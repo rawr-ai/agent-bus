@@ -16,6 +16,16 @@
 - The servers listen on loopback. Keep Fluree's data and admin APIs behind the token, `serve` behind its Host check, and `bus_query` to one regenerated SELECT with no FROM or SERVICE.
 - Never put credentials or raw tool responses in messages, logs or the ledger.
 
+## Project memory
+
+Decisions (with rationale and the alternatives rejected), constraints and costly traps live in Fluree memory, committed as `.fluree-memory/repo.ttl`. Recall before substantial work, from this checkout:
+
+```sh
+fluree --config .fluree/config.toml memory recall "specific keywords" --limit 5
+```
+
+When a decision, constraint or trap changes, `update` its memory instead of adding another; record new ones with `memory add --scope repo` and the right kind (`decision` with `--rationale` and `--alternatives`, `constraint` with `--severity`, otherwise `fact`), lowercase tags and repo-relative `--refs`. Store only what code, docs and Git can't show, phrased to stay true at HEAD: no progress, status, commit hashes or session notes. The repository is public, so repo memories carry no machine names, home paths or personal details; keep those in your own user-scope store. `fluree memory audit --all` checks the store. `.fluree/` (local config and storage) is ignored; `fluree init` recreates it.
+
 ## Verification
 
 `bun run check` must pass before committing. `bun run lint:effect` is advisory.

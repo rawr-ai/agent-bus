@@ -1,0 +1,131 @@
+# Fluree Memory — repo-scoped
+# Auto-managed by `fluree memory`. Manual edits are supported.
+@prefix mem: <https://ns.flur.ee/memory#> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+
+mem:constraint-01m5x1zt7w483hs4ddjdqtbd77 a mem:Constraint ;
+    mem:content "serve must never thread/resume a Codex thread whose join wasn't classified codexHost daemon (loaded in this machine's daemon at bus_join). Other threads get messages only while the daemon has them loaded; an active-writer refusal means wait, not retry; subagents are never woken." ;
+    mem:tag "app-server" ;
+    mem:tag "codex" ;
+    mem:tag "guard" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "src/codex.ts" ;
+    mem:artifactRef "src/mcp.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:14.044903+00:00"^^xsd:dateTime ;
+    mem:rationale "A thread has one writer. Resuming a desktop-app thread once the app released it made the daemon its writer and locked the owner's window ('open in another app'). Classifying at join works because a Codex agent calls bus_join mid-turn, while its thread is loaded wherever it runs." ;
+    mem:alternatives "a per-session wake flag (records permission, doesn't reconcile two writers),retrying with back-off until the thread is free" .
+
+mem:constraint-01m5x1ztaxvc47hyxyyrwbtsrb a mem:Constraint ;
+    mem:content "The Codex Stop hook must deliver only when transcript_path names the thread in session_id (rollout files are named by thread id): a subagent's hook carries its parent's session_id and would otherwise take the parent's messages. Any failure must let the turn end." ;
+    mem:tag "codex" ;
+    mem:tag "hooks" ;
+    mem:tag "subagents" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "src/hook.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:14.141430+00:00"^^xsd:dateTime ;
+    mem:rationale "Codex documents that subagent hooks use the parent session id; a hook that errors or blocks would stall the user's thread." .
+
+mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
+    mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
+    mem:tag "architecture" ;
+    mem:tag "mcp" ;
+    mem:tag "serve" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/Bus.ts" ;
+    mem:artifactRef "src/serve.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:13.849993+00:00"^^xsd:dateTime ;
+    mem:rationale "One process gives one cursor writer per address, one per-address lock (Bus.deliver) shared by reads and deliveries, and one ledger change stream; only serve holds the Fluree token." ;
+    mem:alternatives "a stdio MCP server per session (raced on cursors and needed the token in every session),Fluree's native MCP endpoint for agents,a separate deliver-codex process" .
+
+mem:decision-01m5x1zt365xpe32kp3h35dkww a mem:Decision ;
+    mem:content "Messages live in a Fluree ledger (one message per insert commit, a cursor is the last commit t read), behind the Ledger service, with a JSONL file as the fallback store." ;
+    mem:tag "fluree" ;
+    mem:tag "ledger" ;
+    mem:tag "storage" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/Fluree.ts" ;
+    mem:artifactRef "src/Ledger.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:13.894070+00:00"^^xsd:dateTime ;
+    mem:rationale "The ledger is queryable (SPARQL SELECT and full-text through bus_query and bus_history), readable as of any t, and shared by every machine through one transaction server; the JSONL store keeps the bus usable without Fluree." ;
+    mem:alternatives "JSONL only,SQLite" .
+
+mem:decision-01m5x1zt4q2fm8vdq3ezve2sw5 a mem:Decision ;
+    mem:content "Messages record their origin (machine, the sender's joined cwd, its repo and branch) and are grouped into commit windows by repo and ts against that repo's commit times; no message stores a Git SHA." ;
+    mem:tag "commit-windows" ;
+    mem:tag "git" ;
+    mem:tag "origin" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/Bus.ts" ;
+    mem:artifactRef "src/domain.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:13.943795+00:00"^^xsd:dateTime ;
+    mem:rationale "A SHA per message costs a git call on every send and says nothing for uncommitted work; commit times already order messages against the code they discuss." ;
+    mem:alternatives "a Git SHA per message" .
+
+mem:decision-01m5x1zt6aegrjnxxakxym735x a mem:Decision ;
+    mem:content "Codex threads are woken by push: serve sends the unread messages as turn/start through the machine's Codex app-server daemon, which starts a turn on an idle thread and steers a running one. Messages are marked read only once the daemon accepts." ;
+    mem:tag "codex" ;
+    mem:tag "delivery" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/codex.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:13.994666+00:00"^^xsd:dateTime ;
+    mem:rationale "Agents are woken, never polled; a Codex agent can't run a background wait the way Claude Code can." ;
+    mem:alternatives "agents polling with bus_wait,a queued-input command" .
+
+mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
+    mem:content "Codex desktop Local threads stay in the desktop app's own app-server; the bus reaches them through a Codex Stop hook (agent-bus codex-stop-hook) that continues the ending turn with the thread's unread messages. It can't wake an idle Local thread." ;
+    mem:tag "codex" ;
+    mem:tag "desktop" ;
+    mem:tag "hooks" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/connections.md" ;
+    mem:artifactRef "src/hook.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:14.094317+00:00"^^xsd:dateTime ;
+    mem:rationale "Moving desktop threads onto the daemon loses desktop features the owner needs: SSH projects lose browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools; the CODEX_APP_SERVER_WS_URL override skips the app's provisioning too." ;
+    mem:alternatives "a desktop SSH project to the same machine,launching the app with CODEX_APP_SERVER_WS_URL,deep links (they only prefill the composer)" .
+
+mem:fact-01m5x1ztcfrgxg1r3zcbxt5s0f a mem:Fact ;
+    mem:content "The bus's Fluree token has no subject and is sent only to the data and admin APIs; the event stream stays open. In Fluree 4.2.4 a token with a subject is held to identity policies, which deny writes on a ledger without policies, and events auth refuses subject-less tokens. With CORS off, a cross-origin text/plain POST still writes, so auth is what protects the loopback server." ;
+    mem:tag "auth" ;
+    mem:tag "fluree" ;
+    mem:tag "security" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "scripts/install-launch-agents.sh" ;
+    mem:artifactRef "src/Fluree.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:14.191984+00:00"^^xsd:dateTime ;
+    mem:rationale "Each of these was found by a failing write or test during setup." .
+
+mem:fact-01m5x1zte4rznzfcj9npy234jz a mem:Fact ;
+    mem:content "HttpRouter.serve forks its layer memo map, so a service built inside it is a separate instance from one built outside. Provide Bus (and the Ledger) around Serve.layer, never inside the router, or the MCP tools and the Codex deliverer get separate cursors and locks." ;
+    mem:tag "effect" ;
+    mem:tag "layers" ;
+    mem:tag "serve" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/serve.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:14.244634+00:00"^^xsd:dateTime ;
+    mem:rationale "Found in Effect 4.0.6's source while wiring serve; nothing fails visibly, deliveries just stop being serialized with reads." .
+
+mem:fact-01m5x1ztfs8vfda4m06w25nvj8 a mem:Fact ;
+    mem:content "codex app-server daemon restart and stop refuse a daemon the CLI auto-started on first use ('not managed by codex app-server daemon'), and a running daemon never updates itself. To replace one: kill -TERM it, then run codex app-server daemon start from a shell with ulimit -S -n 10240. Restarting drops its loaded threads." ;
+    mem:tag "app-server" ;
+    mem:tag "codex" ;
+    mem:tag "daemon" ;
+    mem:tag "operations" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "README.md" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T21:31:14.297018+00:00"^^xsd:dateTime ;
+    mem:rationale "The daemon inherits its starter's open-file limit (macOS default 256), and each loaded thread costs about 33 descriptors, so a few threads exhaust it." .
