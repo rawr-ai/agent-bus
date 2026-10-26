@@ -74,9 +74,8 @@ export class Bus extends Context.Service<
     readonly peers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
     /**
      * Hands an address's unread messages to `send` and marks them read if it
-     * returns true. Joins, leaves, sends and deliveries for one address run one
-     * at a time, so a message is delivered once and to the subscriber's current
-     * state. This is the Codex deliverer's path, which delivers to whoever owns
+     * returns true. Joins, leaves and deliveries for one address run one at a
+     * time, so a message is delivered once and to the subscriber's current state. This is the Codex deliverer's path, which delivers to whoever owns
      * the address; sessions read through `take` and `wait`.
      */
     readonly deliver: <E>(
@@ -149,7 +148,8 @@ export const layer = Layer.effect(
 
     const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
 
-    const peers = Effect.gen(function* () {
+    /** Each address's latest presence, joined or left. */
+    const latest = Effect.gen(function* () {
       const latest = new Map<string, Subscriber>();
       for (const message of yield* ledger.presence) {
         if (message.presence === undefined) continue;
@@ -162,14 +162,17 @@ export const layer = Layer.effect(
           cwd: message.origin?.cwd,
         });
       }
-      return Array.from(latest.values()).filter((peer) => peer.presence.status === "joined");
-    }).pipe(Effect.withSpan("Bus.peers"));
+      return latest;
+    });
+
+    const peers = Effect.map(latest, (all) =>
+      Array.from(all.values()).filter((peer) => peer.presence.status === "joined")
+    ).pipe(Effect.withSpan("Bus.peers"));
 
     const peer = (address: string) =>
       Effect.map(peers, (all) => all.find((subscriber) => subscriber.address === address));
 
-    const locks = new Map<string, Semaphore.Semaphore>();
-    const exclusive = (address: string) => {
+    const lockFor = (locks: Map<string, Semaphore.Semaphore>) => (address: string) => {
       let lock = locks.get(address);
       if (lock === undefined) {
         lock = Semaphore.makeUnsafe(1);
@@ -177,6 +180,14 @@ export const layer = Layer.effect(
       }
       return Semaphore.withPermit(lock);
     };
+    /** Serializes reads, deliveries and anything that moves an address's cursor. */
+    const exclusive = lockFor(new Map());
+    /**
+     * Serializes changes of ownership with sends, so a session that loses an
+     * address can't send after it, without sends waiting on a slow delivery.
+     * Taken before `exclusive` whenever both are held.
+     */
+    const claiming = lockFor(new Map());
 
     const activity = new Map<string, Activity>();
     const activityOf = (address: string) => {
@@ -192,6 +203,19 @@ export const layer = Layer.effect(
         activityOf(address).last = ts;
       });
 
+    /**
+     * Whether `session` owns the presence. A presence from before owners is
+     * owned by the Codex thread it names, so that thread keeps its inbox.
+     */
+    const owns = (presence: Presence, session: string) =>
+      presence.session === undefined
+        ? presence.runtime === "codex" && presence.codexThreadId === session
+        : presence.session === session;
+
+    /** What a session told about a presence from before owners should do. */
+    const legacyHelp = (holder: Subscriber) =>
+      `${holder.address} joined before addresses had owners. If this session joined it, reclaim it by rejoining with bus_join, your session id and takeover "${holder.joinId}"; otherwise join an address specific to this session.`;
+
     /** Why a session that doesn't own an address can't join it, and what to do instead. */
     const heldBy = (holder: Subscriber) => {
       const { presence } = holder;
@@ -204,17 +228,12 @@ export const layer = Layer.effect(
         `last call ${seen.last ?? "not seen by this machine's bus since it started"}`,
         seen.waits > 0 ? "a wait open now" : "no wait open on this machine",
       ];
-      const owner =
-        presence.session === undefined
-          ? "a session that joined before addresses had owners"
-          : "another session";
-      const reclaim =
-        presence.session === undefined && presence.runtime === "codex"
-          ? " The Codex thread that joined it reclaims it by rejoining with its thread id as session."
-          : "";
       return new NotOwner({
         address: holder.address,
-        message: `${holder.address} is held by ${owner} (${facts.join("; ")}). An address is one session's inbox: join one specific to this session instead.${reclaim} Only if that session has ended and the human says to replace it, rejoin with takeover "${holder.joinId}".`,
+        message:
+          presence.session === undefined
+            ? `${legacyHelp(holder)} (${facts.join("; ")})`
+            : `${holder.address} is held by another session (${facts.join("; ")}). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, rejoin with takeover "${holder.joinId}".`,
       });
     };
 
@@ -224,7 +243,7 @@ export const layer = Layer.effect(
         address: holder.address,
         message:
           holder.presence.session === undefined
-            ? `${holder.address} joined before addresses had owners. Rejoin it with bus_join and your session id; nothing was changed.`
+            ? `${legacyHelp(holder)} Nothing was changed.`
             : `${holder.address} belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session.`,
       });
 
@@ -240,7 +259,7 @@ export const layer = Layer.effect(
           message: `${address} has not joined the bus; join first.`,
         });
       }
-      if (subscriber.presence.session !== session) return yield* notOwner(subscriber);
+      if (!owns(subscriber.presence, session)) return yield* notOwner(subscriber);
       yield* touch(address);
       return subscriber;
     });
@@ -278,21 +297,15 @@ export const layer = Layer.effect(
             message: "codexThreadId must be your own thread id, the same as session.",
           });
         }
-        const holder = yield* peer(input.address);
+        const last = (yield* latest).get(input.address);
+        const mine =
+          last !== undefined &&
+          owns(last.presence, session) &&
+          last.presence.runtime === input.runtime;
         let takeover: string | undefined;
-        if (holder !== undefined) {
-          const held = holder.presence;
-          const reconnect = held.session === session && held.runtime === input.runtime;
-          // A presence from before owners is reclaimed only by the Codex thread it names.
-          const adopt =
-            held.session === undefined &&
-            held.runtime === "codex" &&
-            input.runtime === "codex" &&
-            held.codexThreadId === session;
-          if (!reconnect && !adopt) {
-            if (input.takeover !== holder.joinId) return yield* heldBy(holder);
-            takeover = holder.joinId;
-          }
+        if (last?.presence.status === "joined" && !mine) {
+          if (input.takeover !== last.joinId) return yield* heldBy(last);
+          takeover = last.joinId;
         }
         const presence = new Presence({
           runtime: input.runtime,
@@ -304,19 +317,21 @@ export const layer = Layer.effect(
           ...optional("codexHost", input.codexHost),
           ...optional("note", input.note),
         });
-        // Rejoining keeps unread messages; a new subscriber starts at the present.
-        // The cursor is set before the announcement, so no reply to it is skipped.
+        // The owner rejoining, or a takeover, keeps unread messages; a new owner
+        // starts at the present, so a left address's mail isn't handed to another
+        // session. The cursor is set before the announcement, so no reply to it
+        // is skipped.
         const existing = yield* cursors.get(input.address);
         const cursor = input.replay
           ? 0
-          : Option.isSome(existing)
+          : Option.isSome(existing) && (mine || takeover !== undefined)
             ? existing.value
             : yield* ledger.end;
         yield* cursors.set(input.address, cursor);
         yield* announce(input.address, presence, input.cwd);
         yield* touch(input.address);
         return { address: input.address, cursor };
-      }).pipe(exclusive(input.address), Effect.withSpan("Bus.join"));
+      }).pipe(exclusive(input.address), claiming(input.address), Effect.withSpan("Bus.join"));
 
     const leave = (address: string, session: string | undefined) =>
       Effect.gen(function* () {
@@ -328,9 +343,8 @@ export const layer = Layer.effect(
           ...optional("session", current.presence.session),
         });
         yield* announce(address, presence, current.cwd);
-      }).pipe(exclusive(address), Effect.withSpan("Bus.leave"));
+      }).pipe(exclusive(address), claiming(address), Effect.withSpan("Bus.leave"));
 
-    // Sending takes the sender's lock, so a session that loses its address can't send after it.
     const publish = (input: PublishInput) =>
       Effect.gen(function* () {
         const sender = yield* owned(input.from, input.session);
@@ -347,7 +361,7 @@ export const layer = Layer.effect(
         });
         yield* ledger.append(message);
         return message;
-      }).pipe(exclusive(input.from), Effect.withSpan("Bus.publish"));
+      }).pipe(claiming(input.from), Effect.withSpan("Bus.publish"));
 
     /** The unread messages of the subscriber `reader` resolves, as it is under the lock. */
     const pending = <R>(

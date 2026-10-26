@@ -40,7 +40,10 @@ export const sessionFor = (
     ? Effect.succeed(session)
     : Effect.fail(
         new BusCallError({
-          message: `No usable session id for a ${runtime} session: pass --session, or run where $${variable} is set.`,
+          message:
+            explicit === undefined
+              ? `No usable session id for a ${runtime} session: pass --session, or run where $${variable} is set.`
+              : "--session is empty or an unexpanded placeholder.",
           refused: true,
         })
       );
@@ -89,9 +92,15 @@ export const call =
  * Waits for an address's next messages, in calls no longer than the server
  * holds a request open. While the bus process is unreachable (restarting, say)
  * it retries until the deadline rather than returning, since returning would
- * wake the session.
+ * wake the session; that includes working out the session id, when it has to
+ * ask the bus. A refusal ends the wait.
  */
-export const waitFor = (url: string, address: string, session: string, timeoutSeconds?: number) =>
+export const waitFor = <R = never>(
+  url: string,
+  address: string,
+  session: string | Effect.Effect<string, BusCallError, R>,
+  timeoutSeconds?: number
+) =>
   Effect.gen(function* () {
     const start = yield* Clock.currentTimeMillis;
     const remaining = Effect.map(Clock.currentTimeMillis, (now) =>
@@ -99,10 +108,19 @@ export const waitFor = (url: string, address: string, session: string, timeoutSe
         ? Number.POSITIVE_INFINITY
         : Math.max(0, timeoutSeconds - (now - start) / 1000)
     );
+    let id = typeof session === "string" ? session : undefined;
     while (true) {
       const seconds = Math.min(MAX_WAIT_SECONDS, yield* remaining);
       const result = yield* Effect.result(
-        call(url)("bus_wait", Messages, { address, session, timeoutSeconds: seconds }, seconds + 5)
+        Effect.gen(function* () {
+          if (id === undefined && typeof session !== "string") id = yield* session;
+          return yield* call(url)(
+            "bus_wait",
+            Messages,
+            { address, session: id, timeoutSeconds: seconds },
+            seconds + 5
+          );
+        })
       );
       if (result._tag === "Success") {
         const { messages } = result.success;

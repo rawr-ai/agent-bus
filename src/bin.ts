@@ -99,11 +99,15 @@ const optionalRuntime = runtimeFlag.pipe(
   Flag.optional
 );
 
-/** The session id to present for an address, from the flags or the runtime it joined with. */
+/**
+ * The session id to present for an address: `--session`, or the variable of
+ * `--runtime` or of the runtime the address joined with, which asks the bus.
+ */
 const sessionOf = (of: string, runtime: Option.Option<Runtime>, explicit: Option.Option<string>) =>
   Effect.gen(function* () {
-    const known = Option.getOrUndefined(runtime) ?? (yield* Client.runtimeOf(endpoint, of));
-    return yield* Client.sessionFor(known, Option.getOrUndefined(explicit));
+    if (Option.isSome(explicit)) return yield* Client.sessionFor("other", explicit.value);
+    const known = Option.isSome(runtime) ? runtime.value : yield* Client.runtimeOf(endpoint, of);
+    return yield* Client.sessionFor(known, undefined);
   });
 
 const serve = Command.make(
@@ -217,7 +221,7 @@ const wait = Command.make(
       const messages = yield* Client.waitFor(
         endpoint,
         input.address,
-        yield* sessionOf(input.address, input.runtime, input.session),
+        sessionOf(input.address, input.runtime, input.session),
         input.timeout > 0 ? input.timeout : undefined
       );
       if (messages.length === 0) return yield* Console.log("[agent-bus] no new messages");

@@ -34,7 +34,7 @@ const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpCli
 const busOn = (ledger: Layer.Layer<Ledger.Ledger, unknown, never>, dir: string) =>
   Bus.layer.pipe(
     Layer.provideMerge(ledger),
-    Layer.provide(Cursors.layerFiles(join(dir, "cursors")))
+    Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors")))
   );
 
 const jsonl = () => {
@@ -1079,31 +1079,42 @@ describe("one address at a time", () => {
 
 describe("one session per address", () => {
   const cwd = process.cwd();
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger>) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) =>
     Effect.runPromise(Effect.provide(effect, jsonl().layer));
 
   /**
-   * Runs `refused` and checks it failed with `tag` without touching the ledger
-   * or anyone's presence; callers check unread messages are still there.
+   * Runs `refused` and checks it failed with `tag` without touching the
+   * ledger, anyone's presence, or `address`'s cursor.
    */
   const unchanged = <E extends { readonly _tag: string; readonly message: string }>(
+    address: string,
     refused: Effect.Effect<unknown, E, never>,
     tag = "NotOwner"
   ) =>
     Effect.gen(function* () {
       const bus = yield* Bus.Bus;
       const ledger = yield* Ledger.Ledger;
-      const before = { end: yield* ledger.end, peers: yield* bus.peers };
+      const cursors = yield* Cursors.Cursors;
+      const snapshot = Effect.all({
+        end: ledger.end,
+        peers: bus.peers,
+        cursor: cursors.get(address),
+      });
+      const before = yield* snapshot;
       const error = yield* Effect.flip(refused);
       expect(error._tag).toBe(tag);
-      expect(yield* ledger.end).toBe(before.end);
-      expect(yield* bus.peers).toEqual(before.peers);
+      expect(yield* snapshot).toEqual(before);
       return error;
     });
 
-  /** Holds `address`'s lock with a delivery until `release` completes. */
+  /**
+   * Holds `address`'s delivery lock until `release` completes, with a
+   * delivery of a message sent to it for the purpose.
+   */
   const holdLock = (bus: Bus.Bus["Service"], address: string) =>
     Effect.gen(function* () {
+      yield* bus.join({ address: "claude/sender", runtime: "claude", session: "sender", cwd });
+      yield* bus.publish({ from: "claude/sender", session: "sender", to: [address], body: "held" });
       const holding = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       const fiber = yield* Effect.forkChild(
@@ -1114,14 +1125,15 @@ describe("one session per address", () => {
           )
         )
       );
-      yield* Effect.sleep("50 millis");
-      return { fiber, release, holding };
+      yield* Deferred.await(holding);
+      return { fiber, release };
     });
 
-  /** A presence written before addresses had owners. */
+  /** A join from before addresses had owners: its cursor, and a presence with no session. */
   const legacy = (address: string, presence: Partial<Presence> = {}) =>
     Effect.gen(function* () {
       const ledger = yield* Ledger.Ledger;
+      yield* (yield* Cursors.Cursors).set(address, yield* ledger.end);
       yield* ledger.append(
         new Message({
           id: Bun.randomUUIDv7(),
@@ -1156,18 +1168,21 @@ describe("one session per address", () => {
         });
 
         const joining = yield* unchanged(
+          "claude/site",
           bus.join({ address: "claude/site", runtime: "claude", session: "s2", cwd })
         );
         expect(joining.message).toContain('note "story"');
         expect(joining.message).toContain("join one specific to this session");
-        yield* unchanged(bus.take("claude/site", "s2"));
-        yield* unchanged(bus.wait("claude/site", "s2", 0.2));
+        yield* unchanged("claude/site", bus.take("claude/site", "s2"));
+        yield* unchanged("claude/site", bus.wait("claude/site", "s2", 0.2));
         yield* unchanged(
+          "claude/site",
           bus.publish({ from: "claude/site", session: "s2", to: ["codex/director"], body: "x" })
         );
-        yield* unchanged(bus.leave("claude/site", "s2"));
+        yield* unchanged("claude/site", bus.leave("claude/site", "s2"));
         // The same id under another runtime is another session.
         yield* unchanged(
+          "claude/site",
           bus.join({ address: "claude/site", runtime: "codex", session: "s1", cwd })
         );
 
@@ -1187,15 +1202,20 @@ describe("one session per address", () => {
           "$CODEX_THREAD_ID",
         ]) {
           const error = yield* unchanged(
+            "claude/a",
             bus.join({ address: "claude/a", runtime: "claude", session, cwd })
           );
           expect(error.message).toContain("CLAUDE_CODE_SESSION_ID");
         }
         yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
-        yield* unchanged(bus.take("claude/a", undefined));
-        yield* unchanged(bus.publish({ from: "claude/a", session: "", to: ["*"], body: "x" }));
+        yield* unchanged("claude/a", bus.take("claude/a", undefined));
+        yield* unchanged(
+          "claude/a",
+          bus.publish({ from: "claude/a", session: "", to: ["*"], body: "x" })
+        );
         // A Codex thread is woken at its own id, so it can't name another.
         yield* unchanged(
+          "codex/a",
           bus.join({
             address: "codex/a",
             runtime: "codex",
@@ -1225,20 +1245,30 @@ describe("one session per address", () => {
       })
     ));
 
-  test("the owner reconnects, and leaves; a left address is free", () =>
+  test("the owner reconnects and rejoins with its mail; a left address is free, without it", () =>
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
+        const send = (body: string) =>
+          bus.publish({ from: "claude/b", session: "sb", to: ["claude/a"], body });
         yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
         yield* bus.join({ address: "claude/b", runtime: "claude", session: "sb", cwd });
-        yield* bus.publish({ from: "claude/b", session: "sb", to: ["claude/a"], body: "kept" });
+        yield* send("kept");
         yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
         expect(bodies(yield* bus.take("claude/a", "s1"))).toEqual(["kept"]);
 
+        yield* send("while away");
         yield* bus.leave("claude/a", "s1");
-        yield* unchanged(bus.take("claude/a", "s1"), "NotJoined");
+        yield* unchanged("claude/a", bus.take("claude/a", "s1"), "NotJoined");
+        yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
+        expect(bodies(yield* bus.take("claude/a", "s1"))).toEqual(["while away"]);
+
+        // Another session on a left address starts at the present.
+        yield* send("for s1");
+        yield* bus.leave("claude/a", "s1");
         yield* bus.join({ address: "claude/a", runtime: "claude", session: "s2", cwd });
-        yield* unchanged(bus.take("claude/a", "s1"));
+        yield* unchanged("claude/a", bus.take("claude/a", "s1"));
+        expect(yield* bus.take("claude/a", "s2")).toEqual([]);
       })
     ));
 
@@ -1268,6 +1298,7 @@ describe("one session per address", () => {
         const joinId = holder?.joinId ?? "";
 
         yield* unchanged(
+          "claude/a",
           bus.join({
             address: "claude/a",
             runtime: "claude",
@@ -1286,9 +1317,15 @@ describe("one session per address", () => {
         const [current] = (yield* bus.peers).filter((peer) => peer.address === "claude/a");
         expect(current?.presence.takeover).toBe(joinId);
 
-        yield* unchanged(bus.take("claude/a", "old"));
-        yield* unchanged(bus.publish({ from: "claude/a", session: "old", to: ["*"], body: "x" }));
-        yield* unchanged(bus.join({ address: "claude/a", runtime: "claude", session: "old", cwd }));
+        yield* unchanged("claude/a", bus.take("claude/a", "old"));
+        yield* unchanged(
+          "claude/a",
+          bus.publish({ from: "claude/a", session: "old", to: ["*"], body: "x" })
+        );
+        yield* unchanged(
+          "claude/a",
+          bus.join({ address: "claude/a", runtime: "claude", session: "old", cwd })
+        );
         expect(bodies(yield* bus.take("claude/a", "new"))).toEqual(["unread"]);
       })
     ));
@@ -1327,6 +1364,8 @@ describe("one session per address", () => {
         yield* bus.join({ address: "claude/a", runtime: "claude", session: "old", cwd });
         const [holder] = yield* bus.peers;
         const { fiber, release } = yield* holdLock(bus, "claude/a");
+        // A slow delivery doesn't hold up the owner's sends.
+        yield* bus.publish({ from: "claude/a", session: "old", to: ["*"], body: "prompt" });
         const takeover = yield* Effect.forkChild(
           bus.join({
             address: "claude/a",
@@ -1355,8 +1394,13 @@ describe("one session per address", () => {
         const bus = yield* Bus.Bus;
         yield* legacy("codex/a", { runtime: "codex", codexThreadId: "t-1" });
         yield* legacy("claude/b");
-        yield* unchanged(bus.take("codex/a", "t-1"));
-        yield* unchanged(bus.join({ address: "codex/a", runtime: "codex", session: "t-2", cwd }));
+        // The thread can read before it rejoins (its Stop hook does); no other session can.
+        expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
+        yield* unchanged("codex/a", bus.take("codex/a", "t-2"));
+        yield* unchanged(
+          "codex/a",
+          bus.join({ address: "codex/a", runtime: "codex", session: "t-2", cwd })
+        );
         yield* bus.join({
           address: "codex/a",
           runtime: "codex",
@@ -1366,10 +1410,16 @@ describe("one session per address", () => {
         });
 
         const refused = yield* unchanged(
+          "claude/b",
           bus.join({ address: "claude/b", runtime: "claude", session: "s", cwd })
         );
-        expect(refused.message).toContain("before addresses had owners");
+        const reading = yield* unchanged("claude/b", bus.take("claude/b", "s"));
         const [holder] = (yield* bus.peers).filter((peer) => peer.address === "claude/b");
+        // Both refusals tell the session that joined it how to reclaim it.
+        for (const message of [refused.message, reading.message]) {
+          expect(message).toContain("If this session joined it");
+          expect(message).toContain(`takeover "${holder?.joinId}"`);
+        }
         yield* bus.join({
           address: "claude/b",
           runtime: "claude",
@@ -1714,6 +1764,29 @@ describe("mcp over http", () => {
         expect(unreachable).toEqual([]);
         expect(Date.now() - started).toBeGreaterThanOrEqual(1_400);
         expect(notJoined.refused).toBe(true);
+
+        // Working out the session from the bus is retried the same way, and then used.
+        const lookup = (at: string) =>
+          Effect.flatMap(Client.runtimeOf(at, "claude/a"), (runtime) =>
+            Client.sessionFor(runtime, undefined, { CLAUDE_CODE_SESSION_ID: a })
+          );
+        const before = Date.now();
+        expect(
+          yield* Client.waitFor(
+            "http://127.0.0.1:9/mcp",
+            "claude/a",
+            lookup("http://127.0.0.1:9/mcp"),
+            1.5
+          )
+        ).toEqual([]);
+        expect(Date.now() - before).toBeGreaterThanOrEqual(1_400);
+        yield* call("bus_publish", Mcp.Published, {
+          from: "codex/b",
+          session: sid("codex/b"),
+          to: ["claude/a"],
+          body: "found",
+        });
+        expect(bodies(yield* Client.waitFor(url, "claude/a", lookup(url), 1))).toEqual(["found"]);
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });
