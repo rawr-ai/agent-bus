@@ -93,7 +93,7 @@ Both servers listen on loopback only. Another machine clones this repo and runs 
 
 ## Security
 
-The bus trusts every process of the user on the machine; loopback is not authentication.
+The bus trusts every process of the user on the machine; loopback is not authentication. [Connections and trust boundaries](docs/connections.md) lists every connection the bus makes or depends on, including the Codex daemon and the desktop app's options for running on it.
 
 - **Fluree** requires the token on its data and admin APIs (`--data-auth-mode required`, `--admin-auth-mode required`) and has CORS off. Without this, any web page could write to it with a cross-origin `text/plain` POST. Its event stream stays open: it carries only ledger names and commit pointers, never message content (a subject-less token, which writes need, is refused there). The token is never logged.
 - **`serve`** accepts only requests whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding, and the MCP endpoint rejects any browser `Origin`.
