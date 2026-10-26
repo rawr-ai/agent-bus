@@ -31,11 +31,14 @@ In the incident, the desktop app's own app-server shut down at 15:36:32 (the app
 
 ## Decision
 
-**Desktop on the daemon.** The owner works in Codex threads through the desktop app's SSH remote connection to the same machine. That connection runs `codex app-server proxy`, which attaches to the daemon. The owner's window and `serve` are then both clients of one writer, so bus wake-ups appear live in the window and the owner can keep typing. The owner already works this way with remote machines.
+**Superseded (2026-10-26): keep working in Local threads.** The first decision was "desktop on the daemon": the owner would work through the desktop app's SSH connection to the same machine. Reading the app's code then showed that SSH projects and the `CODEX_APP_SERVER_WS_URL` override both lose desktop features the owner needs: browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools (see [connections](../connections.md)). So:
 
-**Plus a permanent, automatic guard in the bus:** never take a thread from another app-server. The guard keeps the setup safe when a thread is opened in the embedded server out of habit, and it is what makes the setup safe at all; desktop-on-daemon is what makes wake-ups visible.
+- **The guard is permanent** (shipped in b4aa1f5): the bus never takes a thread from another app-server.
+- **A Codex `Stop` hook** (shipped in ba3ab5e) delivers to Local threads when a turn ends.
+- **Waking idle Local threads** is the subject of [the desktop-wake spike](desktop-wake-spike.md): asking the desktop app, through its own coordination socket, to start or steer the turn, so the app stays the writer.
+- Daemon threads (the `codex` TUI, control-socket `thread/start`) keep live push.
 
-Three independent reviews (GPT-6 Astra at max effort, GPT-6.1 Sol at extra-high, Claude Opus 5.5 at high) agreed on the direction and on the guard. A per-session `wake` flag was rejected: it records permission, but doesn't reconcile two writers.
+Three reviews (GPT-6 Astra at max effort, GPT-6.1 Sol at extra-high, Claude Opus 5.5 at high) agreed on the guard. A per-session `wake` flag was rejected: it records permission, but doesn't reconcile two writers.
 
 ## Bus changes (`src/codex.ts`, `src/Bus.ts`, docs)
 
@@ -72,21 +75,14 @@ Three independent reviews (GPT-6 Astra at max effort, GPT-6.1 Sol at extra-high,
 
 ## Operations (the owner's machines)
 
-1. **Daemon open-file limit.** The bus host's daemon still runs with the default soft limit of 256: its `~/.zshenv` fix applies only from its next start. Restart it from a login shell (`ulimit -S -n 10240`), once its loaded threads are accounted for, because a restart drops them. Keep the daemon's own `start|restart` management; don't add a competing launchd job. Qualify `codex app-server daemon bootstrap` before relying on it for restarts after a reboot. After every start, check the limit: a child process's `getrlimit`, or `lsof -p <pid>` counts.
-2. **SSH from each machine to itself, for the desktop app** (the owner's decision, since it touches SSH trust):
-   - the machine's own key in `authorized_keys`;
-   - a reviewed `known_hosts` entry for `127.0.0.1`;
-   - a concrete `Host` alias, such as `<machine>-self`, because the app ignores pattern-only hosts.
-
-   Check it with `ssh <alias> 'zsh -lc "command -v codex; ulimit -n"'`. Then, in the desktop app, open Settings → Connections → SSH → Add, choose the alias and the project folder, and create chats under that host.
-
-   The alternative is to launch the app with the `CODEX_APP_SERVER_WS_URL` override, which keeps Local projects but is undocumented. Try it only as a deliberate experiment the owner runs: quit the app, then launch it with `open --env … -a /Applications/ChatGPT.app`.
-3. **Move threads by reopening them, not by migrating.** Both app-servers read the same `~/.codex`, so the same thread id opens under either; check that it is the same id. Finish or interrupt the work in the embedded window, then open the thread from the SSH host. Don't use Handoff, which interrupts the response and creates a worktree. Have each Codex agent rejoin from its daemon session so it is classified `daemon`.
+1. **Daemon open-file limit. Done 2026-10-26:** both daemons now run 0.164 with a soft limit of 10240. The CLI's `daemon restart` refuses daemons it auto-started; stop those with `kill -TERM`, then `daemon start` from a shell with the raised limit. Background: Restart it from a login shell (`ulimit -S -n 10240`), once its loaded threads are accounted for, because a restart drops them. Keep the daemon's own `start|restart` management; don't add a competing launchd job. Qualify `codex app-server daemon bootstrap` before relying on it for restarts after a reboot. After every start, check the limit: a child process's `getrlimit`, or `lsof -p <pid>` counts.
+2. **SSH from each machine to itself: dropped**, with the launch override, because both lose desktop features. Both are described in [connections](../connections.md) for reference.
+3. **Open each thread from one place.** Both app-servers read the same `~/.codex`, so a thread id opens under either, but only one can be its writer: a thread the daemon holds shows "open in another app" in a Local window until the daemon unloads it.
 4. **Recovering a thread the daemon holds today:** `codex resume --remote unix:// <thread uuid>` attaches to it, with no restart needed. Never archive or delete a thread to release it.
 
 ## Verification (on a disposable thread first)
 
-1. **Idle wake.** A publish starts a turn live in the daemon-connected window, and the owner can type the next turn.
+1. **Idle wake.** A publish starts a turn live in the daemon-connected window (a TUI), and the owner can type the next turn.
 2. **Busy thread.** A publish during the owner's turn arrives as a steer without error; an unsent draft survives; interrupt and approvals still work.
 3. **Approval with no window.** A bus-started turn needs an approval while no window is attached. When the window opens, the prompt is there and can be answered.
 4. **Guard.** A thread joined from the embedded server is never loaded by the daemon, including after its window closes. Its messages stay unread.
