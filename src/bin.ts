@@ -87,6 +87,24 @@ const list = (value: Option.Option<string>) =>
 const call = Client.call(endpoint);
 
 const address = Flag.String("address").pipe(Flag.withDescription("Your bus address"));
+const session = Flag.String("session").pipe(
+  Flag.withDescription(
+    "Your session id; defaults by runtime to $CODEX_THREAD_ID, $CLAUDE_CODE_SESSION_ID or $AGENT_BUS_SESSION"
+  ),
+  Flag.optional
+);
+const runtimeFlag = Flag.Literals("runtime", Runtime.literals);
+const optionalRuntime = runtimeFlag.pipe(
+  Flag.withDescription("Your runtime, which picks the session id; defaults to the address's"),
+  Flag.optional
+);
+
+/** The session id to present for an address, from the flags or the runtime it joined with. */
+const sessionOf = (of: string, runtime: Option.Option<Runtime>, explicit: Option.Option<string>) =>
+  Effect.gen(function* () {
+    const known = Option.getOrUndefined(runtime) ?? (yield* Client.runtimeOf(endpoint, of));
+    return yield* Client.sessionFor(known, Option.getOrUndefined(explicit));
+  });
 
 const serve = Command.make(
   "serve",
@@ -111,7 +129,14 @@ const joinCommand = Command.make(
   "join",
   {
     address,
-    runtime: Flag.Literals("runtime", Runtime.literals),
+    runtime: runtimeFlag,
+    session,
+    takeover: Flag.String("takeover").pipe(
+      Flag.withDescription(
+        "Replace an ended session: the holder's join id from the refusal (only when the human says so)"
+      ),
+      Flag.optional
+    ),
     topics: Flag.String("topics").pipe(
       Flag.withDescription("Comma-separated topics to receive"),
       Flag.optional
@@ -131,8 +156,10 @@ const joinCommand = Command.make(
       const joined = yield* call("bus_join", Mcp.Joined, {
         address: input.address,
         runtime: input.runtime,
+        session: yield* Client.sessionFor(input.runtime, Option.getOrUndefined(input.session)),
         cwd: process.cwd(),
         ...Client.defined({
+          takeover: Option.getOrUndefined(input.takeover),
           topics: list(input.topics),
           codexThreadId: Option.getOrUndefined(input.codexThread),
           note: Option.getOrUndefined(input.note),
@@ -151,6 +178,8 @@ const publish = Command.make(
   "publish",
   {
     from: Flag.String("from"),
+    runtime: optionalRuntime,
+    session,
     to: Flag.String("to").pipe(Flag.withDescription("Comma-separated addresses, #topics or *")),
     body: Flag.String("body"),
     subject: Flag.String("subject").pipe(Flag.optional),
@@ -160,6 +189,7 @@ const publish = Command.make(
     Effect.gen(function* () {
       const published = yield* call("bus_publish", Mcp.Published, {
         from: input.from,
+        session: yield* sessionOf(input.from, input.runtime, input.session),
         to: list(Option.some(input.to)) ?? [],
         body: input.body,
         ...Client.defined({
@@ -175,6 +205,8 @@ const wait = Command.make(
   "wait",
   {
     address,
+    runtime: optionalRuntime,
+    session,
     timeout: Flag.Int("timeout").pipe(
       Flag.withDescription("Seconds to wait; 0 waits until a message arrives"),
       Flag.withDefault(0)
@@ -185,6 +217,7 @@ const wait = Command.make(
       const messages = yield* Client.waitFor(
         endpoint,
         input.address,
+        yield* sessionOf(input.address, input.runtime, input.session),
         input.timeout > 0 ? input.timeout : undefined
       );
       if (messages.length === 0) return yield* Console.log("[agent-bus] no new messages");

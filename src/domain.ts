@@ -20,11 +20,19 @@ export class Origin extends Schema.Class<Origin>("Origin")({
 export const CodexHost = Schema.Literals(["daemon", "other"]);
 export type CodexHost = typeof CodexHost.Type;
 
-/** A subscriber's announcement. The latest presence per address is that peer's state. */
+/**
+ * A subscriber's announcement. The latest presence per address is that peer's
+ * state, and its owner is the session that may use the address: `runtime` and
+ * `session`, the runtime's own id for it (a Codex thread id, a Claude Code
+ * session id). Presences written before addresses had owners have no session.
+ */
 export class Presence extends Schema.Class<Presence>("Presence")({
   runtime: Runtime,
   status: Schema.Literals(["joined", "left"]),
   topics: Schema.Array(Schema.String),
+  session: Schema.optionalKey(Schema.String),
+  /** The join this one took over from a different session. */
+  takeover: Schema.optionalKey(Schema.String),
   codexThreadId: Schema.optionalKey(Schema.String),
   codexHost: Schema.optionalKey(CodexHost),
   note: Schema.optionalKey(Schema.String),
@@ -58,11 +66,29 @@ export class NotJoined extends Schema.TaggedError<NotJoined>()("NotJoined", {
   message: Schema.String,
 }) {}
 
+/**
+ * A usable session id: present, not blank, and not a configuration
+ * placeholder that was never expanded (`${CLAUDE_CODE_SESSION_ID}`, `$VAR`).
+ */
+export const validSession = (session: string | undefined): session is string =>
+  session !== undefined &&
+  session.trim() !== "" &&
+  !session.includes("${") &&
+  !session.startsWith("$");
+
+/** The bus refused a call that isn't from the address's owner; nothing changed. */
+export class NotOwner extends Schema.TaggedError<NotOwner>()("NotOwner", {
+  address: Schema.String,
+  message: Schema.String,
+}) {}
+
 export interface Subscriber {
   readonly address: string;
   readonly presence: Presence;
   /** Id of the presence entry that made this the peer's current state. */
   readonly joinId: string;
+  /** When that presence was written. */
+  readonly since?: string | undefined;
   /** The machine the peer joined from; only that machine's bus delivers to it. */
   readonly host?: string | undefined;
   /** The peer's working directory, which locates the messages it sends. */

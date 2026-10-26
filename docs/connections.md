@@ -4,13 +4,13 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 
 | From | To | Transport | Protection | Trusts |
 | --- | --- | --- | --- | --- |
-| A Claude or Codex session | `serve` | HTTP on `127.0.0.1:8096/mcp` | `Host` must be `127.0.0.1:<port>` or `localhost:<port>` (stops DNS rebinding); any browser `Origin` is rejected | Every process of the user on the machine; loopback is not authentication |
+| A Claude or Codex session | `serve` | HTTP on `127.0.0.1:8096/mcp` | `Host` must be `127.0.0.1:<port>` or `localhost:<port>` (stops DNS rebinding); any browser `Origin` is rejected. Each call names its session, and only an address's owner may use it ([ownership](../README.md#addresses-belong-to-sessions)), which keeps cooperating sessions apart but proves nothing | Every process of the user on the machine; loopback is not authentication |
 | `serve` on the bus host | Fluree | HTTP on `127.0.0.1:8095` | Bearer token (`~/.agent-bus/fluree-token`, mode 0600) on the data and admin APIs; CORS off | Holders of the token |
 | `serve` | Fluree's event stream | The same port, no token | Carries ledger names and commit pointers only, never message content | Anyone on the machine |
 | `serve` on another machine | The bus host's Fluree | SSH local forward (`ai.rawr.agent-bus.tunnel`), on the same local port | SSH host key and key authentication, plus the Fluree token, copied over `scp` at install | The SSH account on the bus host |
 | `serve` | The Codex app-server daemon | WebSocket over `~/.codex/app-server-control/app-server-control.sock` | The directory is 0700; no other authentication | Every process of the user on the machine |
 | The Codex desktop app, Local project | Its own app-server | stdio (a child process) | Process boundary | - |
-| A Codex `Stop` hook (`agent-bus codex-stop-hook`) | `serve` | HTTP on loopback, as a session | As for sessions; reads only the unread messages of the Codex peer joined with the hook's own thread | Every process of the user on the machine |
+| A Codex `Stop` hook (`agent-bus codex-stop-hook`) | `serve` | HTTP on loopback, as a session | As for sessions; reads as the hook's own thread, so only the addresses that thread owns, and only when the hook's transcript is that thread's | Every process of the user on the machine |
 | The Codex desktop app, SSH project | The daemon on the SSH host, through `codex app-server proxy` | SSH, then the daemon's Unix socket | SSH host key and key authentication | The SSH account |
 
 ## What `serve` may do to Codex threads

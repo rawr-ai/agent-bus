@@ -1,7 +1,7 @@
 import { Clock, Duration, Effect, Schema } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
-import type { Message } from "./domain.ts";
-import { MAX_WAIT_SECONDS, Messages } from "./mcp.ts";
+import { type Message, type Runtime, validSession } from "./domain.ts";
+import { MAX_WAIT_SECONDS, Messages, Peers } from "./mcp.ts";
 
 /** A failed call to the machine's bus process. */
 export class BusCallError extends Schema.TaggedError<BusCallError>()("BusCallError", {
@@ -18,6 +18,33 @@ export const defined = <T extends Record<string, unknown>>(fields: T) =>
   Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as {
     [K in keyof T]?: Exclude<T[K], undefined>;
   };
+
+/**
+ * The session id the CLI presents for a runtime: `--session`, or the runtime's
+ * own variable. It never falls back to another runtime's variable, since a
+ * Codex process started from a Claude shell inherits the Claude session's id.
+ */
+export const sessionFor = (
+  runtime: Runtime,
+  explicit: string | undefined,
+  env: Record<string, string | undefined> = process.env
+) => {
+  const variable =
+    runtime === "codex"
+      ? "CODEX_THREAD_ID"
+      : runtime === "claude"
+        ? "CLAUDE_CODE_SESSION_ID"
+        : "AGENT_BUS_SESSION";
+  const session = explicit ?? env[variable];
+  return validSession(session)
+    ? Effect.succeed(session)
+    : Effect.fail(
+        new BusCallError({
+          message: `No usable session id for a ${runtime} session: pass --session, or run where $${variable} is set.`,
+          refused: true,
+        })
+      );
+};
 
 /** Calls one bus tool over a fresh MCP connection, decoding its result. */
 export const call =
@@ -64,7 +91,7 @@ export const call =
  * it retries until the deadline rather than returning, since returning would
  * wake the session.
  */
-export const waitFor = (url: string, address: string, timeoutSeconds?: number) =>
+export const waitFor = (url: string, address: string, session: string, timeoutSeconds?: number) =>
   Effect.gen(function* () {
     const start = yield* Clock.currentTimeMillis;
     const remaining = Effect.map(Clock.currentTimeMillis, (now) =>
@@ -75,7 +102,7 @@ export const waitFor = (url: string, address: string, timeoutSeconds?: number) =
     while (true) {
       const seconds = Math.min(MAX_WAIT_SECONDS, yield* remaining);
       const result = yield* Effect.result(
-        call(url)("bus_wait", Messages, { address, timeoutSeconds: seconds }, seconds + 5)
+        call(url)("bus_wait", Messages, { address, session, timeoutSeconds: seconds }, seconds + 5)
       );
       if (result._tag === "Success") {
         const { messages } = result.success;
@@ -90,4 +117,16 @@ export const waitFor = (url: string, address: string, timeoutSeconds?: number) =
       );
       yield* Effect.sleep(Duration.seconds(Math.min(RETRY_SECONDS, left)));
     }
+  });
+
+/** The runtime an address joined with, which picks the session id the CLI presents for it. */
+export const runtimeOf = (url: string, address: string) =>
+  Effect.gen(function* () {
+    const { peers } = yield* call(url)("bus_peers", Peers, {});
+    const peer = peers.find((candidate) => candidate.address === address);
+    if (peer !== undefined) return peer.runtime;
+    return yield* new BusCallError({
+      message: `${address} has not joined the bus; join first, or pass --runtime.`,
+      refused: true,
+    });
   });

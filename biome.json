@@ -13,6 +13,7 @@
       "!**/dist/**",
       "!.repos/**",
       "!.agents/**",
+      "!.fluree/**",
       "!.claude/settings.local.json"
     ]
   },

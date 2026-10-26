@@ -106,6 +106,10 @@ const search = (query: string) =>
     })
   );
 
+/** The qualification's two sessions. */
+const READER = "qualify-reader";
+const SENDER = "qualify-sender";
+
 const bodies = (messages: ReadonlyArray<{ readonly body: string }>) =>
   messages.map((message) => message.body).sort();
 
@@ -115,9 +119,26 @@ try {
   await withBus(
     Effect.gen(function* () {
       const bus = yield* Bus.Bus;
-      yield* bus.join({ address: "codex/reader", runtime: "codex", cwd: process.cwd() });
-      yield* bus.publish({ from: "claude/a", to: ["*"], body: "indexed: deploying the adapters" });
-      for (const body of corpus) yield* bus.publish({ from: "claude/a", to: ["*"], body });
+      yield* bus.join({
+        address: "codex/reader",
+        runtime: "codex",
+        session: READER,
+        cwd: process.cwd(),
+      });
+      yield* bus.join({
+        address: "claude/a",
+        runtime: "claude",
+        session: SENDER,
+        cwd: process.cwd(),
+      });
+      yield* bus.publish({
+        from: "claude/a",
+        session: SENDER,
+        to: ["*"],
+        body: "indexed: deploying the adapters",
+      });
+      for (const body of corpus)
+        yield* bus.publish({ from: "claude/a", session: SENDER, to: ["*"], body });
     })
   );
   await waitForIndex();
@@ -129,7 +150,12 @@ try {
   await withBus(
     Effect.gen(function* () {
       const bus = yield* Bus.Bus;
-      yield* bus.publish({ from: "claude/a", to: ["*"], body: "canary: redeployed adapter" });
+      yield* bus.publish({
+        from: "claude/a",
+        session: SENDER,
+        to: ["*"],
+        body: "canary: redeployed adapter",
+      });
     })
   );
   const lag = await indexLag();
@@ -146,7 +172,7 @@ try {
   const caughtUp = await withBus(
     Effect.gen(function* () {
       const bus = yield* Bus.Bus;
-      return yield* bus.take("codex/reader");
+      return yield* bus.take("codex/reader", READER);
     })
   );
   check(
@@ -160,12 +186,17 @@ try {
     Effect.provide(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const waiting = yield* Effect.forkChild(bus.wait("codex/reader", 60));
+        const waiting = yield* Effect.forkChild(bus.wait("codex/reader", READER, 60));
         yield* Effect.sleep("500 millis");
         yield* Effect.promise(stop);
         yield* Effect.promise(() => start());
         const sent = Date.now();
-        yield* bus.publish({ from: "claude/a", to: ["codex/reader"], body: "after restart" });
+        yield* bus.publish({
+          from: "claude/a",
+          session: SENDER,
+          to: ["codex/reader"],
+          body: "after restart",
+        });
         const messages = yield* Fiber.join(waiting);
         return { messages, ms: Date.now() - sent };
       }),

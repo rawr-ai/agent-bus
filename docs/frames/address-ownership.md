@@ -30,13 +30,14 @@ Reviewed by GPT-6 Astra (max effort), GPT-6.1 Sol (extra-high) and Claude Opus 5
 2. **Identity travels as an explicit `session` argument** on `bus_join`, `bus_read`, `bus_wait`, `bus_publish` and `bus_leave`, not as an HTTP header.
    - Why not a header: Claude Code documents its session id only for shells, hooks and stdio MCP subprocesses; `/clear` changes it while a connection's headers stay fixed; and one Codex daemon serves many threads.
    - Agents read their id from their shell, which also works after compaction.
-   - The CLI defaults `--session` by `--runtime`: `$CODEX_THREAD_ID` for codex, `$CLAUDE_CODE_SESSION_ID` for claude, and `$AGENT_BUS_SESSION` otherwise. It never takes whichever variable happens to be set, because a Codex process started from a Claude shell inherits the Claude id.
+   - The join fixes the owner's runtime; later calls present only the id, which is a UUID in both runtimes.
+   - The CLI defaults `--session` by `--runtime`: `$CODEX_THREAD_ID` for codex, `$CLAUDE_CODE_SESSION_ID` for claude, and `$AGENT_BUS_SESSION` otherwise. It never takes whichever variable happens to be set, because a Codex process started from a Claude shell inherits the Claude id. Outside `join`, `--runtime` defaults to the runtime the address joined with, so `agent-bus wait --address <address>` keeps working.
    - Empty values and unexpanded `${…}` placeholders are refused.
    - A lease token issued by `bus_join` was rejected: it would have to survive compaction and be handed to the background `wait` and the hook, and it protects nothing more between cooperating sessions.
 3. **No anonymous access.**
    - Reading, waiting, leaving and publishing all require the caller to be the address's current owner, including `publish.from`. Today an address that never joined can publish.
    - A refusal leaves the cursor, the presence and the ledger unchanged.
-   - The CLI treats an ownership refusal as final and doesn't retry it.
+   - The CLI treats an ownership refusal as final and doesn't retry it. The tool schemas leave `session` optional so that a call without one, including from a CLI older than this change, gets the bus's refusal (which ends its retries) rather than a protocol error (which it would retry).
 4. **Checks run under the address lock, at the moment of effect.**
    - Ownership is checked inside `Bus.deliver`, just before the cursor moves, on every attempt. A wait that started before a takeover therefore can't consume the new owner's messages.
    - Publishing takes the sender address's lock and checks ownership before appending.
