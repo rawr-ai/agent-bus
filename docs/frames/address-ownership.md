@@ -68,7 +68,23 @@ Reviewed by GPT-6 Astra (max effort), GPT-6.1 Sol (extra-high) and Claude Opus 5
 ## Verified and unverified
 
 - **Verified:** `CODEX_THREAD_ID` is set in Codex shells, with distinct values for a thread and its subagent (two reviewers' own shells). Claude subagents share the parent's `CLAUDE_CODE_SESSION_ID` (a reviewer's own shell). Codex documents that subagent hooks carry the parent's `session_id`.
-- **Unverified:** that `CLAUDE_CODE_SESSION_ID` is set the same way in terminal sessions as in the desktop app, and how it behaves on `--resume`; whether a desktop Local Codex thread's shell has `CODEX_THREAD_ID` (qualification checks both).
+- **Verified in qualification** (2026-10-26, Claude Code 2.1.310, Codex 0.164):
+  - `CLAUDE_CODE_SESSION_ID` is set in the desktop app, in interactive terminal sessions and in `claude -p`, each with its own value even when started from another session's shell. `--resume` keeps the id; `--fork-session` and `/clear` change it.
+  - A `codex exec` thread started from a Claude shell has its own `CODEX_THREAD_ID` and also inherits the Claude id.
+- **Unverified:** whether a desktop Local Codex thread's shell has `CODEX_THREAD_ID`.
+
+## Qualification (2026-10-26)
+
+Run against the live bus (Fluree, both machines) with real runtime ids, and against an isolated `serve` (JSONL) for the upgrade path. Everything in item 9 held, except where noted:
+
+- **The incident:** a Codex thread couldn't join, wait on or send from a Claude session's address; a second Claude session's join was refused while the first had a wait open.
+- **Takeover:** the old owner's blocked wait was refused as the takeover landed; unread mail carried over; a wrong join id was refused; the previous owner was refused from then on.
+- **Concurrency:** of eight simultaneous joins on one address, exactly one won. A join from the Pro was refused to a Mini session, and the Mini's message reached the Pro.
+- **Identity:** a missing, empty or placeholder id is refused, as is a Codex join naming another thread as `codexThreadId`. A running session whose MCP tool list predates `session` works by passing it as an extra argument, with no reconnect.
+- **Session changes:** leaving and rejoining hands no left mail to the next owner. A `serve` restart kept owners and unread mail (isolated store).
+- **Migration and the hook:** on a store written by the previous `serve`, a legacy Codex holder's Stop hook delivered before any rejoin, its own thread adopted the address and another was refused, and a legacy Claude address needed a takeover, then got its pre-upgrade mail. A pre-ownership `serve` running against an owned address afterwards changed nothing. With a real thread id and its rollout transcript, the hook delivered once; another thread's id, a mismatched transcript or no transcript delivered nothing and consumed nothing.
+- **Not run live:** a takeover racing a publish, and a hook's failing second read (both covered by unit tests).
+- **Found:** a process started from another session's shell inherits that session's id, so a `codex exec` delegate calling `wait --address <the Claude parent's address>` without `--runtime` acts as the parent, as subagents do. Delegates should get their own address. Separately, Claude Code reports "output schema but did not return structured content" for `bus_leave`, though the leave takes effect (the tool has had no success schema since the first release).
 
 ## Out of scope
 

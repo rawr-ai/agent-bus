@@ -30,6 +30,17 @@ mem:constraint-01m5x1ztaxvc47hyxyyrwbtsrb a mem:Constraint ;
     mem:createdAt "2026-10-26T21:31:14.141430+00:00"^^xsd:dateTime ;
     mem:rationale "Codex documents that subagent hooks use the parent session id; a hook that errors or blocks would stall the user's thread." .
 
+mem:constraint-01m5x9h52psxmgtkmg6pxw27q8 a mem:Constraint ;
+    mem:content "A process started from a session's shell inherits that session's runtime id (codex exec from Claude inherits CLAUDE_CODE_SESSION_ID), so the CLI acts as the parent when it defaults --runtime to the address's runtime. Give delegates that need an inbox their own address." ;
+    mem:tag "delegates" ;
+    mem:tag "identity" ;
+    mem:tag "ownership" ;
+    mem:scope mem:repo ;
+    mem:severity "should" ;
+    mem:artifactRef "README.md" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T23:43:02.230648+00:00"^^xsd:dateTime .
+
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
     mem:tag "architecture" ;
@@ -94,6 +105,21 @@ mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
     mem:createdAt "2026-10-26T21:31:14.094317+00:00"^^xsd:dateTime ;
     mem:rationale "Moving desktop threads onto the daemon loses desktop features the owner needs: SSH projects lose browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools; the CODEX_APP_SERVER_WS_URL override skips the app's provisioning too." ;
     mem:alternatives "a desktop SSH project to the same machine,launching the app with CODEX_APP_SERVER_WS_URL,deep links (they only prefill the composer)" .
+
+mem:decision-01m5x9h50yh252vteyr31k9jtk a mem:Decision ;
+    mem:content "Each bus address is owned by one session, identified by (runtime, the runtime's own id: CODEX_THREAD_ID or CLAUDE_CODE_SESSION_ID), passed as an explicit session argument on every call and recorded in the presence entry. Only the owner reads, waits, leaves or sends from it; takeover must name the holder's join id." ;
+    mem:tag "addresses" ;
+    mem:tag "identity" ;
+    mem:tag "ownership" ;
+    mem:tag "takeover" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/address-ownership.md" ;
+    mem:artifactRef "src/Bus.ts" ;
+    mem:artifactRef "src/client.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-26T23:43:02.174817+00:00"^^xsd:dateTime ;
+    mem:rationale "Two sessions on one address were competing consumers: a reply went to the wrong session. Runtime ids survive compaction and reach background waits and hooks without extra storage." ;
+    mem:alternatives "lease token issued at join (must survive compaction and be handed to waits and hooks),identity in an HTTP header (connection headers stay fixed across /clear; one Codex daemon serves many threads),idle-based automatic takeover (inactivity cannot prove a session ended)" .
 
 mem:fact-01m5x1ztcfrgxg1r3zcbxt5s0f a mem:Fact ;
     mem:content "The bus's Fluree token has no subject and is sent only to the data and admin APIs; the event stream stays open. In Fluree 4.2.4 a token with a subject is held to identity policies, which deny writes on a ledger without policies, and events auth refuses subject-less tokens. With CORS off, a cross-origin text/plain POST still writes, so auth is what protects the loopback server." ;
