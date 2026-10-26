@@ -1,0 +1,72 @@
+import { Schema } from "effect";
+
+/** The agent runtime behind an address; it decides how the bus delivers to it. */
+export const Runtime = Schema.Literals(["claude", "codex", "human", "other"]);
+export type Runtime = typeof Runtime.Type;
+
+/** Where a message was written from. Commit windows group messages by `repo` and `ts`. */
+export class Origin extends Schema.Class<Origin>("Origin")({
+  host: Schema.String,
+  cwd: Schema.optionalKey(Schema.String),
+  repo: Schema.optionalKey(Schema.String),
+  branch: Schema.optionalKey(Schema.String),
+}) {}
+
+/** A subscriber's announcement. The latest presence per address is that peer's state. */
+export class Presence extends Schema.Class<Presence>("Presence")({
+  runtime: Runtime,
+  status: Schema.Literals(["joined", "left"]),
+  topics: Schema.Array(Schema.String),
+  codexThreadId: Schema.optionalKey(Schema.String),
+  note: Schema.optionalKey(Schema.String),
+}) {}
+
+/**
+ * One ledger entry. Recipients in `to` are addresses, `#topic` for topic
+ * subscribers, or `*` for every peer.
+ */
+export class Message extends Schema.Class<Message>("Message")({
+  id: Schema.String,
+  ts: Schema.String,
+  from: Schema.String,
+  to: Schema.Array(Schema.String),
+  kind: Schema.Literals(["message", "presence"]),
+  subject: Schema.optionalKey(Schema.String),
+  body: Schema.String,
+  replyTo: Schema.optionalKey(Schema.String),
+  origin: Schema.optionalKey(Origin),
+  presence: Schema.optionalKey(Presence),
+}) {}
+
+export const MessageJson = Schema.fromJsonString(Message);
+
+export class LedgerError extends Schema.TaggedError<LedgerError>()("LedgerError", {
+  message: Schema.String,
+}) {}
+
+export class NotJoined extends Schema.TaggedError<NotJoined>()("NotJoined", {
+  address: Schema.String,
+  message: Schema.String,
+}) {}
+
+export interface Subscriber {
+  readonly address: string;
+  readonly presence: Presence;
+  /** Id of the presence entry that made this the peer's current state. */
+  readonly joinId: string;
+  /** The machine the peer joined from; only that machine's bus delivers to it. */
+  readonly host?: string | undefined;
+  /** The peer's working directory, which locates the messages it sends. */
+  readonly cwd?: string | undefined;
+}
+
+/** Whether a message should be delivered to a subscriber. Senders never receive their own. */
+export const isFor = (message: Message, subscriber: Subscriber): boolean =>
+  message.kind === "message" &&
+  message.from !== subscriber.address &&
+  message.to.some(
+    (recipient) =>
+      recipient === "*" ||
+      recipient === subscriber.address ||
+      (recipient.startsWith("#") && subscriber.presence.topics.includes(recipient.slice(1)))
+  );

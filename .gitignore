@@ -1,0 +1,9 @@
+.DS_Store
+node_modules/
+dist/
+*.log
+.repos/effect
+.claude/settings.local.json
+# Agent skills are installed locally, not published.
+.agents/
+.claude/skills
