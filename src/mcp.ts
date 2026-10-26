@@ -25,6 +25,7 @@ export const Peers = Schema.Struct({
       runtime: Runtime,
       topics: Schema.Array(Schema.String),
       host: Schema.optionalKey(Schema.String),
+      codexThreadId: Schema.optionalKey(Schema.String),
       note: Schema.optionalKey(Schema.String),
     })
   ),
@@ -172,6 +173,9 @@ const BusHandlers = BusToolkit.toLayer(
               runtime: presence.runtime,
               topics: presence.topics,
               ...(host === undefined ? {} : { host }),
+              ...(presence.codexThreadId === undefined
+                ? {}
+                : { codexThreadId: presence.codexThreadId }),
               ...(presence.note === undefined ? {} : { note: presence.note }),
             })),
           }))

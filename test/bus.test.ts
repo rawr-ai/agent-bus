@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Clock, Deferred, Duration, Effect, Fiber, Layer } from "effect";
+import { Clock, Deferred, Duration, Effect, Fiber, Layer, Option } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
@@ -22,6 +22,7 @@ import {
 } from "../src/codex.ts";
 import { type CodexHost, Message, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
+import { codexStop } from "../src/hook.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Mcp from "../src/mcp.ts";
 import * as Serve from "../src/serve.ts";
@@ -902,6 +903,56 @@ describe("mcp over http", () => {
           "other",
           undefined,
         ]);
+      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
+
+  test("a Codex Stop hook continues the turn with the thread's unread messages", () => {
+    const { url, layer } = serve();
+    const stop = (transcript: string | null) =>
+      codexStop(
+        url,
+        JSON.stringify({
+          session_id: "t-desk",
+          transcript_path: transcript,
+          hook_event_name: "Stop",
+          stop_hook_active: false,
+        }),
+        hostname()
+      );
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const call = Client.call(url);
+        yield* call("bus_join", Mcp.Joined, {
+          address: "codex/a",
+          runtime: "codex",
+          cwd: process.cwd(),
+          codexThreadId: "t-desk",
+        });
+        yield* call("bus_publish", Mcp.Published, {
+          from: "claude/b",
+          to: ["codex/a"],
+          body: "hi",
+        });
+
+        // A subagent's hook carries its parent's id, with its own transcript.
+        expect(yield* stop("/sessions/rollout-2026-10-26T10-00-00-t-sub.jsonl")).toEqual(
+          Option.none()
+        );
+        const output = yield* stop("/sessions/rollout-2026-10-26T10-00-00-t-desk.jsonl");
+        expect(Option.isSome(output)).toBe(true);
+        if (Option.isSome(output)) {
+          const decision = JSON.parse(output.value) as { decision: string; reason: string };
+          expect(decision.decision).toBe("block");
+          expect(decision.reason).toContain("1 new message for codex/a");
+          expect(decision.reason).toContain("hi");
+        }
+        // Read once; the next turn end has nothing to add.
+        expect(yield* stop(null)).toEqual(Option.none());
+        // An unreachable bus lets the turn end.
+        expect(
+          yield* codexStop("http://127.0.0.1:9/mcp", '{"session_id":"t-desk"}', hostname())
+        ).toEqual(Option.none());
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });

@@ -137,7 +137,7 @@ export const formatDelivery = (address: string, messages: ReadonlyArray<Message>
 };
 
 /** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
-const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
+export const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
 
 export const localHost = hostname();
 

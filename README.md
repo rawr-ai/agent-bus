@@ -63,17 +63,38 @@ A resume refused because another app-server holds the thread (`active writer`) i
 
 Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since a thread can only be woken by the daemon that hosts it. Within `serve`, joins, leaves, reads and deliveries for one address run one at a time, so a message is delivered once, to the subscriber's current state.
 
+**A Codex `Stop` hook delivers to threads the bus can't wake.** When a turn ends, `agent-bus codex-stop-hook` reads the thread's unread messages and continues the turn with them, so the desktop app's Local threads get their messages without a second writer and keep every desktop feature. It can't wake a thread that is already idle. A subagent's hook carries its parent's id, so the hook delivers only when the transcript is the thread's own. If the bus is unreachable, the turn ends normally. Install it in `~/.codex/hooks.json` (use absolute paths; hooks don't get your shell's `PATH`), then review and trust it with `/hooks` in the Codex CLI:
+
+```json
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "/Users/you/.local/bin/bun /path/to/agent-bus/src/bin.ts codex-stop-hook",
+            "timeout": 30,
+            "statusMessage": "Checking agent-bus"
+          }
+        ]
+      }
+    ]
+  }
+}
+```
+
 Where Codex threads run, and so whether the bus can wake them:
 
 | Started from | Runs on | Woken by the bus |
 | --- | --- | --- |
 | `codex` TUI | The daemon (unless `--no-daemon`) | Yes, live in the TUI |
 | The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes |
-| The desktop app, Local project | The app's own app-server | Only while the daemon has it loaded, which it doesn't |
+| The desktop app, Local project | The app's own app-server | No; the `Stop` hook delivers when a turn ends |
 | `codex exec` | Its own process | No (joins as `other`) |
 | A subagent | Its parent's app-server | Never |
 
-To have bus messages appear in a desktop window, work in the thread through a daemon connection. A thread keeps its id across app-servers, since they share `~/.codex`: finish or interrupt its turn in the Local window, open it from the SSH project, and rejoin from there.
+To have bus messages wake a thread in a desktop window, work in the thread through a daemon connection (an SSH project), at the cost of some desktop features (see [connections](docs/connections.md)). A thread keeps its id across app-servers, since they share `~/.codex`: finish or interrupt its turn in the Local window, open it from the SSH project, and rejoin from there.
 
 The daemon inherits the open-file limit of whatever started it, often macOS's default soft limit of 256. A daemon holding several threads, each with its own MCP servers, exhausts that, and then fails to load threads, skills or shells (`Too many open files` in `~/.codex/app-server-control/app-server.log`). Restart it from a shell with a higher limit: `ulimit -n 10240 && codex app-server daemon restart`.
 
@@ -118,4 +139,5 @@ Each message is a node `urn:agent-bus:message:<id>` typed `bus:Message` or `bus:
 ## Next
 
 - **Commit-window view** over `git log` per repo and branch.
-- **Stop hooks** for Claude and Codex that check the bus when a turn ends.
+- **A Claude Code Stop hook** that checks the bus when a turn ends, like the Codex one.
+- **Waking idle Local desktop threads** through the desktop app's own coordination socket (undocumented), which keeps the app as the thread's writer.

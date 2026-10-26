@@ -11,6 +11,7 @@ import * as Client from "./client.ts";
 import { defaultSocket, formatDelivery, localHost } from "./codex.ts";
 import { Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
+import { codexStop } from "./hook.ts";
 import * as Ledger from "./Ledger.ts";
 import * as Mcp from "./mcp.ts";
 import * as Serve from "./serve.ts";
@@ -207,6 +208,18 @@ const peers = Command.make("peers", {}, () =>
   })
 ).pipe(Command.withDescription("List joined peers"));
 
+const codexStopHook = Command.make("codex-stop-hook", {}, () =>
+  Effect.gen(function* () {
+    const input = yield* Effect.promise(() => Bun.stdin.text());
+    const output = yield* codexStop(endpoint, input, localHost);
+    if (Option.isSome(output)) yield* Console.log(output.value);
+  })
+).pipe(
+  Command.withDescription(
+    "Codex Stop hook: continue the ending turn with the thread's unread bus messages (reads the hook input on stdin)"
+  )
+);
+
 const importJsonl = Command.make(
   "import-jsonl",
   { file: Flag.String("file").pipe(Flag.withDefault(jsonlFile)) },
@@ -245,7 +258,7 @@ const importJsonl = Command.make(
 
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
-  Command.withSubcommands([serve, joinCommand, publish, wait, peers, importJsonl])
+  Command.withSubcommands([serve, joinCommand, publish, wait, peers, codexStopHook, importJsonl])
 );
 
 Command.run(cli, { version: VERSION }).pipe(
