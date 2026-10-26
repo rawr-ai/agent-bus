@@ -1,12 +1,22 @@
 import { Effect, Layer, Schema } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus } from "./Bus.ts";
-import { LedgerError, Message, NotJoined, Runtime } from "./domain.ts";
+import { ThreadHosts } from "./codex.ts";
+import { CodexHost, LedgerError, Message, NotJoined, Runtime } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 
 const Failure = Schema.Union([LedgerError, NotJoined]);
 export const Messages = Schema.Struct({ messages: Schema.Array(Message) });
-export const Joined = Schema.Struct({ address: Schema.String, cursor: Schema.Number });
+export const Joined = Schema.Struct({
+  address: Schema.String,
+  cursor: Schema.Number,
+  codexHost: Schema.optionalKey(
+    CodexHost.annotate({
+      description:
+        "daemon: the bus can wake this thread, resuming it if needed. other: it runs in another app-server (such as the desktop app's), so the bus wakes it only while this machine's daemon has it loaded.",
+    })
+  ),
+});
 export const Published = Schema.Struct({ id: Schema.String, ts: Schema.String });
 export const Peers = Schema.Struct({
   peers: Schema.Array(
@@ -30,7 +40,7 @@ const Address = Schema.String.annotate({
 
 const Join = Tool.make("bus_join", {
   description:
-    "Join the agent bus (or rejoin after a restart) before reading. Announces your address, runtime and topics to every peer. Codex sessions pass their own thread id so the bus can wake them with new messages; Claude sessions run `agent-bus wait --address <address>` as a background command to be woken.",
+    "Join the agent bus (or rejoin after a restart) before reading. Announces your address, runtime and topics to every peer. Codex sessions pass their own thread id so the bus can wake them with new messages, and learn whether it can (codexHost); Claude sessions run `agent-bus wait --address <address>` as a background command to be woken.",
   parameters: Schema.Struct({
     address: Address,
     runtime: Runtime,
@@ -136,8 +146,17 @@ const BusHandlers = BusToolkit.toLayer(
   Effect.gen(function* () {
     const bus = yield* Bus;
     const ledger = yield* Ledger;
+    const hosts = yield* ThreadHosts;
     return {
-      bus_join: (params) => bus.join(params),
+      bus_join: (params) =>
+        Effect.gen(function* () {
+          const codexHost =
+            params.runtime === "codex" && params.codexThreadId !== undefined
+              ? yield* hosts.classify(params.codexThreadId)
+              : undefined;
+          const joined = yield* bus.join({ ...params, codexHost });
+          return codexHost === undefined ? joined : { ...joined, codexHost };
+        }),
       bus_publish: (params) => bus.publish(params).pipe(Effect.map(({ id, ts }) => ({ id, ts }))),
       bus_read: ({ address, limit }) =>
         bus.take(address, limit).pipe(Effect.map((messages) => ({ messages }))),

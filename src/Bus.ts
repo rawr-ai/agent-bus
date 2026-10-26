@@ -2,6 +2,7 @@ import { hostname } from "node:os";
 import { Clock, Context, Effect, Layer, Option, Semaphore, Stream } from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
+  type CodexHost,
   isFor,
   type LedgerError,
   Message,
@@ -18,6 +19,7 @@ export interface JoinInput {
   readonly runtime: Runtime;
   readonly topics?: ReadonlyArray<string> | undefined;
   readonly codexThreadId?: string | undefined;
+  readonly codexHost?: CodexHost | undefined;
   readonly note?: string | undefined;
   /** Start from the beginning of the ledger instead of only new messages. */
   readonly replay?: boolean | undefined;
@@ -161,6 +163,7 @@ export const layer = Layer.effect(
           status: "joined",
           topics: [...(input.topics ?? [])],
           ...optional("codexThreadId", input.codexThreadId),
+          ...optional("codexHost", input.codexHost),
           ...optional("note", input.note),
         });
         // Rejoining keeps unread messages; a new subscriber starts at the present.

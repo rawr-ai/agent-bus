@@ -3,7 +3,7 @@ import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Deferred, Duration, Effect, Fiber, Layer } from "effect";
+import { Clock, Deferred, Duration, Effect, Fiber, Layer } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
@@ -17,9 +17,10 @@ import {
   deliverOnce,
   deliveryTargets,
   formatDelivery,
-  type Refusals,
+  type Holds,
+  ThreadHosts,
 } from "../src/codex.ts";
-import { Message, Origin, Presence } from "../src/domain.ts";
+import { type CodexHost, Message, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Mcp from "../src/mcp.ts";
@@ -510,62 +511,206 @@ describe("codex daemon connection", () => {
   });
 });
 
-describe("codex delivery retries", () => {
-  /** A daemon that records turn requests and refuses them while `refuse` is set. */
+describe("codex daemon replies", () => {
+  test("a request from the daemon that reuses a pending id is not taken for the reply", async () => {
+    const socketPath = join(tempDir(), "daemon.sock");
+    const server = Bun.serve({
+      unix: socketPath,
+      fetch: (request, server) =>
+        server.upgrade(request) ? undefined : new Response("upgrade", { status: 400 }),
+      websocket: {
+        message: (socket, text) => {
+          const { id, method } = JSON.parse(String(text)) as { id?: number; method: string };
+          if (id === undefined) return;
+          if (method === "thread/loaded/list") {
+            socket.send(JSON.stringify({ id, method: "item/requestApproval", params: {} }));
+          }
+          socket.send(JSON.stringify({ id, result: { data: [method] } }));
+        },
+      },
+    });
+    try {
+      const result = await Effect.runPromise(
+        Effect.scoped(
+          Effect.flatMap(connect(socketPath, Duration.seconds(2)), (daemon) =>
+            daemon.request("thread/loaded/list", {})
+          )
+        )
+      );
+      expect(result).toEqual({ data: ["thread/loaded/list"] });
+    } finally {
+      server.stop(true);
+    }
+  });
+});
+
+describe("codex delivery", () => {
+  /**
+   * A daemon with a set of loaded threads. `resume` and `turn` choose how it
+   * answers those requests; every request is recorded as `method threadId`.
+   */
   const fakeDaemon = () => {
-    const turns: Array<string> = [];
-    const state = { refuse: true };
+    const calls: Array<string> = [];
+    const state = {
+      loaded: new Set<string>(),
+      resume: "accept" as "accept" | "active writer",
+      turn: "accept" as "accept" | "subagent" | "silent",
+    };
+    const fail = (method: string, message: string) =>
+      Effect.fail(new CodexError({ method, message }));
     const daemon: Daemon = {
       request: (method, params) => {
-        if (method === "thread/loaded/list") return Effect.succeed({ data: ["t-1"] });
+        if (method === "thread/loaded/list") {
+          return Effect.succeed({ data: Array.from(state.loaded) });
+        }
         const { threadId } = params as { readonly threadId: string };
-        turns.push(threadId);
-        return state.refuse
-          ? Effect.fail(
-              new CodexError({ method, message: `thread ${threadId} already has an active writer` })
-            )
-          : Effect.succeed({});
+        calls.push(`${method} ${threadId}`);
+        if (method === "thread/resume") {
+          if (state.resume === "active writer") {
+            return fail(method, `thread ${threadId} already has an active writer`);
+          }
+          state.loaded.add(threadId);
+        }
+        if (method === "turn/start" && state.turn === "subagent") {
+          return fail(
+            method,
+            "direct app-server input is not allowed for multi-agent v2 sub-agents"
+          );
+        }
+        if (method === "turn/start" && state.turn === "silent") {
+          return fail(method, "no answer within 30s");
+        }
+        return Effect.succeed({});
       },
     };
-    return { daemon, turns, state };
+    return { daemon, calls, state };
   };
 
-  test("a refused thread is retried after a doubling delay, and delivered once accepted", () =>
-    Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const bus = yield* Bus.Bus;
-          const { daemon, turns, state } = fakeDaemon();
-          const refusals: Refusals = new Map();
-          const deliver = deliverOnce(Effect.succeed(daemon), hostname(), refusals);
-          yield* bus.join({
-            address: "codex/a",
-            runtime: "codex",
-            cwd: process.cwd(),
-            codexThreadId: "t-1",
-          });
-          yield* bus.join({ address: "claude/b", runtime: "claude", cwd: process.cwd() });
-          yield* bus.publish({ from: "claude/b", to: ["codex/a"], body: "hi" });
+  /** A Codex peer `codex/a` on thread t-1 with one message from `claude/b`, and a deliverer for it. */
+  const setup = (codexHost: CodexHost) =>
+    Effect.gen(function* () {
+      const bus = yield* Bus.Bus;
+      const fake = fakeDaemon();
+      const holds: Holds = new Map();
+      const deliver = deliverOnce(Effect.succeed(fake.daemon), hostname(), holds);
+      const join = bus.join({
+        address: "codex/a",
+        runtime: "codex",
+        cwd: process.cwd(),
+        codexThreadId: "t-1",
+        codexHost,
+      });
+      yield* join;
+      yield* bus.join({ address: "claude/b", runtime: "claude", cwd: process.cwd() });
+      yield* bus.publish({ from: "claude/b", to: ["codex/a"], body: "hi" });
+      return { bus, ...fake, holds, deliver, join };
+    });
 
-          yield* deliver;
-          yield* deliver; // still waiting out the first refusal
-          expect(turns).toEqual(["t-1"]);
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus>) =>
+    Effect.runPromise(Effect.provide(effect, Layer.merge(jsonl().layer, TestClock.layer())));
 
-          yield* TestClock.adjust("30 seconds");
-          yield* deliver;
-          yield* TestClock.adjust("30 seconds"); // the second refusal waits a minute
-          yield* deliver;
-          expect(turns).toEqual(["t-1", "t-1"]);
+  test("a loaded thread gets a turn, and the deliverer unsubscribes", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, calls, state, deliver } = yield* setup("other");
+        state.loaded.add("t-1");
+        yield* deliver;
+        expect(calls).toEqual(["turn/start t-1", "thread/unsubscribe t-1"]);
+        expect(yield* bus.take("codex/a")).toEqual([]);
+      })
+    ));
 
-          state.refuse = false;
-          yield* TestClock.adjust("30 seconds");
+  test("a thread that joined from the daemon is resumed there", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, calls, deliver } = yield* setup("daemon");
+        yield* deliver;
+        expect(calls).toEqual(["thread/resume t-1", "turn/start t-1", "thread/unsubscribe t-1"]);
+        expect(yield* bus.take("codex/a")).toEqual([]);
+      })
+    ));
+
+  test("a thread from another app-server is never resumed; it waits until the daemon has it", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, calls, state, holds, deliver } = yield* setup("other");
+        yield* deliver;
+        yield* TestClock.adjust("1 hour");
+        yield* deliver;
+        expect(calls).toEqual([]);
+        expect(holds.get("codex/a")?.elsewhere).toBe(true);
+
+        state.loaded.add("t-1");
+        yield* deliver;
+        expect(calls).toEqual(["turn/start t-1", "thread/unsubscribe t-1"]);
+        expect(holds.size).toBe(0);
+        expect(yield* bus.take("codex/a")).toEqual([]);
+      })
+    ));
+
+  test("a thread another app-server refuses to share waits, rather than retrying until it is free", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, calls, state, deliver } = yield* setup("daemon");
+        state.resume = "active writer";
+        yield* deliver;
+        expect(calls).toEqual(["thread/resume t-1"]);
+
+        state.resume = "accept"; // the other app-server let go of it
+        yield* TestClock.adjust("1 hour");
+        yield* deliver;
+        expect(calls).toEqual(["thread/resume t-1"]);
+        expect(bodies(yield* bus.take("codex/a"))).toEqual(["hi"]);
+      })
+    ));
+
+  test("a subagent is not woken again, until it rejoins", () =>
+    run(
+      Effect.gen(function* () {
+        const { calls, state, deliver, join } = yield* setup("daemon");
+        state.loaded.add("t-1");
+        state.turn = "subagent";
+        yield* deliver;
+        yield* TestClock.adjust("1 hour");
+        yield* deliver;
+        expect(calls).toEqual(["turn/start t-1"]);
+
+        yield* join;
+        yield* deliver;
+        expect(calls).toEqual(["turn/start t-1", "turn/start t-1"]);
+      })
+    ));
+
+  test("a daemon that doesn't answer is retried after a doubling delay, capped at five minutes", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, calls, state, holds, deliver } = yield* setup("daemon");
+        state.loaded.add("t-1");
+        state.turn = "silent";
+        const attempts = () => calls.filter((call) => call.startsWith("turn/start")).length;
+
+        yield* deliver;
+        yield* deliver; // still waiting out the first failure
+        expect(attempts()).toBe(1);
+        yield* TestClock.adjust("30 seconds");
+        yield* deliver;
+        yield* TestClock.adjust("30 seconds"); // the second failure waits a minute
+        yield* deliver;
+        expect(attempts()).toBe(2);
+
+        for (const _ of [3, 4, 5]) {
+          yield* TestClock.adjust("5 minutes");
           yield* deliver;
-          expect(turns).toEqual(["t-1", "t-1", "t-1"]);
-          expect(refusals.size).toBe(0);
-          expect(yield* bus.take("codex/a")).toEqual([]);
-        }),
-        Layer.merge(jsonl().layer, TestClock.layer())
-      )
+        }
+        const until = holds.get("codex/a")?.until ?? 0;
+        expect(until - (yield* Clock.currentTimeMillis)).toBe(5 * 60_000);
+
+        state.turn = "accept";
+        yield* TestClock.adjust("5 minutes");
+        yield* deliver;
+        expect(holds.size).toBe(0);
+        expect(yield* bus.take("codex/a")).toEqual([]);
+      })
     ));
 });
 
@@ -661,7 +806,15 @@ describe("mcp over http", () => {
     return {
       port,
       url: `http://127.0.0.1:${port}/mcp`,
-      layer: Serve.layerHttp({ port, version: "test" }).pipe(Layer.provide(jsonl().layer)),
+      layer: Serve.layerHttp({ port, version: "test" }).pipe(
+        Layer.provide(jsonl().layer),
+        // The daemon runs t-daemon; every other thread runs somewhere else.
+        Layer.provide(
+          Layer.succeed(ThreadHosts)({
+            classify: (threadId) => Effect.succeed(threadId === "t-daemon" ? "daemon" : "other"),
+          })
+        )
+      ),
     };
   };
 
@@ -733,6 +886,25 @@ describe("mcp over http", () => {
       );
     });
   }
+
+  test("a Codex join learns whether the bus can wake its thread", () => {
+    const { url, layer } = serve();
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const call = Client.call(url);
+        const join = (address: string, args: Record<string, string>) =>
+          call("bus_join", Mcp.Joined, { address, cwd: process.cwd(), ...args });
+        const onDaemon = yield* join("codex/a", { runtime: "codex", codexThreadId: "t-daemon" });
+        const inDesktop = yield* join("codex/b", { runtime: "codex", codexThreadId: "t-desk" });
+        const claude = yield* join("claude/c", { runtime: "claude" });
+        expect([onDaemon.codexHost, inDesktop.codexHost, claude.codexHost]).toEqual([
+          "daemon",
+          "other",
+          undefined,
+        ]);
+      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
 
   test("refuses browser origins and foreign hosts", () => {
     const { port, url, layer } = serve();

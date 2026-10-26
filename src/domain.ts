@@ -12,12 +12,21 @@ export class Origin extends Schema.Class<Origin>("Origin")({
   branch: Schema.optionalKey(Schema.String),
 }) {}
 
+/**
+ * Which Codex app-server ran a thread when it joined: the machine's shared
+ * daemon, which the bus may resume the thread on, or another one (such as the
+ * desktop app's own), which the bus must never take the thread from.
+ */
+export const CodexHost = Schema.Literals(["daemon", "other"]);
+export type CodexHost = typeof CodexHost.Type;
+
 /** A subscriber's announcement. The latest presence per address is that peer's state. */
 export class Presence extends Schema.Class<Presence>("Presence")({
   runtime: Runtime,
   status: Schema.Literals(["joined", "left"]),
   topics: Schema.Array(Schema.String),
   codexThreadId: Schema.optionalKey(Schema.String),
+  codexHost: Schema.optionalKey(CodexHost),
   note: Schema.optionalKey(Schema.String),
 }) {}
 

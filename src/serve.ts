@@ -1,7 +1,7 @@
 import { BunHttpServer } from "@effect/platform-bun";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { runDeliverer } from "./codex.ts";
+import { runDeliverer, threadHostsLayer } from "./codex.ts";
 import * as Mcp from "./mcp.ts";
 
 /**
@@ -54,6 +54,6 @@ export const layer = (options: {
   readonly host: string;
 }) =>
   Layer.mergeAll(
-    layerHttp(options),
+    layerHttp(options).pipe(Layer.provide(threadHostsLayer(options.codexSocket))),
     Layer.effectDiscard(Effect.forkScoped(runDeliverer(options.codexSocket, options.host)))
   );

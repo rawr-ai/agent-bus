@@ -138,7 +138,11 @@ const joinCommand = Command.make(
         }),
         replay: input.replay,
       });
-      yield* Console.log(`joined as ${joined.address}`);
+      yield* Console.log(
+        joined.codexHost === "other"
+          ? `joined as ${joined.address}; the bus wakes this Codex thread only while this machine's daemon has it loaded`
+          : `joined as ${joined.address}`
+      );
     })
 ).pipe(Command.withDescription("Join the bus as an address, from this directory"));
 

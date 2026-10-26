@@ -49,11 +49,31 @@ codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 
 **Claude Code** runs `agent-bus wait --address <address>` as a background command. It exits when a message arrives, which wakes the session; the session handles the messages and starts the wait again. While `serve` is unreachable (restarting, say) the wait retries rather than exiting.
 
-**Codex** sessions join with their thread id. `serve` connects to the Codex app-server daemon (WebSocket over `~/.codex/app-server-control/app-server-control.sock`) and calls `turn/start` with the unread messages. An idle thread starts a new turn; a thread mid-turn has the messages steered into the running turn. Messages are marked read only after the daemon accepts the turn. A refused delivery is retried after 30 seconds, then after a delay that doubles to 30 minutes, with one log line per refusal; a success or a rejoin starts over.
+**Codex** sessions join with their thread id. `serve` connects to the Codex app-server daemon (WebSocket over `~/.codex/app-server-control/app-server-control.sock`) and calls `turn/start` with the unread messages. An idle thread starts a new turn; a thread mid-turn has the messages steered into the running turn. Messages are marked read only after the daemon accepts the turn, and `serve` then unsubscribes, since it can't answer approvals.
+
+A thread has one writer, the app-server that loaded it, and the bus never takes a thread from another app-server. At `bus_join`, `serve` records where the thread runs (`codexHost` in the presence entry and the join result): `daemon` if this machine's daemon has it loaded, `other` otherwise (the desktop app's own app-server, a running `codex exec`, or a daemon `serve` can't reach).
+
+| The daemon has the thread loaded? | Joined as | `serve` |
+| --- | --- | --- |
+| Yes | either | `turn/start` |
+| No | `daemon` | `thread/resume`, then `turn/start` |
+| No | `other` | Nothing: the messages wait, unread, until the daemon has the thread loaded or the peer rejoins from the daemon |
+
+A resume refused because another app-server holds the thread (`active writer`) is treated the same as `other` for that join; it is not retried until the thread happens to be free. Subagents take no direct input, so they are never woken; their messages stay unread for `bus_read`. Transport failures (the daemon unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes. Each of these is logged once per join.
 
 Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since a thread can only be woken by the daemon that hosts it. Within `serve`, joins, leaves, reads and deliveries for one address run one at a time, so a message is delivered once, to the subscriber's current state.
 
-The daemon can only wake threads it hosts. Threads open in the Codex desktop app's own embedded app-server refuse a second writer (`thread already has an active writer`); run Codex sessions on the daemon (CLI `--remote`, or the app's SSH remote connection) to make them wakeable.
+Where Codex threads run, and so whether the bus can wake them:
+
+| Started from | Runs on | Woken by the bus |
+| --- | --- | --- |
+| `codex` TUI | The daemon (unless `--no-daemon`) | Yes, live in the TUI |
+| The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes |
+| The desktop app, Local project | The app's own app-server | Only while the daemon has it loaded, which it doesn't |
+| `codex exec` | Its own process | No (joins as `other`) |
+| A subagent | Its parent's app-server | Never |
+
+To have bus messages appear in a desktop window, work in the thread through a daemon connection. A thread keeps its id across app-servers, since they share `~/.codex`: finish or interrupt its turn in the Local window, open it from the SSH project, and rejoin from there.
 
 The daemon inherits the open-file limit of whatever started it, often macOS's default soft limit of 256. A daemon holding several threads, each with its own MCP servers, exhausts that, and then fails to load threads, skills or shells (`Too many open files` in `~/.codex/app-server-control/app-server.log`). Restart it from a shell with a higher limit: `ulimit -n 10240 && codex app-server daemon restart`.
 
