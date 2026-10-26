@@ -51,7 +51,7 @@ Reviewed by GPT-6 Astra (max effort), GPT-6.1 Sol (extra-high) and Claude Opus 5
    - It presents the thread id it receives as `session_id`.
    - It requires a transcript path naming that thread; a missing transcript means no delivery.
    - It returns whatever it has already read even if a later read fails, so no consumed messages are lost.
-7. **Scope.** Claims are atomic within one machine's `serve`, whose locks are process-local. Joins from different machines are ordered by the ledger, and the losing claim is refused from its next call. A cross-machine takeover keeps the presence, but the cursor is machine-local, so unread messages may be redelivered from the new machine's position. These limits are documented rather than solved.
+7. **Scope.** Claims are atomic within one machine's `serve`, whose locks are process-local. Joins from different machines are ordered by the ledger, and the losing claim is refused from its next call. A cross-machine takeover keeps the presence, but the cursor is machine-local, so unread messages may be redelivered from the new machine's position. These limits are documented rather than solved. Once an address has an owner, presences written without one (only a `serve` from before owners writes them) are ignored, so machines can be upgraded one at a time.
 8. **Descriptions.**
    - An address is one session's private inbox; pick one specific to the session.
    - `#topics` are for groups.

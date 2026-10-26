@@ -1431,6 +1431,28 @@ describe("one session per address", () => {
       })
     ));
 
+  test("an owned address ignores joins and leaves from a bus that predates owners", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
+        yield* bus.join({ address: "claude/b", runtime: "claude", session: "sb", cwd });
+        yield* legacy("claude/a");
+        yield* legacy("claude/a", { status: "left" });
+        yield* bus.publish({
+          from: "claude/b",
+          session: "sb",
+          to: ["claude/a"],
+          body: "still mine",
+        });
+        expect(bodies(yield* bus.take("claude/a", "s1"))).toEqual(["still mine"]);
+        yield* unchanged(
+          "claude/a",
+          bus.join({ address: "claude/a", runtime: "claude", session: "s2", cwd })
+        );
+      })
+    ));
+
   test("ownership and unread mail survive a restart of the bus", async () => {
     const dir = tempDir();
     const file = join(dir, "ledger.jsonl");

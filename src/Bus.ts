@@ -153,6 +153,12 @@ export const layer = Layer.effect(
       const latest = new Map<string, Subscriber>();
       for (const message of yield* ledger.presence) {
         if (message.presence === undefined) continue;
+        // An older bus writes joins and leaves without an owner. Once an address
+        // has one, they are ignored, so machines can be upgraded one at a time.
+        const previous = latest.get(message.from);
+        if (message.presence.session === undefined && previous?.presence.session !== undefined) {
+          continue;
+        }
         latest.set(message.from, {
           address: message.from,
           presence: message.presence,
