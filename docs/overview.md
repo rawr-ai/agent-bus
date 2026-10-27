@@ -1,6 +1,6 @@
 # agent-bus: how it works, its policies, and its gaps
 
-A map of the whole system, written for a simplification review. It describes the system as deployed on 2026-10-27 (3d10fca) and links to the documents that own the details: the [README](../README.md) (commands, delivery, ledger format), [connections](connections.md) (trust boundaries) and the frames in [frames/](frames/) (decisions, with their reasoning and the alternatives rejected).
+A map of the whole system, written for a simplification review. It describes the system as deployed on 2026-10-27 and links to the documents that own the details: the [README](../README.md) (commands, delivery, ledger format), [connections](connections.md) (trust boundaries) and the frames in [frames/](frames/) (decisions, with their reasoning and the alternatives rejected).
 
 ## What kind of system it is
 
@@ -28,7 +28,7 @@ agent-bus is an **append-only message log with one read cursor per address, plus
 | **Ownership** (in `src/Bus.ts`) | One session per address, identified by the runtime's own id | Two sessions sharing an address were stealing each other's replies |
 | **LaunchAgents** (`scripts/install-launch-agents.sh`) | Bus host: the Fluree server and `serve`. Other machines: `serve` and the SSH tunnel | Keep the bus running across logins |
 
-Size: about 2,600 lines of source, 2,150 lines of tests, and a 190-line installer. Dependencies: Effect 4, `@effect/platform-bun` and `sparqljs`.
+Size: about 2,450 lines of source, 2,400 lines of tests, and a 190-line installer. Dependencies: Effect 4, `@effect/platform-bun` and `sparqljs`.
 
 ## How a message moves
 
@@ -44,7 +44,7 @@ Size: about 2,600 lines of source, 2,150 lines of tests, and a 190-line installe
 | Session | How it receives | Live push? |
 | --- | --- | --- |
 | Claude Code (desktop, terminal or `claude -p`) | A background `agent-bus wait`, which exits on arrival and wakes the session | Yes, within seconds, provided the wait is running. The session must restart it after every wake |
-| Codex `codex` TUI, or a desktop SSH project | A nudge in its queue, which the daemon runs as a turn, with or without the TUI attached | Yes, seen within 15 s when idle, and after the current turn when busy (verified 2026-10-27, [one-codex-route](frames/one-codex-route.md)). A thread the daemon no longer has loaded, as after a daemon restart, runs it when next opened |
+| Codex `codex` TUI, or a desktop SSH project | A nudge in its queue, which the daemon runs as a turn, with or without the TUI attached | Yes, seen within 3–15 s when idle, and after the current turn when busy (verified 2026-10-27, [one-codex-route](frames/one-codex-route.md)). A thread the daemon no longer has loaded, as after a daemon restart, runs it when next opened |
 | **Codex desktop Local thread** | A nudge in its queue, which the desktop runs as a turn: at once when idle, after the current turn when busy. The `Stop` hook also delivers at a turn's end | **Yes**, within seconds while the thread is open (verified 2026-10-27, [queue-wake](frames/queue-wake.md)). A thread nobody has open runs it when next opened |
 | `codex exec` | Only by calling `bus_read`. A nudge waits in its queue, and runs only if the thread is opened in an app | No |
 | A Codex or Claude subagent | Through its parent | Never woken directly: a Codex subagent's queue refuses direct input |
@@ -103,6 +103,7 @@ Size: about 2,600 lines of source, 2,150 lines of tests, and a 190-line installe
 | A session whose cached tool list predates `session` can pass it as an extra argument, in both Claude Code and Codex | **Verified live** |
 | Idle desktop Local threads are woken by a queue nudge, coalesced, restart-safe and ownership-safe | **Verified live**, 2026-10-27 ([results](frames/queue-wake.md#qualification-2026-10-27)) |
 | Daemon threads run a queued nudge with or without a client attached; one loaded nowhere runs it when reopened; a mid-turn add runs after the turn; a subagent's queue refuses the add | **Verified live**, 2026-10-27 ([evidence](frames/one-codex-route.md#what-it-rests-on)) |
+| Codex calls the bus's tools without approval in any sandbox, except `bus_join` outside full access | **Verified live** ([results](frames/one-codex-route.md#found-in-qualification-codex-refused-the-read-outside-full-access)) |
 | The queue methods (`thread/queue/*`) are experimental in the Codex app-server protocol | **Accepted risk:** `serve` uses the desktop's bundled CLI, so protocol and app move together; a change shows as logged errors, and the `Stop` hook still delivers at turn end |
 | The Pro's desktop running a nudge; a desktop subagent's add being refused like the daemon's | **Unverified** |
 | The `Stop` hook is trusted on the Mini; the Pro is unknown | **Owner's step**, if it is kept |
@@ -110,8 +111,6 @@ Size: about 2,600 lines of source, 2,150 lines of tests, and a 190-line installe
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |
 | Locks are per process, and each machine runs one `serve`. Joins from two machines are ordered by the ledger, so the losing claim is refused only from its next call. Cursors are per machine, so a takeover from another machine may redeliver | **Documented limit** |
 | A process started from a session's shell inherits that session's id and acts for it; a `codex exec` delegate can consume its Claude parent's mail | **Documented**: give delegates their own address |
-| Claude Code reported an error for `bus_leave` ("did not return structured content") | **Fixed** in 3d10fca |
-| CLI refusals print a stack trace under the message | **Cosmetic** |
 | Unit tests run on JSONL only. Fluree is covered by `bun run qualify:fluree` and live use | **Accepted** |
 | The other machine's non-interactive SSH `PATH` lacks `bun` | **Operations**: remote commands need `~/.bun/bin` |
 
@@ -125,5 +124,5 @@ These were found while writing this map and are not recommendations. Each names 
 4. **Origin repo and branch on every message.** Each publish runs `git` twice to record them for commit-window views that were never built. Either build the view or stop recording them.
 5. **Legacy ownership paths.** These are adopting owner-less presences and ignoring owner-less presences. Once every live address has an owner and no pre-ownership `serve` remains, both can go.
 6. **Two locks per address** (`claiming` for ownership changes and sends, `exclusive` for cursor moves). They were split so sends don't wait behind slow deliveries. Keep them unless deliveries become fast enough not to matter.
-7. **Retire the `Stop` hook?** The queue nudge shipped and covers idle and busy Local threads, and the desktop-wake spike is superseded. The hook is now optional. It puts message text into the turn, which the nudge deliberately avoids, and it causes the one empty turn the nudge allows. The Opus simplicity pass recommends retiring it. The Director keeps it for now. Retiring it removes `src/hook.ts`, the `codex-stop-hook` command, the hooks.json install and trust step, and the transcript check.
+7. **Retire the `Stop` hook?** The queue nudge shipped and covers idle and busy Local threads, and the desktop-wake spike is superseded. The hook is now optional. It puts message text into the turn, which the nudge deliberately avoids, and it causes the one empty turn the nudge allows. Qualification also showed that it hid a refused read, since fixed ([results](frames/one-codex-route.md#qualification-2026-10-27)). With reads approval-free, it delivers only what the nudge's own turn reads a moment later. The Opus simplicity pass recommends retiring it. The Director keeps it for now. Retiring it removes `src/hook.ts`, the `codex-stop-hook` command, the hooks.json install and trust step, and the transcript check.
 8. **Claude waking by background `wait`.** It works, but every session must restart its wait after each wake, and a forgotten restart silently stops delivery. A Claude Code `Stop` hook (listed as next in the README) would mirror the Codex one and could be simpler for sessions to keep right. The MCP research found no MCP mechanism that reaches the model or starts a turn in an idle session (other than Claude Code's terminal-only channels). A host-armed plugin `monitors` entry could replace the model re-arming `wait` after every wake.

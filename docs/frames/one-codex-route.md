@@ -149,3 +149,37 @@ Code review: GPT-6.1 Sol and Opus. Their findings are applied:
 Two suggestions were declined:
 - logging a missing cursor once per join; it stays as it was, rare and visible;
 - moving `formatDelivery` (decision 6).
+
+## Qualification (2026-10-27)
+
+Deployed to both machines at 2051d3a, then 01452be with the fix below. The checks used throwaway threads and `qual/*` addresses, sent mail through the official MCP SDK, and read each thread's rollout for when its nudge ran and how its mail was read.
+
+| Check | Result |
+| --- | --- |
+| **6. A Codex join** | Returned in 51–66 ms with only `address` and `cursor` |
+| **1. Daemon thread, client attached** | The nudge was queued 0.5 s after the send. The turn started at 5.7 s, and the thread's own `bus_read` returned the mail at 11.4 s. One nudge |
+| **2. The same thread, unsubscribed and disconnected** | Still loaded. The nudge ran at 2.6 s, and `bus_read` returned the mail at 4.6 s. One nudge |
+| **3. A busy daemon thread** | The nudge was queued at 0.6 s, mid-turn. The `Stop` hook delivered the mail when the busy turn ended. The nudge then ran as its own empty turn, the one the design allows. Without the hook, that turn would read the mail (inferred) |
+| **4. A thread nothing has loaded** (an exited `codex exec`) | The nudge sat in the queue for 45 s, unrun, with the mail unread. When a daemon client resumed the thread, the nudge ran at once and `bus_read` returned the mail 9.6 s later. The queue drained |
+| **5. A desktop Local thread** | The nudge was queued at 0.5 s and ran at 8.4 s, and `bus_read` returned the mail at 13 s. The daemon never loaded the thread |
+| **7. Both machines** | At 2051d3a and healthy. `lsof` shows no connection from `serve` to the daemon's socket, and no delivery warnings followed either restart |
+| **8. The Director** (observed, after the second deploy) | The release note to it was nudged once, and its cursor moved by its own read within 10 s of the send. Its rollout wasn't opened |
+
+In every case the mail was still unread when the thread read it, since the thread's own read returned it.
+
+### Found in qualification: Codex refused the read outside full access
+
+**What happened.** The first daemon run used a `read-only` sandbox. The nudge ran, but Codex refused `bus_read` with "MCP tool call requires approval, but approval policy is never". The `Stop` hook then delivered the mail at turn end, which hid the failure.
+
+**Why.** Codex asks approval for an MCP tool that is destructive, or that isn't read-only and may be open-world (`requires_mcp_tool_approval`). The exception is policy `never` with full disk write access. Effect's tools default to destructive and open-world. The owner's threads (full access, `never`) were unaffected.
+
+**The fix,** reviewed by GPT-6.1 Sol and Opus:
+- **Every tool** is annotated closed-world and, except `bus_join`, non-destructive. `bus_peers`, `bus_history` and `bus_query` are also read-only. Reads, waits, sends, leaves and lookups therefore need no approval in any sandbox.
+- **`bus_join` stays destructive,** because a takeover replaces another session's hold. Outside full access, a join asks approval once, or is refused under `never`; the nudge never joins.
+  - Rejected: a separate `bus_takeover` tool. It would keep joins approval-free, but adds a tool.
+- **`bus_leave` is non-destructive.** It affects only the caller, and a rejoin by the same session keeps its cursor. Sol disagreed.
+- **`bus_publish` needs no approval,** so a nudged thread can answer. The cost: a sandboxed thread can send to peers that aren't sandboxed ([connections](../connections.md#approval-in-codex)).
+
+The same release prints a CLI refusal as one line, with exit status 1, instead of a stack trace.
+
+After that deploy (01452be), a daemon thread in a `read-only` sandbox under policy `never` ran its nudge at 8.7 s. It read the mail with its own `bus_read` at 13.2 s, with no approval refusal and no help from the hook. `serve` lists `bus_join` as destructive, the lookups as read-only, and every tool as closed-world.
