@@ -41,11 +41,10 @@ export interface PublishInput {
   readonly replyTo?: string | undefined;
 }
 
+/** A subscriber as it is under its address's lock, and its unread messages. */
 export interface Pending {
   readonly subscriber: Subscriber;
   readonly messages: ReadonlyArray<Message>;
-  /** The cursor just past these messages, where a read of them moves it. */
-  readonly next: number;
 }
 
 export class Bus extends Context.Service<
@@ -75,13 +74,14 @@ export class Bus extends Context.Service<
      * read: only the owner's read does. With nothing for the subscriber, it
      * passes over what isn't its mail, as the owner's read would. Joins,
      * leaves, reads and nudges for one address run one at a time, so a nudge
-     * acts on the subscriber's current state. This is the Codex deliverer's
+     * acts on the subscriber's current state. Returns what `nudge` returns, or
+     * undefined when it had nothing to act on. This is the Codex deliverer's
      * path; sessions read through `take` and `wait`.
      */
-    readonly deliver: <E>(
+    readonly deliver: <A, E>(
       address: string,
-      nudge: (pending: Pending) => Effect.Effect<void, E>
-    ) => Effect.Effect<void, LedgerError | NotJoined | E>;
+      nudge: (pending: Pending) => Effect.Effect<A, E>
+    ) => Effect.Effect<A | undefined, LedgerError | NotJoined | E>;
     /** Returns the owner's unread messages and marks them read. */
     readonly take: (
       address: string,
@@ -397,16 +397,17 @@ export const layer = Layer.effect(
 
     const ack = (address: string, cursor: number) => cursors.set(address, cursor);
 
-    const deliver = <E>(address: string, nudge: (pending: Pending) => Effect.Effect<void, E>) =>
+    const deliver = <A, E>(address: string, nudge: (pending: Pending) => Effect.Effect<A, E>) =>
       Effect.gen(function* () {
         // A peer that left since the deliverer listed peers has nothing to nudge.
         const subscriber = yield* peer(address);
-        if (subscriber === undefined) return;
-        const batch = yield* pending(address, Effect.succeed(subscriber));
+        if (subscriber === undefined) return undefined;
+        const { messages, next } = yield* pending(address, Effect.succeed(subscriber));
+        if (messages.length > 0) return yield* nudge({ subscriber, messages });
         // With nothing for this subscriber, pass over what was read, as its own read would,
         // so later passes don't read it again.
-        if (batch.messages.length === 0) return yield* ack(address, batch.next);
-        yield* nudge(batch);
+        yield* ack(address, next);
+        return undefined;
       }).pipe(exclusive(address), Effect.withSpan("Bus.deliver"));
 
     /** The owner's read: its reader checks ownership under the lock, just before the cursor moves. */

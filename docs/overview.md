@@ -108,7 +108,7 @@ Size: about 2,600 lines of source, 2,150 lines of tests, and a 190-line installe
 | The `Stop` hook is trusted on the Mini; the Pro is unknown | **Owner's step**, if it is kept |
 | `codex exec` threads get a nudge only if opened in an app | **Open decision** (codex-wake item 7) |
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |
-| Locks are per machine. Joins from two machines are ordered by the ledger, so the losing claim is refused only from its next call. Cursors are per machine, so a takeover from another machine may redeliver | **Documented limit** |
+| Locks are per process, and each machine runs one `serve`. Joins from two machines are ordered by the ledger, so the losing claim is refused only from its next call. Cursors are per machine, so a takeover from another machine may redeliver | **Documented limit** |
 | A process started from a session's shell inherits that session's id and acts for it; a `codex exec` delegate can consume its Claude parent's mail | **Documented**: give delegates their own address |
 | Claude Code reported an error for `bus_leave` ("did not return structured content") | **Fixed** in 3d10fca |
 | CLI refusals print a stack trace under the message | **Cosmetic** |

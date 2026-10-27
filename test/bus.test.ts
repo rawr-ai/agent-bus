@@ -1059,7 +1059,9 @@ describe("codex app-server queue", () => {
    * A stand-in `codex` whose `app-server` speaks JSON-RPC on stdio. It records
    * each request it receives, and answers as `mode` says.
    */
-  const fakeCodex = (mode: "answers" | "pages" | "asks" | "refuses" | "silent" | "stubborn") => {
+  const fakeCodex = (
+    mode: "answers" | "pages" | "loops" | "asks" | "refuses" | "silent" | "stubborn"
+  ) => {
     const dir = tempDir();
     const bin = join(dir, "codex");
     const log = join(dir, "requests");
@@ -1082,6 +1084,7 @@ for await (const line of console) {
   else if (mode === "silent" || mode === "stubborn") continue;
   else if (mode === "refuses") reply(message.id, { error: { code: -32603, message: "no rollout found for thread id " + message.params.threadId } });
   else if (mode === "pages" && message.method === "thread/queue/list") reply(message.id, { result: message.params.cursor === "p2" ? { data: [{ id: "q2", input: [{ type: "text", text: "second page", text_elements: [] }] }], nextCursor: null } : { data: [{ id: "q1", input: [{ type: "text", text: "first page", text_elements: [] }] }], nextCursor: "p2" } });
+  else if (mode === "loops" && message.method === "thread/queue/list") reply(message.id, { result: { data: [], nextCursor: "again" } });
   else if (mode === "asks" && message.method === "thread/queue/list") {
     // A request of the server's own that happens to reuse the pending id is not the reply.
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, method: "item/requestApproval", params: {} }) + "\\n");
@@ -1138,6 +1141,11 @@ for await (const line of console) {
       null,
       "p2",
     ]);
+  });
+
+  test("a listing that never ends fails rather than holding the lock to the deadline", async () => {
+    const result = await withQueue(fakeCodex("loops").bin, (queue) => queue.list("t-1"));
+    expect(result._tag === "Failure" && result.failure.message).toContain("didn't end");
   });
 
   test("a request from the app-server that reuses a pending id is not taken for the reply", async () => {
@@ -1244,11 +1252,64 @@ describe("one address at a time", () => {
           });
           const { fiber, release } = yield* heldDelivery(bus, "codex/a");
           const read = yield* Effect.forkChild(bus.take("codex/a", sid("codex/a")));
-          yield* Effect.yieldNow;
+          yield* Effect.promise(() => Bun.sleep(20));
           expect(read.pollUnsafe()).toBeUndefined();
           yield* Deferred.succeed(release, undefined);
           yield* Fiber.join(fiber);
           expect(bodies(yield* Fiber.join(read))).toEqual(["once"]);
+        }),
+        jsonl().layer
+      )
+    ));
+
+  test("with nothing for the subscriber, a nudge passes over only what isn't its mail", () =>
+    Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const cursors = yield* Cursors.Cursors;
+          yield* bus.join({
+            address: "codex/a",
+            runtime: "codex",
+            session: sid("codex/a"),
+            cwd: process.cwd(),
+            topics: ["t"],
+          });
+          // A presence, its own send (even to its topic), and mail for someone else.
+          yield* bus.join({
+            address: "claude/b",
+            runtime: "claude",
+            session: sid("claude/b"),
+            cwd: process.cwd(),
+          });
+          yield* bus.publish({ from: "codex/a", session: sid("codex/a"), to: ["#t"], body: "own" });
+          yield* bus.publish({
+            from: "claude/b",
+            session: sid("claude/b"),
+            to: ["claude/c"],
+            body: "elsewhere",
+          });
+          let nudged = 0;
+          const nudge = () =>
+            Effect.sync(() => {
+              nudged += 1;
+            });
+          yield* bus.deliver("codex/a", nudge);
+          expect(nudged).toBe(0);
+          expect(yield* cursors.get("codex/a")).toEqual(Option.some(yield* ledger.end));
+
+          yield* bus.publish({
+            from: "claude/b",
+            session: sid("claude/b"),
+            to: ["#t"],
+            body: "topic",
+          });
+          const before = yield* cursors.get("codex/a");
+          yield* bus.deliver("codex/a", nudge);
+          expect(nudged).toBe(1);
+          expect(yield* cursors.get("codex/a")).toEqual(before);
+          expect(bodies(yield* bus.take("codex/a", sid("codex/a")))).toEqual(["topic"]);
         }),
         jsonl().layer
       )

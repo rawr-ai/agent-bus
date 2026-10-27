@@ -95,9 +95,10 @@ The owner works in desktop Local threads, which never had steering or headless r
 - **The older frames:** [codex-wake](codex-wake.md) is marked superseded, and queue-wake's decisions 1 and 5 point here.
 
 **9. Smaller fixes in the same code.**
-- **The queue listing follows every page.** It read only the first 100 items, so a waiting nudge further down could be missed and another one added.
+- **The queue listing follows every page.** It read only the first 100 items, so a waiting nudge further down could be missed and another one added. A listing that repeats a cursor, or runs past 20 pages, fails rather than holding the lock to the deadline.
 - **`initialize` always asks for the experimental methods.** Its mode flag served only the socket client, and the identity wrappers are gone.
-- **A peer that leaves between the deliverer's listing and its lock is skipped quietly.** This was the "has not joined" warning after a leave.
+- **A peer that leaves between the deliverer's listing and its lock is skipped quietly.** This was the "has not joined" warning after a leave. A joined peer whose cursor is missing (a replaced ledger, say) still fails and logs on each pass, as before.
+- **`Bus.deliver` returns what the nudge returns,** so the deliverer keeps no closure state for it, and the cursor (`next`) stays inside the bus.
 
 ## Not doing
 
@@ -110,13 +111,16 @@ The owner works in desktop Local threads, which never had steering or headless r
 
 - **The empty-turn bound is per address.** A thread that owns two addresses can have two nudges waiting, and so two empty turns if the `Stop` hook reads both inboxes first. A per-thread bound would need coalescing across addresses; nobody runs two addresses from one thread today.
 - **A queued item of an unknown shape reads as no text,** so if Codex changed the item format, a waiting nudge could go unrecognised and a second be added for the next unread span. The mark still limits this to one per span.
+- **Unread mail is re-read on every pass.** A Codex peer with unread mail is read from its oldest unread entry at each ledger change (and at Fluree's 15-second poll), however long the mail waits. This was already true of the queue route; it now also covers former daemon threads, such as one a daemon restart unloaded. If it starts to cost, an in-memory scan mark per join would end it.
+- **One `serve` per machine.** Locks are per process, and the deliverer can move a cursor past non-mail, so a second `serve` on the same ledger and machine could add duplicate nudges or move a cursor back. Qualification runs extra `serve`s only with their own store.
 - **The read-then-lost window** ([overview](../overview.md)) is unchanged.
 
 ## Qualification
 
 Unit tests:
 - a nudge never marks mail read, and with nothing for the subscriber it passes over only what isn't its mail;
-- every page of a queue listing is read;
+- every page of a queue listing is read, and a listing that never ends fails;
+- the nudge holds the address's lock, so an owner's read and a replay wait for it, and its deadline ends it;
 - a server request that reuses a pending id isn't taken for the reply;
 - a subagent's refused add holds that join, keeps its mail unread, and is retried after a rejoin;
 - the back-off doubles to five minutes;
@@ -133,3 +137,15 @@ After deploy, with throwaway threads and test addresses:
 8. **The Director,** observed as a real user: woken as before.
 
 Reviews: GPT-6 Astra and GPT-6.1 Sol both found the frame sound with changes. This revision takes their changes, except for removing the empty-batch skip (decision 1, with the reason).
+
+Code review: GPT-6.1 Sol and Opus. Their findings are applied:
+- the quiet skip limited to a real leave;
+- a bound on the listing;
+- tests that fail without the lock, the deadline or the empty-batch skip, checked by mutation;
+- exact back-off delays;
+- a replay test that shows the order;
+- docs wording.
+
+Two suggestions were declined:
+- logging a missing cursor once per join; it stays as it was, rare and visible;
+- moving `formatDelivery` (decision 6).

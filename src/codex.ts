@@ -225,16 +225,16 @@ const queuedText = (item: unknown) => {
     .join("\n");
 };
 
-/** The Codex CLI the desktop app ships, whose protocol matches the app that runs the queue. */
-const desktopCodex =
-  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
-
 /**
  * The Codex CLI to reach queues with: the desktop app's own, whose
  * experimental protocol matches the app that runs the items. A machine
  * without the desktop app passes its own CLI with `serve --codex`.
  */
-export const defaultCodex = desktopCodex;
+export const defaultCodex =
+  "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
+
+/** More pages than a queue of a person's own making would fill. */
+const MAX_PAGES = 20;
 
 /** Each app-server request's deadline. */
 const QUEUE_TIMEOUT = Duration.seconds(2);
@@ -261,8 +261,16 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
       list: (threadId) =>
         Effect.gen(function* () {
           const texts: Array<string> = [];
+          const seen = new Set<string>();
           let cursor: string | null = null;
           do {
+            if (seen.size >= MAX_PAGES || (cursor !== null && seen.has(cursor))) {
+              return yield* new CodexError({
+                method: "thread/queue/list",
+                message: `the listing didn't end after ${seen.size + 1} pages`,
+              });
+            }
+            if (cursor !== null) seen.add(cursor);
             const page: typeof QueuedItems.Type = yield* server
               .request("thread/queue/list", { threadId, limit: 100, cursor })
               .pipe(Effect.flatMap(decodeQueued));
@@ -294,6 +302,7 @@ export const localHost = hostname();
 /**
  * The Codex peers one machine's deliverer wakes: those with a thread id that
  * joined from that machine, whose queues are in that machine's `~/.codex`.
+ * One deliverer per machine keeps one cursor writer per address.
  */
 export const deliveryTargets = (peers: ReadonlyArray<Subscriber>, host: string) =>
   peers.filter(
@@ -357,8 +366,6 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
     // The bus hands over the subscriber as it is now, under the address's lock;
     // what happens belongs to that subscriber, which may have rejoined since `peer` was read.
     let attempted: Subscriber = peer;
-    let nudged: string | undefined;
-    let added = false;
     const current = () => {
       const hold = holds.get(peer.address);
       return hold?.joinId === attempted.joinId ? hold : undefined;
@@ -373,22 +380,21 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
           deliveryTargets([subscriber], host).length === 0 ||
           current()?.nudged === unread
         ) {
-          return;
+          return undefined;
         }
         // The app-server is ended before the lock is released, so an add can't land later.
-        yield* Effect.scoped(
+        const added = yield* Effect.scoped(
           Effect.gen(function* () {
             const queue = yield* openQueue;
             const waiting = (yield* queue.list(threadId)).some((text) =>
               text.startsWith(nudgeHead(subscriber.address))
             );
-            if (!waiting) {
-              yield* queue.add(threadId, formatNudge(subscriber.address));
-              added = true;
-            }
+            if (waiting) return false;
+            yield* queue.add(threadId, formatNudge(subscriber.address));
+            return true;
           })
         ).pipe(timeLimit("queue nudge", NUDGE_TIMEOUT));
-        nudged = unread;
+        return { unread, added };
       });
     const nudging = yield* Effect.result(bus.deliver(peer.address, nudge));
     const hold = (change: Partial<Hold>) =>
@@ -402,9 +408,12 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       });
 
     if (nudging._tag === "Success") {
-      if (nudged === undefined) continue;
-      hold({ nudged });
-      if (added) yield* Effect.logInfo(`Queued a nudge for ${peer.address} to read its mail`);
+      const covered = nudging.success;
+      if (covered === undefined) continue;
+      hold({ nudged: covered.unread });
+      if (covered.added) {
+        yield* Effect.logInfo(`Queued a nudge for ${peer.address} to read its mail`);
+      }
       continue;
     }
     const error = nudging.failure;
