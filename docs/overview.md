@@ -50,7 +50,7 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | `codex exec` | Only by calling `bus_read`. It is never woken, including after it exits | No |
 | A Codex or Claude subagent | Through its parent | Never woken directly |
 
-**The `Stop` hook is not installed on the bus host yet.** There is no `~/.codex/hooks.json` there. Until it is installed and trusted with `/hooks`, Local threads, including the Director, get messages only when they read the bus themselves. `serve` logs "Holding messages for …" for them.
+**The `Stop` hook runs only once the owner trusts it.** It is in each machine's `~/.codex/hooks.json`, and Codex skips hooks until they are reviewed and trusted with `/hooks`. Until then, Local threads, including the Director, get messages only when they read the bus themselves. `serve` logs "Holding messages for …" for them.
 
 ## Policies
 
@@ -103,7 +103,7 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | A desktop Local Codex thread's shell has `CODEX_THREAD_ID`, equal to its thread id, and its legacy address was adopted on rejoin | **Verified live** |
 | A session whose cached tool list predates `session` can pass it as an extra argument, in both Claude Code and Codex | **Verified live** |
 | Idle desktop Local threads can't be woken | **Known gap.** The desktop-wake spike may close it for threads that have a window open |
-| The `Stop` hook is built but not installed or trusted on the bus host | **Owner's step** |
+| The `Stop` hook is installed on both machines but not yet trusted | **Owner's step**: `/hooks` |
 | `codex exec` threads are never woken, even after they exit | **Open decision** (codex-wake item 7) |
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |
 | Locks are per machine. Joins from two machines are ordered by the ledger, so the losing claim is refused only from its next call. Cursors are per machine, so a takeover from another machine may redeliver | **Documented limit** |
