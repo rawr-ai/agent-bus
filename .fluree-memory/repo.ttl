@@ -14,10 +14,10 @@ mem:constraint-01m5y26y2g6hjydmb652z0sb3w a mem:Constraint ;
     mem:artifactRef "src/Bus.ts" ;
     mem:artifactRef "src/mcp.ts" ;
     mem:branch "claude-host-wake" ;
-    mem:createdAt "2026-10-27T06:54:21.776907+00:00"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T06:54:21.776907Z"^^xsd:dateTime .
 
 mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
-    mem:content "Claude Code sessions are woken by the agent-bus plugin (served in place from the checkout as a local marketplace): an asyncRewake hook on SessionStart, Stop and StopFailure runs agent-bus claude-wake, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook; a session without it runs agent-bus wait in the background as before." ;
+    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/, a single manifest): an asyncRewake hook on SessionStart, Stop and StopFailure runs ~/.local/bin/agent-bus claude-wake, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
     mem:tag "claude" ;
     mem:tag "hooks" ;
     mem:tag "plugin" ;
@@ -28,7 +28,8 @@ mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
     mem:artifactRef "src/Bus.ts" ;
     mem:artifactRef "src/claude.ts" ;
     mem:branch "claude-host-wake" ;
-    mem:createdAt "2026-10-27T06:54:21.716683+00:00"^^xsd:dateTime ;
+    mem:createdAt "2026-10-27T06:54:21.716683Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T23:36:03.921722+00:00"^^xsd:dateTime ;
     mem:rationale "The host re-arms the wake at session start and every turn end, so the model starts nothing, in the desktop app (stream-json mode) and the terminal alike." ;
     mem:alternatives "a plugin monitor running a streaming watch (never starts in stream-json mode; desktop sessions run that way),serve posting into the session inbox socket (held for sessions that bypass permissions; the desktop drops held messages after five minutes),channels (terminal only)" .
 
@@ -41,7 +42,7 @@ mem:fact-01m5y26y48w2rk3e0yh14fszrs a mem:Fact ;
     mem:scope mem:repo ;
     mem:artifactRef "docs/frames/claude-wake.md" ;
     mem:branch "claude-host-wake" ;
-    mem:createdAt "2026-10-27T06:54:21.832877+00:00"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T06:54:21.832877Z"^^xsd:dateTime .
 
 mem:fact-01m5y26y5y9r72px418615x6tq a mem:Fact ;
     mem:content "Effect 4.0.6 McpServer returns a declared tool failure that is an Error with a message as plain text (the message alone), not its encoded JSON, so a client can't tell a LedgerError from a NotOwner by type. The Claude wake hook therefore checks the session itself and retries every failed bus_wake call for up to ten minutes." ;
@@ -53,7 +54,7 @@ mem:fact-01m5y26y5y9r72px418615x6tq a mem:Fact ;
     mem:artifactRef "src/claude.ts" ;
     mem:artifactRef "src/client.ts" ;
     mem:branch "claude-host-wake" ;
-    mem:createdAt "2026-10-27T06:54:21.886327+00:00"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T06:54:21.886327Z"^^xsd:dateTime .
 
 mem:constraint-01m5x9h52psxmgtkmg6pxw27q8 a mem:Constraint ;
     mem:content "A process started from a session's shell inherits that session's runtime id (codex exec from Claude inherits CLAUDE_CODE_SESSION_ID), so the CLI acts as the parent when it defaults --runtime to the address's runtime. Give delegates that need an inbox their own address." ;
@@ -78,7 +79,7 @@ mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
     mem:createdAt "2026-10-27T03:05:13.982763Z"^^xsd:dateTime .
 
 mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
-    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve runs src/bin.ts from it, the agent-bus Claude Code plugin is loaded in place from it (every Claude session's wake hook runs its src/bin.ts), and so do Codex threads still calling the retired codex-stop-hook. A half-edited tree breaks serve at its next restart and those hooks at their next run. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
+    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve runs src/bin.ts from it, and every Claude session's wake hook runs it through the installer's link ~/.local/bin/agent-bus. A half-edited tree breaks serve at its next restart and the hooks at their next run. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
     mem:tag "hooks" ;
     mem:tag "operations" ;
     mem:tag "serve" ;
@@ -89,7 +90,7 @@ mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:32:00.198214Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T06:54:38.886265+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T23:36:03.963355+00:00"^^xsd:dateTime ;
     mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
 
 mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
@@ -121,6 +122,19 @@ mem:constraint-01m5xxtabswcyy08b31skk6s4z a mem:Constraint ;
     mem:createdAt "2026-10-27T05:37:34.073037Z"^^xsd:dateTime ;
     mem:updatedAt "2026-10-27T05:37:46.116492Z"^^xsd:dateTime ;
     mem:rationale "Codex's requires_mcp_tool_approval requires approval when destructiveHint is true, or when a tool isn't read-only and destructiveHint or openWorldHint is unset or true; only policy never with full disk write access, or a server approval mode of approve, skips that. Found live when a read-only-sandbox thread ran its nudge and bus_read was refused; the Stop hook masked it by delivering at turn end." .
+
+mem:constraint-01m5zvh3rypm1qrxpmr95bc8y8 a mem:Constraint ;
+    mem:content "src/bin.ts's shebang must keep bun's --no-env-file (#!/usr/bin/env -S bun --no-env-file): the Claude wake hook runs in the session's project directory, and bun otherwise loads that project's .env, which can set AGENT_BUS_PORT or other variables and point the hook at the wrong bus." ;
+    mem:tag "bun" ;
+    mem:tag "claude" ;
+    mem:tag "env" ;
+    mem:tag "hooks" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "docs/frames/finish-swap.md" ;
+    mem:artifactRef "src/bin.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T23:36:04.126583+00:00"^^xsd:dateTime .
 
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
@@ -182,7 +196,7 @@ mem:decision-01m5xn3ccvw8spz95s87csea3r a mem:Decision ;
     mem:alternatives "the desktop coordination socket (spike, never run past Gate 0),a heartbeat automation in the thread (crude fallback only),the daemon taking the thread (second writer locks the owner out),the codex queue CLI with an in-memory mark (reads before a nudge runs stack empty turns; timed-out adds force duplicate or missed wake),thread/queue/start (could run the item in an app-server that is not the thread's owner)" .
 
 mem:decision-01m5xxta7vr0wb7b7640a0wqyv a mem:Decision ;
-    mem:content "Every Codex thread is woken one way: a content-free nudge in its own queue that tells it to call bus_read. serve doesn't connect to the Codex app-server daemon, send messages as turns, steer busy turns or mark anything read; only the owner's read (bus_read, bus_wait or agent-bus wait) moves its cursor. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
+    mem:content "Every Codex thread is woken one way: a content-free nudge in its own queue that tells it to call bus_read. serve doesn't connect to the Codex app-server daemon, load or resume threads, send messages as turns, steer busy turns or mark anything read; only the owner's read (bus_read or bus_wait) marks its mail read. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
     mem:tag "codex" ;
     mem:tag "delivery" ;
     mem:tag "queue" ;
@@ -193,7 +207,7 @@ mem:decision-01m5xxta7vr0wb7b7640a0wqyv a mem:Decision ;
     mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T05:37:33.947759Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T06:31:43.331621Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T23:36:03.999283+00:00"^^xsd:dateTime ;
     mem:rationale "Agents are woken, never polled. The daemon runs a queued item for a thread it has loaded, with or without a client attached, within seconds when idle and after the current turn when busy, and keeps it for a thread nothing has loaded until one resumes it. So the daemon route's resume, turn/start, host classification and holds bought only steering and headless resume, at the cost of a second path that writes to threads and most of the delivery code. The empty-batch skip stays because Fluree's read from a cursor queries every commit up to the head, so a peer with no mail would otherwise re-read a growing range on every change." ;
     mem:alternatives "keeping the daemon route for steering and closed TUI threads (a second writer path that nothing relied on),marking mail read when the nudge is queued (a lost nudge then loses the mail),dropping the empty-batch skip (the cost grows with the ledger)" .
 
@@ -226,7 +240,7 @@ mem:decision-01m5y0xfm8zx0cxdqqxm1nrm3p a mem:Decision ;
     mem:alternatives "recording repo and branch once at join (misses branch switches),dropping them (the workstream context can't be reconstructed),a Git SHA per message (a git call per send that says nothing for uncommitted work)" .
 
 mem:decision-01m5y0xfnyv3fhekaj29gcg196 a mem:Decision ;
-    mem:content "The Codex Stop hook is retired: a nudged turn reads the mail itself with bus_read. codex-stop-hook stays as a command that does nothing, for threads that loaded the hook before its removal from hooks.json, until every Codex app-server (the desktop app's and the daemon) is seen to have started since (ps -o lstart)." ;
+    mem:content "The Codex Stop hook is retired, and so is the codex-stop-hook command that covered the transition: a nudged turn reads the mail itself with bus_read. Codex builds a thread's hooks when it loads the thread, so removing a hook takes effect only for threads loaded after every app-server (the desktop app's and the daemon) has restarted; check start times with ps -o lstart before removing anything a loaded thread could still call." ;
     mem:tag "codex" ;
     mem:tag "hooks" ;
     mem:tag "retired" ;
@@ -236,8 +250,24 @@ mem:decision-01m5y0xfnyv3fhekaj29gcg196 a mem:Decision ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T06:31:43.550044Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T23:36:04.033848+00:00"^^xsd:dateTime ;
     mem:rationale "With approval-free reads, the nudge alone delivers to idle, busy, clientless and unloaded threads. The hook's remaining effects were inline delivery at a busy turn's end, the empty turn after it, and hiding a failed read. Codex keeps a loaded thread's hooks until its app-server restarts, so deleting the command at once would record a failure at every turn end of those threads." ;
     mem:alternatives "deleting the command at once (recorded failures until each app-server restarts),two deploys with the no-op first (guards only against one recorded failure),keeping the hook (message text in the turn and an extra empty turn)" .
+
+mem:decision-01m5zvh3qar2276yby9g3xqbmd a mem:Decision ;
+    mem:content "The Claude Code plugin's hook runs the checkout through the link ~/.local/bin/agent-bus -> src/bin.ts, not through ${CLAUDE_PLUGIN_ROOT}: claude plugin install from a local-directory marketplace copies the plugin into ~/.claude/plugins/cache/<marketplace>/<plugin>/<sha>, so a path inside the plugin root is a stale copy. The installer makes the link and checks it runs with a launchd-style PATH from /." ;
+    mem:tag "claude" ;
+    mem:tag "deploy" ;
+    mem:tag "hooks" ;
+    mem:tag "plugin" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/finish-swap.md" ;
+    mem:artifactRef "plugin/.claude-plugin/plugin.json" ;
+    mem:artifactRef "scripts/install-launch-agents.sh" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T23:36:04.074554+00:00"^^xsd:dateTime ;
+    mem:rationale "One stable manifest, and the hook always runs the deployed checkout without a plugin update per release" ;
+    mem:alternatives "${CLAUDE_PLUGIN_ROOT}/src/bin.ts (a cached copy, stale after each deploy); per-machine path configuration" .
 
 mem:fact-01m5x1ztcfrgxg1r3zcbxt5s0f a mem:Fact ;
     mem:content "The bus's Fluree token has no subject and is sent only to the data and admin APIs; the event stream stays open. In Fluree 4.2.4 a token with a subject is held to identity policies, which deny writes on a ledger without policies, and events auth refuses subject-less tokens. With CORS off, a cross-origin text/plain POST still writes, so auth is what protects the loopback server." ;

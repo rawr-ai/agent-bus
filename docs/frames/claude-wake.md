@@ -62,7 +62,7 @@ A failed read of one address can therefore never hide another's mail. The change
 **5. Identity, and which addresses count.**
 - **Identity.** The hook presents its input's `session_id`, which equals the session's `CLAUDE_CODE_SESSION_ID`.
 - **Which addresses.** A call covers the addresses that session holds as `claude`, joined from this machine, the one whose `serve` keeps their cursors. An address joined from this machine whose cursor is missing (a replaced ledger, say) is logged and skipped, as the Codex deliverer does.
-- **After `/clear`** the session has a new id. `SessionStart` arms a hook for it, which finds no addresses until the session joins again; a cleared session already needs a new address ([README](../README.md#addresses-belong-to-sessions)). The hook from before `/clear` keeps waiting under the old id. It fires at most once, if mail reaches the old addresses: the cleared conversation's `bus_read` is then refused, and the nudge tells it to carry on.
+- **After `/clear`** the session has a new id. `SessionStart` arms a hook for it, which finds no addresses until the session joins again; a cleared session already needs a new address ([README](../../README.md#addresses-belong-to-sessions)). The hook from before `/clear` keeps waiting under the old id. It fires at most once, if mail reaches the old addresses: the cleared conversation's `bus_read` is then refused, and the nudge tells it to carry on.
 - **`--resume`** keeps the id. `SessionStart` re-arms the wake.
 - **Subagents** share their parent's id, so mail to a subagent's own address wakes the parent, which may read it.
 - **Two processes resuming the same id** share one wait: the one that armed last is the one woken.
@@ -245,4 +245,4 @@ Run on throwaway stream-json sessions (how the desktop app runs Claude Code) wit
 - **7:** a second address in one session was woken. A subagent's address wasn't tried: a subagent is reached through its parent.
 - **10:** a session without the plugin got no `hooked` and no hook process. Since [finish-swap](finish-swap.md) it isn't woken at all.
 - **11:** both machines run the hook through the link to the primary checkout.
-- **8:** the store being unavailable is covered by the unit tests. A `serve` restart while a hook waits is checked at the deploy that retires `wait`.
+- **8:** the store being unavailable is covered by the unit tests. A `serve` restart while a hook waits was checked at the deploy that retired `wait` ([finish-swap](finish-swap.md#release-b)): on 2026-10-27, a throwaway session whose hook was waiting across the restart was woken by the next mail, with the hook's event 4.3 s after the send. That closes item 8.

@@ -1,6 +1,6 @@
-# agent-bus: how it works, its policies, and its gaps
+# agent-bus: overview
 
-A map of the whole system, written for a simplification review. It describes the system as deployed on 2026-10-27 and links to the documents that own the details: the [README](../README.md) (commands, delivery, ledger format), [connections](connections.md) (trust boundaries) and the frames in [frames/](frames/) (decisions, with their reasoning and the alternatives rejected).
+The entry map to agent-bus: what kind of system it is, where each part is documented, the ownership rules, and what is still open. It describes the system as deployed on 2026-10-27.
 
 ## What kind of system it is
 
@@ -14,46 +14,40 @@ agent-bus is an **append-only message log with one read cursor per address, plus
   - `*` (everyone).
 
   So it is pub/sub in the sense that topics fan out. Underneath, each subscriber reads its own mailbox.
-- **Waking is separate from delivery.** A change in the ledger only signals that something may be waiting. What is delivered is decided by reading from the cursor, under that address's lock. A message is delivered once, to whoever owns the address at that moment.
+- **Waking is separate from delivery:** a wake only signals that mail may be waiting, and the owner's read decides what is delivered ([delivery](architecture/delivery.md#waking-is-separate-from-delivery)).
 
-## The pieces
+## Where to read what
+
+| Document | Read it for |
+| --- | --- |
+| [Topology](architecture/topology.md) | The two machine roles, every process and port, the transports between them (loopback HTTP, stdio, unix socket, SSH tunnel, SSH proxy), and where the ledger, cursors, token and Codex state live |
+| [Codex hosting](architecture/codex-hosting.md) | How many Codex app-servers run and what each is for, the one-writer lock and how long a thread stays loaded, the shared queue and its timings, what "desktop-capable" means, how each route creates a thread, the desktop's wake link, and why `serve` uses a short-lived app-server of its own |
+| [Delivery](architecture/delivery.md) | Whether and how each kind of session is woken (the one table of it), the Claude wake hook and the Codex nudge step by step, why Claude uses a hook rather than a monitor, and the delivery policies |
+| [Platforms and versions](architecture/platforms.md) | The installed Codex, Claude Code, Fluree, Bun and macOS versions, the owner's Codex setting, the versions each finding was observed on, and how claims are marked |
+| [Connections and trust boundaries](connections.md) | What protects each connection, what `serve` may do to Codex threads, and approval in Codex |
+| [README](../README.md) | Commands, setup, the MCP tools, address ownership, security settings and the ledger format |
+| [Frames](frames/) | Each decision, with its evidence, the alternatives rejected and its qualification results. Frames are history: a later frame may supersede an earlier one |
+| [Research](research/mcp-native-messaging.md) | Whether MCP or an existing server could wake sessions more simply (no) |
+
+## The pieces in the code
 
 | Piece | What it does | Why it exists |
 | --- | --- | --- |
-| **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree: one transaction server on the bus host, reached from other machines through an SSH tunnel. The unit tests use a JSONL file | One shared, ordered log across machines, with history, full-text search and SPARQL |
+| **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree, on one transaction server on the bus host. The unit tests use a JSONL file | One shared, ordered log across machines, with history, full-text search and SPARQL |
 | **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`) | The only process that reads or writes the store for its machine's sessions. Serves the bus tools over MCP on loopback, keeps cursors, enforces ownership, and runs the Codex deliverer | One owner of cursors and locks per machine, so a message is taken once |
-| **CLI** (`src/bin.ts`, `src/client.ts`) | `join`, `publish`, `peers`: MCP clients of the local `serve` | Shell access |
-| **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook runs `agent-bus claude-wake` (the installer's link to the checkout) when a session starts or resumes and whenever a turn ends. It waits in `bus_wake` until the session's addresses have new unread mail, then wakes the session with a nudge to call `bus_read` | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
-| **Codex deliverer** (`src/codex.ts`) | Gives each Codex thread with unread mail one nudge in its own queue (`thread/queue/list` and `add`, through a short-lived app-server of `serve`'s own), which whichever app-server has the thread loaded runs as a turn | Idle wake for every Codex thread, desktop or daemon, without a second writer |
+| **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
+| **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail ([delivery](architecture/delivery.md#claude-code-sessions)) | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
+| **Codex deliverer** (`src/codex.ts`) | Gives each Codex thread with unread mail one nudge in its own queue, through a short-lived app-server of `serve`'s own ([delivery](architecture/delivery.md#codex-threads)) | Wakes every Codex thread, desktop or daemon, without a second writer |
 | **Ownership** (in `src/Bus.ts`) | One session per address, identified by the runtime's own id | Two sessions sharing an address were stealing each other's replies |
-| **LaunchAgents** (`scripts/install-launch-agents.sh`) | Bus host: the Fluree server and `serve`. Other machines: `serve` and the SSH tunnel. On each, the `~/.local/bin/agent-bus` link the plugin's hook runs | Keep the bus running across logins |
+| **Installer** (`scripts/install-launch-agents.sh`) | The LaunchAgents and the `~/.local/bin/agent-bus` link ([topology](architecture/topology.md#processes)) | Keeps the bus running across logins |
 
 Size: about 2,450 lines of source, 2,850 lines of tests, and a 200-line installer. Dependencies: Effect 4, `@effect/platform-bun` and `sparqljs`.
 
-## How a message moves
-
-1. A session calls `bus_publish` (directly over MCP, or through `agent-bus publish`). `serve` checks that the caller owns the sending address, records where it was sent from (machine, directory, Git repo and branch), and appends one entry to the ledger.
-2. The ledger's change stream wakes every reader on every machine. Fluree's event stream does this, with a 15-second poll behind it.
-3. For each recipient, the machine it joined from acts:
-   - **A Claude session:** the hook its start or last turn's end started, waiting in `bus_wake`, sees unread mail it hasn't woken the session for. It exits with a nudge, which wakes the session, and the session reads its mail with `bus_read`. The woken turn's end starts the next hook.
-   - **A Codex thread:** `serve` adds one nudge to the thread's queue, unless one of ours is already waiting. Whichever app-server has the thread loaded (the desktop app's, or the daemon's for the TUI) runs it as a turn, and the thread reads its mail with `bus_read`. The message stays unread until then.
-4. Reading moves the cursor. A refused or failed read moves nothing.
-
-## How each kind of session receives messages today
-
-| Session | How it receives | Live push? |
-| --- | --- | --- |
-| Claude Code with the agent-bus plugin (desktop or terminal) | The plugin's hook, which the host starts at session start and every turn end, and which wakes the session with a nudge to call `bus_read`. Its joins return `hooked: true` | Yes, at once when idle, and as queued input when busy. Nothing for the session to restart ([claude-wake](frames/claude-wake.md)) |
-| Claude Code without the plugin | Only by calling `bus_read` or `bus_wait` | No |
-| `claude -p` | Only by calling `bus_read` or `bus_wait` | No: Claude Code ends async hooks when the run ends |
-| Codex `codex` TUI, or a desktop SSH project | A nudge in its queue, which the daemon runs as a turn, with or without the TUI attached | Yes, seen within 3–15 s when idle, and after the current turn when busy (verified 2026-10-27, [one-codex-route](frames/one-codex-route.md)). A thread the daemon no longer has loaded, as after a daemon restart, runs it when next opened |
-| **Codex desktop Local thread** | A nudge in its queue, which the desktop runs as a turn: at once when idle, after the current turn when busy | **Yes**, within seconds while the thread is open (verified 2026-10-27, [queue-wake](frames/queue-wake.md)). A thread nobody has open runs it when next opened |
-| `codex exec` | Only by calling `bus_read`. A nudge waits in its queue, and runs only if the thread is opened in an app | No |
-| A Codex or Claude subagent | Through its parent | Never woken directly: a Codex subagent's queue refuses direct input |
-
 ## Policies
 
-### Identity and ownership ([frame](frames/address-ownership.md))
+### Identity and ownership
+
+From [address-ownership](frames/address-ownership.md); the [README](../README.md#addresses-belong-to-sessions) explains them for users.
 
 1. An address belongs to the session that joined it, identified by runtime and id: `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude Code, or a stable id of its own for other clients. Every call passes it as `session`.
 2. Only the owner may read, wait on, leave or send from the address. Every refusal changes nothing: not the cursor, the presence or the ledger.
@@ -64,63 +58,43 @@ Size: about 2,450 lines of source, 2,850 lines of tests, and a 200-line installe
 7. Joins and leaves written without an owner, by a `serve` from before owners, are ignored.
 8. Ownership is checked under the address's lock at the moment of effect, so a wait or send that started before a takeover can't act after it.
 
-### Delivery
+### Other policies, where they live
 
-9. A change notification only wakes readers; reading from the cursor decides delivery. A cursor advances only after a complete read.
-10. `serve` nudges only Codex peers that joined from its own machine. A Claude session is woken only by its own machine's `serve`, for addresses it joined there: once per change in an address's unread mail, with no message text and nothing marked read, and one waiting hook per session ([claude-wake](frames/claude-wake.md)).
-11. A message the bus can't deliver is held, never dropped. Transport failures are retried with back-off up to five minutes. A refusal or an unreachable bus ends a CLI command with its message; the Claude wake hook retries failures every 5 s, for up to ten minutes.
+- **Delivery and Codex thread safety:** [delivery](architecture/delivery.md#policies-that-govern-delivery).
+- **Security:** [connections](connections.md) (what each connection trusts and what protects it) and the [README](../README.md#security) (Fluree's token, `serve`'s Host check, `bus_query`'s limits).
+- **Engineering:** [AGENTS.md](../AGENTS.md) (the `Ledger` service, `bun run check`, repo memory with no personal details).
 
-### Codex thread safety ([one-codex-route](frames/one-codex-route.md), [connections](connections.md))
+## Open gaps and limits
 
-12. `serve` never loads, resumes or starts a turn in a Codex thread, and never connects to the daemon. Its only reach into Codex is listing and adding to a thread's queue through an app-server of its own, which loads no thread, so no thread ever has a second writer.
-13. A subagent's queue refuses direct input. The deliverer holds that join as refused, and retries only after a rejoin or a `serve` restart.
-14. A queue nudge carries no text from other sessions and marks nothing read. At most one waits in a thread's queue per address, so at most one empty turn per address follows any read. With nothing for a subscriber, the deliverer moves its cursor past the entries its own read would pass over.
-
-### Security ([connections](connections.md))
-
-15. The bus trusts every process of the user on the machine. Ownership keeps cooperating sessions apart; it is not authentication.
-16. Every server listens on loopback only. `serve` checks the `Host` header and rejects any browser `Origin`. Fluree's data and admin APIs require the token.
-17. `bus_query` runs one SELECT, regenerated from its syntax tree, with no FROM or SERVICE, a 32 KB cap and a 10-second limit.
-18. Credentials and raw tool responses never go into messages, logs or the ledger.
-
-### Engineering
-
-19. All storage goes through the `Ledger` service.
-20. `bun run check` must pass before a commit.
-21. Decisions, constraints and traps go in repo Fluree memory, with no machine names or personal details, since the repository is public.
-
-## Verified, unverified and known gaps
+What is still open, unverified or accepted as a limit. What has been verified is recorded with its versions in [platforms](architecture/platforms.md#version-sensitive-findings), and each frame's qualification results give the evidence: [address-ownership](frames/address-ownership.md#qualification-2026-10-26), [queue-wake](frames/queue-wake.md#qualification-2026-10-27), [one-codex-route](frames/one-codex-route.md#qualification-2026-10-27), [simplification-pass](frames/simplification-pass.md#qualification-2026-10-27) and [claude-wake](frames/claude-wake.md#results-2026-10-27), whose last open item, a `serve` restart while a hook waits, passed on 2026-10-27.
 
 | Item | Status |
 | --- | --- |
-| Ownership: the incident, takeover, concurrency, cross-machine claims, identity refusals, leave and rejoin | **Verified live**, 2026-10-26 ([results](frames/address-ownership.md#qualification-2026-10-26)) |
-| Claude ids: set in the desktop app, the terminal and `claude -p`; `/clear` and forks change them; `--resume` keeps them | **Verified live** |
-| A desktop Local Codex thread's shell has `CODEX_THREAD_ID`, equal to its thread id | **Verified live** |
-| A session whose cached tool list predates `session` can pass it as an extra argument, in both Claude Code and Codex | **Verified live** |
-| Idle desktop Local threads are woken by a queue nudge, coalesced, restart-safe and ownership-safe | **Verified live**, 2026-10-27 ([results](frames/queue-wake.md#qualification-2026-10-27)) |
-| Daemon threads run a queued nudge with or without a client attached; one loaded nowhere runs it when reopened; a mid-turn add runs after the turn; a subagent's queue refuses the add | **Verified live**, 2026-10-27 ([evidence](frames/one-codex-route.md#what-it-rests-on)) |
-| Codex calls the bus's tools without approval in any sandbox, except `bus_join` outside full access | **Verified live** ([results](frames/one-codex-route.md#found-in-qualification-codex-refused-the-read-outside-full-access)) |
+| `codex exec` threads get a nudge only if opened in an app. The desktop's wake link could run it for threads loaded nowhere, at the cost of desktop ownership ([Codex hosting](architecture/codex-hosting.md#the-threadswake-link)) | **Open decision** for the owner ([codex-wake](frames/codex-wake.md), item 7) |
+| How long the desktop holds a thread its wake link woke | **Pending:** being measured |
+| That a change to `thread_unload_delay_secs` takes effect without restarting the daemon | **Read in code, not tested** |
+| Another machine's desktop running a nudge; a desktop subagent's add being refused like the daemon's; a daemon-thread nudge where the daemon (0.165.0) is newer than the bundled CLI (0.164) | **Unverified** |
+| The desktop's installed Claude Code (2.1.308) behaving as the probed 2.1.310 did in stream-json mode | **Extrapolated** |
 | The queue methods (`thread/queue/*`) are experimental in the Codex app-server protocol | **Accepted risk:** `serve` uses the desktop's bundled CLI, so protocol and app move together; a change shows as logged errors, and the mail waits unread for the thread's next read |
-| Another machine's desktop running a nudge; a desktop subagent's add being refused like the daemon's | **Unverified** |
-| Plugin monitors never start in stream-json mode, how the desktop app runs Claude Code; `asyncRewake` hooks (`Stop`, `SessionStart`, from settings or a plugin) wake an idle stream-json session | **Probed** on throwaway sessions, 2026-10-27 ([evidence](frames/claude-wake.md#what-it-rests-on)) |
-| The Claude wake in installed use: idle, busy and ignored-nudge cycles, a second address, `/clear` and a new join, resume, no plugin, hook processes, both machines | **Verified live**, 2026-10-27, on throwaway sessions run the way the desktop app runs Claude Code ([results](frames/claude-wake.md#results-2026-10-27)). A `serve` restart while a hook waits is checked at the next deploy |
-| `codex exec` threads get a nudge only if opened in an app | **Open decision** (codex-wake item 7) |
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |
 | Locks are per process, and each machine runs one `serve`. Joins from two machines are ordered by the ledger, so the losing claim is refused only from its next call. Cursors are per machine, so a takeover from another machine may redeliver | **Documented limit** |
 | A process started from a session's shell inherits that session's id and acts for it; a `codex exec` delegate can consume its Claude parent's mail | **Documented**: give delegates their own address |
+| A Claude session isn't armed after an interrupted turn whose hook already fired, or after a hook dies holding its result ([delivery](architecture/delivery.md#when-a-claude-session-isnt-armed)) | **Documented limit** |
 | Unit tests run on JSONL, plus the Fluree suites when the `fluree` CLI is installed. Fluree is also covered by `bun run qualify:fluree` and live use | **Accepted** |
 | The other machine's non-interactive SSH `PATH` lacks `bun` | **Operations**: remote commands need `~/.bun/bin` |
 
 ## Questions for a simplification pass
 
-These were found while writing this map and are not recommendations. Each names what the piece costs and what would have to be true to remove it.
+Questions raised by the first version of this map. All but the last are answered; the frames hold the reasoning.
 
-1. **Is the daemon deliverer earning its place?** Answered (2026-10-27): no. It is removed, and every Codex thread takes the queue route ([one-codex-route](frames/one-codex-route.md)). The cost accepted is that a thread the daemon no longer has loaded gets its mail when next opened, not by a headless resume.
-2. **Two stores.** Answered (2026-10-27): Fluree is the only production store; JSONL is the unit tests' ([simplification-pass](frames/simplification-pass.md)).
-3. **`bus_query` (SPARQL).** Answered: kept. The owner plans richer ledger properties (topic, task, workstream, decisions, tags, reference docs), so history can be queried by meaning.
-4. **Origin repo and branch.** Answered: kept as optional metadata for those queries, since a branch can't be recovered later. The commit-window view is dropped.
-5. **Legacy ownership paths.** Answered: removed. Joins and leaves without an owner are ignored.
-6. **Two locks per address.** Answered: kept.
-7. **Retire the `Stop` hook?** Answered: retired. A nudged turn reads the mail itself. The no-op `codex-stop-hook` that covered the transition is gone too ([finish-swap](frames/finish-swap.md)).
-8. **Claude waking by background `wait`.** Answered (2026-10-27): a Claude Code plugin's `asyncRewake` hook, armed by the host at session start and every turn end, replaces it for sessions with the plugin ([claude-wake](frames/claude-wake.md)). Plugin monitors, the first idea, don't start in the desktop app's stream-json mode. `agent-bus wait` was retired once every session ran the plugin ([finish-swap](frames/finish-swap.md)).
-9. **`codexThreadId` at join.** It must equal `session`, so it is only a "wake me" flag. Deriving it from the runtime would drop a join field, a CLI flag and a check.
+| # | Question | Outcome |
+| --- | --- | --- |
+| 1 | Is the daemon deliverer earning its place? | No: removed; every Codex thread takes the queue route ([one-codex-route](frames/one-codex-route.md)) |
+| 2 | Two stores? | Fluree is the only production store; JSONL is the unit tests' ([simplification-pass](frames/simplification-pass.md)) |
+| 3 | `bus_query` (SPARQL)? | Kept, for richer ledger properties to come |
+| 4 | Origin repo and branch? | Kept as optional metadata; the commit-window view is dropped |
+| 5 | Legacy ownership paths? | Removed: joins and leaves without an owner are ignored |
+| 6 | Two locks per address? | Kept |
+| 7 | Retire the Codex `Stop` hook? | Retired, and its no-op command too ([finish-swap](frames/finish-swap.md)) |
+| 8 | Claude waking by background `wait`? | Replaced by the plugin's `asyncRewake` hook, and `wait` retired ([claude-wake](frames/claude-wake.md), [finish-swap](frames/finish-swap.md)) |
+| 9 | `codexThreadId` at join? | **Open.** It must equal `session`, so it is only a "wake me" flag. Deriving it from the runtime would drop a join field, a CLI flag and a check |

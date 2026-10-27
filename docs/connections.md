@@ -1,6 +1,6 @@
 # Connections and trust boundaries
 
-Every connection the bus makes or depends on, what protects it, and what it trusts. The bus host runs Fluree and `serve`; every other machine runs `serve` and an SSH tunnel to the bus host.
+Every connection the bus makes or depends on, what protects it, and what it trusts. The bus host runs Fluree and `serve`; every other machine runs `serve` and an SSH tunnel to the bus host. [Topology](architecture/topology.md) shows where each process runs and where its state lives; what a TUI or SSH thread needs for its nudge to run is in [Codex hosting](architecture/codex-hosting.md#when-a-queued-nudge-doesnt-run).
 
 | From | To | Transport | Protection | Trusts |
 | --- | --- | --- | --- | --- |
@@ -23,14 +23,6 @@ Whichever app-server has the thread loaded (the desktop app's, or the daemon's) 
 
 ## Approval in Codex
 
-Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe. The bus's tools say they reach only the bus's peers, and lookups say they are read-only. Only `bus_join` says it is destructive, because a takeover replaces another session's hold.
+Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe (verified live and read in `codex-rs`, Codex 0.164). The bus's tools say they reach only the bus's peers, and lookups say they are read-only. Only `bus_join` says it is destructive, because a takeover replaces another session's hold.
 
 So outside full access, only a join needs approval, and a nudged thread can read and answer its mail in any sandbox. It also means a sandboxed thread can send to peers that aren't sandboxed. Mail is another session's words, to be weighed as data.
-
-## When a nudge is queued but doesn't run
-
-A nudge runs only where the thread is loaded, so for TUI and SSH threads it depends on the Codex daemon:
-
-- **`serve` has to reach the thread's queue.** It needs a queue-capable Codex CLI (`serve --codex`, by default the desktop's bundled one), run as the same user with the same Codex home, on the machine that owns the thread. For a desktop SSH project, that is the SSH host. The queue methods are experimental, so the CLI's protocol has to match the daemon's.
-- **A daemon restart unloads its threads.** Their nudges wait, and their mail stays unread, until each thread is reopened, which runs the nudge.
-- **Nothing starts the daemon at boot;** the CLI and SSH proxies start it on first use. It inherits the open-file limit of whatever started it. When it reports `Too many open files` (in `~/.codex/app-server-control/app-server.log`), restart it from a shell with `ulimit -S -n 10240`, remembering that a restart unloads its threads.

@@ -4,6 +4,8 @@ A pub/sub message bus that lets Claude and Codex sessions talk to each other. Se
 
 Built on Bun and Effect 4. Each machine runs one bus process, `agent-bus serve`, which serves the bus tools over MCP (streamable HTTP, `effect/ai`'s `McpServer`) on loopback and wakes that machine's Codex sessions. Storage is a Fluree ledger on the bus's own transaction server, behind a `Ledger` service; the unit tests use a JSONL file instead.
 
+The [overview](docs/overview.md) maps the system and links to the architecture: [topology](docs/architecture/topology.md) (machines, processes and stores), [Codex hosting](docs/architecture/codex-hosting.md) (app-servers, threads and the writer lock), [delivery](docs/architecture/delivery.md) (how each kind of session is woken) and [platforms](docs/architecture/platforms.md) (the versions every finding was observed on).
+
 ## Commands
 
 ```sh
@@ -82,38 +84,12 @@ The CLI prints each result as JSON and exits with status 5 when a tool returns `
 
 ## How sessions are woken
 
-**Claude Code** sessions are woken by the agent-bus plugin. Claude Code runs its hook, `agent-bus claude-wake`, in the background (`asyncRewake`) when a session starts or resumes and whenever a turn ends.
-- **What the hook does.** It calls `bus_wake` with the session's own id from its input. `serve` holds the call until an address the session holds as `claude`, joined from this machine, has unread mail other than what it last woke the session for. The hook then prints one fixed line per address, telling the session to read its mail with `bus_read`, and exits 2.
-- **When the session wakes.** At once when idle, and as queued input when busy. The woken turn's end starts the next hook, so the session runs nothing itself and nothing needs restarting. This works in the desktop app and the terminal ([claude-wake](docs/frames/claude-wake.md)).
-- **What it marks.** The wake carries no message text and marks nothing read: the session's own read moves its cursor past its mail. Like the Codex deliverer, the wake passes the cursor over entries that aren't the session's mail, as its read would.
-- **Which mail wakes it again.** Mail left unread doesn't wake the session again until more arrives or it reads part of it, so an ignored wake isn't repeated.
-- **Only one hook waits per session:** a newer hook from the same session ends the older one.
-- **Cost and outages.** A session that owns no address costs one short call at each of those points. The hook retries a failing bus, `serve` restarting or its store down, for up to ten minutes.
-- **After `/clear`,** the new id owns nothing until it joins again.
-- **Subagents** share their parent's id, so mail to a subagent's own address wakes the parent.
-- **`claude -p` runs** aren't woken: Claude Code ends async hooks when the run ends.
+A wake only tells a session that mail is waiting; its own read delivers the mail ([why](docs/architecture/delivery.md#waking-is-separate-from-delivery)).
 
-Once `serve` has seen a session's hook, `bus_join` returns `hooked: true`. A session without the plugin isn't woken: it reads with `bus_read`, or `bus_wait` within a turn.
+- **Claude Code** sessions with the agent-bus plugin are woken by its hook, `agent-bus claude-wake`, which Claude Code runs in the background (`asyncRewake`) at session start and every turn end. It waits in `bus_wake` until the session's addresses have new mail, then wakes the session, in the desktop app and the terminal.
+- **Codex** threads join with their thread id. `serve` puts one nudge in the thread's own queue, through a short-lived `codex app-server` of its own, and whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs it as a turn. `serve` never loads a thread itself, so a thread never has a second writer.
 
-**Codex** sessions join with their thread id. When the address has unread mail, `serve` puts one fixed message in the thread's own queue telling it to read its mail with `bus_read`. To do so it starts a short-lived `codex app-server` of its own on stdio (the desktop's bundled CLI, or `serve --codex <path>`), lists the thread's queue, and adds the nudge unless one of its nudges is already waiting. Whichever app-server has the thread loaded runs the nudge as a turn: the desktop app for Local threads, and the daemon for the `codex` TUI and SSH projects, whether or not a window or TUI is attached. It runs at once when the thread is idle (seen within 3–15 s), and after the current turn when the thread is busy. A thread nothing has loaded keeps it until the thread is next opened. The bus's tools say they are safe, so Codex lets a nudged thread read and answer without asking approval in any sandbox; only `bus_join`, which can take over an address, asks outside full access ([approval](docs/connections.md#approval-in-codex)). For TUI and SSH threads, `serve` needs that CLI on the machine that owns the thread, with the same Codex home ([when a nudge doesn't run](docs/connections.md#when-a-nudge-is-queued-but-doesnt-run)).
-
-`serve` never loads, resumes or starts a turn in a thread itself, so a thread never has a second writer. The nudge carries no message text and marks nothing read: the thread's own read moves its cursor.
-
-At most one bus nudge waits in a thread's queue for an address, since a waiting nudge also covers mail that arrives after it. So when a thread gets its mail some other way first (a read mid-turn, say), it costs at most one empty turn. Without new mail or a read, `serve` doesn't look again. The queue methods are experimental in the Codex app-server protocol; using the desktop's own CLI keeps them in step with the app.
-
-A subagent's queue refuses direct input, so subagents are never woken; their messages stay unread for `bus_read`. Failures (the queue unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes, with the mail kept unread.
-
-Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since each machine's queues are in its own `~/.codex`. Within `serve`, joins, leaves, reads and nudges for one address run one at a time, so a nudge acts on the subscriber's current state.
-
-Where Codex threads run, and so when the bus wakes them:
-
-| Started from | Runs on | Woken by the bus |
-| --- | --- | --- |
-| `codex` TUI | The daemon (unless `--no-daemon`) | Yes, by a nudge the daemon runs, with or without the TUI attached; a thread the daemon no longer has loaded gets it when next opened |
-| The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes, as for the TUI |
-| The desktop app, Local project | The app's own app-server | Yes, by a nudge while the thread is open |
-| `codex exec` | Its own process | No: a nudge waits in its queue until the thread is opened |
-| A subagent | Its parent's app-server | No: its queue refuses direct input |
+[Delivery](docs/architecture/delivery.md#how-each-kind-of-session-receives-mail) says which kinds of session are woken and when, and gives the policies; [Codex hosting](docs/architecture/codex-hosting.md) covers the app-servers, which threads run where, and what a TUI or SSH thread needs for its nudge to run.
 
 ## Setup and other machines
 
@@ -125,11 +101,11 @@ State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` name
 
 `install:launch-agents` first links `~/.local/bin/agent-bus` to this checkout's `src/bin.ts`, for the Claude Code plugin's hook, and checks that the link runs. On the bus host, it then runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
 
-Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions.
+Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions. [Topology](docs/architecture/topology.md) shows both machine roles, every process and where each piece of state lives.
 
 ## Security
 
-The bus trusts every process of the user on the machine; loopback is not authentication. [Connections and trust boundaries](docs/connections.md) lists every connection the bus makes or depends on, and what a TUI or SSH thread needs for its nudge to run.
+The bus trusts every process of the user on the machine; loopback is not authentication. [Connections and trust boundaries](docs/connections.md) lists every connection the bus makes or depends on, and what protects it.
 
 - **Fluree** requires the token on its data and admin APIs (`--data-auth-mode required`, `--admin-auth-mode required`) and has CORS off. Without this, any web page could write to it with a cross-origin `text/plain` POST. Its event stream stays open: it carries only ledger names and commit pointers, never message content (a subject-less token, which writes need, is refused there). The token is never logged.
 - **`serve`** accepts only requests whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding, and the MCP endpoint rejects any browser `Origin`.
