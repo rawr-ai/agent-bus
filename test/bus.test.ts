@@ -1,5 +1,13 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
@@ -2443,6 +2451,68 @@ describe("mcp over http", () => {
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });
+  test("the plugin's hook command finds bun in ~/.bun/bin when Claude Code's PATH lacks it", () => {
+    const { url, port, layer } = serve();
+    const manifest = JSON.parse(
+      readFileSync(join(import.meta.dir, "../.claude-plugin/plugin.json"), "utf8")
+    ) as {
+      readonly hooks: Record<
+        string,
+        ReadonlyArray<{ readonly hooks: ReadonlyArray<{ readonly command: string }> }>
+      >;
+    };
+    const commands = new Set(
+      Object.values(manifest.hooks).flatMap((matchers) =>
+        matchers.flatMap((matcher) => matcher.hooks.map((hook) => hook.command))
+      )
+    );
+    expect(commands.size).toBe(1);
+    const command = [...commands][0]?.replaceAll(
+      "${CLAUDE_PLUGIN_ROOT}",
+      join(import.meta.dir, "..")
+    );
+    // A home whose only bun is ~/.bun/bin/bun, and a PATH with none.
+    const home = tempDir();
+    mkdirSync(join(home, ".bun", "bin"), { recursive: true });
+    symlinkSync(process.execPath, join(home, ".bun", "bin", "bun"));
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const call = Client.call(url);
+        for (const [address, runtime] of [
+          ["claude/a", "claude"],
+          ["codex/b", "codex"],
+        ]) {
+          yield* call("bus_join", Mcp.Joined, {
+            address,
+            runtime,
+            session: sid(address ?? ""),
+            cwd: process.cwd(),
+          });
+        }
+        yield* call("bus_publish", Mcp.Published, {
+          from: "codex/b",
+          session: sid("codex/b"),
+          to: ["claude/a"],
+          body: "wake",
+        });
+        const result = yield* Effect.promise(async () => {
+          const child = Bun.spawn(["/bin/sh", "-c", command ?? ""], {
+            stdin: new Blob([JSON.stringify({ session_id: sid("claude/a") })]),
+            stdout: "ignore",
+            stderr: "pipe",
+            env: { HOME: home, PATH: "/usr/bin:/bin", AGENT_BUS_PORT: String(port) },
+          });
+          const [code, stderr] = await Promise.all([
+            child.exited,
+            new Response(child.stderr).text(),
+          ]);
+          return { code, stderr: stderr.trim() };
+        });
+        expect(result).toEqual({ code: 2, stderr: formatWake("claude/a") });
+      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
+
   test("the Claude wake hook exits 2 with the nudge on stderr, marking nothing read, and 0 for a stranger", () => {
     const { url, port, layer } = serve();
     const hook = (session: string) =>

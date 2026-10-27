@@ -11,7 +11,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/bin.ts\" claude-wake",
+            "command": "PATH=\"$PATH:$HOME/.bun/bin:$HOME/.local/bin\" exec bun \"${CLAUDE_PLUGIN_ROOT}/src/bin.ts\" claude-wake",
             "asyncRewake": true,
             "timeout": 2592000
           }
@@ -23,7 +23,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/bin.ts\" claude-wake",
+            "command": "PATH=\"$PATH:$HOME/.bun/bin:$HOME/.local/bin\" exec bun \"${CLAUDE_PLUGIN_ROOT}/src/bin.ts\" claude-wake",
             "asyncRewake": true,
             "timeout": 2592000
           }
@@ -35,7 +35,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bun \"${CLAUDE_PLUGIN_ROOT}/src/bin.ts\" claude-wake",
+            "command": "PATH=\"$PATH:$HOME/.bun/bin:$HOME/.local/bin\" exec bun \"${CLAUDE_PLUGIN_ROOT}/src/bin.ts\" claude-wake",
             "asyncRewake": true,
             "timeout": 2592000
           }

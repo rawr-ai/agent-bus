@@ -63,7 +63,7 @@ claude plugin marketplace add <agent-bus checkout>
 claude plugin install agent-bus@agent-bus
 ```
 
-Claude Code loads it in place, so its hook runs the checkout's own `src/bin.ts` with the checkout's dependencies, and picks up a deploy at once. It needs `bun` on Claude Code's `PATH`, and the same `AGENT_BUS_PORT` as `serve` (or neither set). Sessions get it when they next start, or with `/reload-plugins`. Deploy `serve` first, so the hook finds `bus_wake`.
+Claude Code loads it in place, so its hook runs the checkout's own `src/bin.ts` with the checkout's dependencies, and picks up a deploy at once. Hooks inherit Claude Code's environment rather than your shell's, so the hook looks for `bun` on that `PATH`, then in `~/.bun/bin` and `~/.local/bin`. It needs the same `AGENT_BUS_PORT` as `serve` (or neither set). Sessions get it when they next start, or with `/reload-plugins`. Deploy `serve` first, so the hook finds `bus_wake`.
 
 ## Checking with MCP Inspector
 

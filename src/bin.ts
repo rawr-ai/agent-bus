@@ -261,7 +261,10 @@ const codexStopHook = Command.make("codex-stop-hook", {}, () => Effect.void).pip
 
 const claudeWakeHook = Command.make("claude-wake", {}, () =>
   Effect.gen(function* () {
-    const input = yield* Effect.promise(() => Bun.stdin.text());
+    // An unreadable input is no session: the hook exits quietly.
+    const input = yield* Effect.tryPromise(() => Bun.stdin.text()).pipe(
+      Effect.orElseSucceed(() => "")
+    );
     const nudge = yield* claudeWake(endpoint, input);
     if (Option.isNone(nudge)) return;
     // An asyncRewake hook that exits 2 wakes the session, which is shown its stderr.

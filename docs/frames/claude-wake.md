@@ -103,7 +103,7 @@ claude plugin install agent-bus@agent-bus
 `${CLAUDE_PLUGIN_ROOT}` is then the checkout itself, and the hook runs `bun "${CLAUDE_PLUGIN_ROOT}/src/bin.ts" claude-wake` against the checkout's own dependencies. The hook's `timeout` is 30 days.
 
 The hook's requirements:
-- `bun` on Claude Code's `PATH`, since hooks inherit Claude Code's environment;
+- `bun`. Hooks inherit Claude Code's environment, not a shell's, so the command looks on that `PATH` and then in `~/.bun/bin` and `~/.local/bin`, the two places `bun` is installed on the owner's machines;
 - the checkout's dependencies installed;
 - `AGENT_BUS_PORT` the same in Claude Code's environment as in `serve`'s, or unset in both (8096).
 
@@ -196,6 +196,7 @@ On a throwaway `serve` with its own store and port, a throwaway stream-json sess
 - `bus_join` returned `hooked: true`, since the `SessionStart` hook had already called.
 - Each of two messages, sent while the session was idle, woke it within 1.5 s, and it read the mail with `bus_read`.
 - One hook process waited after each turn, and none outlived the session.
+- The same held when the session ran with the desktop app's own `PATH`, and with a launchd-style `PATH` that has no `bun` (`/usr/bin:/bin:/usr/sbin:/sbin`), where the command found `bun` in the fallback directories. A unit test runs the manifest's command under `/bin/sh` with a `PATH` lacking `bun` and a home whose only `bun` is in `~/.bun/bin`; it fails with a bare `bun`.
 
 ## Qualification
 
