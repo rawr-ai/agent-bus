@@ -35,7 +35,7 @@ In the incident, the desktop app's own app-server shut down at 15:36:32 (the app
 
 - **The guard is permanent** (shipped in b4aa1f5): the bus never takes a thread from another app-server.
 - **A Codex `Stop` hook** (shipped in ba3ab5e) delivers to Local threads when a turn ends.
-- **Waking idle Local threads** is the subject of [the desktop-wake spike](desktop-wake-spike.md): asking the desktop app, through its own coordination socket, to start or steer the turn, so the app stays the writer.
+- **Waking idle Local threads** was first framed as [the desktop-wake spike](desktop-wake-spike.md), through the app's coordination socket. It shipped instead as a nudge in the thread's own queue (3d10fca, [queue-wake](queue-wake.md)): the desktop app stays the writer and runs the nudge as a turn.
 - Daemon threads (the `codex` TUI, control-socket `thread/start`) keep live push.
 
 Three reviews (GPT-6 Astra at max effort, GPT-6.1 Sol at extra-high, Claude Opus 5.5 at high) agreed on the guard. A per-session `wake` flag was rejected: it records permission, but doesn't reconcile two writers.

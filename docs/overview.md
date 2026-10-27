@@ -1,6 +1,6 @@
 # agent-bus: how it works, its policies, and its gaps
 
-A map of the whole system, written for a simplification review. It describes the system as deployed on 2026-10-26 and links to the documents that own the details: the [README](../README.md) (commands, delivery, ledger format), [connections](connections.md) (trust boundaries) and the frames in [frames/](frames/) (decisions, with their reasoning and the alternatives rejected).
+A map of the whole system, written for a simplification review. It describes the system as deployed on 2026-10-27 (3d10fca) and links to the documents that own the details: the [README](../README.md) (commands, delivery, ledger format), [connections](connections.md) (trust boundaries) and the frames in [frames/](frames/) (decisions, with their reasoning and the alternatives rejected).
 
 ## What kind of system it is
 
@@ -23,12 +23,12 @@ agent-bus is an **append-only message log with one read cursor per address, plus
 | **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry. Fluree in the installed setup (one transaction server on the bus host, reached from other machines through an SSH tunnel); a JSONL file otherwise and in the unit tests | Fluree gives one shared, ordered log across machines, history, full-text search and SPARQL. JSONL needs no server |
 | **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`) | The only process that reads or writes the store for its machine's sessions. Serves the bus tools over MCP on loopback, keeps cursors, enforces ownership, and runs the Codex deliverer | One owner of cursors and locks per machine, so a message is taken once |
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `wait`, `join`, `publish`, `peers`: MCP clients of the local `serve` | `wait` is how Claude sessions are woken; the rest is shell access |
-| **Codex deliverer** (`src/codex.ts`) | Starts or steers a turn in Codex threads that the machine's Codex daemon hosts (`turn/start` over the daemon's control socket) | Live push for daemon-hosted Codex threads |
-| **Codex `Stop` hook** (`src/hook.ts`) | When a Codex turn ends, continues it with the thread's unread messages | Reaches desktop Local threads, which the deliverer must not touch |
+| **Codex deliverer** (`src/codex.ts`) | Starts or steers a turn in Codex threads that the machine's Codex daemon hosts (`turn/start` over the daemon's control socket). Every other Codex thread gets one nudge in its own queue (`thread/queue/list` and `add`, through a short-lived app-server of `serve`'s own) | Live push for daemon threads; idle wake for desktop Local threads without a second writer |
+| **Codex `Stop` hook** (`src/hook.ts`) | When a Codex turn ends, continues it with the thread's unread messages | Delivers inline at the end of a busy turn. Optional since the queue nudge |
 | **Ownership** (in `src/Bus.ts`) | One session per address, identified by the runtime's own id | Two sessions sharing an address were stealing each other's replies |
 | **LaunchAgents** (`scripts/install-launch-agents.sh`) | Bus host: the Fluree server and `serve`. Other machines: `serve` and the SSH tunnel | Keep the bus running across logins |
 
-Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installer. Dependencies: Effect 4, `@effect/platform-bun` and `sparqljs`.
+Size: about 2,600 lines of source, 2,150 lines of tests, and a 190-line installer. Dependencies: Effect 4, `@effect/platform-bun` and `sparqljs`.
 
 ## How a message moves
 
@@ -37,7 +37,7 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 3. For each recipient, the machine it joined from acts:
    - **A Claude session:** its background `agent-bus wait` reads the message and exits, which wakes the session. The session handles the message and starts the wait again.
    - **A Codex thread on the daemon:** `serve` sends `turn/start` with the message, marks it read once the daemon accepts, and unsubscribes.
-   - **Any other Codex thread:** the message is held unread. The thread gets it from its `Stop` hook when a turn ends, or by calling `bus_read`.
+   - **Any other Codex thread:** `serve` adds one nudge to the thread's queue, unless one of ours is already waiting. The app that has the thread open runs it as a turn, and the thread reads its mail with `bus_read`. The message stays unread until then (or until the `Stop` hook reads it at a turn's end).
 4. Reading moves the cursor. A refused or failed read moves nothing.
 
 ## How each kind of session receives messages today
@@ -46,11 +46,11 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | --- | --- | --- |
 | Claude Code (desktop, terminal or `claude -p`) | A background `agent-bus wait`, which exits on arrival and wakes the session | Yes, within seconds, provided the wait is running. The session must restart it after every wake |
 | Codex `codex` TUI, or a desktop SSH project | The deliverer's `turn/start` through the daemon | Yes: an idle thread starts a turn, a busy one is steered |
-| **Codex desktop Local thread** | The `Stop` hook at the end of each of its turns, once trusted. Otherwise only when the thread itself calls `bus_read` or `bus_wait` | **Not yet.** An idle Local thread isn't woken today. `codex queue` was shown to start a turn in an idle, open Local thread within seconds ([result](frames/desktop-wake-spike.md)), so a coalesced nudge from `serve` would add idle wake |
-| `codex exec` | Only by calling `bus_read`. It is never woken, including after it exits | No |
+| **Codex desktop Local thread** | A nudge in its queue, which the desktop runs as a turn: at once when idle, after the current turn when busy. The `Stop` hook also delivers at a turn's end | **Yes**, within seconds while the thread is open (verified 2026-10-27, [queue-wake](frames/queue-wake.md)). A thread nobody has open runs it when next opened |
+| `codex exec` | Only by calling `bus_read`. A nudge waits in its queue, and runs only if the thread is opened in an app | No |
 | A Codex or Claude subagent | Through its parent | Never woken directly |
 
-**The `Stop` hook runs only once the owner trusts it.** It is in each machine's `~/.codex/hooks.json`, and Codex skips hooks until they are reviewed and trusted with `/hooks`. Until then, Local threads, including the Director, get messages only when they read the bus themselves. `serve` logs "Holding messages for …" for them.
+**The `Stop` hook runs only once the owner trusts it.** It is in each machine's `~/.codex/hooks.json`, and Codex skips hooks until they are reviewed and trusted with `/hooks`. It is trusted on the Mini; whether it is on the Pro is unknown. Since the queue nudge it is optional: with it, a busy thread gets its mail inline at the turn's end, followed by at most one empty nudged turn.
 
 ## Policies
 
@@ -76,23 +76,24 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 
 ### Codex thread safety ([codex-wake frame](frames/codex-wake.md), [connections](connections.md))
 
-12. The bus never takes a thread from another app-server. A thread not loaded in the daemon when it joined (`codexHost: other`) is never resumed there.
+12. The bus never takes a thread from another app-server. A thread not loaded in the daemon when it joined (`codexHost: other`), or one whose resume another app-server refused, is never sent to the daemon; it is nudged through its queue.
 13. `serve` unsubscribes after each delivery and never answers approvals.
-14. Subagents are never woken.
+14. Subagents are never woken through the daemon. Whether the desktop runs a queue nudge for its own subagents is untested.
 15. The `Stop` hook reads only as its own thread, and only when the transcript it is given is that thread's own.
+16. A queue nudge carries no text from other sessions and marks nothing read. At most one waits in a thread's queue per address, so at most one empty turn follows any read.
 
 ### Security ([connections](connections.md))
 
-16. The bus trusts every process of the user on the machine. Ownership keeps cooperating sessions apart; it is not authentication.
-17. Every server listens on loopback only. `serve` checks the `Host` header and rejects any browser `Origin`. Fluree's data and admin APIs require the token.
-18. `bus_query` runs one SELECT, regenerated from its syntax tree, with no FROM or SERVICE, a 32 KB cap and a 10-second limit.
-19. Credentials and raw tool responses never go into messages, logs or the ledger.
+17. The bus trusts every process of the user on the machine. Ownership keeps cooperating sessions apart; it is not authentication.
+18. Every server listens on loopback only. `serve` checks the `Host` header and rejects any browser `Origin`. Fluree's data and admin APIs require the token.
+19. `bus_query` runs one SELECT, regenerated from its syntax tree, with no FROM or SERVICE, a 32 KB cap and a 10-second limit.
+20. Credentials and raw tool responses never go into messages, logs or the ledger.
 
 ### Engineering
 
-20. All storage goes through the `Ledger` service.
-21. `bun run check` must pass before a commit.
-22. Decisions, constraints and traps go in repo Fluree memory, with no machine names or personal details, since the repository is public.
+21. All storage goes through the `Ledger` service.
+22. `bun run check` must pass before a commit.
+23. Decisions, constraints and traps go in repo Fluree memory, with no machine names or personal details, since the repository is public.
 
 ## Verified, unverified and known gaps
 
@@ -102,13 +103,16 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | Claude ids: set in the desktop app, the terminal and `claude -p`; `/clear` and forks change them; `--resume` keeps them | **Verified live** |
 | A desktop Local Codex thread's shell has `CODEX_THREAD_ID`, equal to its thread id, and its legacy address was adopted on rejoin | **Verified live** |
 | A session whose cached tool list predates `session` can pass it as an extra argument, in both Claude Code and Codex | **Verified live** |
-| Idle desktop Local threads can't be woken | **Known gap, with a verified fix:** a coalesced `codex queue` nudge from `serve` (not built) |
-| The `Stop` hook is installed on both machines but not yet trusted | **Owner's step**: `/hooks` |
-| `codex exec` threads are never woken, even after they exit | **Open decision** (codex-wake item 7) |
+| Idle desktop Local threads are woken by a queue nudge, coalesced, restart-safe and ownership-safe | **Verified live**, 2026-10-27 ([results](frames/queue-wake.md#qualification-2026-10-27)) |
+| The queue methods (`thread/queue/*`) are experimental in the Codex app-server protocol | **Accepted risk:** `serve` uses the desktop's bundled CLI, so protocol and app move together; a change shows as logged errors, and the `Stop` hook still delivers at turn end |
+| The Pro's desktop running a nudge; desktop subagents' nudges; whether the daemon runs queued items | **Unverified** |
+| A refused resume is remembered only until `serve` restarts | **Inherited limit**: a restarted `serve` can resume a `daemon` join the desktop has since released |
+| The `Stop` hook is trusted on the Mini; the Pro is unknown | **Owner's step**, if it is kept |
+| `codex exec` threads get a nudge only if opened in an app | **Open decision** (codex-wake item 7) |
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |
 | Locks are per machine. Joins from two machines are ordered by the ledger, so the losing claim is refused only from its next call. Cursors are per machine, so a takeover from another machine may redeliver | **Documented limit** |
 | A process started from a session's shell inherits that session's id and acts for it; a `codex exec` delegate can consume its Claude parent's mail | **Documented**: give delegates their own address |
-| Claude Code reports an error for `bus_leave` ("did not return structured content"), though the leave takes effect | **Bug, small fix** |
+| Claude Code reported an error for `bus_leave` ("did not return structured content") | **Fixed** in 3d10fca |
 | After a peer leaves, the deliverer can log one "has not joined" warning | **Log noise** |
 | CLI refusals print a stack trace under the message | **Cosmetic** |
 | Unit tests run on JSONL only. Fluree is covered by `bun run qualify:fluree` and live use | **Accepted** |
@@ -119,11 +123,11 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 
 These were found while writing this map and are not recommendations. Each names what the piece costs and what would have to be true to remove it.
 
-1. **Is the daemon deliverer earning its place?** It is the largest single piece (`src/codex.ts`, with the `codexHost` classification, the guard, back-off and the unsubscribe). It serves only daemon-hosted threads: the `codex` TUI and SSH projects. The owner works in desktop Local threads by decision, and today the only Codex peer is Local, so every Codex delivery is held. If nobody uses daemon threads, the hook (plus the spike's route, if it goes) may be the whole Codex story. If the spike goes, `serve` gains a second Codex route rather than replacing this one, so decide this before building it.
+1. **Is the daemon deliverer earning its place?** It serves only daemon-hosted threads: the `codex` TUI and SSH projects. Desktop threads, which the owner works in, now go through the queue. The parts that serve only the daemon route are `connect`, the `codexHost` classification and its 5-second wait at join, resume and unsubscribe, the `elsewhere` and `refused` holds, `--codex-socket` and `formatDelivery`. If the daemon also runs queued items for threads it has loaded, every Codex thread could take the queue route and all of those could go. That is untested: a fresh daemon thread has no rollout until its first turn. The research report and the Opus simplicity pass both recommend this collapse once that is verified. The consequences: a closed TUI thread would no longer be resumed headlessly, and daemon threads would come under "only the owner's read moves its cursor".
 2. **Two stores.** Fluree is what makes the bus span machines and gives history and search; JSONL keeps the unit tests fast and the bus usable without a server, and adds `import-jsonl`. Keeping JSONL for tests is cheap. Whether it is still a supported production store is a choice.
 3. **`bus_query` (SPARQL), with its parser dependency and sandbox rules.** Worth keeping only if agents actually query the ledger. `bus_history` covers text search.
 4. **Origin repo and branch on every message.** Each publish runs `git` twice to record them for commit-window views that were never built. Either build the view or stop recording them.
 5. **Legacy ownership paths.** These are adopting owner-less presences and ignoring owner-less presences. Once every live address has an owner and no pre-ownership `serve` remains, both can go.
 6. **Two locks per address** (`claiming` for ownership changes and sends, `exclusive` for cursor moves). They were split so sends don't wait behind slow deliveries. Keep them unless deliveries become fast enough not to matter.
-7. **One Codex route for desktop threads.** If `serve` gains the `codex queue` nudge, it covers idle and busy Local threads alike. The `Stop` hook becomes optional (with both, a busy thread gets its mail inline and then runs one empty nudge turn), and the desktop-wake spike is unnecessary.
-8. **Claude waking by background `wait`.** It works, but every session must restart its wait after each wake, and a forgotten restart silently stops delivery. A Claude Code `Stop` hook (listed as next in the README) would mirror the Codex one and could be simpler for sessions to keep right.
+7. **Retire the `Stop` hook?** The queue nudge shipped and covers idle and busy Local threads, and the desktop-wake spike is superseded. The hook is now optional. It puts message text into the turn, which the nudge deliberately avoids, and it causes the one empty turn the nudge allows. The Opus simplicity pass recommends retiring it. The Director keeps it for now. Retiring it removes `src/hook.ts`, the `codex-stop-hook` command, the hooks.json install and trust step, and the transcript check.
+8. **Claude waking by background `wait`.** It works, but every session must restart its wait after each wake, and a forgotten restart silently stops delivery. A Claude Code `Stop` hook (listed as next in the README) would mirror the Codex one and could be simpler for sessions to keep right. The MCP research found no MCP mechanism that reaches the model or starts a turn in an idle session (other than Claude Code's terminal-only channels). A host-armed plugin `monitors` entry could replace the model re-arming `wait` after every wake.

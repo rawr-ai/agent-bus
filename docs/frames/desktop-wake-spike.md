@@ -1,5 +1,7 @@
 # Spike: waking desktop Local threads through the app's coordination socket
 
+**Superseded (2026-10-27).** It was never run past Gate 0: the thread's own queue wakes idle Local threads, shipped in 3d10fca ([queue-wake](queue-wake.md)). The gates below are kept as a record of the route not taken.
+
 ## Result before Gate 0: the supported queue wakes idle Local threads (2026-10-27)
 
 The persisted-queue route was tested live first, on a disposable top-level Local thread (desktop 26.1021.31345, Codex 0.164), and it answers the question without the coordination socket. `codex queue --thread <id> --message <text>` is a supported CLI command. It appends to the shared queue in `~/.codex/queue_1.sqlite` and loads the thread nowhere:

@@ -154,3 +154,24 @@ On a disposable top-level Local thread joined to a test address, never the Direc
 10. **Optional:**
     - a desktop subagent's nudge;
     - whether the daemon runs a queued item for a thread it has loaded.
+
+## Qualification (2026-10-27)
+
+Shipped in 3d10fca and deployed to both machines (02:47–02:48 UTC). Results, all verified live unless marked:
+
+| Check | Result |
+| --- | --- |
+| **Idle arrival (the Director, a real desktop Local thread)** | A Claude session's message at 02:55:52 was nudged at 02:55:53, and the idle thread started a turn at 02:55:59, read its mail and resumed work without a relay. The desktop's bundled app-server (a child of ChatGPT.app) held the rollout; the daemon didn't have the thread loaded. The nudged turn ran with the same model, effort, approval and permission settings as the turns before it. The Director separately saw a nudge whose mail it had already read, and stopped silently |
+| **Busy thread** | A nudge queued during a 71-minute turn waited until that turn ended. New mail during the nudged turn queued exactly one more |
+| **Burst** | Three messages became one waiting nudge and one log line (a throwaway `codex exec` thread that no app has open, so items stay countable) |
+| **Read while a nudge waits, then new mail** | Nothing added |
+| **`serve` restart with a nudge waiting, then new mail** | No duplicate |
+| **Leave, then mail** | Nothing added |
+| **Same-owner rejoin** | Nothing added (the waiting nudge was found) |
+| **Takeover** | Only the new thread was nudged. The old thread's waiting nudge stays, and its read is refused ("belongs to another session"), which the nudge text says to stop on |
+| **A failing `--codex`** (isolated `serve`, JSONL) | Retried at 30 s, then 1 m. The real CLI's "no rollout" for an unknown thread was retried with the id redacted. Both messages were still unread afterwards |
+| **launchd** | The deployed `serve` found the bundled CLI and nudged under launchd's environment on both machines |
+| **The Pro** | A burst from the Mini became one nudge in the Pro's own queue, added by the Pro's `serve`. Whether the Pro's desktop runs it is **unverified** (no desktop thread there) |
+| **Daemon-hosted threads and queued items** | **Inconclusive.** A fresh daemon thread has no rollout until its first turn, so the queue refused it. That also shows "no rollout" can be temporary, which is why it is retried |
+| **A desktop subagent's nudge** | Not tested |
+| **The `Stop` hook beside the nudge** | Installed and trusted on the Mini. A full turn-end case on a busy thread with mail was not isolated beyond the Director's busy-turn sequence above |
