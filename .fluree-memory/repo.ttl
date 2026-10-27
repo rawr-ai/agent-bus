@@ -193,3 +193,14 @@ mem:fact-01m5xn3chn8n8q5wktct3xxn4s a mem:Fact ;
     mem:artifactRef "docs/frames/queue-wake.md" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:05:14.037431+00:00"^^xsd:dateTime .
+
+mem:fact-01m5xnf9zqad6yt71b5exbs2dc a mem:Fact ;
+    mem:content "The Codex app-server daemon runs a queued item (thread/queue/add from another process) as a turn for a thread it has loaded with a client attached: 5.8 s after the add, verified 2026-10-27 on 0.164. So the queue route can wake daemon-hosted threads too, not only desktop ones. Untested: a daemon thread with no client attached." ;
+    mem:tag "codex" ;
+    mem:tag "daemon" ;
+    mem:tag "queue" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/queue-wake.md" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T03:11:44.631668+00:00"^^xsd:dateTime .

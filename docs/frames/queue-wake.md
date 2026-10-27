@@ -172,6 +172,6 @@ Shipped in 3d10fca and deployed to both machines (02:47–02:48 UTC). Results, a
 | **A failing `--codex`** (isolated `serve`, JSONL) | Retried at 30 s, then 1 m. The real CLI's "no rollout" for an unknown thread was retried with the id redacted. Both messages were still unread afterwards |
 | **launchd** | The deployed `serve` found the bundled CLI and nudged under launchd's environment on both machines |
 | **The Pro** | A burst from the Mini became one nudge in the Pro's own queue, added by the Pro's `serve`. Whether the Pro's desktop runs it is **unverified** (no desktop thread there) |
-| **Daemon-hosted threads and queued items** | **Inconclusive.** A fresh daemon thread has no rollout until its first turn, so the queue refused it. That also shows "no rollout" can be temporary, which is why it is retried |
+| **Daemon-hosted threads and queued items** | **Verified:** a daemon thread with a client attached (as with an open TUI) ran a queued item as a turn 5.8 s after it was added, and its queue drained. A fresh thread has no rollout until its first turn, so the queue refuses it until then; that is why "no rollout" is retried. A daemon thread with no client attached is untested |
 | **A desktop subagent's nudge** | Not tested |
 | **The `Stop` hook beside the nudge** | Installed and trusted on the Mini. A full turn-end case on a busy thread with mail was not isolated beyond the Director's busy-turn sequence above |
