@@ -1,6 +1,6 @@
 # agent-bus
 
-[README](README.md) owns commands, the delivery model and the ledger format.
+[README](README.md) owns commands, the delivery model and the ledger format. [Overview](docs/overview.md) maps the whole system, its policies and its known gaps; update it when one of those changes.
 
 ## Toolkit
 
