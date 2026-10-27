@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env -S bun --no-env-file
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { BunRuntime, BunServices } from "@effect/platform-bun";

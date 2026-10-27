@@ -2451,10 +2451,14 @@ describe("mcp over http", () => {
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });
-  test("the plugin's hook command finds bun in ~/.bun/bin when Claude Code's PATH lacks it", () => {
+  test("the plugin's hook command runs the checkout through ~/.local/bin/agent-bus, with bun only in ~/.bun/bin", () => {
     const { url, port, layer } = serve();
+    const marketplace = JSON.parse(
+      readFileSync(join(import.meta.dir, "../.claude-plugin/marketplace.json"), "utf8")
+    ) as { readonly plugins: ReadonlyArray<{ readonly source: string }> };
+    expect(marketplace.plugins.map((plugin) => plugin.source)).toEqual(["./plugin"]);
     const manifest = JSON.parse(
-      readFileSync(join(import.meta.dir, "../.claude-plugin/plugin.json"), "utf8")
+      readFileSync(join(import.meta.dir, "../plugin/.claude-plugin/plugin.json"), "utf8")
     ) as {
       readonly hooks: Record<
         string,
@@ -2467,14 +2471,22 @@ describe("mcp over http", () => {
       )
     );
     expect(commands.size).toBe(1);
-    const command = [...commands][0]?.replaceAll(
-      "${CLAUDE_PLUGIN_ROOT}",
-      join(import.meta.dir, "..")
-    );
-    // A home whose only bun is ~/.bun/bin/bun, and a PATH with none.
+    // The cached plugin holds only the manifest, so the command names nothing inside it.
+    const command = [...commands][0];
+    expect(command).not.toContain("CLAUDE_PLUGIN_ROOT");
+    // A home whose bun is ~/.bun/bin/bun and whose launcher links to this checkout; a PATH
+    // whose own `bun` and `agent-bus` fail; another working directory, so the checkout's
+    // dependencies come through the link.
     const home = tempDir();
     mkdirSync(join(home, ".bun", "bin"), { recursive: true });
     symlinkSync(process.execPath, join(home, ".bun", "bin", "bun"));
+    mkdirSync(join(home, ".local", "bin"), { recursive: true });
+    symlinkSync(join(import.meta.dir, "../src/bin.ts"), join(home, ".local", "bin", "agent-bus"));
+    const decoys = join(home, "decoys");
+    mkdirSync(decoys);
+    for (const name of ["bun", "agent-bus"]) {
+      writeFileSync(join(decoys, name), "#!/bin/sh\nexit 99\n", { mode: 0o755 });
+    }
     return Effect.runPromise(
       Effect.gen(function* () {
         const call = Client.call(url);
@@ -2497,10 +2509,12 @@ describe("mcp over http", () => {
         });
         const result = yield* Effect.promise(async () => {
           const child = Bun.spawn(["/bin/sh", "-c", command ?? ""], {
+            cwd: home,
+            timeout: 20_000,
             stdin: new Blob([JSON.stringify({ session_id: sid("claude/a") })]),
             stdout: "ignore",
             stderr: "pipe",
-            env: { HOME: home, PATH: "/usr/bin:/bin", AGENT_BUS_PORT: String(port) },
+            env: { HOME: home, PATH: `${decoys}:/usr/bin:/bin`, AGENT_BUS_PORT: String(port) },
           });
           const [code, stderr] = await Promise.all([
             child.exited,

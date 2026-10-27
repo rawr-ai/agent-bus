@@ -29,7 +29,7 @@ Probed 2026-10-27 on throwaway sessions in scratch folders: Claude Code 2.1.310 
 | `timeout: 2592000` (30 days) | Accepted; the hook woke the session at 25 s |
 | The hook's environment | Its `CLAUDE_CODE_SESSION_ID` equals the `session_id` in its input |
 
-The hook docs agree: an `asyncRewake` hook that exits 2 "wakes Claude immediately even when the session is idle". Each run is its own background process. A `-p` run kills async hooks when it ends. Relative-path plugins from a marketplace added from a local path load in place, with `${CLAUDE_PLUGIN_ROOT}` pointing at the source directory. Claude Code doesn't install their dependencies.
+The hook docs agree: an `asyncRewake` hook that exits 2 "wakes Claude immediately even when the session is idle". Each run is its own background process. A `-p` run kills async hooks when it ends. Relative-path plugins from a marketplace added from a local path load in place, with `${CLAUDE_PLUGIN_ROOT}` pointing at the source directory. (Not so at deploy: `claude plugin install` copied the plugin's directory into its cache; see decision 9.) Claude Code doesn't install their dependencies.
 
 **The session's inbox socket** (`$CLAUDE_CODE_MESSAGING_SOCKET`, one per Claude Code process). An unrelated process posted a message frame to an idle stream-json session's socket, and the session started a turn. The socket and its inbound rules are documented, but the frame format is not; it was read from Claude Code's bundle.
 
@@ -102,8 +102,10 @@ claude plugin install agent-bus@agent-bus
 
 `${CLAUDE_PLUGIN_ROOT}` is then the checkout itself, and the hook runs `bun "${CLAUDE_PLUGIN_ROOT}/src/bin.ts" claude-wake` against the checkout's own dependencies. The hook's `timeout` is 30 days.
 
+**Superseded at deploy** ([finish-swap](finish-swap.md), decision 1): a marketplace install copies the plugin's directory into Claude Code's cache, so the plugin is now `plugin/`, a manifest whose hook runs the installer's `~/.local/bin/agent-bus` link to the checkout.
+
 The hook's requirements:
-- `bun`. Hooks inherit Claude Code's environment, not a shell's, so the command looks on that `PATH` and then in `~/.bun/bin` and `~/.local/bin`, the two places `bun` is installed on the owner's machines;
+- `bun`. Hooks inherit Claude Code's environment, not a shell's, so the command looks on that `PATH` and then in `~/.bun/bin` and `~/.local/bin`, the two places `bun` is installed on the owner's machines (since [finish-swap](finish-swap.md), those two first);
 - the checkout's dependencies installed;
 - `AGENT_BUS_PORT` the same in Claude Code's environment as in `serve`'s, or unset in both (8096).
 
@@ -229,4 +231,4 @@ After deploy, with throwaway sessions and `qual/*` addresses (the owner opens th
 8. **`serve` restarted, and the store unavailable, while a hook waits:** the wake still arrives.
 9. **Hook processes:** after many turns, at most one waits per session, and none lingers for a session that hasn't joined (`ps`).
 10. **A session without the plugin:** its join has no `hooked`, and it runs `wait` as before.
-11. **Both machines:** the plugin is installed, `${CLAUDE_PLUGIN_ROOT}` is the primary checkout, and `bun` resolves from Claude Code's environment.
+11. **Both machines:** the plugin is installed, its hook runs the primary checkout (through `~/.local/bin/agent-bus` since [finish-swap](finish-swap.md)), and `bun` resolves from Claude Code's environment.

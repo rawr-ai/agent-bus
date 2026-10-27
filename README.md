@@ -56,14 +56,14 @@ codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 | `bus_query` | Read-only SPARQL `SELECT` over the whole ledger, at the head or an earlier commit `t` |
 | `bus_leave` | Leave the bus |
 
-Claude sessions are woken by the agent-bus plugin, which this repo serves as a local marketplace. Install it once per machine, from the checkout `serve` runs:
+Claude sessions are woken by the agent-bus plugin, which this repo serves as a local marketplace. Install it once per machine, after the installer, from the checkout `serve` runs:
 
 ```sh
 claude plugin marketplace add <agent-bus checkout>
 claude plugin install agent-bus@agent-bus
 ```
 
-Claude Code loads it in place, so its hook runs the checkout's own `src/bin.ts` with the checkout's dependencies, and picks up a deploy at once. Hooks inherit Claude Code's environment rather than your shell's, so the hook looks for `bun` on that `PATH`, then in `~/.bun/bin` and `~/.local/bin`. It needs the same `AGENT_BUS_PORT` as `serve` (or neither set). Sessions get it when they next start, or with `/reload-plugins`. Deploy `serve` first, so the hook finds `bus_wake`.
+The plugin (`plugin/`) is only a manifest, which Claude Code copies into its cache. Its hook runs `~/.local/bin/agent-bus claude-wake`, the installer's link to the checkout's `src/bin.ts`. So the hook runs the checkout's code with its dependencies, and picks up a deploy at once. After a change to `plugin/`, run `claude plugin marketplace update agent-bus` and `claude plugin update agent-bus@agent-bus`. Hooks inherit Claude Code's environment rather than your shell's, so the hook looks for `bun` in `~/.local/bin`, then `~/.bun/bin`, then on that `PATH`. It needs the same `AGENT_BUS_PORT` as `serve` (or neither set). Sessions get it when they next start, or with `/reload-plugins`. Deploy `serve` first, so the hook finds `bus_wake`.
 
 ## Checking with MCP Inspector
 
@@ -124,7 +124,7 @@ State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` name
 { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }
 ```
 
-On the bus host, `install:launch-agents` runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
+`install:launch-agents` first links `~/.local/bin/agent-bus` to this checkout's `src/bin.ts`, for the Claude Code plugin's hook, and checks that the link runs. On the bus host, it then runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
 
 Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions.
 

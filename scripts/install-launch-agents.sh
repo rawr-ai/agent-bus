@@ -36,6 +36,19 @@ domain="gui/$(id -u)"
 
 mkdir -p "$bus_dir" "$agents"
 
+# The `agent-bus` command: a link to this checkout, which the Claude Code plugin's hook runs.
+# Checked as the hook runs it: a launchd-style PATH after the user's bun directories, outside
+# the checkout.
+launcher="$HOME/.local/bin/agent-bus"
+if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
+  echo "$launcher exists and is not a link; move it aside and rerun" >&2
+  exit 1
+fi
+mkdir -p "$HOME/.local/bin"
+ln -sfn "$repo_dir/src/bin.ts" "$launcher"
+(cd / && env -i HOME="$HOME" PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+  "$launcher" --help >/dev/null) || { echo "$launcher does not run" >&2; exit 1; }
+
 # write_agent LABEL LOG ARG... writes a KeepAlive LaunchAgent running ARGs.
 write_agent() {
   label=$1 log=$2
@@ -183,4 +196,6 @@ wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
 
 echo "Register the bus with each agent runtime on this machine:"
 echo "  claude mcp add --scope user --transport http agent-bus http://127.0.0.1:$bus_port/mcp"
+echo "  claude plugin marketplace add '$repo_dir' && claude plugin install agent-bus@agent-bus"
+echo "  (after a change to plugin/: claude plugin marketplace update agent-bus && claude plugin update agent-bus@agent-bus)"
 echo "  codex mcp add agent-bus --url http://127.0.0.1:$bus_port/mcp"

@@ -3,11 +3,11 @@
   "owner": {
     "name": "rawr-ai"
   },
-  "description": "agent-bus, served in place from this checkout",
+  "description": "agent-bus, from this checkout",
   "plugins": [
     {
       "name": "agent-bus",
-      "source": "./",
+      "source": "./plugin",
       "description": "Wakes a Claude Code session when agent-bus mail arrives for an address it owns"
     }
   ]
