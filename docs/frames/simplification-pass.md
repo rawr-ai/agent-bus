@@ -100,6 +100,21 @@ After deploy:
 6. **The trust record** for the removed hook still carries a hash, so a future hook at the same position isn't trusted by it.
 7. **The Director,** observed: woken by the release note.
 
+## Qualification (2026-10-27)
+
+Deployed to both machines at 48477d6, after the Director was told. All verified live, except where marked.
+
+| Check | Result |
+| --- | --- |
+| **1. Both machines** | Each `hooks.json` lost exactly the agent-bus `Stop` entry. The other machine's other hook (`PreToolUse`) is untouched, and `config.toml` is unchanged on both (same hash before and after). Both run the release, healthy, with no errors in `serve`'s log since the restart |
+| **2 and 3. A throwaway daemon thread loaded before the deploy, busy when its mail came** | Its busy turn ended with no hook failure recorded. The nudge then ran as its own turn and read the mail with `bus_read`, so that turn wasn't empty. One nudge |
+| **4. The peer list** | The two stale owner-less addresses are gone; every live peer is listed as before |
+| **5. The Inspector recipe** | `serve` came up healthy on an in-memory Fluree, served all eight tools and accepted a join (before the deploy) |
+| **6. The trust record** | Still present with its hash on both machines |
+| **7. The Director** | Told before the deploy. It read the release note from one nudge within 12 s, with no warnings |
+
+The no-op command stays until every Codex app-server has started since the deploy. The owner's desktop app restart covers its threads. The daemon restarts on its own schedule.
+
 ## Review adjudication
 
 GPT-6 Astra, GPT-6.1 Sol and an Opus simplicity pass.
