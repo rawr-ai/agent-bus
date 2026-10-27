@@ -176,7 +176,7 @@ The desktop handles `codex://threads/wake/<id>`: it runs whatever is already in 
 
 **The sticky retry set** (verified live, explained by the code): a wake that fails is tried 3 times, 1 s apart, and the id is then kept in an in-memory set. Every later wake link retries it 3 more times, for any thread, until the app restarts or the thread's queue is found empty.
 
-**Holding the lock.** The resume subscribes and never unsubscribes (read in code), so the desktop keeps the woken thread under its own rules ([above](#how-long-a-thread-stays-loaded)): up to about 3 h, or until it leaves the 10 most recently used, plus the server's delay. That it can hold longer is inferred. The live measurement of how long the desktop held a woken thread is pending.
+**Holding the lock.** The resume subscribes and never unsubscribes (read in code). Three woken threads were still held by the desktop 34 minutes after their last turn, past the server's 1800 s delay, and while it held them another server's `thread/archive` was refused (verified live, desktop 26.1021.31345, Codex 0.164.0-alpha.11.1). The desktop's release rule ([above](#how-long-a-thread-stays-loaded)) applies only to threads its UI has opened, which a woken thread never was. So the desktop likely holds it until the app restarts, or until the owner opens the thread and leaves it (inferred).
 
 **What it costs:**
 - The desktop takes and keeps the writer lock, so the daemon, the TUI and another machine's SSH project get refused or read-only for that thread meanwhile.

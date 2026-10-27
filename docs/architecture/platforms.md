@@ -39,7 +39,7 @@ Each finding below was observed on the versions named, and should be checked aga
 | How fast a queued item runs, per kind of thread | Codex 0.164.0-alpha.11.1, desktop 26.1021.31345 | Verified live | [Codex hosting](codex-hosting.md#the-shared-queue) |
 | A spawned subagent's queue refuses direct input | Codex 0.164.0-alpha.11.1 (daemon) | Verified live; desktop subagents inferred | [Codex hosting](codex-hosting.md#the-shared-queue) |
 | Desktop features need the desktop's own app-server; SSH projects get part of them | Desktop 26.1021.31345, Codex 0.164 | Read in code; partly verified live, partly inferred | [Codex hosting](codex-hosting.md#what-desktop-capable-means) |
-| The desktop's `codex://threads/wake/<id>` link: what it does, pickup, visible effects, the retry set | Desktop 26.1021.31345, Codex 0.164.0-alpha.11.1 | Read in code and verified live; how long the desktop holds a woken thread is pending | [Codex hosting](codex-hosting.md#the-threadswake-link) |
+| The desktop's `codex://threads/wake/<id>` link: what it does, pickup, visible effects, the retry set | Desktop 26.1021.31345, Codex 0.164.0-alpha.11.1 | Read in code and verified live; a woken thread was held past 34 min, and holding until the app restarts is inferred | [Codex hosting](codex-hosting.md#the-threadswake-link) |
 | Codex asks approval for MCP tools that are destructive or open-world, except under full access | Codex 0.164.0-alpha.11.1 | Verified live, read in code | [connections](../connections.md#approval-in-codex) |
 | Plugin monitors don't start in stream-json mode; `asyncRewake` hooks wake an idle stream-json session | Claude Code 2.1.310, terminal and stream-json; extrapolated to the desktop's installed 2.1.308 | Verified live on throwaway sessions | [delivery](delivery.md#what-claude-code-provides) |
 | `claude -p` ends async hooks when the run ends | Claude Code 2.1.310 | Documented | [delivery](delivery.md#what-claude-code-provides) |
@@ -54,6 +54,6 @@ The architecture pages mark each claim about a platform with its basis:
 - **inferred:** reasoned from the above, not observed;
 - **extrapolated:** observed on one version and assumed for another, which is named;
 - **inconclusive** or **unknown:** looked for, without an answer;
-- **unverified:** not yet checked; **pending:** being measured now.
+- **unverified:** not yet checked.
 
 What agent-bus itself does is read in this repository's code, and needs no mark. Each page keeps platform behaviour and agent-bus's decisions in separate sections.
