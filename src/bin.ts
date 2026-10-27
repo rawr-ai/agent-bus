@@ -8,7 +8,7 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "./Bus.ts";
 import * as Cursors from "./Cursors.ts";
 import * as Client from "./client.ts";
-import { defaultCodex, defaultSocket, formatDelivery, localHost } from "./codex.ts";
+import { defaultCodex, formatDelivery, localHost } from "./codex.ts";
 import { Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import { codexStop } from "./hook.ts";
@@ -113,7 +113,6 @@ const sessionOf = (of: string, runtime: Option.Option<Runtime>, explicit: Option
 const serve = Command.make(
   "serve",
   {
-    codexSocket: Flag.String("codex-socket").pipe(Flag.withDefault(defaultSocket)),
     codex: Flag.String("codex").pipe(
       Flag.withDescription(
         "The Codex CLI whose app-server queues nudges (default: the desktop app's own)"
@@ -130,7 +129,6 @@ const serve = Command.make(
       Serve.layer({
         port,
         version: VERSION,
-        codexSocket: input.codexSocket,
         codex: input.codex,
         host: input.host,
       })
@@ -182,11 +180,7 @@ const joinCommand = Command.make(
         }),
         replay: input.replay,
       });
-      yield* Console.log(
-        joined.codexHost === "other"
-          ? `joined as ${joined.address}; the bus wakes this Codex thread by queuing a nudge to read its mail, which runs while the thread is open in the desktop app`
-          : `joined as ${joined.address}`
-      );
+      yield* Console.log(`joined as ${joined.address}`);
     })
 ).pipe(Command.withDescription("Join the bus as an address, from this directory"));
 

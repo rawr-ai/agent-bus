@@ -72,22 +72,15 @@ The CLI prints each result as JSON and exits with status 5 when a tool returns `
 
 **Claude Code** runs `agent-bus wait --address <address>` as a background command, one per address. It exits when a message arrives, which wakes the session; the session handles the messages and starts the wait again. While `serve` is unreachable (restarting, say) the wait retries rather than exiting.
 
-**Codex** sessions join with their thread id. `serve` connects to the Codex app-server daemon (WebSocket over `~/.codex/app-server-control/app-server-control.sock`) and calls `turn/start` with the unread messages. An idle thread starts a new turn; a thread mid-turn has the messages steered into the running turn. Messages are marked read only after the daemon accepts the turn, and `serve` then unsubscribes, since it can't answer approvals.
+**Codex** sessions join with their thread id. When the address has unread mail, `serve` puts one fixed message in the thread's own queue telling it to read its mail with `bus_read`. To do so it starts a short-lived `codex app-server` of its own on stdio (the desktop's bundled CLI, or `serve --codex <path>`), lists the thread's queue, and adds the nudge unless one of its nudges is already waiting. Whichever app-server has the thread loaded runs the nudge as a turn: the desktop app for Local threads, and the daemon for the `codex` TUI and SSH projects, whether or not a window or TUI is attached. It runs at once when the thread is idle (seen within 2–6 s in the desktop and 15 s on the daemon), and after the current turn when the thread is busy. A thread nothing has loaded keeps it until the thread is next opened. For TUI and SSH threads, `serve` needs that CLI on the machine that owns the thread, with the same Codex home ([when a nudge doesn't run](docs/connections.md#when-a-nudge-is-queued-but-doesnt-run)).
 
-A thread has one writer, the app-server that loaded it, and the bus never takes a thread from another app-server. At `bus_join`, `serve` records where the thread runs (`codexHost` in the presence entry and the join result): `daemon` if this machine's daemon has it loaded, `other` otherwise (the desktop app's own app-server, a running `codex exec`, or a daemon `serve` can't reach).
-
-| Joined as | `serve` |
-| --- | --- |
-| `daemon` | `turn/start` through the daemon, after `thread/resume` if the daemon has let the thread go |
-| `other`, or `daemon` with its resume refused (`active writer`) | A nudge in the thread's queue |
-
-**The queue nudge** wakes threads the daemon doesn't run, above all the desktop app's Local threads, without a second writer. `serve` starts a short-lived `codex app-server` of its own on stdio (the desktop's bundled CLI, or `serve --codex <path>`), lists the thread's queue, and adds one fixed message telling the thread to read its mail with `bus_read`. The app that has the thread open runs it as a turn: at once when the thread is idle, and in a few seconds even with the app in the background. A thread nobody has open runs it when next opened. The nudge carries no message text, and marks nothing read: the thread's own read moves its cursor.
+`serve` never loads, resumes or starts a turn in a thread itself, so a thread never has a second writer. The nudge carries no message text and marks nothing read: the thread's own read moves its cursor.
 
 At most one bus nudge waits in a thread's queue for an address, since a waiting nudge also covers mail that arrives after it. So when a thread gets its mail some other way first (the `Stop` hook, or a read mid-turn), it costs at most one empty turn. Without new mail or a read, `serve` doesn't look again. The queue methods are experimental in the Codex app-server protocol; using the desktop's own CLI keeps them in step with the app.
 
-A refused resume is not retried; the thread is nudged instead for the rest of that join. Subagents on the daemon take no direct input, so they are never woken there; their messages stay unread for `bus_read`. Failures (the daemon or the queue unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes, with the mail kept unread.
+A subagent's queue refuses direct input, so subagents are never woken; their messages stay unread for `bus_read`. Failures (the queue unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes, with the mail kept unread.
 
-Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since a thread can only be woken by the daemon that hosts it. Within `serve`, joins, leaves, reads and deliveries for one address run one at a time, so a message is delivered once, to the subscriber's current state.
+Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since each machine's queues are in its own `~/.codex`. Within `serve`, joins, leaves, reads and nudges for one address run one at a time, so a nudge acts on the subscriber's current state.
 
 **A Codex `Stop` hook delivers at the end of a busy turn.** When a turn ends, `agent-bus codex-stop-hook` reads the thread's unread messages and continues the turn with them, so a busy desktop thread gets its mail inline rather than in a separate nudged turn. It is optional now that idle threads are nudged. The hook reads as the thread, presenting its id as the session. A subagent's hook carries its parent's id, so the hook delivers only when a transcript is given and is the thread's own. If the bus is unreachable, the turn ends normally, with any messages the hook already read. Install it in `~/.codex/hooks.json` (use absolute paths; hooks don't get your shell's `PATH`), then review and trust it with `/hooks` in the Codex CLI:
 
@@ -110,17 +103,15 @@ Each machine's `serve` wakes only the Codex peers whose join came from that mach
 }
 ```
 
-Where Codex threads run, and so whether the bus can wake them:
+Where Codex threads run, and so when the bus wakes them:
 
 | Started from | Runs on | Woken by the bus |
 | --- | --- | --- |
-| `codex` TUI | The daemon (unless `--no-daemon`) | Yes, live in the TUI |
-| The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes |
-| The desktop app, Local project | The app's own app-server | Yes, by a queue nudge while the thread is open; the `Stop` hook also delivers when a turn ends |
+| `codex` TUI | The daemon (unless `--no-daemon`) | Yes, by a nudge the daemon runs, with or without the TUI attached; a thread the daemon no longer has loaded gets it when next opened |
+| The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes, as for the TUI |
+| The desktop app, Local project | The app's own app-server | Yes, by a nudge while the thread is open; the `Stop` hook also delivers when a turn ends |
 | `codex exec` | Its own process | No: a nudge waits in its queue until the thread is opened |
-| A subagent | Its parent's app-server | Not on the daemon; whether the desktop runs a subagent's nudge is untested |
-
-The daemon inherits the open-file limit of whatever started it, often macOS's default soft limit of 256. A daemon holding several threads, each with its own MCP servers, exhausts that, and then fails to load threads, skills or shells (`Too many open files` in `~/.codex/app-server-control/app-server.log`). Restart it from a shell with a higher limit: `ulimit -n 10240 && codex app-server daemon restart`.
+| A subagent | Its parent's app-server | No: its queue refuses direct input |
 
 ## Setup and other machines
 
@@ -138,7 +129,7 @@ Both servers listen on loopback only. Another machine clones this repo and runs 
 
 ## Security
 
-The bus trusts every process of the user on the machine; loopback is not authentication. [Connections and trust boundaries](docs/connections.md) lists every connection the bus makes or depends on, including the Codex daemon and the desktop app's options for running on it.
+The bus trusts every process of the user on the machine; loopback is not authentication. [Connections and trust boundaries](docs/connections.md) lists every connection the bus makes or depends on, and what a TUI or SSH thread needs for its nudge to run.
 
 - **Fluree** requires the token on its data and admin APIs (`--data-auth-mode required`, `--admin-auth-mode required`) and has CORS off. Without this, any web page could write to it with a cross-origin `text/plain` POST. Its event stream stays open: it carries only ledger names and commit pointers, never message content (a subject-less token, which writes need, is refused there). The token is never logged.
 - **`serve`** accepts only requests whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding, and the MCP endpoint rejects any browser `Origin`.

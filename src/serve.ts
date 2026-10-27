@@ -1,7 +1,7 @@
 import { BunHttpServer } from "@effect/platform-bun";
 import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
-import { runDeliverer, threadHostsLayer } from "./codex.ts";
+import { runDeliverer } from "./codex.ts";
 import * as Mcp from "./mcp.ts";
 
 /**
@@ -50,14 +50,11 @@ export const layerHttp = (options: { readonly port: number; readonly version: st
 export const layer = (options: {
   readonly port: number;
   readonly version: string;
-  readonly codexSocket: string;
-  /** The Codex CLI that queues nudges for threads the daemon doesn't run. */
+  /** The Codex CLI whose app-server queues nudges. */
   readonly codex: string;
   readonly host: string;
 }) =>
   Layer.mergeAll(
-    layerHttp(options).pipe(Layer.provide(threadHostsLayer(options.codexSocket))),
-    Layer.effectDiscard(
-      Effect.forkScoped(runDeliverer(options.codexSocket, options.codex, options.host))
-    )
+    layerHttp(options),
+    Layer.effectDiscard(Effect.forkScoped(runDeliverer(options.codex, options.host)))
   );

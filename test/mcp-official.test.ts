@@ -16,7 +16,6 @@ import {
 import { Effect, Layer, ManagedRuntime } from "effect";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { ThreadHosts } from "../src/codex.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Serve from "../src/serve.ts";
 
@@ -35,8 +34,7 @@ const server = ManagedRuntime.make(
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )
-    ),
-    Layer.provide(Layer.succeed(ThreadHosts)({ classify: () => Effect.succeed("other") }))
+    )
   )
 );
 beforeAll(() => server.runPromise(Effect.void));

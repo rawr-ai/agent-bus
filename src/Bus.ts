@@ -2,7 +2,6 @@ import { hostname } from "node:os";
 import { Clock, Context, Effect, Layer, Option, Semaphore, Stream } from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
-  type CodexHost,
   isFor,
   type LedgerError,
   Message,
@@ -25,7 +24,6 @@ export interface JoinInput {
   readonly takeover?: string | undefined;
   readonly topics?: ReadonlyArray<string> | undefined;
   readonly codexThreadId?: string | undefined;
-  readonly codexHost?: CodexHost | undefined;
   readonly note?: string | undefined;
   /** Start from the beginning of the ledger instead of only new messages. */
   readonly replay?: boolean | undefined;
@@ -46,7 +44,7 @@ export interface PublishInput {
 export interface Pending {
   readonly subscriber: Subscriber;
   readonly messages: ReadonlyArray<Message>;
-  /** Cursor to acknowledge once these messages are delivered. */
+  /** The cursor just past these messages, where a read of them moves it. */
   readonly next: number;
 }
 
@@ -73,16 +71,17 @@ export class Bus extends Context.Service<
     ) => Effect.Effect<Message, LedgerError | NotJoined | NotOwner>;
     readonly peers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
     /**
-     * Hands an address's unread messages to `send` and marks them read if it
-     * returns true. Joins, leaves and deliveries for one address run one at a
-     * time, so a message is delivered once and to the subscriber's current state. This is the Codex deliverer's path, which delivers to whoever owns
-     * the address; sessions read through `take` and `wait`.
+     * Hands an address's unread messages to `nudge`, and marks none of them
+     * read: only the owner's read does. With nothing for the subscriber, it
+     * passes over what isn't its mail, as the owner's read would. Joins,
+     * leaves, reads and nudges for one address run one at a time, so a nudge
+     * acts on the subscriber's current state. This is the Codex deliverer's
+     * path; sessions read through `take` and `wait`.
      */
     readonly deliver: <E>(
       address: string,
-      send: (pending: Pending) => Effect.Effect<boolean, E>,
-      limit?: number
-    ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | E>;
+      nudge: (pending: Pending) => Effect.Effect<void, E>
+    ) => Effect.Effect<void, LedgerError | NotJoined | E>;
     /** Returns the owner's unread messages and marks them read. */
     readonly take: (
       address: string,
@@ -320,7 +319,6 @@ export const layer = Layer.effect(
           session,
           ...optional("takeover", takeover),
           ...optional("codexThreadId", input.codexThreadId),
-          ...optional("codexHost", input.codexHost),
           ...optional("note", input.note),
         });
         // The owner rejoining, or a takeover, keeps unread messages; a new owner
@@ -399,32 +397,25 @@ export const layer = Layer.effect(
 
     const ack = (address: string, cursor: number) => cursors.set(address, cursor);
 
-    /**
-     * Reads `reader`'s messages under the address's lock. A session's reader
-     * checks ownership there on every attempt, just before the cursor moves.
-     */
-    const deliverAs = <R, E>(
-      address: string,
-      reader: Effect.Effect<Subscriber | undefined, R>,
-      send: (pending: Pending) => Effect.Effect<boolean, E>,
-      limit?: number
-    ) =>
+    const deliver = <E>(address: string, nudge: (pending: Pending) => Effect.Effect<void, E>) =>
       Effect.gen(function* () {
-        const batch = yield* pending(address, reader, limit);
-        // A batch with nothing for this subscriber still moves its cursor past what was read.
-        const sent = batch.messages.length === 0 ? false : yield* send(batch);
-        if (batch.messages.length === 0 || sent) yield* ack(address, batch.next);
-        return sent ? batch.messages : [];
+        // A peer that left since the deliverer listed peers has nothing to nudge.
+        const subscriber = yield* peer(address);
+        if (subscriber === undefined) return;
+        const batch = yield* pending(address, Effect.succeed(subscriber));
+        // With nothing for this subscriber, pass over what was read, as its own read would,
+        // so later passes don't read it again.
+        if (batch.messages.length === 0) return yield* ack(address, batch.next);
+        yield* nudge(batch);
       }).pipe(exclusive(address), Effect.withSpan("Bus.deliver"));
 
-    const deliver = <E>(
-      address: string,
-      send: (pending: Pending) => Effect.Effect<boolean, E>,
-      limit?: number
-    ) => deliverAs(address, peer(address), send, limit);
-
+    /** The owner's read: its reader checks ownership under the lock, just before the cursor moves. */
     const take = (address: string, session: string | undefined, limit?: number) =>
-      deliverAs(address, owned(address, session), () => Effect.succeed(true), limit);
+      Effect.gen(function* () {
+        const batch = yield* pending(address, owned(address, session), limit);
+        yield* ack(address, batch.next);
+        return batch.messages;
+      }).pipe(exclusive(address), Effect.withSpan("Bus.take"));
 
     const waitFor = Effect.fn("Bus.wait")(function* (
       address: string,

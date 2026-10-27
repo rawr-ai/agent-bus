@@ -10,7 +10,7 @@ import {
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Clock, Deferred, Duration, Effect, Fiber, Layer, Option } from "effect";
+import { Clock, Deferred, Duration, Effect, Fiber, Layer, Option, Schema } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
@@ -20,17 +20,14 @@ import * as Client from "../src/client.ts";
 import {
   appServerQueue,
   CodexError,
-  connect,
-  type Daemon,
   deliverOnce,
   deliveryTargets,
   formatDelivery,
   formatNudge,
   type Holds,
   type Queue,
-  ThreadHosts,
 } from "../src/codex.ts";
-import { type CodexHost, Message, Origin, Presence } from "../src/domain.ts";
+import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import { codexStop } from "../src/hook.ts";
 import * as Ledger from "../src/Ledger.ts";
@@ -678,6 +675,31 @@ describe("codex delivery text", () => {
 });
 
 describe("codex delivery routing", () => {
+  test("presences from earlier versions, which recorded where a thread ran, still decode", async () => {
+    const earlier = JSON.stringify({
+      id: "m-1",
+      ts: new Date().toISOString(),
+      from: "codex/a",
+      to: ["*"],
+      kind: "presence",
+      body: "codex/a joined",
+      presence: {
+        runtime: "codex",
+        status: "joined",
+        topics: [],
+        codexThreadId: "t-1",
+        codexHost: "daemon",
+      },
+    });
+    const decoded = await Effect.runPromise(Schema.decodeUnknownEffect(MessageJson)(earlier));
+    expect(decoded.presence?.codexThreadId).toBe("t-1");
+    // So does an earlier server's join result.
+    const joined = await Effect.runPromise(
+      Schema.decodeUnknownEffect(Mcp.Joined)({ address: "codex/a", cursor: 3, codexHost: "other" })
+    );
+    expect(joined).toEqual({ address: "codex/a", cursor: 3 });
+  });
+
   test("each machine's deliverer wakes only the Codex peers that joined from it", () =>
     Effect.runPromise(
       Effect.provide(
@@ -734,114 +756,41 @@ describe("codex delivery routing", () => {
     ));
 });
 
-describe("codex daemon connection", () => {
-  test("a daemon that never completes the handshake fails at the deadline", async () => {
-    const socketPath = join(tempDir(), "silent.sock");
-    const silent = Bun.listen({ unix: socketPath, socket: { data() {} } });
-    try {
-      const started = Date.now();
-      const result = await Effect.runPromise(
-        Effect.result(Effect.scoped(connect(socketPath, Duration.millis(300))))
-      );
-      expect(result._tag).toBe("Failure");
-      expect(Date.now() - started).toBeLessThan(2_000);
-    } finally {
-      silent.stop(true);
-    }
-  });
-});
-
-describe("codex daemon replies", () => {
-  test("a request from the daemon that reuses a pending id is not taken for the reply", async () => {
-    const socketPath = join(tempDir(), "daemon.sock");
-    const server = Bun.serve({
-      unix: socketPath,
-      fetch: (request, server) =>
-        server.upgrade(request) ? undefined : new Response("upgrade", { status: 400 }),
-      websocket: {
-        message: (socket, text) => {
-          const { id, method } = JSON.parse(String(text)) as { id?: number; method: string };
-          if (id === undefined) return;
-          if (method === "thread/loaded/list") {
-            socket.send(JSON.stringify({ id, method: "item/requestApproval", params: {} }));
-          }
-          socket.send(JSON.stringify({ id, result: { data: [method] } }));
-        },
-      },
-    });
-    try {
-      const result = await Effect.runPromise(
-        Effect.scoped(
-          Effect.flatMap(connect(socketPath, Duration.seconds(2)), (daemon) =>
-            daemon.request("thread/loaded/list", {})
-          )
-        )
-      );
-      expect(result).toEqual({ data: ["thread/loaded/list"] });
-    } finally {
-      server.stop(true);
-    }
-  });
-});
-
 describe("codex delivery", () => {
   /**
-   * A daemon with a set of loaded threads. `resume` and `turn` choose how it
-   * answers those requests; every request is recorded as `method threadId`.
-   */
-  const fakeDaemon = () => {
-    const calls: Array<string> = [];
-    const state = {
-      loaded: new Set<string>(),
-      resume: "accept" as "accept" | "active writer",
-      turn: "accept" as "accept" | "subagent" | "silent",
-    };
-    const fail = (method: string, message: string) =>
-      Effect.fail(new CodexError({ method, message }));
-    const daemon: Daemon = {
-      request: (method, params) => {
-        if (method === "thread/loaded/list") {
-          return Effect.succeed({ data: Array.from(state.loaded) });
-        }
-        const { threadId } = params as { readonly threadId: string };
-        calls.push(`${method} ${threadId}`);
-        if (method === "thread/resume") {
-          if (state.resume === "active writer") {
-            return fail(method, `thread ${threadId} already has an active writer`);
-          }
-          state.loaded.add(threadId);
-        }
-        if (method === "turn/start" && state.turn === "subagent") {
-          return fail(
-            method,
-            "direct app-server input is not allowed for multi-agent v2 sub-agents"
-          );
-        }
-        if (method === "turn/start" && state.turn === "silent") {
-          return fail(method, "no answer within 30s");
-        }
-        return Effect.succeed({});
-      },
-    };
-    return { daemon, calls, state };
-  };
-
-  /**
    * Codex thread queues: each thread's waiting items, in order. `queue` makes
-   * every request fail, or makes an add land and then report a failure, as a
-   * timed-out request might. `opened` counts the app-servers started.
+   * every request fail, makes an add land and then report a failure, as a
+   * timed-out request might, or refuses adds as a subagent's queue does.
+   * `opened` counts the app-servers started.
    */
   const fakeQueue = () => {
     const items = new Map<string, Array<string>>();
-    const queueState = { queue: "accept" as "accept" | "fail" | "lands, then fails", opened: 0 };
+    const queueState = {
+      queue: "accept" as "accept" | "fail" | "lands, then fails" | "subagent" | "hangs",
+      opened: 0,
+      listing: false,
+    };
     const waiting = (threadId: string) => items.get(threadId) ?? [];
-    const fail = (method: string) =>
-      Effect.fail(new CodexError({ method, message: "no answer within 3 seconds" }));
+    const fail = (method: string, message = "no answer within 2 seconds") =>
+      Effect.fail(new CodexError({ method, message }));
     const queue: Queue = {
-      list: (threadId) =>
-        queueState.queue === "fail" ? fail("thread/queue/list") : Effect.succeed(waiting(threadId)),
+      list: (threadId) => {
+        if (queueState.queue === "fail") return fail("thread/queue/list");
+        if (queueState.queue === "hangs") {
+          return Effect.sync(() => {
+            queueState.listing = true;
+          }).pipe(Effect.andThen(Effect.never));
+        }
+        return Effect.succeed(waiting(threadId));
+      },
       add: (threadId, text) => {
         if (queueState.queue === "fail") return fail("thread/queue/add");
+        if (queueState.queue === "subagent") {
+          return fail(
+            "thread/queue/add",
+            "direct app-server input is not allowed for unloaded spawned sub-agents"
+          );
+        }
         items.set(threadId, [...waiting(threadId), text]);
         return queueState.queue === "lands, then fails" ? fail("thread/queue/add") : Effect.void;
       },
@@ -850,80 +799,53 @@ describe("codex delivery", () => {
       queueState.opened += 1;
       return queue;
     });
-    /** The desktop runs the thread's next waiting item. */
+    /** Whichever app-server has the thread loaded runs its next waiting item. */
     const runNext = (threadId: string) => items.set(threadId, waiting(threadId).slice(1));
     return { openQueue, waiting, runNext, queueState };
   };
 
   /** A Codex peer `codex/a` on thread t-1 with one message from `claude/b`, and a deliverer for it. */
-  const setup = (codexHost: CodexHost) =>
-    Effect.gen(function* () {
-      const bus = yield* Bus.Bus;
-      const fake = fakeDaemon();
-      const queued = fakeQueue();
-      const holds: Holds = new Map();
-      const deliverer = (state: Holds) =>
-        deliverOnce(Effect.succeed(fake.daemon), queued.openQueue, hostname(), state);
-      const join = bus.join({
-        address: "codex/a",
-        runtime: "codex",
-        session: "t-1",
-        cwd: process.cwd(),
-        codexThreadId: "t-1",
-        codexHost,
-      });
-      yield* join;
-      yield* bus.join({
-        address: "claude/b",
-        runtime: "claude",
-        session: sid("claude/b"),
-        cwd: process.cwd(),
-      });
-      const send = (body: string) =>
-        bus.publish({ from: "claude/b", session: sid("claude/b"), to: ["codex/a"], body });
-      yield* send("hi");
-      return {
-        bus,
-        ...fake,
-        ...queued,
-        holds,
-        deliver: deliverer(holds),
-        /** A deliverer that has just started, as after a restart. */
-        restarted: deliverer(new Map()),
-        join,
-        send,
-      };
+  const setup = Effect.gen(function* () {
+    const bus = yield* Bus.Bus;
+    const queued = fakeQueue();
+    const holds: Holds = new Map();
+    const deliverer = (state: Holds) => deliverOnce(queued.openQueue, hostname(), state);
+    const join = bus.join({
+      address: "codex/a",
+      runtime: "codex",
+      session: "t-1",
+      cwd: process.cwd(),
+      codexThreadId: "t-1",
     });
+    yield* join;
+    yield* bus.join({
+      address: "claude/b",
+      runtime: "claude",
+      session: sid("claude/b"),
+      cwd: process.cwd(),
+    });
+    const send = (body: string) =>
+      bus.publish({ from: "claude/b", session: sid("claude/b"), to: ["codex/a"], body });
+    yield* send("hi");
+    return {
+      bus,
+      ...queued,
+      holds,
+      deliver: deliverer(holds),
+      /** A deliverer that has just started, as after a restart. */
+      restarted: deliverer(new Map()),
+      join,
+      send,
+    };
+  });
 
   const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus>) =>
     Effect.runPromise(Effect.provide(effect, Layer.merge(jsonl().layer, TestClock.layer())));
 
-  test("a loaded daemon thread gets a turn, and the deliverer unsubscribes", () =>
+  test("a Codex thread is nudged with none of its mail, and its messages stay unread", () =>
     run(
       Effect.gen(function* () {
-        const { bus, calls, state, queueState, deliver } = yield* setup("daemon");
-        state.loaded.add("t-1");
-        yield* deliver;
-        expect(calls).toEqual(["turn/start t-1", "thread/unsubscribe t-1"]);
-        expect(queueState.opened).toBe(0);
-        expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
-      })
-    ));
-
-  test("a thread that joined from the daemon is resumed there", () =>
-    run(
-      Effect.gen(function* () {
-        const { bus, calls, deliver } = yield* setup("daemon");
-        yield* deliver;
-        expect(calls).toEqual(["thread/resume t-1", "turn/start t-1", "thread/unsubscribe t-1"]);
-        expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
-      })
-    ));
-
-  test("a desktop thread is nudged with none of its mail, and its messages stay unread", () =>
-    run(
-      Effect.gen(function* () {
-        const { bus, calls, state, waiting, deliver } = yield* setup("other");
+        const { bus, waiting, deliver } = yield* setup;
         yield* bus.publish({
           from: "claude/b",
           session: sid("claude/b"),
@@ -931,10 +853,7 @@ describe("codex delivery", () => {
           subject: "private subject",
           body: "private body",
         });
-        // Even a desktop thread the daemon happens to have loaded is never sent there.
-        state.loaded.add("t-1");
         yield* deliver;
-        expect(calls).toEqual([]);
         expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
         const text = waiting("t-1")[0] ?? "";
         expect(text).toStartWith('[agent-bus] New messages for "codex/a".');
@@ -946,7 +865,7 @@ describe("codex delivery", () => {
   test("more mail while a nudge waits adds nothing, and starts no app-server once covered", () =>
     run(
       Effect.gen(function* () {
-        const { waiting, queueState, deliver, send } = yield* setup("other");
+        const { waiting, queueState, deliver, send } = yield* setup;
         yield* deliver;
         yield* send("two");
         yield* deliver;
@@ -960,7 +879,7 @@ describe("codex delivery", () => {
   test("once the nudge has run, only mail it didn't cover, or a partial read, is nudged again", () =>
     run(
       Effect.gen(function* () {
-        const { bus, waiting, runNext, deliver, send } = yield* setup("other");
+        const { bus, waiting, runNext, deliver, send } = yield* setup;
         yield* deliver;
         runNext("t-1");
         // The thread didn't read: nothing new, so no nudge.
@@ -987,7 +906,7 @@ describe("codex delivery", () => {
   test("mail read another way while a nudge waits, then new mail, adds nothing", () =>
     run(
       Effect.gen(function* () {
-        const { bus, waiting, deliver, send } = yield* setup("other");
+        const { bus, waiting, deliver, send } = yield* setup;
         yield* deliver;
         for (const body of ["two", "three"]) {
           // The Stop hook reads at the end of a busy turn; the nudge still waits.
@@ -1002,7 +921,7 @@ describe("codex delivery", () => {
   test("an add that lands but reports failure is retried without a second nudge", () =>
     run(
       Effect.gen(function* () {
-        const { bus, waiting, queueState, holds, deliver } = yield* setup("other");
+        const { bus, waiting, queueState, holds, deliver } = yield* setup;
         queueState.queue = "lands, then fails";
         yield* deliver;
         expect(waiting("t-1").length).toBe(1);
@@ -1017,32 +936,56 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a failing queue leaves the mail unread and is retried after a doubling delay", () =>
+  test("a failing queue leaves the mail unread and is retried after a delay doubling to five minutes", () =>
     run(
       Effect.gen(function* () {
-        const { bus, waiting, queueState, deliver } = yield* setup("other");
+        const { bus, waiting, queueState, holds, deliver } = yield* setup;
         queueState.queue = "fail";
-        yield* deliver;
-        yield* deliver; // still waiting out the first failure
-        expect(queueState.opened).toBe(1);
-        yield* TestClock.adjust("30 seconds");
-        yield* deliver;
-        yield* TestClock.adjust("30 seconds"); // the second failure waits a minute
-        yield* deliver;
-        expect(queueState.opened).toBe(2);
+        const delays: Array<number> = [];
+        for (const _ of [1, 2, 3, 4, 5, 6]) {
+          yield* deliver;
+          const now = yield* Clock.currentTimeMillis;
+          const delay = (holds.get("codex/a")?.until ?? 0) - now;
+          delays.push(delay / 1000);
+          // Nothing is tried again before the delay is up.
+          yield* TestClock.adjust(delay - 1);
+          yield* deliver;
+          yield* TestClock.adjust(1);
+        }
+        expect(delays).toEqual([30, 60, 120, 240, 300, 300]);
+        expect(queueState.opened).toBe(6);
 
         queueState.queue = "accept";
-        yield* TestClock.adjust("30 seconds");
         yield* deliver;
         expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.failures).toBe(0);
         expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
+      })
+    ));
+
+  test("a queue that never answers is cut off at the nudge's deadline, holding the owner's read until then", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, queueState, holds, deliver } = yield* setup;
+        queueState.queue = "hangs";
+        const nudging = yield* Effect.forkChild(deliver);
+        while (!queueState.listing) yield* Effect.promise(() => Bun.sleep(5));
+        const read = yield* Effect.forkChild(bus.take("codex/a", "t-1"));
+        yield* Effect.promise(() => Bun.sleep(20));
+        expect(read.pollUnsafe()).toBeUndefined();
+
+        yield* TestClock.adjust("6 seconds");
+        yield* Fiber.join(nudging);
+        expect(holds.get("codex/a")?.failures).toBe(1);
+        expect(waiting("t-1")).toEqual([]);
+        expect(bodies(yield* Fiber.join(read))).toEqual(["hi"]);
       })
     ));
 
   test("a rejoin by the same owner while its nudge waits adds nothing", () =>
     run(
       Effect.gen(function* () {
-        const { waiting, deliver, join } = yield* setup("other");
+        const { waiting, deliver, join } = yield* setup;
         yield* deliver;
         yield* join;
         yield* deliver;
@@ -1053,7 +996,7 @@ describe("codex delivery", () => {
   test("a restart with a nudge waiting adds nothing", () =>
     run(
       Effect.gen(function* () {
-        const { waiting, deliver, restarted } = yield* setup("other");
+        const { waiting, deliver, restarted } = yield* setup;
         yield* deliver;
         yield* restarted;
         expect(waiting("t-1").length).toBe(1);
@@ -1063,7 +1006,7 @@ describe("codex delivery", () => {
   test("a nudge belongs to its address's owner: leaving stops it, a takeover nudges the new one", () =>
     run(
       Effect.gen(function* () {
-        const { bus, waiting, runNext, deliver, join, send } = yield* setup("other");
+        const { bus, waiting, runNext, deliver, join, send } = yield* setup;
         yield* deliver;
         runNext("t-1");
         yield* bus.leave("codex/a", "t-1");
@@ -1084,7 +1027,6 @@ describe("codex delivery", () => {
           session: "t-2",
           cwd: process.cwd(),
           codexThreadId: "t-2",
-          codexHost: "other",
           takeover: holder?.joinId,
         });
         yield* deliver;
@@ -1093,90 +1035,21 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a daemon thread another app-server holds is nudged at once, and never resumed again", () =>
+  test("a subagent, whose queue refuses input, is not nudged again until it rejoins", () =>
     run(
       Effect.gen(function* () {
-        const { bus, calls, state, waiting, runNext, holds, deliver, send } =
-          yield* setup("daemon");
-        state.resume = "active writer";
-        yield* deliver;
-        expect(calls).toEqual(["thread/resume t-1"]);
-        expect(waiting("t-1").length).toBe(1);
-        expect(holds.get("codex/a")?.elsewhere).toBe(true);
-
-        state.resume = "accept";
-        runNext("t-1");
-        yield* bus.take("codex/a", "t-1");
-        yield* send("two");
-        yield* deliver;
-        expect(calls).toEqual(["thread/resume t-1"]);
-        expect(waiting("t-1").length).toBe(1);
-      })
-    ));
-
-  test("a refused resume is remembered even when the nudge after it fails", () =>
-    run(
-      Effect.gen(function* () {
-        const { calls, state, queueState, waiting, holds, deliver } = yield* setup("daemon");
-        state.resume = "active writer";
-        queueState.queue = "fail";
-        yield* deliver;
-        expect(holds.get("codex/a")?.elsewhere).toBe(true);
-
-        queueState.queue = "accept";
-        yield* TestClock.adjust("30 seconds");
-        yield* deliver;
-        expect(calls).toEqual(["thread/resume t-1"]);
-        expect(waiting("t-1").length).toBe(1);
-      })
-    ));
-
-  test("a subagent is not woken again, until it rejoins", () =>
-    run(
-      Effect.gen(function* () {
-        const { calls, state, deliver, join } = yield* setup("daemon");
-        state.loaded.add("t-1");
-        state.turn = "subagent";
+        const { bus, queueState, holds, deliver, join } = yield* setup;
+        queueState.queue = "subagent";
         yield* deliver;
         yield* TestClock.adjust("1 hour");
         yield* deliver;
-        expect(calls).toEqual(["turn/start t-1"]);
+        expect(queueState.opened).toBe(1);
+        expect(holds.get("codex/a")?.refused).toBe(true);
 
         yield* join;
         yield* deliver;
-        expect(calls).toEqual(["turn/start t-1", "turn/start t-1"]);
-      })
-    ));
-
-  test("a daemon that doesn't answer is retried after a doubling delay, capped at five minutes", () =>
-    run(
-      Effect.gen(function* () {
-        const { bus, calls, state, holds, deliver } = yield* setup("daemon");
-        state.loaded.add("t-1");
-        state.turn = "silent";
-        const attempts = () => calls.filter((call) => call.startsWith("turn/start")).length;
-
-        yield* deliver;
-        yield* deliver; // still waiting out the first failure
-        expect(attempts()).toBe(1);
-        yield* TestClock.adjust("30 seconds");
-        yield* deliver;
-        yield* TestClock.adjust("30 seconds"); // the second failure waits a minute
-        yield* deliver;
-        expect(attempts()).toBe(2);
-
-        for (const _ of [3, 4, 5]) {
-          yield* TestClock.adjust("5 minutes");
-          yield* deliver;
-        }
-        const until = holds.get("codex/a")?.until ?? 0;
-        expect(until - (yield* Clock.currentTimeMillis)).toBe(5 * 60_000);
-
-        state.turn = "accept";
-        yield* TestClock.adjust("5 minutes");
-        yield* deliver;
-        expect(holds.size).toBe(0);
-        expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
+        expect(queueState.opened).toBe(2);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
       })
     ));
 });
@@ -1186,7 +1059,7 @@ describe("codex app-server queue", () => {
    * A stand-in `codex` whose `app-server` speaks JSON-RPC on stdio. It records
    * each request it receives, and answers as `mode` says.
    */
-  const fakeCodex = (mode: "answers" | "refuses" | "silent" | "stubborn") => {
+  const fakeCodex = (mode: "answers" | "pages" | "asks" | "refuses" | "silent" | "stubborn") => {
     const dir = tempDir();
     const bin = join(dir, "codex");
     const log = join(dir, "requests");
@@ -1208,6 +1081,12 @@ for await (const line of console) {
   if (message.method === "initialize") reply(message.id, { result: {} });
   else if (mode === "silent" || mode === "stubborn") continue;
   else if (mode === "refuses") reply(message.id, { error: { code: -32603, message: "no rollout found for thread id " + message.params.threadId } });
+  else if (mode === "pages" && message.method === "thread/queue/list") reply(message.id, { result: message.params.cursor === "p2" ? { data: [{ id: "q2", input: [{ type: "text", text: "second page", text_elements: [] }] }], nextCursor: null } : { data: [{ id: "q1", input: [{ type: "text", text: "first page", text_elements: [] }] }], nextCursor: "p2" } });
+  else if (mode === "asks" && message.method === "thread/queue/list") {
+    // A request of the server's own that happens to reuse the pending id is not the reply.
+    process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, method: "item/requestApproval", params: {} }) + "\\n");
+    reply(message.id, { result: { data: [], nextCursor: null } });
+  }
   else if (message.method === "thread/queue/list") reply(message.id, { result: { data: [{ id: "q1", clientUserMessageId: "c1", input: [{ type: "text", text: "waiting", text_elements: [] }] }, { id: "q2", input: [{ type: "image", url: 7 }] }, { id: "q3" }], nextCursor: null } });
   else reply(message.id, { result: { queuedSubmission: { id: "q2", clientUserMessageId: message.params.clientUserMessageId, input: message.params.input } } });
 }
@@ -1242,11 +1121,28 @@ for await (const line of console) {
     const [initialize, initialized, list, add] = codex.requests();
     expect(initialize?.params?.capabilities).toEqual({ experimentalApi: true });
     expect(initialized?.method).toBe("initialized");
-    expect(list?.params).toEqual({ threadId: "t-1", limit: 100 });
+    expect(list?.params).toEqual({ threadId: "t-1", limit: 100, cursor: null });
     expect(add?.params?.threadId).toBe("t-1");
     expect(add?.params?.input).toEqual([
       { type: "text", text: "read your mail", text_elements: [] },
     ]);
+  });
+
+  test("a listing follows every page", async () => {
+    const codex = fakeCodex("pages");
+    const result = await withQueue(codex.bin, (queue) => queue.list("t-1"));
+    expect(result._tag === "Success" && result.success).toEqual(["first page", "second page"]);
+    expect(codex.requests().map((request) => request.params?.cursor)).toEqual([
+      undefined,
+      undefined,
+      null,
+      "p2",
+    ]);
+  });
+
+  test("a request from the app-server that reuses a pending id is not taken for the reply", async () => {
+    const result = await withQueue(fakeCodex("asks").bin, (queue) => queue.list("t-1"));
+    expect(result._tag === "Success" && result.success).toEqual([]);
   });
 
   test("a refusal is a failure that carries the app-server's message", async () => {
@@ -1309,24 +1205,21 @@ describe("sparql validation", () => {
 });
 
 describe("one address at a time", () => {
-  /** Starts a delivery to `address` that holds its batch until `release` completes. */
+  /** Starts a nudge for `address` that holds its batch until `release` completes. */
   const heldDelivery = (bus: Bus.Bus["Service"], address: string) =>
     Effect.gen(function* () {
       const holding = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       const fiber = yield* Effect.forkChild(
         bus.deliver(address, () =>
-          Deferred.succeed(holding, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-            Effect.as(true)
-          )
+          Deferred.succeed(holding, undefined).pipe(Effect.andThen(Deferred.await(release)))
         )
       );
       yield* Deferred.await(holding);
       return { fiber, release };
     });
 
-  test("a read during a delivery waits, and does not see the delivered messages again", () =>
+  test("a read during a nudge waits for it, and the nudge marks nothing read", () =>
     Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
@@ -1351,15 +1244,17 @@ describe("one address at a time", () => {
           });
           const { fiber, release } = yield* heldDelivery(bus, "codex/a");
           const read = yield* Effect.forkChild(bus.take("codex/a", sid("codex/a")));
+          yield* Effect.yieldNow;
+          expect(read.pollUnsafe()).toBeUndefined();
           yield* Deferred.succeed(release, undefined);
-          expect(bodies(yield* Fiber.join(fiber))).toEqual(["once"]);
-          expect(yield* Fiber.join(read)).toEqual([]);
+          yield* Fiber.join(fiber);
+          expect(bodies(yield* Fiber.join(read))).toEqual(["once"]);
         }),
         jsonl().layer
       )
     ));
 
-  test("a replay during a delivery takes effect after it, rather than being overwritten", () =>
+  test("a replay waits for a nudge in progress, then rewinds past mail already read", () =>
     Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
@@ -1376,12 +1271,11 @@ describe("one address at a time", () => {
             session: sid("codex/a"),
             cwd: process.cwd(),
           });
-          yield* bus.publish({
-            from: "claude/b",
-            session: sid("claude/b"),
-            to: ["codex/a"],
-            body: "again",
-          });
+          const send = (body: string) =>
+            bus.publish({ from: "claude/b", session: sid("claude/b"), to: ["codex/a"], body });
+          yield* send("earlier");
+          expect(bodies(yield* bus.take("codex/a", sid("codex/a")))).toEqual(["earlier"]);
+          yield* send("again");
           const { fiber, release } = yield* heldDelivery(bus, "codex/a");
           const rejoin = yield* Effect.forkChild(
             bus.join({
@@ -1392,14 +1286,59 @@ describe("one address at a time", () => {
               replay: true,
             })
           );
+          yield* Effect.promise(() => Bun.sleep(20));
+          expect(rejoin.pollUnsafe()).toBeUndefined();
           yield* Deferred.succeed(release, undefined);
           yield* Fiber.join(fiber);
           yield* Fiber.join(rejoin);
-          expect(bodies(yield* bus.take("codex/a", sid("codex/a")))).toEqual(["again"]);
+          expect(bodies(yield* bus.take("codex/a", sid("codex/a")))).toEqual(["earlier", "again"]);
         }),
         jsonl().layer
       )
     ));
+
+  test("a nudge for a peer that has left does nothing; one whose cursor is missing still fails", () => {
+    const store = jsonl();
+    return Effect.runPromise(
+      Effect.provide(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          let nudged = 0;
+          const nudge = () =>
+            Effect.sync(() => {
+              nudged += 1;
+            });
+          yield* bus.join({
+            address: "claude/b",
+            runtime: "claude",
+            session: sid("claude/b"),
+            cwd: process.cwd(),
+          });
+          for (const address of ["codex/gone", "codex/lost"]) {
+            yield* bus.join({
+              address,
+              runtime: "codex",
+              session: sid(address),
+              cwd: process.cwd(),
+            });
+            yield* bus.publish({
+              from: "claude/b",
+              session: sid("claude/b"),
+              to: [address],
+              body: "hi",
+            });
+          }
+          yield* bus.leave("codex/gone", sid("codex/gone"));
+          yield* bus.deliver("codex/gone", nudge);
+
+          rmSync(join(store.file, "..", "cursors", `${encodeURIComponent("codex/lost")}.json`));
+          const lost = yield* Effect.flip(bus.deliver("codex/lost", nudge));
+          expect([lost._tag, nudged]).toEqual(["NotJoined", 0]);
+        }),
+        store.layer
+      )
+    );
+  });
 });
 
 describe("one session per address", () => {
@@ -1444,10 +1383,7 @@ describe("one session per address", () => {
       const release = yield* Deferred.make<void>();
       const fiber = yield* Effect.forkChild(
         bus.deliver(address, () =>
-          Deferred.succeed(holding, undefined).pipe(
-            Effect.andThen(Deferred.await(release)),
-            Effect.as(false)
-          )
+          Deferred.succeed(holding, undefined).pipe(Effect.andThen(Deferred.await(release)))
         )
       );
       yield* Deferred.await(holding);
@@ -1875,15 +1811,7 @@ describe("mcp over http", () => {
     return {
       port,
       url: `http://127.0.0.1:${port}/mcp`,
-      layer: Serve.layerHttp({ port, version: "test" }).pipe(
-        Layer.provide(jsonl().layer),
-        // The daemon runs t-daemon; every other thread runs somewhere else.
-        Layer.provide(
-          Layer.succeed(ThreadHosts)({
-            classify: (threadId) => Effect.succeed(threadId === "t-daemon" ? "daemon" : "other"),
-          })
-        )
-      ),
+      layer: Serve.layerHttp({ port, version: "test" }).pipe(Layer.provide(jsonl().layer)),
     };
   };
 
@@ -1978,7 +1906,7 @@ describe("mcp over http", () => {
     });
   }
 
-  test("a Codex join learns whether the bus can wake its thread", () => {
+  test("a Codex join returns its address and cursor, with nothing about where the thread runs", () => {
     const { url, layer } = serve();
     return Effect.runPromise(
       Effect.gen(function* () {
@@ -1990,14 +1918,8 @@ describe("mcp over http", () => {
           session: thread,
           codexThreadId: thread,
         });
-        const onDaemon = yield* join("codex/a", codex("t-daemon"));
-        const inDesktop = yield* join("codex/b", codex("t-desk"));
-        const claude = yield* join("claude/c", { runtime: "claude", session: sid("claude/c") });
-        expect([onDaemon.codexHost, inDesktop.codexHost, claude.codexHost]).toEqual([
-          "daemon",
-          "other",
-          undefined,
-        ]);
+        const joined = yield* join("codex/a", codex("t-1"));
+        expect(Object.keys(joined).sort()).toEqual(["address", "cursor"]);
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });

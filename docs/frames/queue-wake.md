@@ -27,7 +27,7 @@ Checked while framing (2026-10-27), on the bundled CLI 0.164.0-alpha.11.1, which
 
 ## Decisions
 
-**1. Route by where the thread runs.**
+**1. Route by where the thread runs.** Superseded by [one-codex-route](one-codex-route.md): every Codex thread now takes the queue route, and `serve` no longer connects to the daemon.
 
 | Peer | Route |
 | --- | --- |
@@ -73,7 +73,7 @@ The deliverer recognises its own waiting nudge by this text's first line, which 
 
 Threads that can't run the item:
 - An exited `codex exec` thread, and a desktop thread no window has open, keep their one waiting nudge until opened.
-- A native subagent on the desktop has its own thread, so its queue accepts the item. Whether the desktop runs it is unknown. It is checked in qualification if a subagent is at hand. Until then, "subagents are never woken" holds only for the daemon route.
+- A native subagent on the desktop has its own thread, so its queue accepts the item. Whether the desktop runs it is unknown. It is checked in qualification if a subagent is at hand. Until then, "subagents are never woken" holds only for the daemon route. *Later found ([one-codex-route](one-codex-route.md)): a spawned subagent's queue refuses the add, through `serve`'s own app-server.*
 
 **6. Fit with what exists.**
 - **The `Stop` hook stays.** A busy thread gets its mail inline at turn end, and the waiting nudge then runs once and finds nothing: the one empty turn the Director accepts.

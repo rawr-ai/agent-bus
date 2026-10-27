@@ -13,14 +13,6 @@ export class Origin extends Schema.Class<Origin>("Origin")({
 }) {}
 
 /**
- * Which Codex app-server ran a thread when it joined: the machine's shared
- * daemon, which the bus may resume the thread on, or another one (such as the
- * desktop app's own), which the bus must never take the thread from.
- */
-export const CodexHost = Schema.Literals(["daemon", "other"]);
-export type CodexHost = typeof CodexHost.Type;
-
-/**
  * A subscriber's announcement. The latest presence per address is that peer's
  * state, and its owner is the session that may use the address: `runtime` and
  * `session`, the runtime's own id for it (a Codex thread id, a Claude Code
@@ -34,7 +26,6 @@ export class Presence extends Schema.Class<Presence>("Presence")({
   /** The join this one took over from a different session. */
   takeover: Schema.optionalKey(Schema.String),
   codexThreadId: Schema.optionalKey(Schema.String),
-  codexHost: Schema.optionalKey(CodexHost),
   note: Schema.optionalKey(Schema.String),
 }) {}
 

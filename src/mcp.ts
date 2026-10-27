@@ -1,22 +1,12 @@
 import { Effect, Layer, Schema } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus } from "./Bus.ts";
-import { ThreadHosts } from "./codex.ts";
-import { CodexHost, LedgerError, Message, NotJoined, NotOwner, Runtime } from "./domain.ts";
+import { LedgerError, Message, NotJoined, NotOwner, Runtime } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 
 const Failure = Schema.Union([LedgerError, NotJoined, NotOwner]);
 export const Messages = Schema.Struct({ messages: Schema.Array(Message) });
-export const Joined = Schema.Struct({
-  address: Schema.String,
-  cursor: Schema.Number,
-  codexHost: Schema.optionalKey(
-    CodexHost.annotate({
-      description:
-        "How the bus wakes this thread. daemon: live, with each message as a turn through this machine's Codex daemon, resuming the thread if needed. other: it runs in another app-server (such as the desktop app's), so the bus queues a nudge to call bus_read, which the desktop app runs while the thread is open; a thread no app has open gets it when next opened.",
-    })
-  ),
-});
+export const Joined = Schema.Struct({ address: Schema.String, cursor: Schema.Number });
 export const Published = Schema.Struct({ id: Schema.String, ts: Schema.String });
 export const Left = Schema.Struct({ address: Schema.String });
 export const Peers = Schema.Struct({
@@ -50,7 +40,7 @@ const Session = Schema.optionalKey(
 
 const Join = Tool.make("bus_join", {
   description:
-    "Join the agent bus (or rejoin after a restart) before reading. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can wake them with new messages, and learn whether it can (codexHost); Claude sessions run `agent-bus wait --address <address>` as a background command to be woken.",
+    "Join the agent bus (or rejoin after a restart) before reading. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can nudge them to read new messages; Claude sessions run `agent-bus wait --address <address>` as a background command to be woken.",
   parameters: Schema.Struct({
     address: Address,
     runtime: Runtime,
@@ -172,17 +162,8 @@ const BusHandlers = BusToolkit.toLayer(
   Effect.gen(function* () {
     const bus = yield* Bus;
     const ledger = yield* Ledger;
-    const hosts = yield* ThreadHosts;
     return {
-      bus_join: (params) =>
-        Effect.gen(function* () {
-          const codexHost =
-            params.runtime === "codex" && params.codexThreadId !== undefined
-              ? yield* hosts.classify(params.codexThreadId)
-              : undefined;
-          const joined = yield* bus.join({ ...params, session: params.session, codexHost });
-          return codexHost === undefined ? joined : { ...joined, codexHost };
-        }),
+      bus_join: (params) => bus.join({ ...params, session: params.session }),
       bus_publish: (params) =>
         bus
           .publish({ ...params, session: params.session })
@@ -224,7 +205,7 @@ const instructions = `agent-bus lets Claude and Codex sessions message each othe
    Pass your runtime's session id as session on every call (join, publish, read, wait, leave): read it from your shell, $CODEX_THREAD_ID in Codex or $CLAUDE_CODE_SESSION_ID in Claude Code. A different session can't use your address, and you can't use one another session holds: choose another address rather than taking it over.
    Codex sessions also pass their thread id as codexThreadId so the bus can wake them with new messages.
    Claude sessions then run \`agent-bus wait --address <address> --runtime claude\` as a background command, one per address; it exits when messages arrive, which wakes you. Re-run it after handling them. Subagents act for their parent and share its id, so a subagent that reads independently needs its own address.
-   Being woken depends on how you run, not on your address or topics, which only decide what is yours to read. Codex threads on this machine's daemon get their unread messages live, through the daemon. Codex desktop Local threads (and any thread not on the daemon) get a queued nudge to call bus_read, which the desktop app runs while the thread is open. Claude sessions are woken only while their background wait runs. Waking isn't guaranteed for codex exec threads or subagents: they read with bus_read or bus_wait.
+   Being woken depends on how you run, not on your address or topics, which only decide what is yours to read. Codex threads get a queued nudge to call bus_read, which runs as a turn wherever the thread is loaded (the desktop app, or the TUI's daemon): at once when idle, after the current turn when busy, and when next opened if nothing has it loaded. Claude sessions are woken only while their background wait runs. Waking isn't guaranteed for codex exec threads or subagents: they read with bus_read or bus_wait.
 2. Send with bus_publish; answer a message by setting replyTo to its id.
 3. bus_read returns unread messages now; bus_wait blocks until a reply arrives. bus_peers shows who is on the bus; bus_history searches past messages; bus_query runs SPARQL over the whole ledger.`;
 

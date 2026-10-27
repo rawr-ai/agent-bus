@@ -1,16 +1,8 @@
-import { homedir, hostname } from "node:os";
-import { join } from "node:path";
-import { Clock, Context, Duration, Effect, Layer, Option, Schema, Scope, Stream } from "effect";
+import { hostname } from "node:os";
+import { Clock, Duration, Effect, Option, Schema, type Scope, Stream } from "effect";
 import { Bus, type Pending } from "./Bus.ts";
-import type { CodexHost, Message, Subscriber } from "./domain.ts";
+import type { Message, Subscriber } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
-
-export const defaultSocket = join(
-  homedir(),
-  ".codex",
-  "app-server-control",
-  "app-server-control.sock"
-);
 
 export class CodexError extends Schema.TaggedError<CodexError>()("CodexError", {
   method: Schema.String,
@@ -20,7 +12,7 @@ export class CodexError extends Schema.TaggedError<CodexError>()("CodexError", {
 const Reply = Schema.fromJsonString(
   Schema.Struct({
     id: Schema.Number,
-    // Requests from the daemon (approvals) carry their own ids; they are not replies.
+    // Requests from the app-server carry their own ids; they are not replies.
     method: Schema.optionalKey(Schema.Unknown),
     result: Schema.optionalKey(Schema.Unknown),
     error: Schema.optionalKey(Schema.Struct({ message: Schema.String })),
@@ -28,16 +20,11 @@ const Reply = Schema.fromJsonString(
 );
 const decodeReply = Schema.decodeUnknownOption(Reply);
 
-const LoadedThreads = Schema.Struct({ data: Schema.Array(Schema.String) });
-const decodeLoaded = Schema.decodeUnknownEffect(LoadedThreads);
-
 type Resolve = (reply: {
   readonly result?: unknown;
   readonly error?: { readonly message: string };
 }) => void;
 
-/** A daemon that stops answering fails the request instead of stalling every delivery. */
-const REQUEST_TIMEOUT = Duration.seconds(30);
 const timeLimit =
   (method: string, timeout: Duration.Duration) =>
   <A, R>(effect: Effect.Effect<A, CodexError, R>) =>
@@ -48,12 +35,6 @@ const timeLimit =
           new CodexError({ method, message: `no answer within ${Duration.format(timeout)}` })
         ),
     });
-
-/** The requests the deliverer makes of a Codex app-server. */
-export interface Daemon {
-  readonly request: (method: string, params: unknown) => Effect.Effect<unknown, CodexError>;
-}
-const Daemon = { of: (daemon: Daemon) => daemon };
 
 /**
  * JSON-RPC over a connection that carries one message per `write`. The
@@ -101,50 +82,21 @@ const rpc = (write: (text: string) => void, timeout: Duration.Duration) => {
       return Effect.sync(() => pending.delete(id));
     }).pipe(timeLimit(method, timeout));
 
-  /** Opens the session; `experimentalApi` unlocks methods such as `thread/queue/*`. */
-  const initialize = (experimentalApi: boolean) =>
-    Effect.gen(function* () {
-      yield* request("initialize", {
-        clientInfo: { name: "agent-bus", title: "agent-bus", version: "0.1.0" },
-        capabilities: experimentalApi ? { experimentalApi } : null,
-      });
-      yield* Effect.try({
-        try: () => write(JSON.stringify({ jsonrpc: "2.0", method: "initialized" })),
-        catch: (cause) => new CodexError({ method: "initialized", message: String(cause) }),
-      });
-      return Daemon.of({ request });
+  /** Opens the session, with the experimental methods (`thread/queue/*`) unlocked. */
+  const initialize = Effect.gen(function* () {
+    yield* request("initialize", {
+      clientInfo: { name: "agent-bus", title: "agent-bus", version: "0.1.0" },
+      capabilities: { experimentalApi: true },
     });
+    yield* Effect.try({
+      try: () => write(JSON.stringify({ jsonrpc: "2.0", method: "initialized" })),
+      catch: (cause) => new CodexError({ method: "initialized", message: String(cause) }),
+    });
+    return { request };
+  });
 
   return { receive, closed, initialize };
 };
-
-/**
- * A JSON-RPC connection to the local Codex app-server daemon, which speaks
- * WebSocket over its Unix socket. Threads the daemon hosts can be woken with
- * `turn/start`; threads owned by another app-server (the desktop app's
- * embedded one) refuse a second writer.
- */
-export const connect = (socketPath: string, timeout: Duration.Duration = REQUEST_TIMEOUT) =>
-  Effect.gen(function* () {
-    // The scope owns the socket from the moment it exists, so a handshake that
-    // never completes can be abandoned at the deadline and still be closed.
-    const ws = yield* Effect.acquireRelease(
-      Effect.sync(() => new WebSocket(`ws+unix://${socketPath}`)),
-      (socket) => Effect.sync(() => socket.close())
-    );
-    yield* Effect.callback<void, CodexError>((resume) => {
-      ws.onopen = () => resume(Effect.void);
-      ws.onerror = () =>
-        resume(
-          Effect.fail(new CodexError({ method: "connect", message: `cannot reach ${socketPath}` }))
-        );
-    }).pipe(timeLimit("connect", timeout));
-
-    const client = rpc((text) => ws.send(text), timeout);
-    ws.onmessage = (event) => client.receive(String(event.data));
-    ws.onclose = client.closed;
-    return yield* client.initialize(false);
-  });
 
 /**
  * A Codex app-server of this process's own, on stdio, as `codex queue` starts
@@ -201,7 +153,7 @@ const appServer = (codex: string, timeout: Duration.Duration) =>
         stderr = (stderr + decoder.decode(chunk, { stream: true })).slice(-500);
       }
     })().catch(() => undefined);
-    return yield* client.initialize(true).pipe(
+    return yield* client.initialize.pipe(
       Effect.mapError((error) =>
         stderr.trim() === ""
           ? error
@@ -223,7 +175,7 @@ const describe = (message: Message) =>
     ...(message.replyTo === undefined ? [] : [`in reply to: ${message.replyTo}`]),
   ].join(" | ");
 
-/** The turn input a Codex session sees when bus messages arrive. */
+/** Bus messages as a session sees them from `agent-bus wait` and the Codex `Stop` hook. */
 export const formatDelivery = (address: string, messages: ReadonlyArray<Message>) => {
   const count = messages.length === 1 ? "1 new message" : `${messages.length} new messages`;
   const blocks = messages.map((message) => `${describe(message)}\n\n${message.body}`);
@@ -246,15 +198,16 @@ const nudgeHead = (address: string) => `[agent-bus] New messages for ${JSON.stri
 export const formatNudge = (address: string) =>
   `${nudgeHead(address)} Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
 
-/** A thread's queue: whichever app has the thread open runs its items as turns, in order. */
+/** A thread's queue: whichever app-server has the thread loaded runs its items as turns, in order. */
 export interface Queue {
   /** The text of each item waiting in the thread's queue. */
   readonly list: (threadId: string) => Effect.Effect<ReadonlyArray<string>, CodexError>;
   readonly add: (threadId: string, text: string) => Effect.Effect<void, CodexError>;
 }
-const Queue = { of: (queue: Queue) => queue };
-
-const QueuedItems = Schema.Struct({ data: Schema.Array(Schema.Unknown) });
+const QueuedItems = Schema.Struct({
+  data: Schema.Array(Schema.Unknown),
+  nextCursor: Schema.optionalKey(Schema.NullOr(Schema.String)),
+});
 const decodeQueued = Schema.decodeUnknownEffect(QueuedItems);
 
 const field = (value: unknown, key: string): unknown =>
@@ -279,7 +232,7 @@ const desktopCodex =
 /**
  * The Codex CLI to reach queues with: the desktop app's own, whose
  * experimental protocol matches the app that runs the items. A machine
- * without the desktop app has nothing to run them.
+ * without the desktop app passes its own CLI with `serve --codex`.
  */
 export const defaultCodex = desktopCodex;
 
@@ -295,16 +248,29 @@ const NUDGE_TIMEOUT = Duration.seconds(6);
 /**
  * Thread queues through an app-server of serve's own (`thread/queue/*`, which
  * the protocol marks experimental). Listing and adding load the thread
- * nowhere; the desktop app runs an item in a thread it has open, at once when
- * idle, and a thread nobody has open keeps it until it is opened.
+ * nowhere. Whichever app-server has the thread loaded (the desktop app's, or
+ * the daemon's for the TUI) runs an item at once when the thread is idle and
+ * after the current turn when it is busy; a thread nothing has loaded keeps it
+ * until it is opened.
  */
 export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE_TIMEOUT) =>
-  Effect.map(appServer(codex, timeout), (server) =>
-    Queue.of({
+  Effect.map(
+    appServer(codex, timeout),
+    (server): Queue => ({
+      // Every page, so a waiting nudge further down is still found.
       list: (threadId) =>
-        server.request("thread/queue/list", { threadId, limit: 100 }).pipe(
-          Effect.flatMap(decodeQueued),
-          Effect.map((queued) => queued.data.map(queuedText)),
+        Effect.gen(function* () {
+          const texts: Array<string> = [];
+          let cursor: string | null = null;
+          do {
+            const page: typeof QueuedItems.Type = yield* server
+              .request("thread/queue/list", { threadId, limit: 100, cursor })
+              .pipe(Effect.flatMap(decodeQueued));
+            texts.push(...page.data.map(queuedText));
+            cursor = page.nextCursor ?? null;
+          } while (cursor !== null);
+          return texts;
+        }).pipe(
           Effect.mapError(
             (cause) => new CodexError({ method: "thread/queue/list", message: cause.message })
           )
@@ -327,8 +293,7 @@ export const localHost = hostname();
 
 /**
  * The Codex peers one machine's deliverer wakes: those with a thread id that
- * joined from that machine, since a thread can only be woken by the daemon that
- * hosts it. One deliverer per machine keeps one cursor writer per address.
+ * joined from that machine, whose queues are in that machine's `~/.codex`.
  */
 export const deliveryTargets = (peers: ReadonlyArray<Subscriber>, host: string) =>
   peers.filter(
@@ -339,38 +304,6 @@ export const deliveryTargets = (peers: ReadonlyArray<Subscriber>, host: string) 
       machine(peer.host) === machine(host)
   );
 
-const loadedThreads = (daemon: Daemon) =>
-  daemon.request("thread/loaded/list", {}).pipe(
-    Effect.flatMap(decodeLoaded),
-    Effect.map((loaded) => loaded.data),
-    Effect.mapError(
-      (cause) => new CodexError({ method: "thread/loaded/list", message: String(cause) })
-    )
-  );
-
-/** How long classifying a joining thread may hold up its join. */
-const CLASSIFY_TIMEOUT = Duration.seconds(5);
-
-/**
- * Classifies a joining Codex thread by where it runs. A Codex session joins
- * mid-turn, so its thread is loaded in whichever app-server runs it: if that is
- * this machine's daemon, the bus may later resume it there.
- */
-export class ThreadHosts extends Context.Service<
-  ThreadHosts,
-  { readonly classify: (threadId: string) => Effect.Effect<CodexHost> }
->()("agent-bus/ThreadHosts") {}
-
-export const threadHostsLayer = (socketPath: string) =>
-  Layer.succeed(ThreadHosts)({
-    classify: (threadId) =>
-      Effect.scoped(Effect.flatMap(connect(socketPath, CLASSIFY_TIMEOUT), loadedThreads)).pipe(
-        Effect.map((loaded): CodexHost => (loaded.includes(threadId) ? "daemon" : "other")),
-        // An unreachable daemon can't be running the thread.
-        Effect.orElseSucceed((): CodexHost => "other")
-      ),
-  });
-
 const FIRST_RETRY = Duration.seconds(30);
 const LAST_RETRY = Duration.minutes(5);
 
@@ -378,14 +311,9 @@ const LAST_RETRY = Duration.minutes(5);
 interface Hold {
   /** The join this applies to; rejoining starts over. */
   readonly joinId: string;
-  /**
-   * Another app-server refused to let the daemon resume the thread: nudge it
-   * through its queue from then on, as for a thread that joined from elsewhere.
-   */
-  readonly elsewhere: boolean;
-  /** The thread takes no direct input (a subagent): never deliver to this join. */
+  /** The thread takes no direct input (a subagent): never nudge this join. */
   readonly refused: boolean;
-  /** Consecutive transport failures, and when to try again. */
+  /** Consecutive failures, and when to try again. */
   readonly failures: number;
   readonly until: number;
   /**
@@ -399,26 +327,19 @@ interface Hold {
 /** What the deliverer knows about each peer, by address. */
 export type Holds = Map<string, Hold>;
 
-const otherWriter = (error: CodexError) => error.message.includes("active writer");
 const noDirectInput = (error: CodexError) =>
   error.message.includes("direct app-server input is not allowed");
 
 /**
- * Wake each of this machine's Codex peers that has unread messages.
+ * Nudge each of this machine's Codex peers that has unread messages to read
+ * them: one fixed item in its thread's queue, which whichever app-server has
+ * the thread loaded runs as a turn. The messages stay unread until the thread
+ * reads them. At most one bus nudge waits in a thread's queue for an address,
+ * since a waiting nudge also covers newer mail.
  *
- * A thread that joined from the daemon gets its messages as one turn there
- * (`turn/start` steers it if it is mid-turn), resumed first if the daemon has
- * let it go, and they are marked read once the daemon accepts the turn.
- *
- * Any other thread (the desktop app's, or one the daemon was refused) is never
- * sent to the daemon. It gets a nudge in its queue to read its mail, and the
- * messages stay unread until it does. At most one bus nudge waits in a
- * thread's queue for an address, since a waiting nudge also covers newer mail.
- *
- * Transport failures are retried after a delay that doubles to five minutes.
+ * Failures are retried after a delay that doubles to five minutes.
  */
 export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
-  open: Effect.Effect<Daemon, CodexError, Scope.Scope>,
   openQueue: Effect.Effect<Queue, CodexError, Scope.Scope>,
   host: string,
   holds: Holds
@@ -431,147 +352,94 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       hold === undefined || hold.joinId !== peer.joinId || (!hold.refused && hold.until <= now)
     );
   });
-  if (ready.length === 0) return;
 
-  yield* Effect.scoped(
-    Effect.gen(function* () {
-      // Connect once, and only when a daemon thread has messages.
-      const scope = yield* Scope.Scope;
-      const daemon = yield* Effect.cached(Effect.provideService(open, Scope.Scope, scope));
-      for (const peer of ready) {
-        // The bus hands over the subscriber as it is now, under the address's lock;
-        // what happens belongs to that subscriber, which may have rejoined since `peer` was read.
-        let attempted: Subscriber = peer;
-        let nudged: string | undefined;
-        let added = false;
-        let refusedResume = false;
-        const current = () => {
-          const hold = holds.get(peer.address);
-          return hold?.joinId === attempted.joinId ? hold : undefined;
-        };
-        const nudge = (address: string, threadId: string, messages: ReadonlyArray<Message>) =>
+  for (const peer of ready) {
+    // The bus hands over the subscriber as it is now, under the address's lock;
+    // what happens belongs to that subscriber, which may have rejoined since `peer` was read.
+    let attempted: Subscriber = peer;
+    let nudged: string | undefined;
+    let added = false;
+    const current = () => {
+      const hold = holds.get(peer.address);
+      return hold?.joinId === attempted.joinId ? hold : undefined;
+    };
+    const nudge = ({ subscriber, messages }: Pending) =>
+      Effect.gen(function* () {
+        attempted = subscriber;
+        const threadId = subscriber.presence.codexThreadId;
+        const unread = `${messages[0]?.id}..${messages.at(-1)?.id}`;
+        if (
+          threadId === undefined ||
+          deliveryTargets([subscriber], host).length === 0 ||
+          current()?.nudged === unread
+        ) {
+          return;
+        }
+        // The app-server is ended before the lock is released, so an add can't land later.
+        yield* Effect.scoped(
           Effect.gen(function* () {
-            const unread = `${messages[0]?.id}..${messages.at(-1)?.id}`;
-            if (messages.length === 0 || current()?.nudged === unread) return false;
-            // The app-server is ended before the lock is released, so an add can't land later.
-            yield* Effect.scoped(
-              Effect.gen(function* () {
-                const queue = yield* openQueue;
-                const waiting = (yield* queue.list(threadId)).some((text) =>
-                  text.startsWith(nudgeHead(address))
-                );
-                if (!waiting) {
-                  yield* queue.add(threadId, formatNudge(address));
-                  added = true;
-                }
-              })
-            ).pipe(timeLimit("queue nudge", NUDGE_TIMEOUT));
-            nudged = unread;
-            // The thread reads its own mail, so nothing is marked read here.
-            return false;
-          });
-        const send = ({ subscriber, messages }: Pending) =>
-          Effect.gen(function* () {
-            attempted = subscriber;
-            const threadId = subscriber.presence.codexThreadId;
-            if (threadId === undefined || deliveryTargets([subscriber], host).length === 0) {
-              return false;
-            }
-            if (subscriber.presence.codexHost !== "daemon" || current()?.elsewhere) {
-              return yield* nudge(subscriber.address, threadId, messages);
-            }
-            return yield* Effect.gen(function* () {
-              const connection = yield* daemon;
-              if (!(yield* loadedThreads(connection)).includes(threadId)) {
-                yield* connection.request("thread/resume", { threadId });
-              }
-              yield* connection.request("turn/start", {
-                threadId,
-                input: [
-                  {
-                    type: "text",
-                    text: formatDelivery(subscriber.address, messages),
-                    text_elements: [],
-                  },
-                ],
-              });
-              // serve can't answer approvals, and must not keep the thread loaded.
-              yield* connection.request("thread/unsubscribe", { threadId }).pipe(Effect.ignore);
-              return true;
-            }).pipe(
-              // Another app-server has the thread, so the daemon must not take it.
-              Effect.catchIf(otherWriter, () => {
-                refusedResume = true;
-                return nudge(subscriber.address, threadId, messages);
-              })
+            const queue = yield* openQueue;
+            const waiting = (yield* queue.list(threadId)).some((text) =>
+              text.startsWith(nudgeHead(subscriber.address))
             );
-          });
-        const delivered = yield* Effect.result(bus.deliver(peer.address, send));
-        const hold = (change: Partial<Hold>) => {
-          const previous = current();
-          holds.set(peer.address, {
-            joinId: attempted.joinId,
-            elsewhere: refusedResume || (previous?.elsewhere ?? false),
-            refused: previous?.refused ?? false,
-            failures: 0,
-            until: 0,
-            nudged: previous?.nudged,
-            ...change,
-          });
-        };
-        if (refusedResume && current()?.elsewhere !== true) {
-          yield* Effect.logInfo(
-            `Nudging ${peer.address} through its Codex queue from now on: another Codex app-server, such as the desktop app's, runs its thread.`
-          );
-        }
+            if (!waiting) {
+              yield* queue.add(threadId, formatNudge(subscriber.address));
+              added = true;
+            }
+          })
+        ).pipe(timeLimit("queue nudge", NUDGE_TIMEOUT));
+        nudged = unread;
+      });
+    const nudging = yield* Effect.result(bus.deliver(peer.address, nudge));
+    const hold = (change: Partial<Hold>) =>
+      holds.set(peer.address, {
+        joinId: attempted.joinId,
+        refused: current()?.refused ?? false,
+        failures: 0,
+        until: 0,
+        nudged: current()?.nudged,
+        ...change,
+      });
 
-        if (delivered._tag === "Success") {
-          if (nudged !== undefined) {
-            hold({ nudged });
-            if (added) yield* Effect.logInfo(`Queued a nudge for ${peer.address} to read its mail`);
-            continue;
-          }
-          if (refusedResume) hold({});
-          if (delivered.success.length === 0) continue;
-          holds.delete(peer.address);
-          yield* Effect.logInfo(`Delivered ${delivered.success.length} to ${peer.address}`);
-          continue;
-        }
-        const error = delivered.failure;
-        if (error._tag !== "CodexError") {
-          yield* Effect.logWarning(`Could not deliver to ${peer.address}: ${error.message}`);
-          continue;
-        }
-        // Codex names the thread in some errors; logs name the address instead.
-        const threadId = attempted.presence.codexThreadId;
-        const reason =
-          threadId === undefined ? error.message : error.message.replaceAll(threadId, "<thread>");
-        if (noDirectInput(error)) {
-          hold({ refused: true });
-          yield* Effect.logWarning(
-            `Not waking ${peer.address}: its Codex thread takes no direct input (${reason}). Its messages stay unread for bus_read until it rejoins.`
-          );
-          continue;
-        }
-        const failures = (current()?.failures ?? 0) + 1;
-        const delay = Duration.min(Duration.times(FIRST_RETRY, 2 ** (failures - 1)), LAST_RETRY);
-        // The delay runs from the failure, which may have taken a request timeout to arrive.
-        const failedAt = yield* Clock.currentTimeMillis;
-        hold({ failures, until: failedAt + Duration.toMillis(delay) });
-        yield* Effect.logWarning(
-          `Could not wake ${peer.address}: ${error.method}: ${reason}. Next attempt in ${Duration.format(delay)}.`
-        );
-      }
-    })
-  );
+    if (nudging._tag === "Success") {
+      if (nudged === undefined) continue;
+      hold({ nudged });
+      if (added) yield* Effect.logInfo(`Queued a nudge for ${peer.address} to read its mail`);
+      continue;
+    }
+    const error = nudging.failure;
+    if (error._tag !== "CodexError") {
+      yield* Effect.logWarning(`Could not nudge ${peer.address}: ${error.message}`);
+      continue;
+    }
+    // Codex names the thread in some errors; logs name the address instead.
+    const threadId = attempted.presence.codexThreadId;
+    const reason =
+      threadId === undefined ? error.message : error.message.replaceAll(threadId, "<thread>");
+    if (noDirectInput(error)) {
+      hold({ refused: true });
+      yield* Effect.logWarning(
+        `Not waking ${peer.address}: its Codex thread takes no direct input (${reason}). Its messages stay unread for bus_read until it rejoins.`
+      );
+      continue;
+    }
+    const failures = (current()?.failures ?? 0) + 1;
+    const delay = Duration.min(Duration.times(FIRST_RETRY, 2 ** (failures - 1)), LAST_RETRY);
+    // The delay runs from the failure, which may have taken a request timeout to arrive.
+    const failedAt = yield* Clock.currentTimeMillis;
+    hold({ failures, until: failedAt + Duration.toMillis(delay) });
+    yield* Effect.logWarning(
+      `Could not wake ${peer.address}: ${error.method}: ${reason}. Next attempt in ${Duration.format(delay)}.`
+    );
+  }
 });
 
-/** Long-running deliverer: delivers now, then whenever the ledger changes. */
-export const runDeliverer = (socketPath: string, codex: string, host: string) =>
+/** Long-running deliverer: nudges now, then whenever the ledger changes. */
+export const runDeliverer = (codex: string, host: string) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger;
     const holds: Holds = new Map();
-    const attempt = deliverOnce(connect(socketPath), appServerQueue(codex), host, holds).pipe(
+    const attempt = deliverOnce(appServerQueue(codex), host, holds).pipe(
       Effect.catchCause((cause) => Effect.logWarning("Delivery cycle failed", cause))
     );
     yield* attempt;

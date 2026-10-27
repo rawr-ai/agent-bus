@@ -1,5 +1,7 @@
 # Frame: waking Codex threads without locking the owner out
 
+**Superseded (2026-10-27).** `serve` no longer connects to the daemon: every Codex thread is woken by a nudge in its own queue ([one-codex-route](one-codex-route.md)). The reasoning below is kept as a record, and its daemon facts still hold for the Codex daemon itself.
+
 ## Outcome
 
 Agents wake each other through the bus, and the owner can always see, and type into, every Codex thread they work in.
