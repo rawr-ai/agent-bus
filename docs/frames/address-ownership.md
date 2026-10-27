@@ -71,7 +71,8 @@ Reviewed by GPT-6 Astra (max effort), GPT-6.1 Sol (extra-high) and Claude Opus 5
 - **Verified in qualification** (2026-10-26, Claude Code 2.1.310, Codex 0.164):
   - `CLAUDE_CODE_SESSION_ID` is set in the desktop app, in interactive terminal sessions and in `claude -p`, each with its own value even when started from another session's shell. `--resume` keeps the id; `--fork-session` and `/clear` change it.
   - A `codex exec` thread started from a Claude shell has its own `CODEX_THREAD_ID` and also inherits the Claude id.
-- **Unverified:** whether a desktop Local Codex thread's shell has `CODEX_THREAD_ID`.
+  - A desktop Local Codex thread's shell has `CODEX_THREAD_ID`, equal to its thread id; its legacy address was adopted on rejoin without a takeover, keeping unread mail.
+  - A Codex thread whose cached tool list predates `session` can pass it as an extra argument.
 
 ## Qualification (2026-10-26)
 

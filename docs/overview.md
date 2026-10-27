@@ -100,8 +100,8 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | --- | --- |
 | Ownership: the incident, takeover, concurrency, cross-machine claims, identity refusals, leave and rejoin, legacy migration, the `Stop` hook with real thread ids | **Verified live**, 2026-10-26 ([results](frames/address-ownership.md#qualification-2026-10-26)) |
 | Claude ids: set in the desktop app, the terminal and `claude -p`; `/clear` and forks change them; `--resume` keeps them | **Verified live** |
-| Whether a desktop Local Codex thread's shell has `CODEX_THREAD_ID` | **Unverified.** The Director has been asked |
-| Whether a Codex thread whose MCP tool list predates `session` can still pass it | **Unverified** for Codex (it works for Claude Code) |
+| A desktop Local Codex thread's shell has `CODEX_THREAD_ID`, equal to its thread id, and its legacy address was adopted on rejoin | **Verified live** |
+| A session whose cached tool list predates `session` can pass it as an extra argument, in both Claude Code and Codex | **Verified live** |
 | Idle desktop Local threads can't be woken | **Known gap.** The desktop-wake spike may close it for threads that have a window open |
 | The `Stop` hook is built but not installed or trusted on the bus host | **Owner's step** |
 | `codex exec` threads are never woken, even after they exit | **Open decision** (codex-wake item 7) |
@@ -123,6 +123,6 @@ These were found while writing this map and are not recommendations. Each names 
 2. **Two stores.** Fluree is what makes the bus span machines and gives history and search; JSONL keeps the unit tests fast and the bus usable without a server, and adds `import-jsonl`. Keeping JSONL for tests is cheap. Whether it is still a supported production store is a choice.
 3. **`bus_query` (SPARQL), with its parser dependency and sandbox rules.** Worth keeping only if agents actually query the ledger. `bus_history` covers text search.
 4. **Origin repo and branch on every message.** Each publish runs `git` twice to record them for commit-window views that were never built. Either build the view or stop recording them.
-5. **Legacy ownership paths.** These are adopting owner-less presences and ignoring owner-less presences. Once every live address has an owner and no pre-ownership `serve` remains, both can go. That needs the Director to rejoin once.
+5. **Legacy ownership paths.** These are adopting owner-less presences and ignoring owner-less presences. Once every live address has an owner and no pre-ownership `serve` remains, both can go.
 6. **Two locks per address** (`claiming` for ownership changes and sends, `exclusive` for cursor moves). They were split so sends don't wait behind slow deliveries. Keep them unless deliveries become fast enough not to matter.
 7. **Claude waking by background `wait`.** It works, but every session must restart its wait after each wake, and a forgotten restart silently stops delivery. A Claude Code `Stop` hook (listed as next in the README) would mirror the Codex one and could be simpler for sessions to keep right.
