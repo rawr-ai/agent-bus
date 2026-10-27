@@ -41,6 +41,17 @@ mem:constraint-01m5x9h52psxmgtkmg6pxw27q8 a mem:Constraint ;
     mem:branch "main" ;
     mem:createdAt "2026-10-26T23:43:02.230648+00:00"^^xsd:dateTime .
 
+mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
+    mem:content "thread/queue/add does not deduplicate on clientUserMessageId: adding twice queues two items, and the desktop runs both. List the thread's queue before adding. The thread/queue/* methods are experimental (initialize with experimentalApi); use the desktop's bundled CLI so they match the app that runs the items." ;
+    mem:tag "app-server" ;
+    mem:tag "codex" ;
+    mem:tag "queue" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "src/codex.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T03:05:13.982763+00:00"^^xsd:dateTime .
+
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
     mem:tag "architecture" ;
@@ -93,7 +104,7 @@ mem:decision-01m5x1zt6aegrjnxxakxym735x a mem:Decision ;
     mem:alternatives "agents polling with bus_wait,a queued-input command" .
 
 mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
-    mem:content "Codex desktop Local threads stay in the desktop app's own app-server; the bus reaches them through a Codex Stop hook (agent-bus codex-stop-hook) that continues the ending turn with the thread's unread messages. It can't wake an idle Local thread." ;
+    mem:content "Codex desktop Local threads stay in the desktop app's own app-server. The bus wakes them, idle or busy, with a nudge in their own queue (see the queue-wake decision); the Codex Stop hook (agent-bus codex-stop-hook) also continues an ending turn with the thread's unread messages, and is optional since the nudge shipped." ;
     mem:tag "codex" ;
     mem:tag "desktop" ;
     mem:tag "hooks" ;
@@ -103,6 +114,7 @@ mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
     mem:artifactRef "src/hook.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-26T21:31:14.094317+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T03:05:13.937520+00:00"^^xsd:dateTime ;
     mem:rationale "Moving desktop threads onto the daemon loses desktop features the owner needs: SSH projects lose browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools; the CODEX_APP_SERVER_WS_URL override skips the app's provisioning too." ;
     mem:alternatives "a desktop SSH project to the same machine,launching the app with CODEX_APP_SERVER_WS_URL,deep links (they only prefill the composer)" .
 
@@ -120,6 +132,21 @@ mem:decision-01m5x9h50yh252vteyr31k9jtk a mem:Decision ;
     mem:createdAt "2026-10-26T23:43:02.174817+00:00"^^xsd:dateTime ;
     mem:rationale "Two sessions on one address were competing consumers: a reply went to the wrong session. Runtime ids survive compaction and reach background waits and hooks without extra storage." ;
     mem:alternatives "lease token issued at join (must survive compaction and be handed to waits and hooks),identity in an HTTP header (connection headers stay fixed across /clear; one Codex daemon serves many threads),idle-based automatic takeover (inactivity cannot prove a session ended)" .
+
+mem:decision-01m5xn3ccvw8spz95s87csea3r a mem:Decision ;
+    mem:content "Codex threads not on the daemon (desktop Local threads, or a daemon join whose resume another app-server refused) are woken by a nudge in their own queue: serve starts a short-lived app-server of its own on stdio (the desktop's bundled CLI, serve --codex), lists the thread's queue (thread/queue/list) and adds one fixed nudge (thread/queue/add) only when none of ours waits for that address. The nudge carries no text from other sessions and marks nothing read; the thread's own bus_read moves its cursor. Shipped in 3d10fca, qualified live 2026-10-27." ;
+    mem:tag "codex" ;
+    mem:tag "delivery" ;
+    mem:tag "desktop" ;
+    mem:tag "queue" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/queue-wake.md" ;
+    mem:artifactRef "src/codex.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T03:05:13.883838+00:00"^^xsd:dateTime ;
+    mem:rationale "The desktop app runs a queued item as a turn within seconds in an idle open thread and stays the thread's only writer. Listing before adding keeps at most one nudge waiting, which bounds empty turns to one per read, survives serve restarts and reconciles adds whose outcome is unknown." ;
+    mem:alternatives "the desktop coordination socket (spike, never run past Gate 0),a heartbeat automation in the thread (crude fallback only),the daemon taking the thread (second writer locks the owner out),the codex queue CLI with an in-memory mark (reads before a nudge runs stack empty turns; timed-out adds force duplicate or missed wake),thread/queue/start (could run the item in an app-server that is not the thread's owner)" .
 
 mem:fact-01m5x1ztcfrgxg1r3zcbxt5s0f a mem:Fact ;
     mem:content "The bus's Fluree token has no subject and is sent only to the data and admin APIs; the event stream stays open. In Fluree 4.2.4 a token with a subject is held to identity policies, which deny writes on a ledger without policies, and events auth refuses subject-less tokens. With CORS off, a cross-origin text/plain POST still writes, so auth is what protects the loopback server." ;
@@ -155,3 +182,14 @@ mem:fact-01m5x1ztfs8vfda4m06w25nvj8 a mem:Fact ;
     mem:branch "main" ;
     mem:createdAt "2026-10-26T21:31:14.297018+00:00"^^xsd:dateTime ;
     mem:rationale "The daemon inherits its starter's open-file limit (macOS default 256), and each loaded thread costs about 33 descriptors, so a few threads exhaust it." .
+
+mem:fact-01m5xn3chn8n8q5wktct3xxn4s a mem:Fact ;
+    mem:content "A Codex thread has no rollout until its first turn, so thread/queue/add for a just-started thread fails with 'no rollout found'; that error can be temporary and is retried. Separately, codex exec reads stdin when it is not a terminal and waits on it, even with a prompt argument: run it with < /dev/null in scripts." ;
+    mem:tag "codex" ;
+    mem:tag "exec" ;
+    mem:tag "queue" ;
+    mem:tag "rollout" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/queue-wake.md" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T03:05:14.037431+00:00"^^xsd:dateTime .
