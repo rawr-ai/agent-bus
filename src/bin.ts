@@ -7,6 +7,7 @@ import { Command, Flag } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "./Bus.ts";
 import * as Cursors from "./Cursors.ts";
+import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
 import { defaultCodex, localHost } from "./codex.ts";
 import { Runtime } from "./domain.ts";
@@ -235,7 +236,7 @@ const wait = Command.make(
     })
 ).pipe(
   Command.withDescription(
-    "Block until messages arrive for an address, print them and mark them read (run in the background to be woken)"
+    "Block until messages arrive for an address, print them and mark them read"
   )
 );
 
@@ -258,6 +259,21 @@ const codexStopHook = Command.make("codex-stop-hook", {}, () => Effect.void).pip
   Command.withDescription("Retired Codex Stop hook: does nothing")
 );
 
+const claudeWakeHook = Command.make("claude-wake", {}, () =>
+  Effect.gen(function* () {
+    const input = yield* Effect.promise(() => Bun.stdin.text());
+    const nudge = yield* claudeWake(endpoint, input);
+    if (Option.isNone(nudge)) return;
+    // An asyncRewake hook that exits 2 wakes the session, which is shown its stderr.
+    yield* Console.error(nudge.value);
+    process.exitCode = 2;
+  })
+).pipe(
+  Command.withDescription(
+    "The Claude Code plugin's asyncRewake hook: wait for new mail for this session's addresses, then wake it (exit 2) with a nudge to read it (reads the hook input on stdin)"
+  )
+);
+
 const fail = (error: { readonly message: string }) =>
   Console.error(error.message).pipe(
     Effect.andThen(
@@ -269,7 +285,7 @@ const fail = (error: { readonly message: string }) =>
 
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
-  Command.withSubcommands([serve, joinCommand, publish, wait, peers, codexStopHook])
+  Command.withSubcommands([serve, joinCommand, publish, wait, peers, claudeWakeHook, codexStopHook])
 );
 
 Command.run(cli, { version: VERSION }).pipe(

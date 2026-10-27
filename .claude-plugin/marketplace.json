@@ -1,0 +1,14 @@
+{
+  "name": "agent-bus",
+  "owner": {
+    "name": "rawr-ai"
+  },
+  "description": "agent-bus, served in place from this checkout",
+  "plugins": [
+    {
+      "name": "agent-bus",
+      "source": "./",
+      "description": "Wakes a Claude Code session when agent-bus mail arrives for an address it owns"
+    }
+  ]
+}

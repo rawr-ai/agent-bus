@@ -1,10 +1,22 @@
 import { hostname } from "node:os";
-import { Clock, Context, Duration, Effect, Layer, Option, Semaphore, Stream } from "effect";
+import {
+  Clock,
+  Context,
+  Deferred,
+  Duration,
+  Effect,
+  Exit,
+  Layer,
+  Option,
+  Semaphore,
+  Stream,
+} from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
   isFor,
   type LedgerError,
   Message,
+  machine,
   NotJoined,
   NotOwner,
   Origin,
@@ -47,18 +59,29 @@ export interface Pending {
   readonly messages: ReadonlyArray<Message>;
 }
 
+/** What a session's wake wait found. */
+export interface Woken {
+  /** The session's addresses with mail it hasn't been woken for. */
+  readonly addresses: ReadonlyArray<string>;
+  /** Whether the session owns any address. */
+  readonly owns: boolean;
+  /** A newer wait from the same session ended this one. */
+  readonly superseded: boolean;
+}
+
 export class Bus extends Context.Service<
   Bus,
   {
     /**
      * Claims an address for a session, or reconnects the session that owns it.
      * A different session is refused while the address is held, unless it
-     * names the holder's join in `takeover`.
+     * names the holder's join in `takeover`. `hooked` says this machine's bus
+     * has seen the session's wake hook, so the session needn't run a wait.
      */
     readonly join: (
       input: JoinInput
     ) => Effect.Effect<
-      { readonly address: string; readonly cursor: number },
+      { readonly address: string; readonly cursor: number; readonly hooked?: true },
       LedgerError | NotOwner
     >;
     readonly leave: (
@@ -99,6 +122,17 @@ export class Bus extends Context.Service<
       timeoutSeconds?: number
     ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner>;
     readonly history: (input: SearchInput) => Effect.Effect<ReadonlyArray<Message>, LedgerError>;
+    /**
+     * Waits until an address `session` owns has unread mail, first to newest,
+     * other than what it was last woken for, or the timeout, and returns those
+     * addresses. It marks nothing read and, like `deliver`, passes over what
+     * isn't the subscriber's mail. A newer wait from the same session ends this
+     * one. This is the path of the hook that wakes Claude sessions.
+     */
+    readonly wake: (
+      session: string | undefined,
+      timeoutSeconds: number
+    ) => Effect.Effect<Woken, LedgerError | NotOwner>;
   }
 >()("agent-bus/Bus") {}
 
@@ -142,6 +176,55 @@ const optional = <K extends string, V>(key: K, value: V | undefined) =>
 
 const sessionHelp =
   "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients.";
+
+/** What an address's owner was last woken for: its join, and its unread mail, first to newest. */
+export interface Mark {
+  readonly joinId: string;
+  readonly unread: string;
+}
+
+/** An address's mark as a wake read it under the address's lock, and the mark it would move to. */
+export interface Moved {
+  readonly address: string;
+  readonly previous: Mark | undefined;
+  readonly mark: Mark;
+}
+
+/**
+ * Moves the marks a wake read, in one step, and returns their addresses. It
+ * skips a mark another wake has moved since it was read (the new owner's,
+ * after a takeover), and one already at the unread mail read. Each move is
+ * added to `moved`, so a result that is never returned can be undone.
+ */
+export const commitMarks = (
+  woken: Map<string, Mark>,
+  found: ReadonlyArray<Moved>,
+  moved: Array<Moved>
+): Array<string> => {
+  const addresses: Array<string> = [];
+  for (const read of found) {
+    const { address, previous, mark } = read;
+    if (woken.get(address) !== previous) continue;
+    if (previous?.joinId === mark.joinId && previous.unread === mark.unread) continue;
+    moved.push(read);
+    woken.set(address, mark);
+    addresses.push(address);
+  }
+  return addresses;
+};
+
+/** Puts back the marks a wake moved but didn't return, unless another wake has moved them since. */
+export const restoreMarks = (
+  woken: Map<string, Mark>,
+  moved: ReadonlyArray<Moved>,
+  returned: ReadonlyArray<string>
+) => {
+  for (const { address, previous, mark } of moved) {
+    if (returned.includes(address) || woken.get(address) !== mark) continue;
+    if (previous === undefined) woken.delete(address);
+    else woken.set(address, previous);
+  }
+};
 
 /** What this machine's bus has seen of an address's owner, for telling a live holder from a dead one. */
 interface Activity {
@@ -198,6 +281,9 @@ export const layer = Layer.effect(
      * Taken before `exclusive` whenever both are held.
      */
     const claiming = lockFor(new Map());
+
+    /** Sessions whose wake hook has called this bus since it started. */
+    const hooked = new Set<string>();
 
     const activity = new Map<string, Activity>();
     const activityOf = (address: string) => {
@@ -320,7 +406,11 @@ export const layer = Layer.effect(
         yield* cursors.set(input.address, cursor);
         yield* announce(input.address, presence, input.cwd);
         yield* touch(input.address);
-        return { address: input.address, cursor };
+        return {
+          address: input.address,
+          cursor,
+          ...(input.runtime === "claude" && hooked.has(session) ? { hooked: true as const } : {}),
+        };
       }).pipe(exclusive(input.address), claiming(input.address), Effect.withSpan("Bus.join"));
 
     const leave = (address: string, session: string | undefined) =>
@@ -437,6 +527,124 @@ export const layer = Layer.effect(
 
     const history = (input: SearchInput) => ledger.search(input);
 
-    return Bus.of({ join, leave, publish, peers, deliver, take, wait, history });
+    /** Per address, the join and the unread mail (first to newest) its owner was last woken for. */
+    const woken = new Map<string, Mark>();
+    /** Each session's current wake wait; a newer one ends it. */
+    const wakers = new Map<string, Deferred.Deferred<void>>();
+
+    const settled = (found: Woken) => found.addresses.length > 0 || !found.owns || found.superseded;
+    const timedOut: Woken = { addresses: [], owns: true, superseded: false };
+    const superseded: Woken = { addresses: [], owns: true, superseded: true };
+
+    /**
+     * The session's addresses, joined from this machine as Claude, whose unread
+     * mail isn't what they were last woken for. New mail, or a partial read,
+     * changes it; mail left unread doesn't, so an ignored wake isn't repeated.
+     * The reads, under each address's lock, can be interrupted, and an address
+     * whose read fails is skipped for this pass, keeping its mark. The marks then
+     * move in one step, only while this is still the session's wait. Each
+     * address it covers counts as an open wait (`counted`), as a background
+     * wait did, so a refused join can tell a live holder from a dead one.
+     */
+    const wakeable = (
+      session: string,
+      mine: Deferred.Deferred<void>,
+      moved: Array<Moved>,
+      counted: Set<string>
+    ) =>
+      Effect.gen(function* () {
+        const here = machine(hostname());
+        const eligible = (peer: Subscriber) =>
+          peer.presence.runtime === "claude" &&
+          peer.presence.session === session &&
+          peer.host !== undefined &&
+          machine(peer.host) === here;
+        const owned = (yield* peers).filter(eligible);
+        const found: Array<Moved> = [];
+        for (const peer of owned) {
+          yield* touch(peer.address);
+          if (!counted.has(peer.address)) {
+            counted.add(peer.address);
+            activityOf(peer.address).waits += 1;
+          }
+          const unread = yield* deliver(peer.address, ({ subscriber, messages }) =>
+            Effect.succeed(
+              eligible(subscriber)
+                ? {
+                    address: subscriber.address,
+                    // The mark as it was under the lock: if it has moved by the commit (another
+                    // owner's wake, after a takeover), this reading is stale and is dropped.
+                    previous: woken.get(subscriber.address),
+                    mark: {
+                      joinId: subscriber.joinId,
+                      unread: `${messages[0]?.id}..${messages.at(-1)?.id}`,
+                    },
+                  }
+                : undefined
+            )
+          ).pipe(
+            // A join from this machine without a cursor (a replaced ledger, say), or a failing read,
+            // leaves this address for a later pass rather than holding up the others.
+            Effect.catchTags({
+              NotJoined: (error) => Effect.as(skipped(peer.address, error), undefined),
+              LedgerError: (error) => Effect.as(skipped(peer.address, error), undefined),
+            })
+          );
+          if (unread !== undefined) found.push(unread);
+        }
+        return yield* Effect.sync(
+          (): Woken =>
+            wakers.get(session) === mine
+              ? {
+                  addresses: commitMarks(woken, found, moved),
+                  owns: owned.length > 0,
+                  superseded: false,
+                }
+              : superseded
+        );
+      });
+
+    const skipped = (address: string, error: { readonly message: string }) =>
+      Effect.logWarning(`Not waking ${address} this pass: ${error.message}`);
+
+    const wake = (session: string | undefined, timeoutSeconds: number) =>
+      Effect.gen(function* () {
+        if (!validSession(session)) {
+          return yield* new NotOwner({ address: "", message: sessionHelp });
+        }
+        hooked.add(session);
+        const mine = yield* Deferred.make<void>();
+        const moved: Array<Moved> = [];
+        const counted = new Set<string>();
+        // A first look now, and one per change after; the changes are subscribed
+        // alongside the first look, so mail landing during it isn't left to the poll.
+        const watch = Stream.merge(Stream.succeed(undefined), ledger.changes).pipe(
+          Stream.mapEffect(() => wakeable(session, mine, moved, counted)),
+          Stream.filter(settled),
+          Stream.runHead,
+          Effect.map(Option.getOrElse(() => timedOut))
+        );
+        return yield* Effect.acquireUseRelease(
+          Effect.suspend(() => {
+            const previous = wakers.get(session);
+            wakers.set(session, mine);
+            return previous === undefined ? Effect.void : Deferred.succeed(previous, undefined);
+          }),
+          () =>
+            Effect.raceFirst(watch, Effect.as(Deferred.await(mine), superseded)).pipe(
+              Effect.timeoutOption(`${timeoutSeconds} seconds`),
+              Effect.map(Option.getOrElse(() => timedOut))
+            ),
+          (_, exit) =>
+            Effect.sync(() => {
+              if (wakers.get(session) === mine) wakers.delete(session);
+              for (const address of counted) activityOf(address).waits -= 1;
+              // A mark moves only with the result that names it: undo those whose result was lost.
+              restoreMarks(woken, moved, Exit.isSuccess(exit) ? exit.value.addresses : []);
+            })
+        );
+      }).pipe(Effect.withSpan("Bus.wake"));
+
+    return Bus.of({ join, leave, publish, peers, deliver, take, wait, history, wake });
   })
 );

@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import { Clock, Duration, Effect, Option, Schema, type Scope, Stream } from "effect";
 import { Bus, type Pending } from "./Bus.ts";
-import type { Subscriber } from "./domain.ts";
+import { machine, type Subscriber } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 
 export class CodexError extends Schema.TaggedError<CodexError>()("CodexError", {
@@ -271,9 +271,6 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
           .pipe(Effect.asVoid),
     })
   );
-
-/** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
-const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
 
 export const localHost = hostname();
 

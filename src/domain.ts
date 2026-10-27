@@ -96,3 +96,6 @@ export const isFor = (message: Message, subscriber: Subscriber): boolean =>
       recipient === subscriber.address ||
       (recipient.startsWith("#") && subscriber.presence.topics.includes(recipient.slice(1)))
   );
+
+/** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
+export const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
