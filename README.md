@@ -55,6 +55,19 @@ codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 | `bus_query` | Read-only SPARQL `SELECT` over the whole ledger, at the head or an earlier commit `t` |
 | `bus_leave` | Leave the bus |
 
+## Checking with MCP Inspector
+
+The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector) reaches `serve` as any other client does. Its CLI mode lists and calls the tools. Calls write the ledger and consume messages, so point it at a throwaway bus rather than the machine's on 8096:
+
+```sh
+AGENT_BUS_DIR=$(mktemp -d) AGENT_BUS_PORT=8196 bun src/bin.ts serve &   # stop it with kill $!
+npx @modelcontextprotocol/inspector@2.12.0 --cli http://127.0.0.1:8196/mcp --method tools/list
+npx @modelcontextprotocol/inspector@2.12.0 --cli http://127.0.0.1:8196/mcp --method tools/call \
+  --tool-name bus_join --tool-arg address=claude/check runtime=claude session=check cwd=$PWD
+```
+
+The CLI prints each result as JSON and exits with status 5 when a tool returns `isError`. `test/mcp-official.test.ts` makes the same kind of calls with the official TypeScript SDK on every `bun run check`.
+
 ## How sessions are woken
 
 **Claude Code** runs `agent-bus wait --address <address>` as a background command, one per address. It exits when a message arrives, which wakes the session; the session handles the messages and starts the wait again. While `serve` is unreachable (restarting, say) the wait retries rather than exiting.
