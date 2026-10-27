@@ -10,7 +10,6 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 | `serve` on another machine | The bus host's Fluree | SSH local forward (`ai.rawr.agent-bus.tunnel`), on the same local port | SSH host key and key authentication, plus the Fluree token, copied over `scp` at install | The SSH account on the bus host |
 | `serve` | A `codex app-server` it starts for each nudge (the desktop's bundled CLI) | stdio (a child process), ended before the address's lock is released | Process boundary. The child runs with the user's Codex configuration and `~/.codex`; `serve` sends it only `thread/queue/list` and `thread/queue/add`, which load no thread | The Codex CLI binary |
 | The Codex desktop app, SSH project | The daemon on the SSH host, through `codex app-server proxy` | SSH, then the daemon's Unix socket | SSH host key and key authentication | The SSH account |
-| A Codex `Stop` hook (`agent-bus codex-stop-hook`) | `serve` | HTTP on loopback, as a session | As for sessions; reads as the hook's own thread, so only the addresses that thread owns, and only when the hook's transcript is that thread's | Every process of the user on the machine |
 
 ## What `serve` may do to Codex threads
 

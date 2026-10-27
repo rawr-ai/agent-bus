@@ -5,8 +5,8 @@
 #   ai.rawr.agent-bus.fluree  the bus's own Fluree transaction server (loopback only); its data
 #                             and admin APIs require the token in fluree-token
 #   ai.rawr.agent-bus         `agent-bus serve`: this machine's MCP endpoint and Codex delivery
-# On first install it creates the signing key and token, points the bus at the Fluree ledger
-# (config.json) and copies the JSONL history into it.
+# On first install it creates the signing key and token and points the bus at the Fluree ledger
+# (config.json).
 #
 # On another machine, `--remote SSH_HOST` (an ssh host alias for the bus host):
 #   ai.rawr.agent-bus.tunnel  an SSH tunnel to the bus host's server, on the same local port
@@ -175,9 +175,6 @@ require_auth
 if [ ! -f "$bus_dir/config.json" ]; then
   printf '{ "fluree": { "url": "%s", "ledger": "%s" } }\n' "$url" "$ledger" > "$bus_dir/config.json"
   echo "bus store: $ledger at $url"
-fi
-if [ -z "$remote" ] && [ -f "$bus_dir/ledger.jsonl" ]; then
-  AGENT_BUS_DIR="$bus_dir" "$bun_bin" "$repo_dir/src/bin.ts" import-jsonl
 fi
 
 write_agent ai.rawr.agent-bus "$bus_dir/agent-bus.log" \

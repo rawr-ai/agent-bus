@@ -1,12 +1,5 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import {
-  appendFileSync,
-  chmodSync,
-  mkdtempSync,
-  readFileSync,
-  rmSync,
-  writeFileSync,
-} from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
@@ -22,18 +15,17 @@ import {
   CodexError,
   deliverOnce,
   deliveryTargets,
-  formatDelivery,
   formatNudge,
   type Holds,
   type Queue,
 } from "../src/codex.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
-import { codexStop } from "../src/hook.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Mcp from "../src/mcp.ts";
 import * as Serve from "../src/serve.ts";
 import { validateSelect } from "../src/sparql.ts";
+import { layerJsonl } from "./jsonl-ledger.ts";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -49,9 +41,7 @@ const jsonl = () => {
   const file = join(dir, "ledger.jsonl");
   return {
     file,
-    layer: busOn(Ledger.layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(
-      Layer.provide(platform)
-    ),
+    layer: busOn(layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(Layer.provide(platform)),
   };
 };
 
@@ -601,44 +591,6 @@ describe.if(flureeBin !== null)("fluree ledger", () => {
     ));
 });
 
-describe("jsonl ledger", () => {
-  test("ignores a partial trailing line until it is complete", () => {
-    const { file, layer } = jsonl();
-    return Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const bus = yield* Bus.Bus;
-          yield* bus.join({
-            address: "claude/a",
-            runtime: "claude",
-            session: sid("claude/a"),
-            cwd: process.cwd(),
-          });
-          const ledger = yield* Ledger.Ledger;
-          yield* bus.join({
-            address: "codex/b",
-            runtime: "codex",
-            session: sid("codex/b"),
-            cwd: process.cwd(),
-          });
-          yield* bus.publish({
-            from: "claude/a",
-            session: sid("claude/a"),
-            to: ["codex/b"],
-            body: "whole",
-          });
-          const before = yield* ledger.end;
-          appendFileSync(file, '{"id":"partial"');
-          const slice = yield* ledger.read(0);
-          expect(slice.next).toBe(before);
-          expect(bodies(yield* bus.take("codex/b", sid("codex/b")))).toEqual(["whole"]);
-        }),
-        layer
-      )
-    );
-  });
-});
-
 describe("codex delivery text", () => {
   test("lists every message and how to reply to the first", () =>
     Effect.runPromise(
@@ -664,7 +616,7 @@ describe("codex delivery text", () => {
             to: ["codex/b"],
             body: "two",
           });
-          const text = formatDelivery("codex/b", [first, second]);
+          const text = Client.formatDelivery("codex/b", [first, second]);
           expect(text).toStartWith("[agent-bus] 2 new messages for codex/b");
           expect(text).toContain("subject: s");
           expect(text).toContain(`replyTo "${first.id}"`);
@@ -738,6 +690,7 @@ describe("codex delivery routing", () => {
                 runtime: "codex",
                 status: "joined",
                 topics: [],
+                session: "t-there",
                 codexThreadId: "t-there",
               }),
             })
@@ -909,7 +862,7 @@ describe("codex delivery", () => {
         const { bus, waiting, deliver, send } = yield* setup;
         yield* deliver;
         for (const body of ["two", "three"]) {
-          // The Stop hook reads at the end of a busy turn; the nudge still waits.
+          // The owner reads mid-turn; the nudge still waits.
           yield* bus.take("codex/a", "t-1");
           yield* send(body);
           yield* deliver;
@@ -1451,23 +1404,21 @@ describe("one session per address", () => {
       return { fiber, release };
     });
 
-  /** A join from before addresses had owners: its cursor, and a presence with no session. */
-  const legacy = (address: string, presence: Partial<Presence> = {}) =>
+  /** A join or leave written without an owner, as a bus from before owners wrote them. */
+  const ownerless = (address: string, presence: Partial<Presence> = {}) =>
     Effect.gen(function* () {
-      const ledger = yield* Ledger.Ledger;
-      yield* (yield* Cursors.Cursors).set(address, yield* ledger.end);
-      yield* ledger.append(
-        new Message({
-          id: Bun.randomUUIDv7(),
-          ts: new Date().toISOString(),
-          from: address,
-          to: ["*"],
-          kind: "presence",
-          body: `${address} joined`,
-          origin: new Origin({ host: hostname(), cwd }),
-          presence: new Presence({ runtime: "claude", status: "joined", topics: [], ...presence }),
-        })
-      );
+      const message = new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: address,
+        to: ["*"],
+        kind: "presence",
+        body: `${address} ${presence.status ?? "joined"}`,
+        origin: new Origin({ host: hostname(), cwd }),
+        presence: new Presence({ runtime: "claude", status: "joined", topics: [], ...presence }),
+      });
+      yield* (yield* Ledger.Ledger).append(message);
+      return message.id;
     });
 
   test("a second session can't join, read, wait on or send as an address another holds", () =>
@@ -1585,6 +1536,42 @@ describe("one session per address", () => {
       1,
       "--session is empty or an unexpanded placeholder.",
     ]);
+  });
+
+  const cliIn = (dir: string, args: ReadonlyArray<string>, stdin?: string) =>
+    Bun.spawnSync([process.execPath, join(import.meta.dir, "../src/bin.ts"), ...args], {
+      stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
+      env: { ...process.env, AGENT_BUS_PORT: "9", AGENT_BUS_DIR: dir },
+      timeout: 10_000,
+    });
+  const outcome = (run: ReturnType<typeof cliIn>) => [
+    run.exitCode,
+    run.stdout.toString(),
+    run.stderr.toString(),
+  ];
+
+  test("the retired Codex Stop hook lets the turn end, whatever its input", () => {
+    const inputs = [
+      '{"session_id":"t-1","transcript_path":null}',
+      "not json",
+      "x".repeat(4_000_000),
+    ];
+    for (const input of inputs) {
+      expect(outcome(cliIn(tempDir(), ["codex-stop-hook"], input))).toEqual([0, "", ""]);
+    }
+  });
+
+  test("serve won't start without a Fluree ledger in config.json", () => {
+    const missing = tempDir();
+    const empty = tempDir();
+    writeFileSync(join(empty, "config.json"), "{}");
+    for (const dir of [missing, empty]) {
+      expect(outcome(cliIn(dir, ["serve"]))).toEqual([
+        1,
+        "",
+        `${join(dir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }\n`,
+      ]);
+    }
   });
 
   test("the owner reconnects and rejoins with its mail; a left address is free, without it", () =>
@@ -1730,68 +1717,79 @@ describe("one session per address", () => {
       })
     ));
 
-  test("a presence from before owners is reclaimed only by its own Codex thread, or by takeover", () =>
+  test("joins and leaves without an owner are ignored, before or after an owned one", () =>
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        yield* legacy("codex/a", { runtime: "codex", codexThreadId: "t-1" });
-        yield* legacy("claude/b");
-        // The thread can read before it rejoins (its Stop hook does); no other session can.
-        expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
-        yield* unchanged("codex/a", bus.take("codex/a", "t-2"));
-        yield* unchanged(
-          "codex/a",
-          bus.join({ address: "codex/a", runtime: "codex", session: "t-2", cwd })
-        );
-        yield* bus.join({
-          address: "codex/a",
-          runtime: "codex",
-          session: "t-1",
-          codexThreadId: "t-1",
-          cwd,
-        });
+        yield* bus.join({ address: "claude/s", runtime: "claude", session: "ss", cwd });
+        const send = (to: string, body: string) =>
+          bus.publish({ from: "claude/s", session: "ss", to: [to], body });
 
-        const refused = yield* unchanged(
-          "claude/b",
-          bus.join({ address: "claude/b", runtime: "claude", session: "s", cwd })
-        );
-        const reading = yield* unchanged("claude/b", bus.take("claude/b", "s"));
-        const [holder] = (yield* bus.peers).filter((peer) => peer.address === "claude/b");
-        // Both refusals tell the session that joined it how to reclaim it.
-        for (const message of [refused.message, reading.message]) {
-          expect(message).toContain("If this session joined it");
-          expect(message).toContain(`takeover "${holder?.joinId}"`);
-        }
-        yield* bus.join({
-          address: "claude/b",
-          runtime: "claude",
-          session: "s",
-          takeover: holder?.joinId,
-          cwd,
-        });
-        expect(yield* bus.take("claude/b", "s")).toEqual([]);
-      })
-    ));
-
-  test("an owned address ignores joins and leaves from a bus that predates owners", () =>
-    run(
-      Effect.gen(function* () {
-        const bus = yield* Bus.Bus;
-        yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
-        yield* bus.join({ address: "claude/b", runtime: "claude", session: "sb", cwd });
-        yield* legacy("claude/a");
-        yield* legacy("claude/a", { status: "left" });
-        yield* bus.publish({
-          from: "claude/b",
-          session: "sb",
-          to: ["claude/a"],
-          body: "still mine",
-        });
-        expect(bodies(yield* bus.take("claude/a", "s1"))).toEqual(["still mine"]);
+        // Owned, then owner-less: the owner keeps the address and its unread mail.
+        yield* bus.join({ address: "claude/a", runtime: "claude", session: "sa", cwd });
+        yield* send("claude/a", "before");
+        yield* ownerless("claude/a");
+        yield* ownerless("claude/a", { status: "left" });
+        yield* send("claude/a", "after");
+        expect(bodies(yield* bus.take("claude/a", "sa"))).toEqual(["before", "after"]);
         yield* unchanged(
           "claude/a",
-          bus.join({ address: "claude/a", runtime: "claude", session: "s2", cwd })
+          bus.join({ address: "claude/a", runtime: "claude", session: "other", cwd })
         );
+
+        // An owner-less join's id is no takeover of the live owner.
+        const unowned = yield* ownerless("claude/a");
+        yield* unchanged(
+          "claude/a",
+          bus.join({
+            address: "claude/a",
+            runtime: "claude",
+            session: "other",
+            takeover: unowned,
+            cwd,
+          })
+        );
+
+        // A pre-owner join left a cursor, and mail waits behind it.
+        const cursors = yield* Cursors.Cursors;
+        const ledger = yield* Ledger.Ledger;
+        yield* cursors.set("codex/b", yield* ledger.end);
+        yield* cursors.set("claude/d", yield* ledger.end);
+        yield* send("codex/b", "waiting for b");
+
+        // Owner-less only, joined (even naming a Codex thread) or left: not joined.
+        yield* ownerless("codex/b", { runtime: "codex", codexThreadId: "t-b" });
+        yield* ownerless("claude/c");
+        yield* ownerless("claude/c", { status: "left" });
+        const listed = (yield* bus.peers).map((peer) => peer.address);
+        expect(listed).not.toContain("codex/b");
+        expect(listed).not.toContain("claude/c");
+        expect((yield* Effect.flip(bus.take("codex/b", "t-b")))._tag).toBe("NotJoined");
+        // Its first owner starts at the present, not at the pre-owner cursor.
+        yield* bus.join({
+          address: "codex/b",
+          runtime: "codex",
+          session: "t-b",
+          codexThreadId: "t-b",
+          cwd,
+        });
+        expect(yield* bus.take("codex/b", "t-b")).toEqual([]);
+
+        // Owner-less, then owned: a plain join, even with a stale takeover, starts at the present.
+        const stale = yield* ownerless("claude/d");
+        yield* send("claude/d", "sent before the owner joined");
+        const joined = yield* bus.join({
+          address: "claude/d",
+          runtime: "claude",
+          session: "sd",
+          takeover: stale,
+          cwd,
+        });
+        expect(joined.address).toBe("claude/d");
+        yield* send("claude/d", "sent after");
+        expect(bodies(yield* bus.take("claude/d", "sd"))).toEqual(["sent after"]);
+        const [holder] = (yield* bus.peers).filter((peer) => peer.address === "claude/d");
+        expect(holder?.presence.takeover).toBeUndefined();
       })
     ));
 
@@ -1799,9 +1797,7 @@ describe("one session per address", () => {
     const dir = tempDir();
     const file = join(dir, "ledger.jsonl");
     const layer = () =>
-      busOn(Ledger.layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(
-        Layer.provide(platform)
-      );
+      busOn(layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(Layer.provide(platform));
     await Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
@@ -1829,59 +1825,6 @@ describe("one session per address", () => {
       )
     );
   });
-
-  test("the Stop hook reads as its thread, and keeps what it read when a later read fails", () =>
-    Effect.runPromise(
-      Effect.gen(function* () {
-        const input = JSON.stringify({
-          session_id: "t-1",
-          transcript_path: "/s/rollout-t-1.jsonl",
-        });
-        const peer = (address: string) => ({
-          address,
-          runtime: "codex",
-          topics: [],
-          host: hostname(),
-          codexThreadId: "t-1",
-        });
-        const reads: Array<unknown> = [];
-        const fake = (second: "fails" | "refused") =>
-          ((name: string, _schema: unknown, args: Record<string, unknown>) => {
-            if (name === "bus_peers") {
-              return Effect.succeed({ peers: [peer("codex/a"), peer("codex/b"), peer("codex/c")] });
-            }
-            reads.push(args);
-            if (args.address === "codex/b") {
-              return Effect.fail(
-                new Client.BusCallError({ message: second, refused: second === "refused" })
-              );
-            }
-            const message = new Message({
-              id: Bun.randomUUIDv7(),
-              ts: new Date().toISOString(),
-              from: "claude/x",
-              to: [String(args.address)],
-              kind: "message",
-              body: `for ${String(args.address)}`,
-            });
-            return Effect.succeed({ messages: [message] });
-          }) as unknown as ReturnType<typeof Client.call>;
-
-        const reasons = (output: Option.Option<string>) =>
-          Option.isSome(output) ? (JSON.parse(output.value) as { reason: string }).reason : "";
-        const broken = reasons(yield* codexStop("unused", input, hostname(), fake("fails")));
-        expect(broken).toContain("for codex/a");
-        expect(broken).not.toContain("for codex/c");
-        expect(reads).toEqual([
-          { address: "codex/a", session: "t-1" },
-          { address: "codex/b", session: "t-1" },
-        ]);
-        // A refusal changed nothing, so the hook reads on.
-        const refused = reasons(yield* codexStop("unused", input, hostname(), fake("refused")));
-        expect(refused).toContain("for codex/a");
-        expect(refused).toContain("for codex/c");
-      }).pipe(Effect.provide(FetchHttpClient.layer))
-    ));
 });
 
 describe("mcp over http", () => {
@@ -2001,70 +1944,6 @@ describe("mcp over http", () => {
         });
         const joined = yield* join("codex/a", codex("t-1"));
         expect(Object.keys(joined).sort()).toEqual(["address", "cursor"]);
-      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
-    );
-  });
-
-  test("a Codex Stop hook continues the turn with the thread's unread messages", () => {
-    const { url, layer } = serve();
-    const stop = (transcript: string | null) =>
-      codexStop(
-        url,
-        JSON.stringify({
-          session_id: "t-desk",
-          transcript_path: transcript,
-          hook_event_name: "Stop",
-          stop_hook_active: false,
-        }),
-        hostname()
-      );
-    return Effect.runPromise(
-      Effect.gen(function* () {
-        const call = Client.call(url);
-        yield* call("bus_join", Mcp.Joined, {
-          address: "codex/a",
-          runtime: "codex",
-          session: "t-desk",
-          cwd: process.cwd(),
-          codexThreadId: "t-desk",
-        });
-        yield* call("bus_join", Mcp.Joined, {
-          address: "claude/b",
-          runtime: "claude",
-          session: sid("claude/b"),
-          cwd: process.cwd(),
-        });
-        yield* call("bus_publish", Mcp.Published, {
-          from: "claude/b",
-          session: sid("claude/b"),
-          to: ["codex/a"],
-          body: "hi",
-        });
-
-        // A subagent's hook carries its parent's id, with its own transcript; no transcript proves nothing.
-        expect(yield* stop("/sessions/rollout-2026-10-26T10-00-00-t-sub.jsonl")).toEqual(
-          Option.none()
-        );
-        expect(yield* stop(null)).toEqual(Option.none());
-        const own = "/sessions/rollout-2026-10-26T10-00-00-t-desk.jsonl";
-        const output = yield* stop(own);
-        expect(Option.isSome(output)).toBe(true);
-        if (Option.isSome(output)) {
-          const decision = JSON.parse(output.value) as { decision: string; reason: string };
-          expect(decision.decision).toBe("block");
-          expect(decision.reason).toContain("1 new message for codex/a");
-          expect(decision.reason).toContain("hi");
-        }
-        // Read once; the next turn end has nothing to add.
-        expect(yield* stop(own)).toEqual(Option.none());
-        // An unreachable bus lets the turn end.
-        expect(
-          yield* codexStop(
-            "http://127.0.0.1:9/mcp",
-            JSON.stringify({ session_id: "t-desk", transcript_path: own }),
-            hostname()
-          )
-        ).toEqual(Option.none());
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });

@@ -4,7 +4,7 @@ import { Schema } from "effect";
 export const Runtime = Schema.Literals(["claude", "codex", "human", "other"]);
 export type Runtime = typeof Runtime.Type;
 
-/** Where a message was written from. Commit windows group messages by `repo` and `ts`. */
+/** Where an entry was written from. `repo` and `branch` are optional metadata for queries. */
 export class Origin extends Schema.Class<Origin>("Origin")({
   host: Schema.String,
   cwd: Schema.optionalKey(Schema.String),

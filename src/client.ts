@@ -13,6 +13,28 @@ export class BusCallError extends Schema.TaggedError<BusCallError>()("BusCallErr
 const CALL_TIMEOUT_SECONDS = 30;
 const RETRY_SECONDS = 5;
 
+const describe = (message: Message) =>
+  [
+    `id: ${message.id}`,
+    `from: ${message.from}`,
+    `to: ${message.to.join(", ")}`,
+    `at: ${message.ts}`,
+    ...(message.subject === undefined ? [] : [`subject: ${message.subject}`]),
+    ...(message.replyTo === undefined ? [] : [`in reply to: ${message.replyTo}`]),
+  ].join(" | ");
+
+/** Bus messages as a session sees them from `agent-bus wait`. */
+export const formatDelivery = (address: string, messages: ReadonlyArray<Message>) => {
+  const count = messages.length === 1 ? "1 new message" : `${messages.length} new messages`;
+  const blocks = messages.map((message) => `${describe(message)}\n\n${message.body}`);
+  const first = messages[0];
+  const replyHint =
+    first === undefined
+      ? ""
+      : `\n\nReply with the agent-bus bus_publish tool: from "${address}", to ["${first.from}"], replyTo "${first.id}".`;
+  return `[agent-bus] ${count} for ${address}\n\n${blocks.join("\n\n---\n\n")}${replyHint}`;
+};
+
 /** Drops undefined fields, which tool arguments omit rather than send. */
 export const defined = <T extends Record<string, unknown>>(fields: T) =>
   Object.fromEntries(Object.entries(fields).filter(([, value]) => value !== undefined)) as {

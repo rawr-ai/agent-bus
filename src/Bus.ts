@@ -1,5 +1,5 @@
 import { hostname } from "node:os";
-import { Clock, Context, Effect, Layer, Option, Semaphore, Stream } from "effect";
+import { Clock, Context, Duration, Effect, Layer, Option, Semaphore, Stream } from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
   isFor,
@@ -27,7 +27,7 @@ export interface JoinInput {
   readonly note?: string | undefined;
   /** Start from the beginning of the ledger instead of only new messages. */
   readonly replay?: boolean | undefined;
-  /** The session's working directory; messages it sends are grouped by its repo and branch. */
+  /** The session's working directory; its entries record it, with its repo and branch. */
   readonly cwd: string;
 }
 
@@ -102,18 +102,28 @@ export class Bus extends Context.Service<
   }
 >()("agent-bus/Bus") {}
 
-/** Runs git in a directory, or returns undefined when it is not a repo or no longer exists. */
+/** How long `git` may take; it runs under the address's lock. */
+const GIT_TIMEOUT = Duration.seconds(2);
+
+/**
+ * Runs git in a directory, or returns undefined when it is not a repo, no
+ * longer exists, or takes longer than GIT_TIMEOUT.
+ */
 const git = (cwd: string, args: ReadonlyArray<string>) =>
-  Effect.tryPromise(async () => {
-    const child = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "ignore" });
+  Effect.tryPromise(async (signal) => {
+    const child = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "ignore", signal });
     const [out, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
     const text = out.trim();
     return code === 0 && text !== "" ? text : undefined;
-  }).pipe(Effect.orElseSucceed(() => undefined));
+  }).pipe(
+    Effect.timeout(GIT_TIMEOUT),
+    Effect.orElseSucceed(() => undefined)
+  );
 
 /**
- * Where an entry was written: this machine, and the sender's directory with its
- * repo and branch, which commit windows group messages by.
+ * Where an entry was written: this machine, and the session's directory with
+ * its repo and branch. They are optional metadata for queries: a branch can't
+ * be recovered once its worktree or branch is gone.
  */
 const originFor = Effect.fn("Bus.originFor")(function* (cwd: string | undefined) {
   if (cwd === undefined) return new Origin({ host: hostname() });
@@ -151,13 +161,8 @@ export const layer = Layer.effect(
     const latest = Effect.gen(function* () {
       const latest = new Map<string, Subscriber>();
       for (const message of yield* ledger.presence) {
-        if (message.presence === undefined) continue;
-        // An older bus writes joins and leaves without an owner. Once an address
-        // has one, they are ignored, so machines can be upgraded one at a time.
-        const previous = latest.get(message.from);
-        if (message.presence.session === undefined && previous?.presence.session !== undefined) {
-          continue;
-        }
+        // Joins and leaves from before addresses had owners are ignored.
+        if (message.presence?.session === undefined) continue;
         latest.set(message.from, {
           address: message.from,
           presence: message.presence,
@@ -208,19 +213,6 @@ export const layer = Layer.effect(
         activityOf(address).last = ts;
       });
 
-    /**
-     * Whether `session` owns the presence. A presence from before owners is
-     * owned by the Codex thread it names, so that thread keeps its inbox.
-     */
-    const owns = (presence: Presence, session: string) =>
-      presence.session === undefined
-        ? presence.runtime === "codex" && presence.codexThreadId === session
-        : presence.session === session;
-
-    /** What a session told about a presence from before owners should do. */
-    const legacyHelp = (holder: Subscriber) =>
-      `${holder.address} joined before addresses had owners. If this session joined it, reclaim it by rejoining with bus_join, your session id and takeover "${holder.joinId}"; otherwise join an address specific to this session.`;
-
     /** Why a session that doesn't own an address can't join it, and what to do instead. */
     const heldBy = (holder: Subscriber) => {
       const { presence } = holder;
@@ -235,10 +227,7 @@ export const layer = Layer.effect(
       ];
       return new NotOwner({
         address: holder.address,
-        message:
-          presence.session === undefined
-            ? `${legacyHelp(holder)} (${facts.join("; ")})`
-            : `${holder.address} is held by another session (${facts.join("; ")}). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, rejoin with takeover "${holder.joinId}".`,
+        message: `${holder.address} is held by another session (${facts.join("; ")}). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, rejoin with takeover "${holder.joinId}".`,
       });
     };
 
@@ -246,10 +235,7 @@ export const layer = Layer.effect(
     const notOwner = (holder: Subscriber) =>
       new NotOwner({
         address: holder.address,
-        message:
-          holder.presence.session === undefined
-            ? `${legacyHelp(holder)} Nothing was changed.`
-            : `${holder.address} belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session.`,
+        message: `${holder.address} belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session.`,
       });
 
     const noSession = (address: string) => new NotOwner({ address, message: sessionHelp });
@@ -264,7 +250,7 @@ export const layer = Layer.effect(
           message: `${address} has not joined the bus; join first.`,
         });
       }
-      if (!owns(subscriber.presence, session)) return yield* notOwner(subscriber);
+      if (subscriber.presence.session !== session) return yield* notOwner(subscriber);
       yield* touch(address);
       return subscriber;
     });
@@ -305,7 +291,7 @@ export const layer = Layer.effect(
         const last = (yield* latest).get(input.address);
         const mine =
           last !== undefined &&
-          owns(last.presence, session) &&
+          last.presence.session === session &&
           last.presence.runtime === input.runtime;
         let takeover: string | undefined;
         if (last?.presence.status === "joined" && !mine) {

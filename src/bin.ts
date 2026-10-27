@@ -8,10 +8,9 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "./Bus.ts";
 import * as Cursors from "./Cursors.ts";
 import * as Client from "./client.ts";
-import { defaultCodex, formatDelivery, localHost } from "./codex.ts";
+import { defaultCodex, localHost } from "./codex.ts";
 import { Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
-import { codexStop } from "./hook.ts";
 import * as Ledger from "./Ledger.ts";
 import * as Mcp from "./mcp.ts";
 import * as Serve from "./serve.ts";
@@ -19,11 +18,10 @@ import * as Serve from "./serve.ts";
 const VERSION = "0.2.0";
 
 const busDir = process.env.AGENT_BUS_DIR ?? join(homedir(), ".agent-bus");
-const jsonlFile = join(busDir, "ledger.jsonl");
 const port = Number(process.env.AGENT_BUS_PORT ?? 8096);
 const endpoint = `http://127.0.0.1:${port}/mcp`;
 
-/** `config.json` in the bus directory; without a `fluree` entry the bus uses the JSONL ledger. */
+/** `config.json` in the bus directory, which names the Fluree ledger the bus uses. */
 const ConfigJson = Schema.fromJsonString(
   Schema.Struct({
     fluree: Schema.optionalKey(Schema.Struct({ url: Schema.String, ledger: Schema.String })),
@@ -56,15 +54,17 @@ const cursorsFor = (ledgerId: string) =>
     })
   );
 
-/** Direct access to the store, for the machine's bus process and offline imports. */
+/** `config.json` names no Fluree ledger, so the store can't open. */
+class NoStore extends Schema.TaggedError<NoStore>()("NoStore", { message: Schema.String }) {}
+
+/** Direct access to the store, for the machine's bus process. */
 const BusLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* loadConfig;
     if (config.fluree === undefined) {
-      return Bus.layer.pipe(
-        Layer.provideMerge(Ledger.layerJsonl(jsonlFile)),
-        Layer.provideMerge(Cursors.layerFiles(join(busDir, "cursors")))
-      );
+      return yield* new NoStore({
+        message: `${join(busDir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`,
+      });
     }
     const token = yield* loadToken;
     return Bus.layer.pipe(
@@ -231,7 +231,7 @@ const wait = Command.make(
         input.timeout > 0 ? input.timeout : undefined
       );
       if (messages.length === 0) return yield* Console.log("[agent-bus] no new messages");
-      yield* Console.log(formatDelivery(input.address, messages));
+      yield* Console.log(Client.formatDelivery(input.address, messages));
     })
 ).pipe(
   Command.withDescription(
@@ -251,70 +251,31 @@ const peers = Command.make("peers", {}, () =>
   })
 ).pipe(Command.withDescription("List joined peers"));
 
-const codexStopHook = Command.make("codex-stop-hook", {}, () =>
-  Effect.gen(function* () {
-    const input = yield* Effect.promise(() => Bun.stdin.text());
-    const output = yield* codexStop(endpoint, input, localHost);
-    if (Option.isSome(output)) yield* Console.log(output.value);
-  })
-).pipe(
-  Command.withDescription(
-    "Codex Stop hook: continue the ending turn with the thread's unread bus messages (reads the hook input on stdin)"
-  )
+// Retired: Codex keeps a loaded thread's hooks until its app-server restarts, so
+// threads that loaded the old Stop hook still call this. It lets the turn end
+// (Codex ignores an unread input). Remove it once every app-server has restarted.
+const codexStopHook = Command.make("codex-stop-hook", {}, () => Effect.void).pipe(
+  Command.withDescription("Retired Codex Stop hook: does nothing")
 );
 
-const importJsonl = Command.make(
-  "import-jsonl",
-  { file: Flag.String("file").pipe(Flag.withDefault(jsonlFile)) },
-  (input) =>
-    Effect.gen(function* () {
-      const target = yield* Ledger.Ledger;
-      const bus = yield* Bus.Bus;
-      const cursors = yield* Cursors.Cursors;
-      const source = yield* Effect.provide(
-        Effect.gen(function* () {
-          return yield* Ledger.Ledger;
-        }),
-        Ledger.layerJsonl(input.file)
-      );
-      const existing = new Set((yield* target.read(0)).entries.map((entry) => entry.message.id));
-      let copied = 0;
-      for (const { message } of (yield* source.read(0)).entries) {
-        if (existing.has(message.id)) continue;
-        yield* target.append(message);
-        copied += 1;
-      }
-      // Imported peers start at the present in the new store, as a fresh join would.
-      const head = yield* target.end;
-      for (const peer of yield* bus.peers) {
-        if (Option.isNone(yield* cursors.get(peer.address))) {
-          yield* cursors.set(peer.address, head);
-        }
-      }
-      yield* Console.log(`imported ${copied} entries from ${input.file}`);
-    }).pipe(Effect.provide(BusLayer))
-).pipe(
-  Command.withDescription(
-    "Copy a JSONL ledger into the configured store, skipping entries already there"
-  )
-);
+const fail = (error: { readonly message: string }) =>
+  Console.error(error.message).pipe(
+    Effect.andThen(
+      Effect.sync(() => {
+        process.exitCode = 1;
+      })
+    )
+  );
 
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
-  Command.withSubcommands([serve, joinCommand, publish, wait, peers, codexStopHook, importJsonl])
+  Command.withSubcommands([serve, joinCommand, publish, wait, peers, codexStopHook])
 );
 
 Command.run(cli, { version: VERSION }).pipe(
-  // A refused or failed bus call is an answer, not a crash: its message alone, and status 1.
-  Effect.catchTag("BusCallError", (error) =>
-    Console.error(error.message).pipe(
-      Effect.andThen(
-        Effect.sync(() => {
-          process.exitCode = 1;
-        })
-      )
-    )
-  ),
+  // A refused or failed bus call, or a missing store, is an answer, not a crash:
+  // its message alone, and status 1.
+  Effect.catchTags({ BusCallError: fail, NoStore: fail }),
   Effect.provide(Layer.mergeAll(BunServices.layer, FetchHttpClient.layer)),
   Effect.provide(Layer.succeed(Logger.LogToStderr)(true)),
   BunRuntime.runMain

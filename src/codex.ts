@@ -1,7 +1,7 @@
 import { hostname } from "node:os";
 import { Clock, Duration, Effect, Option, Schema, type Scope, Stream } from "effect";
 import { Bus, type Pending } from "./Bus.ts";
-import type { Message, Subscriber } from "./domain.ts";
+import type { Subscriber } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 
 export class CodexError extends Schema.TaggedError<CodexError>()("CodexError", {
@@ -165,28 +165,6 @@ const appServer = (codex: string, timeout: Duration.Duration) =>
     );
   });
 
-const describe = (message: Message) =>
-  [
-    `id: ${message.id}`,
-    `from: ${message.from}`,
-    `to: ${message.to.join(", ")}`,
-    `at: ${message.ts}`,
-    ...(message.subject === undefined ? [] : [`subject: ${message.subject}`]),
-    ...(message.replyTo === undefined ? [] : [`in reply to: ${message.replyTo}`]),
-  ].join(" | ");
-
-/** Bus messages as a session sees them from `agent-bus wait` and the Codex `Stop` hook. */
-export const formatDelivery = (address: string, messages: ReadonlyArray<Message>) => {
-  const count = messages.length === 1 ? "1 new message" : `${messages.length} new messages`;
-  const blocks = messages.map((message) => `${describe(message)}\n\n${message.body}`);
-  const first = messages[0];
-  const replyHint =
-    first === undefined
-      ? ""
-      : `\n\nReply with the agent-bus bus_publish tool: from "${address}", to ["${first.from}"], replyTo "${first.id}".`;
-  return `[agent-bus] ${count} for ${address}\n\n${blocks.join("\n\n---\n\n")}${replyHint}`;
-};
-
 /** The first line of a bus nudge, by which the deliverer recognises its own waiting one. */
 const nudgeHead = (address: string) => `[agent-bus] New messages for ${JSON.stringify(address)}.`;
 
@@ -241,7 +219,7 @@ const QUEUE_TIMEOUT = Duration.seconds(2);
 
 /**
  * The deadline for a whole nudge (start, list, add), which holds the
- * address's lock: well under the 10 s a `Stop` hook waits to read.
+ * address's lock: an owner's read waits behind it, well inside the CLI's 30 s call.
  */
 const NUDGE_TIMEOUT = Duration.seconds(6);
 
@@ -295,7 +273,7 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
   );
 
 /** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
-export const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
+const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
 
 export const localHost = hostname();
 

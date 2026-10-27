@@ -3,18 +3,6 @@
 @prefix mem: <https://ns.flur.ee/memory#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
-mem:constraint-01m5x1ztaxvc47hyxyyrwbtsrb a mem:Constraint ;
-    mem:content "The Codex Stop hook must deliver only when transcript_path names the thread in session_id (rollout files are named by thread id): a subagent's hook carries its parent's session_id and would otherwise take the parent's messages. Any failure must let the turn end." ;
-    mem:tag "codex" ;
-    mem:tag "hooks" ;
-    mem:tag "subagents" ;
-    mem:scope mem:repo ;
-    mem:severity "must" ;
-    mem:artifactRef "src/hook.ts" ;
-    mem:branch "main" ;
-    mem:createdAt "2026-10-26T21:31:14.141430+00:00"^^xsd:dateTime ;
-    mem:rationale "Codex documents that subagent hooks use the parent session id; a hook that errors or blocks would stall the user's thread." .
-
 mem:constraint-01m5x9h52psxmgtkmg6pxw27q8 a mem:Constraint ;
     mem:content "A process started from a session's shell inherits that session's runtime id (codex exec from Claude inherits CLAUDE_CODE_SESSION_ID), so the CLI acts as the parent when it defaults --runtime to the address's runtime. Give delegates that need an inbox their own address." ;
     mem:tag "delegates" ;
@@ -38,7 +26,7 @@ mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
     mem:createdAt "2026-10-27T03:05:13.982763+00:00"^^xsd:dateTime .
 
 mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
-    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve and every Codex Stop hook run src/bin.ts from it. A half-edited tree breaks the hook at the next Codex turn end and serve at its next restart. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
+    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve runs src/bin.ts from it, and so do Codex threads still calling the retired codex-stop-hook. A half-edited tree breaks serve at its next restart and those hooks at the next turn end. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
     mem:tag "hooks" ;
     mem:tag "operations" ;
     mem:tag "serve" ;
@@ -49,6 +37,7 @@ mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:32:00.198214+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T06:31:43.258786+00:00"^^xsd:dateTime ;
     mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
 
 mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
@@ -94,44 +83,18 @@ mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:rationale "One process gives one cursor writer per address, one per-address lock (Bus.deliver) shared by reads and deliveries, and one ledger change stream; only serve holds the Fluree token." ;
     mem:alternatives "a stdio MCP server per session (raced on cursors and needed the token in every session),Fluree's native MCP endpoint for agents,a separate deliver-codex process" .
 
-mem:decision-01m5x1zt365xpe32kp3h35dkww a mem:Decision ;
-    mem:content "Messages live in a Fluree ledger (one message per insert commit, a cursor is the last commit t read), behind the Ledger service, with a JSONL file as the fallback store." ;
-    mem:tag "fluree" ;
-    mem:tag "ledger" ;
-    mem:tag "storage" ;
-    mem:scope mem:repo ;
-    mem:artifactRef "src/Fluree.ts" ;
-    mem:artifactRef "src/Ledger.ts" ;
-    mem:branch "main" ;
-    mem:createdAt "2026-10-26T21:31:13.894070+00:00"^^xsd:dateTime ;
-    mem:rationale "The ledger is queryable (SPARQL SELECT and full-text through bus_query and bus_history), readable as of any t, and shared by every machine through one transaction server; the JSONL store keeps the bus usable without Fluree." ;
-    mem:alternatives "JSONL only,SQLite" .
-
-mem:decision-01m5x1zt4q2fm8vdq3ezve2sw5 a mem:Decision ;
-    mem:content "Messages record their origin (machine, the sender's joined cwd, its repo and branch) and are grouped into commit windows by repo and ts against that repo's commit times; no message stores a Git SHA." ;
-    mem:tag "commit-windows" ;
-    mem:tag "git" ;
-    mem:tag "origin" ;
-    mem:scope mem:repo ;
-    mem:artifactRef "src/Bus.ts" ;
-    mem:artifactRef "src/domain.ts" ;
-    mem:branch "main" ;
-    mem:createdAt "2026-10-26T21:31:13.943795+00:00"^^xsd:dateTime ;
-    mem:rationale "A SHA per message costs a git call on every send and says nothing for uncommitted work; commit times already order messages against the code they discuss." ;
-    mem:alternatives "a Git SHA per message" .
-
 mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
-    mem:content "Codex desktop Local threads stay in the desktop app's own app-server. The bus wakes them, idle or busy, with a nudge in their own queue (see the queue-wake decision); the Codex Stop hook (agent-bus codex-stop-hook) also continues an ending turn with the thread's unread messages, and is optional since the nudge shipped." ;
+    mem:content "Codex desktop Local threads stay in the desktop app's own app-server. The bus wakes them, idle or busy, with a nudge in their own queue (see the queue-wake decision)." ;
     mem:tag "codex" ;
     mem:tag "desktop" ;
     mem:tag "hooks" ;
     mem:tag "wake" ;
     mem:scope mem:repo ;
     mem:artifactRef "docs/connections.md" ;
-    mem:artifactRef "src/hook.ts" ;
+    mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-26T21:31:14.094317+00:00"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T03:05:13.937520+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T06:31:43.296056+00:00"^^xsd:dateTime ;
     mem:rationale "Moving desktop threads onto the daemon loses desktop features the owner needs: SSH projects lose browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools; the CODEX_APP_SERVER_WS_URL override skips the app's provisioning too." ;
     mem:alternatives "a desktop SSH project to the same machine,launching the app with CODEX_APP_SERVER_WS_URL,deep links (they only prefill the composer)" .
 
@@ -167,7 +130,7 @@ mem:decision-01m5xn3ccvw8spz95s87csea3r a mem:Decision ;
     mem:alternatives "the desktop coordination socket (spike, never run past Gate 0),a heartbeat automation in the thread (crude fallback only),the daemon taking the thread (second writer locks the owner out),the codex queue CLI with an in-memory mark (reads before a nudge runs stack empty turns; timed-out adds force duplicate or missed wake),thread/queue/start (could run the item in an app-server that is not the thread's owner)" .
 
 mem:decision-01m5xxta7vr0wb7b7640a0wqyv a mem:Decision ;
-    mem:content "Every Codex thread is woken one way: a content-free nudge in its own queue that tells it to call bus_read. serve doesn't connect to the Codex app-server daemon, send messages as turns, steer busy turns or mark anything read; only the owner's read (bus_read, bus_wait, agent-bus wait or the Stop hook) moves its cursor. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
+    mem:content "Every Codex thread is woken one way: a content-free nudge in its own queue that tells it to call bus_read. serve doesn't connect to the Codex app-server daemon, send messages as turns, steer busy turns or mark anything read; only the owner's read (bus_read, bus_wait or agent-bus wait) moves its cursor. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
     mem:tag "codex" ;
     mem:tag "delivery" ;
     mem:tag "queue" ;
@@ -178,8 +141,51 @@ mem:decision-01m5xxta7vr0wb7b7640a0wqyv a mem:Decision ;
     mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T05:37:33.947759+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T06:31:43.331621+00:00"^^xsd:dateTime ;
     mem:rationale "Agents are woken, never polled. The daemon runs a queued item for a thread it has loaded, with or without a client attached, within seconds when idle and after the current turn when busy, and keeps it for a thread nothing has loaded until one resumes it. So the daemon route's resume, turn/start, host classification and holds bought only steering and headless resume, at the cost of a second path that writes to threads and most of the delivery code. The empty-batch skip stays because Fluree's read from a cursor queries every commit up to the head, so a peer with no mail would otherwise re-read a growing range on every change." ;
     mem:alternatives "keeping the daemon route for steering and closed TUI threads (a second writer path that nothing relied on),marking mail read when the nudge is queued (a lost nudge then loses the mail),dropping the empty-batch skip (the cost grows with the ledger)" .
+
+mem:decision-01m5y0xfhgx4cre4rg53xnyzwh a mem:Decision ;
+    mem:content "Messages live in a Fluree ledger (one message per insert commit; a cursor is the last commit t read), behind the Ledger service. It is the only production store: serve won't start without a fluree entry in config.json. The unit tests use a JSONL ledger (test/jsonl-ledger.ts)." ;
+    mem:tag "fluree" ;
+    mem:tag "ledger" ;
+    mem:tag "store" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/Fluree.ts" ;
+    mem:artifactRef "src/bin.ts" ;
+    mem:artifactRef "test/jsonl-ledger.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T06:31:43.408992+00:00"^^xsd:dateTime ;
+    mem:rationale "The ledger is queryable (SPARQL SELECT and full-text through bus_query and bus_history), readable as of any t, and shared by every machine through one transaction server. A second production store doubled what had to stay correct, for a fallback nothing used once every machine had Fluree." ;
+    mem:alternatives "JSONL as a fallback production store (unused once every machine had Fluree),SQLite" .
+
+mem:decision-01m5y0xfm8zx0cxdqqxm1nrm3p a mem:Decision ;
+    mem:content "Every entry records its origin: the machine, the session's joined directory, and that directory's Git repo and branch as optional metadata (bus:repo, bus:branch) for queries. Each git call gets 2 seconds under the address's lock; a field it misses is left out. No commit-window view is built." ;
+    mem:tag "git" ;
+    mem:tag "metadata" ;
+    mem:tag "origin" ;
+    mem:tag "query" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/Bus.ts" ;
+    mem:artifactRef "src/domain.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T06:31:43.496623+00:00"^^xsd:dateTime ;
+    mem:rationale "A branch is a cheap proxy for the workstream and task behind a message, and can't be recovered once its worktree or branch is gone; it is recorded per entry, not per join, because a session can switch branches. The owner plans richer ledger properties so history can be queried by meaning, and repo and branch are the first of them." ;
+    mem:alternatives "recording repo and branch once at join (misses branch switches),dropping them (the workstream context can't be reconstructed),a Git SHA per message (a git call per send that says nothing for uncommitted work)" .
+
+mem:decision-01m5y0xfnyv3fhekaj29gcg196 a mem:Decision ;
+    mem:content "The Codex Stop hook is retired: a nudged turn reads the mail itself with bus_read. codex-stop-hook stays as a command that does nothing, for threads that loaded the hook before its removal from hooks.json, until every Codex app-server (the desktop app's and the daemon) is seen to have started since (ps -o lstart)." ;
+    mem:tag "codex" ;
+    mem:tag "hooks" ;
+    mem:tag "retired" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/simplification-pass.md" ;
+    mem:artifactRef "src/bin.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T06:31:43.550044+00:00"^^xsd:dateTime ;
+    mem:rationale "With approval-free reads, the nudge alone delivers to idle, busy, clientless and unloaded threads. The hook's remaining effects were inline delivery at a busy turn's end, the empty turn after it, and hiding a failed read. Codex keeps a loaded thread's hooks until its app-server restarts, so deleting the command at once would record a failure at every turn end of those threads." ;
+    mem:alternatives "deleting the command at once (recorded failures until each app-server restarts),two deploys with the no-op first (guards only against one recorded failure),keeping the hook (message text in the turn and an extra empty turn)" .
 
 mem:fact-01m5x1ztcfrgxg1r3zcbxt5s0f a mem:Fact ;
     mem:content "The bus's Fluree token has no subject and is sent only to the data and admin APIs; the event stream stays open. In Fluree 4.2.4 a token with a subject is held to identity policies, which deny writes on a ledger without policies, and events auth refuses subject-less tokens. With CORS off, a cross-origin text/plain POST still writes, so auth is what protects the loopback server." ;
@@ -250,6 +256,15 @@ mem:fact-01m5xp8sc3dxn0nzd394qprgrr a mem:Fact ;
     mem:artifactRef "src/serve.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:25:39.587953+00:00"^^xsd:dateTime .
+
+mem:fact-01m5y0xfrbrcwbym2ws681paww a mem:Fact ;
+    mem:content "Codex builds a thread's hooks once, when it loads the thread (Hooks::new at session construction), and never reloads them: editing hooks.json reaches a thread only after its app-server restarts. A Stop hook that exits 1 is recorded as a failure and never blocks a turn; only exit 2 with stderr, or decision block, continues the turn. Codex ignores a broken pipe on the hook's stdin. Read in openai/codex 0.164 source." ;
+    mem:tag "codex" ;
+    mem:tag "hooks" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/bin.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T06:31:43.627731+00:00"^^xsd:dateTime .
 
 mem:fact-01m5xp8mhr201tna2derhkerve a mem:Fact ;
     mem:content "The official MCP SDK Client (@modelcontextprotocol/sdk 1.x) validates a tool's structuredContent only when that client's own listTools() cached the tool's output schema, and never for a tool without one; a tool whose success schema is void lists no outputSchema and returns empty text. So wire tests call listTools first and also assert structuredContent equals the JSON in the first text block. SDK 1.x always offers its latest protocol (2025-11-25) at initialize with no option to choose; it cannot speak the stateless 2026-07-28." ;

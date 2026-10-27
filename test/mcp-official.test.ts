@@ -16,8 +16,8 @@ import {
 import { Effect, Layer, ManagedRuntime } from "effect";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import * as Ledger from "../src/Ledger.ts";
 import * as Serve from "../src/serve.ts";
+import { layerJsonl } from "./jsonl-ledger.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-official-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
@@ -30,7 +30,7 @@ const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provide(
       Bus.layer.pipe(
-        Layer.provideMerge(Ledger.layerJsonl(join(dir, "ledger.jsonl"))),
+        Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )

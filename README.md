@@ -2,7 +2,7 @@
 
 A pub/sub message bus that lets Claude and Codex sessions talk to each other. Sessions join with an address, publish to addresses, `#topics` or `*`, and are woken when messages arrive for them.
 
-Built on Bun and Effect 4. Each machine runs one bus process, `agent-bus serve`, which serves the bus tools over MCP (streamable HTTP, `effect/ai`'s `McpServer`) on loopback and wakes that machine's Codex sessions. Storage sits behind a `Ledger` service with two implementations: a Fluree ledger on the bus's own transaction server (the installed setup), and a JSONL file (the default without one).
+Built on Bun and Effect 4. Each machine runs one bus process, `agent-bus serve`, which serves the bus tools over MCP (streamable HTTP, `effect/ai`'s `McpServer`) on loopback and wakes that machine's Codex sessions. Storage is a Fluree ledger on the bus's own transaction server, behind a `Ledger` service; the unit tests use a JSONL file instead.
 
 ## Commands
 
@@ -22,9 +22,8 @@ bun src/bin.ts --help
 | `agent-bus serve` | This machine's bus: MCP at `http://127.0.0.1:8096/mcp` (`AGENT_BUS_PORT`), and delivery to the Codex sessions that joined from this machine. Runs as the `ai.rawr.agent-bus` LaunchAgent |
 | `agent-bus wait --address A` | Block until messages arrive for `A`, print them, mark them read |
 | `agent-bus join` / `publish` / `peers` | The same operations from a shell; `join` records the current directory, and `--takeover` replaces an ended session |
-| `agent-bus import-jsonl` | Copy the JSONL ledger into the configured Fluree ledger, skipping entries already there |
 
-`wait`, `join`, `publish` and `peers` are MCP clients of the local `serve`; only `serve` and `import-jsonl` touch the store. They present the session id of the address's runtime (`--runtime`, or the runtime the address joined with): `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude, `$AGENT_BUS_SESSION` otherwise, or `--session`. A refusal from the bus ends the command; only an unreachable bus is retried.
+`wait`, `join`, `publish` and `peers` are MCP clients of the local `serve`; only `serve` touches the store. They present the session id of the address's runtime (`--runtime`, or the runtime the address joined with): `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude, `$AGENT_BUS_SESSION` otherwise, or `--session`. A refusal from the bus ends the command; only an unreachable bus is retried.
 
 ## Addresses belong to sessions
 
@@ -32,7 +31,7 @@ An address is one session's private inbox: reading consumes, so two sessions on 
 
 The session that joins an address owns it, identified by its runtime and the runtime's own id for it (a Codex thread id, a Claude Code session id; other clients pass a stable id of their own). Every call passes that id as `session`, and only the owner can read, wait, leave or send from the address. A different session's join is refused with what the bus knows of the holder (its note, last call, whether it has a wait open), and should pick another address. Rejoining with the same id keeps unread messages; after `/clear` or a fork, Claude Code has a new id, so the session needs a new address and its old background `wait` exits on its next call. A process started from a session's shell inherits that session's id and acts for it, as subagents do, so give a delegate that needs its own inbox its own address. A client whose tool list predates `session` can pass it as an extra argument without reconnecting.
 
-To replace a session that has ended, rejoin with `takeover` set to the holder's join id, which the refusal gives. The new owner keeps the unread messages, and the previous one is refused from then on. A presence from before addresses had owners belongs to the Codex thread it names, which can read and rejoin it as before; any other session that joined it reclaims it with a takeover, and a different session gets a fresh cursor rather than another's unread mail. Once an address has an owner, the bus ignores joins and leaves written without one, which only a `serve` from before owners writes, so machines can be upgraded one at a time.
+To replace a session that has ended, rejoin with `takeover` set to the holder's join id, which the refusal gives. The new owner keeps the unread messages, and the previous one is refused from then on. Joins and leaves written without an owner, by a `serve` from before owners, are ignored.
 
 Ownership is checked under the address's lock as each call takes effect, so a wait or send that started before a takeover can't act after it. It is collision protection between cooperating sessions, not security: every process of the user can reach `serve` and the store. Claims are atomic within one machine's `serve`; joins from different machines are ordered by the ledger, and the losing session is refused from its next call. A cursor belongs to the machine its owner joined from, so a takeover from another machine may redeliver messages from that machine's position.
 
@@ -60,7 +59,10 @@ codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector) reaches `serve` as any other client does. Its CLI mode lists and calls the tools. Calls write the ledger and consume messages, so point it at a throwaway bus rather than the machine's on 8096:
 
 ```sh
-AGENT_BUS_DIR=$(mktemp -d) AGENT_BUS_PORT=8196 bun src/bin.ts serve &   # stop it with kill $!
+fluree server run --memory --listen-addr 127.0.0.1:18095 &   # a throwaway Fluree, no auth
+dir=$(mktemp -d)
+echo '{ "fluree": { "url": "http://127.0.0.1:18095", "ledger": "check:main" } }' > "$dir/config.json"
+AGENT_BUS_DIR=$dir AGENT_BUS_PORT=8196 bun src/bin.ts serve &   # stop both with kill %1 %2
 npx @modelcontextprotocol/inspector@2.12.0 --cli http://127.0.0.1:8196/mcp --method tools/list
 npx @modelcontextprotocol/inspector@2.12.0 --cli http://127.0.0.1:8196/mcp --method tools/call \
   --tool-name bus_join --tool-arg address=claude/check runtime=claude session=check cwd=$PWD
@@ -76,32 +78,11 @@ The CLI prints each result as JSON and exits with status 5 when a tool returns `
 
 `serve` never loads, resumes or starts a turn in a thread itself, so a thread never has a second writer. The nudge carries no message text and marks nothing read: the thread's own read moves its cursor.
 
-At most one bus nudge waits in a thread's queue for an address, since a waiting nudge also covers mail that arrives after it. So when a thread gets its mail some other way first (the `Stop` hook, or a read mid-turn), it costs at most one empty turn. Without new mail or a read, `serve` doesn't look again. The queue methods are experimental in the Codex app-server protocol; using the desktop's own CLI keeps them in step with the app.
+At most one bus nudge waits in a thread's queue for an address, since a waiting nudge also covers mail that arrives after it. So when a thread gets its mail some other way first (a read mid-turn, say), it costs at most one empty turn. Without new mail or a read, `serve` doesn't look again. The queue methods are experimental in the Codex app-server protocol; using the desktop's own CLI keeps them in step with the app.
 
 A subagent's queue refuses direct input, so subagents are never woken; their messages stay unread for `bus_read`. Failures (the queue unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes, with the mail kept unread.
 
 Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since each machine's queues are in its own `~/.codex`. Within `serve`, joins, leaves, reads and nudges for one address run one at a time, so a nudge acts on the subscriber's current state.
-
-**A Codex `Stop` hook delivers at the end of a busy turn.** When a turn ends, `agent-bus codex-stop-hook` reads the thread's unread messages and continues the turn with them, so a busy desktop thread gets its mail inline rather than in a separate nudged turn. It is optional now that idle threads are nudged. The hook reads as the thread, presenting its id as the session. A subagent's hook carries its parent's id, so the hook delivers only when a transcript is given and is the thread's own. If the bus is unreachable, the turn ends normally, with any messages the hook already read. Install it in `~/.codex/hooks.json` (use absolute paths; hooks don't get your shell's `PATH`), then review and trust it with `/hooks` in the Codex CLI:
-
-```json
-{
-  "hooks": {
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "/Users/you/.local/bin/bun /path/to/agent-bus/src/bin.ts codex-stop-hook",
-            "timeout": 30,
-            "statusMessage": "Checking agent-bus"
-          }
-        ]
-      }
-    ]
-  }
-}
-```
 
 Where Codex threads run, and so when the bus wakes them:
 
@@ -109,21 +90,23 @@ Where Codex threads run, and so when the bus wakes them:
 | --- | --- | --- |
 | `codex` TUI | The daemon (unless `--no-daemon`) | Yes, by a nudge the daemon runs, with or without the TUI attached; a thread the daemon no longer has loaded gets it when next opened |
 | The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes, as for the TUI |
-| The desktop app, Local project | The app's own app-server | Yes, by a nudge while the thread is open; the `Stop` hook also delivers when a turn ends |
+| The desktop app, Local project | The app's own app-server | Yes, by a nudge while the thread is open |
 | `codex exec` | Its own process | No: a nudge waits in its queue until the thread is opened |
 | A subagent | Its parent's app-server | No: its queue refuses direct input |
 
 ## Setup and other machines
 
-State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` selects the store; without its `fluree` entry the bus uses `ledger.jsonl`:
+State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` names the Fluree ledger, and `serve` won't start without it:
 
 ```json
 { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }
 ```
 
-On the bus host, `install:launch-agents` runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, writes `config.json`, and imports `ledger.jsonl`. Rerunning it is safe.
+On the bus host, `install:launch-agents` runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
 
 Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions.
+
+**Retiring the Codex `Stop` hook.** The hook is gone: a nudged turn reads the mail itself. Remove the `agent-bus codex-stop-hook` entry from `~/.codex/hooks.json`. A thread that loaded the hook keeps calling it until its app-server restarts, so `codex-stop-hook` stays as a command that does nothing until then.
 
 **Upgrading from the per-session stdio server.** `agent-bus mcp` and `deliver-codex` are gone. Rerunning the installer turns on Fluree's token auth and replaces the deliverer with `serve`; on other machines rerun it with `--remote` too. Old stdio processes have no token, so they fail from then on: replace each machine's `agent-bus` registration with the HTTP one above, remove any `agent-bus-ledger` registration, and reconnect or reopen running sessions.
 
@@ -137,15 +120,15 @@ The bus trusts every process of the user on the machine; loopback is not authent
 
 ## Ledger model
 
-Every entry (`src/domain.ts`) has a time-ordered UUIDv7 `id`, ISO `ts`, `from`, `to`, optional `subject` and `replyTo`, and an `origin`: the machine, and the sender's joined directory with its repo and branch, worked out when the message is sent. Presence entries record joins and leaves; the latest per address is that peer's state. Messages are grouped into commit windows by `origin.repo` and `ts` against that repo's commit times, so no message needs a Git SHA.
+Every entry (`src/domain.ts`) has a time-ordered UUIDv7 `id`, ISO `ts`, `from`, `to`, optional `subject` and `replyTo`, and an `origin`: the machine, and the sender's joined directory with its repo and branch, worked out when the entry is written. Repo and branch are optional metadata for queries; a branch can't be recovered once its worktree or branch is gone. Presence entries record joins and leaves; the latest per address with an owner is that peer's state.
 
-In every store, a change notification only wakes readers; reading from the subscriber's cursor decides what is delivered, and a cursor advances only after a complete read. Each store has one change stream per process, shared by every waiter.
+A change notification only wakes readers; reading from the subscriber's cursor decides what is delivered, and a cursor advances only after a complete read. There is one change stream per process, shared by every waiter.
 
 **Fluree** (`src/Fluree.ts`). All bus processes share one transaction server over HTTP, which serializes writers. Each message is one `/insert`, so one commit, and a cursor is the last commit `t` read. Reads are history queries over the `bus:json` assertions from the cursor to the head, in windows of 500 commits. The `/v1/fluree/events` SSE stream wakes readers, with a 15-second poll behind it and a catch-up read after every reconnect. Cursors live in `fluree-cursors/<ledger>/<first commit id>/`, so a replaced ledger starts subscribers over rather than skipping messages; a cursor ahead of the ledger fails loudly.
 
 Each message is a node `urn:agent-bus:message:<id>` typed `bus:Message` or `bus:Presence` (`bus:` is `https://rawr.ai/ns/agent-bus#`), with `bus:id`, `bus:ts` (`xsd:dateTime`), `bus:from`, `bus:to`, `bus:subject`, `bus:body`, `bus:replyTo` (a link to the answered message), `bus:host`, `bus:cwd`, `bus:repo`, `bus:branch`, `bus:runtime` and `bus:status` for presence (whose owning session is in `bus:json`), and `bus:json`, the exact encoded message the bus reads back. The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`, so `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter") and `bus_query` can rank with `f:fulltext`. Fluree 4.2.4 applies that config at the ledger's first index, so for about a second after a ledger is created, text search finds nothing or fails.
 
-**JSONL** (`src/Ledger.ts`). Writers append whole lines with `O_APPEND`; readers consume only newline-terminated lines from their cursor (a byte offset). File watching wakes readers, backed by a two-second poll. `bus_history` matches substrings; `bus_query` is not available.
+The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`): byte-offset cursors, file watching, substring search and no `bus_query`.
 
 ## Known gaps
 
@@ -153,6 +136,5 @@ Each message is a node `urn:agent-bus:message:<id>` typed `bus:Message` or `bus:
 
 ## Next
 
-- **Commit-window view** over `git log` per repo and branch.
-- **A Claude Code Stop hook** that checks the bus when a turn ends, like the Codex one.
-- **Waking idle Local desktop threads** through the desktop app's own coordination socket (undocumented), which keeps the app as the thread's writer.
+- **Richer ledger properties** (topic, task, workstream, decisions, tags, reference docs), so history can be queried by meaning with `bus_query`, not only by text.
+- **Host-armed Claude waking,** so a Claude session doesn't have to restart `wait` after every wake.
