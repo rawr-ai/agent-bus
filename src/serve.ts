@@ -51,9 +51,13 @@ export const layer = (options: {
   readonly port: number;
   readonly version: string;
   readonly codexSocket: string;
+  /** The Codex CLI that queues nudges for threads the daemon doesn't run. */
+  readonly codex: string;
   readonly host: string;
 }) =>
   Layer.mergeAll(
     layerHttp(options).pipe(Layer.provide(threadHostsLayer(options.codexSocket))),
-    Layer.effectDiscard(Effect.forkScoped(runDeliverer(options.codexSocket, options.host)))
+    Layer.effectDiscard(
+      Effect.forkScoped(runDeliverer(options.codexSocket, options.codex, options.host))
+    )
   );

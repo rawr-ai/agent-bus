@@ -13,11 +13,12 @@ export const Joined = Schema.Struct({
   codexHost: Schema.optionalKey(
     CodexHost.annotate({
       description:
-        "daemon: the bus can wake this thread, resuming it if needed. other: it runs in another app-server (such as the desktop app's), so the bus wakes it only while this machine's daemon has it loaded.",
+        "How the bus wakes this thread. daemon: live, with each message as a turn through this machine's Codex daemon, resuming the thread if needed. other: it runs in another app-server (such as the desktop app's), so the bus queues a nudge to call bus_read, which the desktop app runs while the thread is open; a thread no app has open gets it when next opened.",
     })
   ),
 });
 export const Published = Schema.Struct({ id: Schema.String, ts: Schema.String });
+export const Left = Schema.Struct({ address: Schema.String });
 export const Peers = Schema.Struct({
   peers: Schema.Array(
     Schema.Struct({
@@ -155,6 +156,7 @@ Results are rows with a schema and the commit t they reflect, cut off at 32 KB (
 const Leave = Tool.make("bus_leave", {
   description: "Leave the bus; peers stop seeing you and the bus stops waking you.",
   parameters: Schema.Struct({ address: Address, session: Session }),
+  success: Left,
   failure: Failure,
 });
 
@@ -212,7 +214,7 @@ const BusHandlers = BusToolkit.toLayer(
           .pipe(Effect.map((messages) => ({ messages }))),
       bus_query: ({ query, t }) =>
         ledger.select(query, t).pipe(Effect.flatMap(decodeRecord), Effect.mapError(toLedgerError)),
-      bus_leave: ({ address, session }) => bus.leave(address, session),
+      bus_leave: ({ address, session }) => bus.leave(address, session).pipe(Effect.as({ address })),
     };
   })
 );
@@ -222,6 +224,7 @@ const instructions = `agent-bus lets Claude and Codex sessions message each othe
    Pass your runtime's session id as session on every call (join, publish, read, wait, leave): read it from your shell, $CODEX_THREAD_ID in Codex or $CLAUDE_CODE_SESSION_ID in Claude Code. A different session can't use your address, and you can't use one another session holds: choose another address rather than taking it over.
    Codex sessions also pass their thread id as codexThreadId so the bus can wake them with new messages.
    Claude sessions then run \`agent-bus wait --address <address> --runtime claude\` as a background command, one per address; it exits when messages arrive, which wakes you. Re-run it after handling them. Subagents act for their parent and share its id, so a subagent that reads independently needs its own address.
+   Being woken depends on how you run, not on your address or topics, which only decide what is yours to read. Codex threads on this machine's daemon get their unread messages live, through the daemon. Codex desktop Local threads (and any thread not on the daemon) get a queued nudge to call bus_read, which the desktop app runs while the thread is open. Claude sessions are woken only while their background wait runs. Waking isn't guaranteed for codex exec threads or subagents: they read with bus_read or bus_wait.
 2. Send with bus_publish; answer a message by setting replyTo to its id.
 3. bus_read returns unread messages now; bus_wait blocks until a reply arrives. bus_peers shows who is on the bus; bus_history searches past messages; bus_query runs SPARQL over the whole ledger.`;
 

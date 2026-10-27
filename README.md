@@ -63,17 +63,20 @@ codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 
 A thread has one writer, the app-server that loaded it, and the bus never takes a thread from another app-server. At `bus_join`, `serve` records where the thread runs (`codexHost` in the presence entry and the join result): `daemon` if this machine's daemon has it loaded, `other` otherwise (the desktop app's own app-server, a running `codex exec`, or a daemon `serve` can't reach).
 
-| The daemon has the thread loaded? | Joined as | `serve` |
-| --- | --- | --- |
-| Yes | either | `turn/start` |
-| No | `daemon` | `thread/resume`, then `turn/start` |
-| No | `other` | Nothing: the messages wait, unread, until the daemon has the thread loaded or the peer rejoins from the daemon |
+| Joined as | `serve` |
+| --- | --- |
+| `daemon` | `turn/start` through the daemon, after `thread/resume` if the daemon has let the thread go |
+| `other`, or `daemon` with its resume refused (`active writer`) | A nudge in the thread's queue |
 
-A resume refused because another app-server holds the thread (`active writer`) is treated the same as `other` for that join; it is not retried until the thread happens to be free. Subagents take no direct input, so they are never woken; their messages stay unread for `bus_read`. Transport failures (the daemon unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes. Each of these is logged once per join.
+**The queue nudge** wakes threads the daemon doesn't run, above all the desktop app's Local threads, without a second writer. `serve` starts a short-lived `codex app-server` of its own on stdio (the desktop's bundled CLI, or `serve --codex <path>`), lists the thread's queue, and adds one fixed message telling the thread to read its mail with `bus_read`. The app that has the thread open runs it as a turn: at once when the thread is idle, and in a few seconds even with the app in the background. A thread nobody has open runs it when next opened. The nudge carries no message text, and marks nothing read: the thread's own read moves its cursor.
+
+At most one bus nudge waits in a thread's queue for an address, since a waiting nudge also covers mail that arrives after it. So when a thread gets its mail some other way first (the `Stop` hook, or a read mid-turn), it costs at most one empty turn. Without new mail or a read, `serve` doesn't look again. The queue methods are experimental in the Codex app-server protocol; using the desktop's own CLI keeps them in step with the app.
+
+A refused resume is not retried; the thread is nudged instead for the rest of that join. Subagents on the daemon take no direct input, so they are never woken there; their messages stay unread for `bus_read`. Failures (the daemon or the queue unreachable or not answering) are retried after 30 seconds, then after a delay that doubles to five minutes, with the mail kept unread.
 
 Each machine's `serve` wakes only the Codex peers whose join came from that machine (the presence entry's `origin.host`, compared without case or domain), since a thread can only be woken by the daemon that hosts it. Within `serve`, joins, leaves, reads and deliveries for one address run one at a time, so a message is delivered once, to the subscriber's current state.
 
-**A Codex `Stop` hook delivers to threads the bus can't wake.** When a turn ends, `agent-bus codex-stop-hook` reads the thread's unread messages and continues the turn with them, so the desktop app's Local threads get their messages without a second writer and keep every desktop feature. It can't wake a thread that is already idle. The hook reads as the thread, presenting its id as the session. A subagent's hook carries its parent's id, so the hook delivers only when a transcript is given and is the thread's own. If the bus is unreachable, the turn ends normally, with any messages the hook already read. Install it in `~/.codex/hooks.json` (use absolute paths; hooks don't get your shell's `PATH`), then review and trust it with `/hooks` in the Codex CLI:
+**A Codex `Stop` hook delivers at the end of a busy turn.** When a turn ends, `agent-bus codex-stop-hook` reads the thread's unread messages and continues the turn with them, so a busy desktop thread gets its mail inline rather than in a separate nudged turn. It is optional now that idle threads are nudged. The hook reads as the thread, presenting its id as the session. A subagent's hook carries its parent's id, so the hook delivers only when a transcript is given and is the thread's own. If the bus is unreachable, the turn ends normally, with any messages the hook already read. Install it in `~/.codex/hooks.json` (use absolute paths; hooks don't get your shell's `PATH`), then review and trust it with `/hooks` in the Codex CLI:
 
 ```json
 {
@@ -100,11 +103,9 @@ Where Codex threads run, and so whether the bus can wake them:
 | --- | --- | --- |
 | `codex` TUI | The daemon (unless `--no-daemon`) | Yes, live in the TUI |
 | The desktop app, SSH project (including SSH to the same machine) | The daemon, through `codex app-server proxy` | Yes |
-| The desktop app, Local project | The app's own app-server | No; the `Stop` hook delivers when a turn ends |
-| `codex exec` | Its own process | No (joins as `other`) |
-| A subagent | Its parent's app-server | Never |
-
-To have bus messages wake a thread in a desktop window, work in the thread through a daemon connection (an SSH project), at the cost of some desktop features (see [connections](docs/connections.md)). A thread keeps its id across app-servers, since they share `~/.codex`: finish or interrupt its turn in the Local window, open it from the SSH project, and rejoin from there.
+| The desktop app, Local project | The app's own app-server | Yes, by a queue nudge while the thread is open; the `Stop` hook also delivers when a turn ends |
+| `codex exec` | Its own process | No: a nudge waits in its queue until the thread is opened |
+| A subagent | Its parent's app-server | Not on the daemon; whether the desktop runs a subagent's nudge is untested |
 
 The daemon inherits the open-file limit of whatever started it, often macOS's default soft limit of 256. A daemon holding several threads, each with its own MCP servers, exhausts that, and then fails to load threads, skills or shells (`Too many open files` in `~/.codex/app-server-control/app-server.log`). Restart it from a shell with a higher limit: `ulimit -n 10240 && codex app-server daemon restart`.
 

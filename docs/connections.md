@@ -10,6 +10,7 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 | `serve` on another machine | The bus host's Fluree | SSH local forward (`ai.rawr.agent-bus.tunnel`), on the same local port | SSH host key and key authentication, plus the Fluree token, copied over `scp` at install | The SSH account on the bus host |
 | `serve` | The Codex app-server daemon | WebSocket over `~/.codex/app-server-control/app-server-control.sock` | The directory is 0700; no other authentication | Every process of the user on the machine |
 | The Codex desktop app, Local project | Its own app-server | stdio (a child process) | Process boundary | - |
+| `serve` | A `codex app-server` it starts for each nudge (the desktop's bundled CLI) | stdio (a child process), ended before the address's lock is released | Process boundary. The child runs with the user's Codex configuration and `~/.codex`; `serve` sends it only `thread/queue/list` and `thread/queue/add` | The Codex CLI binary |
 | A Codex `Stop` hook (`agent-bus codex-stop-hook`) | `serve` | HTTP on loopback, as a session | As for sessions; reads as the hook's own thread, so only the addresses that thread owns, and only when the hook's transcript is that thread's | Every process of the user on the machine |
 | The Codex desktop app, SSH project | The daemon on the SSH host, through `codex app-server proxy` | SSH, then the daemon's Unix socket | SSH host key and key authentication | The SSH account |
 
@@ -17,8 +18,9 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 
 The daemon socket gives full control of every thread the daemon can load, so `serve` limits itself:
 
-- It sends `turn/start` only to Codex peers that joined from its own machine, and only with their unread bus messages.
+- It sends `turn/start` only to Codex peers that joined from its own machine as `daemon`, and only with their unread bus messages.
 - It never resumes a thread that was running in another app-server when it joined, so it never takes a thread from the desktop app (see [How sessions are woken](../README.md#how-sessions-are-woken)).
+- It can start turns in the user's desktop threads, through their queue: only for a Codex thread that joined an address from this machine with its own thread id, only while that address has unread mail, at most one waiting at a time, and only with a fixed message that carries no text from other sessions. A queued turn runs with the thread's own permissions, which is why the nudge names nothing but the thread's own address.
 - It unsubscribes after each delivery, and never answers approval requests.
 
 ## Running the desktop app on the daemon

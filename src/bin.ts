@@ -8,7 +8,7 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "./Bus.ts";
 import * as Cursors from "./Cursors.ts";
 import * as Client from "./client.ts";
-import { defaultSocket, formatDelivery, localHost } from "./codex.ts";
+import { defaultCodex, defaultSocket, formatDelivery, localHost } from "./codex.ts";
 import { Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import { codexStop } from "./hook.ts";
@@ -114,6 +114,12 @@ const serve = Command.make(
   "serve",
   {
     codexSocket: Flag.String("codex-socket").pipe(Flag.withDefault(defaultSocket)),
+    codex: Flag.String("codex").pipe(
+      Flag.withDescription(
+        "The Codex CLI whose app-server queues nudges (default: the desktop app's own)"
+      ),
+      Flag.withDefault(defaultCodex)
+    ),
     host: Flag.String("host").pipe(
       Flag.withDescription("Wake the Codex peers that joined from this machine"),
       Flag.withDefault(localHost)
@@ -121,7 +127,13 @@ const serve = Command.make(
   },
   (input) =>
     Layer.launch(
-      Serve.layer({ port, version: VERSION, codexSocket: input.codexSocket, host: input.host })
+      Serve.layer({
+        port,
+        version: VERSION,
+        codexSocket: input.codexSocket,
+        codex: input.codex,
+        host: input.host,
+      })
     ).pipe(Effect.provide(BusLayer))
 ).pipe(
   Command.withDescription(
@@ -172,7 +184,7 @@ const joinCommand = Command.make(
       });
       yield* Console.log(
         joined.codexHost === "other"
-          ? `joined as ${joined.address}; the bus wakes this Codex thread only while this machine's daemon has it loaded`
+          ? `joined as ${joined.address}; the bus wakes this Codex thread by queuing a nudge to read its mail, which runs while the thread is open in the desktop app`
           : `joined as ${joined.address}`
       );
     })

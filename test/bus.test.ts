@@ -1,5 +1,12 @@
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
@@ -11,13 +18,16 @@ import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import * as Client from "../src/client.ts";
 import {
+  appServerQueue,
   CodexError,
   connect,
   type Daemon,
   deliverOnce,
   deliveryTargets,
   formatDelivery,
+  formatNudge,
   type Holds,
+  type Queue,
   ThreadHosts,
 } from "../src/codex.ts";
 import { type CodexHost, Message, Origin, Presence } from "../src/domain.ts";
@@ -816,13 +826,44 @@ describe("codex delivery", () => {
     return { daemon, calls, state };
   };
 
+  /**
+   * Codex thread queues: each thread's waiting items, in order. `queue` makes
+   * every request fail, or makes an add land and then report a failure, as a
+   * timed-out request might. `opened` counts the app-servers started.
+   */
+  const fakeQueue = () => {
+    const items = new Map<string, Array<string>>();
+    const queueState = { queue: "accept" as "accept" | "fail" | "lands, then fails", opened: 0 };
+    const waiting = (threadId: string) => items.get(threadId) ?? [];
+    const fail = (method: string) =>
+      Effect.fail(new CodexError({ method, message: "no answer within 3 seconds" }));
+    const queue: Queue = {
+      list: (threadId) =>
+        queueState.queue === "fail" ? fail("thread/queue/list") : Effect.succeed(waiting(threadId)),
+      add: (threadId, text) => {
+        if (queueState.queue === "fail") return fail("thread/queue/add");
+        items.set(threadId, [...waiting(threadId), text]);
+        return queueState.queue === "lands, then fails" ? fail("thread/queue/add") : Effect.void;
+      },
+    };
+    const openQueue = Effect.sync(() => {
+      queueState.opened += 1;
+      return queue;
+    });
+    /** The desktop runs the thread's next waiting item. */
+    const runNext = (threadId: string) => items.set(threadId, waiting(threadId).slice(1));
+    return { openQueue, waiting, runNext, queueState };
+  };
+
   /** A Codex peer `codex/a` on thread t-1 with one message from `claude/b`, and a deliverer for it. */
   const setup = (codexHost: CodexHost) =>
     Effect.gen(function* () {
       const bus = yield* Bus.Bus;
       const fake = fakeDaemon();
+      const queued = fakeQueue();
       const holds: Holds = new Map();
-      const deliver = deliverOnce(Effect.succeed(fake.daemon), hostname(), holds);
+      const deliverer = (state: Holds) =>
+        deliverOnce(Effect.succeed(fake.daemon), queued.openQueue, hostname(), state);
       const join = bus.join({
         address: "codex/a",
         runtime: "codex",
@@ -838,25 +879,33 @@ describe("codex delivery", () => {
         session: sid("claude/b"),
         cwd: process.cwd(),
       });
-      yield* bus.publish({
-        from: "claude/b",
-        session: sid("claude/b"),
-        to: ["codex/a"],
-        body: "hi",
-      });
-      return { bus, ...fake, holds, deliver, join };
+      const send = (body: string) =>
+        bus.publish({ from: "claude/b", session: sid("claude/b"), to: ["codex/a"], body });
+      yield* send("hi");
+      return {
+        bus,
+        ...fake,
+        ...queued,
+        holds,
+        deliver: deliverer(holds),
+        /** A deliverer that has just started, as after a restart. */
+        restarted: deliverer(new Map()),
+        join,
+        send,
+      };
     });
 
   const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus>) =>
     Effect.runPromise(Effect.provide(effect, Layer.merge(jsonl().layer, TestClock.layer())));
 
-  test("a loaded thread gets a turn, and the deliverer unsubscribes", () =>
+  test("a loaded daemon thread gets a turn, and the deliverer unsubscribes", () =>
     run(
       Effect.gen(function* () {
-        const { bus, calls, state, deliver } = yield* setup("other");
+        const { bus, calls, state, queueState, deliver } = yield* setup("daemon");
         state.loaded.add("t-1");
         yield* deliver;
         expect(calls).toEqual(["turn/start t-1", "thread/unsubscribe t-1"]);
+        expect(queueState.opened).toBe(0);
         expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
       })
     ));
@@ -871,37 +920,214 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a thread from another app-server is never resumed; it waits until the daemon has it", () =>
+  test("a desktop thread is nudged with none of its mail, and its messages stay unread", () =>
     run(
       Effect.gen(function* () {
-        const { bus, calls, state, holds, deliver } = yield* setup("other");
-        yield* deliver;
-        yield* TestClock.adjust("1 hour");
-        yield* deliver;
-        expect(calls).toEqual([]);
-        expect(holds.get("codex/a")?.elsewhere).toBe(true);
-
+        const { bus, calls, state, waiting, deliver } = yield* setup("other");
+        yield* bus.publish({
+          from: "claude/b",
+          session: sid("claude/b"),
+          to: ["codex/a"],
+          subject: "private subject",
+          body: "private body",
+        });
+        // Even a desktop thread the daemon happens to have loaded is never sent there.
         state.loaded.add("t-1");
         yield* deliver;
-        expect(calls).toEqual(["turn/start t-1", "thread/unsubscribe t-1"]);
-        expect(holds.size).toBe(0);
-        expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
+        expect(calls).toEqual([]);
+        expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
+        const text = waiting("t-1")[0] ?? "";
+        expect(text).toStartWith('[agent-bus] New messages for "codex/a".');
+        for (const leaked of ["private", "claude/b"]) expect(text).not.toContain(leaked);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi", "private body"]);
       })
     ));
 
-  test("a thread another app-server refuses to share waits, rather than retrying until it is free", () =>
+  test("more mail while a nudge waits adds nothing, and starts no app-server once covered", () =>
     run(
       Effect.gen(function* () {
-        const { bus, calls, state, deliver } = yield* setup("daemon");
+        const { waiting, queueState, deliver, send } = yield* setup("other");
+        yield* deliver;
+        yield* send("two");
+        yield* deliver;
+        expect(queueState.opened).toBe(2);
+        yield* deliver;
+        expect(queueState.opened).toBe(2);
+        expect(waiting("t-1").length).toBe(1);
+      })
+    ));
+
+  test("once the nudge has run, only mail it didn't cover, or a partial read, is nudged again", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, runNext, deliver, send } = yield* setup("other");
+        yield* deliver;
+        runNext("t-1");
+        // The thread didn't read: nothing new, so no nudge.
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        // New mail arrives: one nudge.
+        yield* send("two");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+
+        // The thread reads part of it: the rest is nudged.
+        runNext("t-1");
+        expect(bodies(yield* bus.take("codex/a", "t-1", 1))).toEqual(["hi"]);
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        // It reads everything: nothing more.
+        runNext("t-1");
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+      })
+    ));
+
+  test("mail read another way while a nudge waits, then new mail, adds nothing", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, deliver, send } = yield* setup("other");
+        yield* deliver;
+        for (const body of ["two", "three"]) {
+          // The Stop hook reads at the end of a busy turn; the nudge still waits.
+          yield* bus.take("codex/a", "t-1");
+          yield* send(body);
+          yield* deliver;
+        }
+        expect(waiting("t-1").length).toBe(1);
+      })
+    ));
+
+  test("an add that lands but reports failure is retried without a second nudge", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, queueState, holds, deliver } = yield* setup("other");
+        queueState.queue = "lands, then fails";
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.failures).toBe(1);
+
+        queueState.queue = "accept";
+        yield* TestClock.adjust("30 seconds");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.failures).toBe(0);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
+      })
+    ));
+
+  test("a failing queue leaves the mail unread and is retried after a doubling delay", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, queueState, deliver } = yield* setup("other");
+        queueState.queue = "fail";
+        yield* deliver;
+        yield* deliver; // still waiting out the first failure
+        expect(queueState.opened).toBe(1);
+        yield* TestClock.adjust("30 seconds");
+        yield* deliver;
+        yield* TestClock.adjust("30 seconds"); // the second failure waits a minute
+        yield* deliver;
+        expect(queueState.opened).toBe(2);
+
+        queueState.queue = "accept";
+        yield* TestClock.adjust("30 seconds");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
+      })
+    ));
+
+  test("a rejoin by the same owner while its nudge waits adds nothing", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, deliver, join } = yield* setup("other");
+        yield* deliver;
+        yield* join;
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+      })
+    ));
+
+  test("a restart with a nudge waiting adds nothing", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, deliver, restarted } = yield* setup("other");
+        yield* deliver;
+        yield* restarted;
+        expect(waiting("t-1").length).toBe(1);
+      })
+    ));
+
+  test("a nudge belongs to its address's owner: leaving stops it, a takeover nudges the new one", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, runNext, deliver, join, send } = yield* setup("other");
+        yield* deliver;
+        runNext("t-1");
+        yield* bus.leave("codex/a", "t-1");
+        yield* send("while away");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+
+        // The owner rejoining keeps its unread mail, and gets one nudge for it.
+        yield* join;
+        yield* deliver;
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+
+        const holder = (yield* bus.peers).find((peer) => peer.address === "codex/a");
+        yield* bus.join({
+          address: "codex/a",
+          runtime: "codex",
+          session: "t-2",
+          cwd: process.cwd(),
+          codexThreadId: "t-2",
+          codexHost: "other",
+          takeover: holder?.joinId,
+        });
+        yield* deliver;
+        expect([waiting("t-1").length, waiting("t-2").length]).toEqual([1, 1]);
+        expect(bodies(yield* bus.take("codex/a", "t-2"))).toEqual(["hi", "while away"]);
+      })
+    ));
+
+  test("a daemon thread another app-server holds is nudged at once, and never resumed again", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, calls, state, waiting, runNext, holds, deliver, send } =
+          yield* setup("daemon");
         state.resume = "active writer";
         yield* deliver;
         expect(calls).toEqual(["thread/resume t-1"]);
+        expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.elsewhere).toBe(true);
 
-        state.resume = "accept"; // the other app-server let go of it
-        yield* TestClock.adjust("1 hour");
+        state.resume = "accept";
+        runNext("t-1");
+        yield* bus.take("codex/a", "t-1");
+        yield* send("two");
         yield* deliver;
         expect(calls).toEqual(["thread/resume t-1"]);
-        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
+        expect(waiting("t-1").length).toBe(1);
+      })
+    ));
+
+  test("a refused resume is remembered even when the nudge after it fails", () =>
+    run(
+      Effect.gen(function* () {
+        const { calls, state, queueState, waiting, holds, deliver } = yield* setup("daemon");
+        state.resume = "active writer";
+        queueState.queue = "fail";
+        yield* deliver;
+        expect(holds.get("codex/a")?.elsewhere).toBe(true);
+
+        queueState.queue = "accept";
+        yield* TestClock.adjust("30 seconds");
+        yield* deliver;
+        expect(calls).toEqual(["thread/resume t-1"]);
+        expect(waiting("t-1").length).toBe(1);
       })
     ));
 
@@ -953,6 +1179,105 @@ describe("codex delivery", () => {
         expect(yield* bus.take("codex/a", "t-1")).toEqual([]);
       })
     ));
+});
+
+describe("codex app-server queue", () => {
+  /**
+   * A stand-in `codex` whose `app-server` speaks JSON-RPC on stdio. It records
+   * each request it receives, and answers as `mode` says.
+   */
+  const fakeCodex = (mode: "answers" | "refuses" | "silent" | "stubborn") => {
+    const dir = tempDir();
+    const bin = join(dir, "codex");
+    const log = join(dir, "requests");
+    const pidFile = join(dir, "pid");
+    writeFileSync(
+      bin,
+      `#!${process.execPath}
+import { appendFileSync } from "node:fs";
+const mode = ${JSON.stringify(mode)};
+await Bun.write(${JSON.stringify(pidFile)}, String(process.pid));
+// A stubborn server outlives the end of its input.
+if (mode === "stubborn") setInterval(() => {}, 1000);
+const reply = (id, body) => process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id, ...body }) + "\\n");
+for await (const line of console) {
+  if (line.trim() === "") continue;
+  const message = JSON.parse(line);
+  appendFileSync(${JSON.stringify(log)}, line + "\\n");
+  if (message.id === undefined) continue;
+  if (message.method === "initialize") reply(message.id, { result: {} });
+  else if (mode === "silent" || mode === "stubborn") continue;
+  else if (mode === "refuses") reply(message.id, { error: { code: -32603, message: "no rollout found for thread id " + message.params.threadId } });
+  else if (message.method === "thread/queue/list") reply(message.id, { result: { data: [{ id: "q1", clientUserMessageId: "c1", input: [{ type: "text", text: "waiting", text_elements: [] }] }, { id: "q2", input: [{ type: "image", url: 7 }] }, { id: "q3" }], nextCursor: null } });
+  else reply(message.id, { result: { queuedSubmission: { id: "q2", clientUserMessageId: message.params.clientUserMessageId, input: message.params.input } } });
+}
+`
+    );
+    chmodSync(bin, 0o755);
+    const requests = () =>
+      readFileSync(log, "utf8")
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line) as { method: string; params?: Record<string, unknown> });
+    const pid = () => Number(readFileSync(pidFile, "utf8"));
+    return { bin, requests, pid };
+  };
+
+  const withQueue = <A>(bin: string, use: (queue: Queue) => Effect.Effect<A, CodexError>) =>
+    Effect.runPromise(
+      Effect.result(Effect.scoped(Effect.flatMap(appServerQueue(bin, Duration.seconds(1)), use)))
+    );
+
+  test("lists and adds through an experimental app-server session", async () => {
+    const codex = fakeCodex("answers");
+    const result = await withQueue(codex.bin, (queue) =>
+      Effect.gen(function* () {
+        const listed = yield* queue.list("t-1");
+        yield* queue.add("t-1", "read your mail");
+        return listed;
+      })
+    );
+    // Items of shapes it doesn't know read as no text rather than failing the list.
+    expect(result._tag === "Success" && result.success).toEqual(["waiting", "", ""]);
+    const [initialize, initialized, list, add] = codex.requests();
+    expect(initialize?.params?.capabilities).toEqual({ experimentalApi: true });
+    expect(initialized?.method).toBe("initialized");
+    expect(list?.params).toEqual({ threadId: "t-1", limit: 100 });
+    expect(add?.params?.threadId).toBe("t-1");
+    expect(add?.params?.input).toEqual([
+      { type: "text", text: "read your mail", text_elements: [] },
+    ]);
+  });
+
+  test("a refusal is a failure that carries the app-server's message", async () => {
+    const result = await withQueue(fakeCodex("refuses").bin, (queue) => queue.list("t-1"));
+    expect(result._tag === "Failure" && result.failure.message).toContain("no rollout found");
+  });
+
+  test("an app-server that never answers is stopped at the deadline and ended", async () => {
+    const codex = fakeCodex("silent");
+    const started = Date.now();
+    const result = await withQueue(codex.bin, (queue) => queue.list("t-1"));
+    expect(Date.now() - started).toBeLessThan(4_000);
+    expect(result._tag === "Failure" && result.failure.message).toContain("no answer within");
+    expect(codex.requests().map((request) => request.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/queue/list",
+    ]);
+  });
+
+  test("an app-server that outlives the end of its input is killed before the session ends", async () => {
+    const codex = fakeCodex("stubborn");
+    const result = await withQueue(codex.bin, (queue) => queue.list("t-1"));
+    expect(result._tag).toBe("Failure");
+    expect(() => process.kill(codex.pid(), 0)).toThrow();
+  });
+
+  test("a missing CLI is a failure, not a crash", async () => {
+    const result = await withQueue(join(tempDir(), "missing"), (queue) => queue.list("t-1"));
+    expect(result._tag).toBe("Failure");
+  });
 });
 
 describe("sparql validation", () => {
@@ -1635,6 +1960,12 @@ describe("mcp over http", () => {
             arguments: { address: "claude/a" },
           });
           expect(anonymous.isError).toBe(true);
+          const left = yield* client.callTool({
+            tool: tool("bus_leave"),
+            schema: Mcp.Left,
+            arguments: { address: "codex/b", session: sid("codex/b") },
+          });
+          expect(left).toEqual({ address: "codex/b" });
         }).pipe(
           Effect.provide(
             McpClient.layerHttp({ name: "test", version: "1", url, protocol }).pipe(
