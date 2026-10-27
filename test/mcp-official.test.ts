@@ -107,6 +107,36 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     return { tools, call, succeed, refused };
   };
 
+  // Codex asks approval for a tool that is destructive, or not read-only and possibly
+  // open-world (requires_mcp_tool_approval in codex-rs/core/src/mcp_tool_call.rs), and
+  // refuses the call outright under approval policy never outside full access.
+  test("annotates the tools as closed-world, lookups as read-only and only bus_join as destructive", async () => {
+    const { tools } = await connect();
+    const changes = { destructiveHint: false, openWorldHint: false, readOnlyHint: false };
+    const lookup = { ...changes, readOnlyHint: true };
+    expect(
+      Object.fromEntries(
+        tools.map(({ name, annotations }) => [
+          name,
+          {
+            destructiveHint: annotations?.destructiveHint,
+            openWorldHint: annotations?.openWorldHint,
+            readOnlyHint: annotations?.readOnlyHint,
+          },
+        ])
+      )
+    ).toEqual({
+      bus_join: { ...changes, destructiveHint: true },
+      bus_publish: changes,
+      bus_read: changes,
+      bus_wait: changes,
+      bus_peers: lookup,
+      bus_history: lookup,
+      bus_query: lookup,
+      bus_leave: changes,
+    });
+  });
+
   test("lists the bus tools, with output schemas from 2025-06-18", async () => {
     const { tools } = await connect();
     const required = {

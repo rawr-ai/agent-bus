@@ -3,21 +3,6 @@
 @prefix mem: <https://ns.flur.ee/memory#> .
 @prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
 
-mem:constraint-01m5x1zt7w483hs4ddjdqtbd77 a mem:Constraint ;
-    mem:content "serve must never thread/resume a Codex thread whose join wasn't classified codexHost daemon (loaded in this machine's daemon at bus_join). Other threads get messages only while the daemon has them loaded; an active-writer refusal means wait, not retry; subagents are never woken." ;
-    mem:tag "app-server" ;
-    mem:tag "codex" ;
-    mem:tag "guard" ;
-    mem:tag "wake" ;
-    mem:scope mem:repo ;
-    mem:severity "must" ;
-    mem:artifactRef "src/codex.ts" ;
-    mem:artifactRef "src/mcp.ts" ;
-    mem:branch "main" ;
-    mem:createdAt "2026-10-26T21:31:14.044903+00:00"^^xsd:dateTime ;
-    mem:rationale "A thread has one writer. Resuming a desktop-app thread once the app released it made the daemon its writer and locked the owner's window ('open in another app'). Classifying at join works because a Codex agent calls bus_join mid-turn, while its thread is loaded wherever it runs." ;
-    mem:alternatives "a per-session wake flag (records permission, doesn't reconcile two writers),retrying with back-off until the thread is free" .
-
 mem:constraint-01m5x1ztaxvc47hyxyyrwbtsrb a mem:Constraint ;
     mem:content "The Codex Stop hook must deliver only when transcript_path names the thread in session_id (rollout files are named by thread id): a subagent's hook carries its parent's session_id and would otherwise take the parent's messages. Any failure must let the turn end." ;
     mem:tag "codex" ;
@@ -51,6 +36,50 @@ mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
     mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:05:13.982763+00:00"^^xsd:dateTime .
+
+mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
+    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve and every Codex Stop hook run src/bin.ts from it. A half-edited tree breaks the hook at the next Codex turn end and serve at its next restart. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
+    mem:tag "hooks" ;
+    mem:tag "operations" ;
+    mem:tag "serve" ;
+    mem:tag "worktree" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "README.md" ;
+    mem:artifactRef "src/bin.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T03:32:00.198214+00:00"^^xsd:dateTime ;
+    mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
+
+mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
+    mem:content "serve never loads, resumes, subscribes to or starts turns on a Codex thread. It only lists and adds to the thread's queue, through a short-lived app-server of its own, so whichever app-server has the thread loaded stays its only writer and runs the nudge." ;
+    mem:tag "app-server" ;
+    mem:tag "codex" ;
+    mem:tag "guard" ;
+    mem:tag "queue" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "src/codex.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T05:37:33.860507+00:00"^^xsd:dateTime ;
+    mem:rationale "A thread has one writer. Resuming a desktop-app thread once the app released it made the daemon its writer and locked the owner's window ('open in another app'). A queued item runs in whichever app-server has the thread loaded, so adding one needs no knowledge of where the thread lives." ;
+    mem:alternatives "classifying each join's host (codexHost) and resuming only daemon threads (a wait at every join; stale once the thread moves),retrying a refused resume with back-off (contends with the owner's app)" .
+
+mem:constraint-01m5xxtabswcyy08b31skk6s4z a mem:Constraint ;
+    mem:content "Every bus MCP tool must be annotated openWorldHint false and, except bus_join, destructiveHint false; pure lookups also readOnlyHint true. bus_join stays destructive because a takeover replaces another session's hold. Effect's ai Tool defaults to destructive and open-world, and Codex then asks approval for each call outside full access, or refuses it under approval policy never, so a nudged thread can't read or answer its mail." ;
+    mem:tag "annotations" ;
+    mem:tag "approval" ;
+    mem:tag "codex" ;
+    mem:tag "mcp" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "src/mcp.ts" ;
+    mem:artifactRef "test/mcp-official.test.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T05:37:34.073037+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T05:37:46.116492+00:00"^^xsd:dateTime ;
+    mem:rationale "Codex's requires_mcp_tool_approval requires approval when destructiveHint is true, or when a tool isn't read-only and destructiveHint or openWorldHint is unset or true; only policy never with full disk write access, or a server approval mode of approve, skips that. Found live when a read-only-sandbox thread ran its nudge and bus_read was refused; the Stop hook masked it by delivering at turn end." .
 
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
@@ -91,18 +120,6 @@ mem:decision-01m5x1zt4q2fm8vdq3ezve2sw5 a mem:Decision ;
     mem:rationale "A SHA per message costs a git call on every send and says nothing for uncommitted work; commit times already order messages against the code they discuss." ;
     mem:alternatives "a Git SHA per message" .
 
-mem:decision-01m5x1zt6aegrjnxxakxym735x a mem:Decision ;
-    mem:content "Codex threads are woken by push: serve sends the unread messages as turn/start through the machine's Codex app-server daemon, which starts a turn on an idle thread and steers a running one. Messages are marked read only once the daemon accepts." ;
-    mem:tag "codex" ;
-    mem:tag "delivery" ;
-    mem:tag "wake" ;
-    mem:scope mem:repo ;
-    mem:artifactRef "src/codex.ts" ;
-    mem:branch "main" ;
-    mem:createdAt "2026-10-26T21:31:13.994666+00:00"^^xsd:dateTime ;
-    mem:rationale "Agents are woken, never polled; a Codex agent can't run a background wait the way Claude Code can." ;
-    mem:alternatives "agents polling with bus_wait,a queued-input command" .
-
 mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
     mem:content "Codex desktop Local threads stay in the desktop app's own app-server. The bus wakes them, idle or busy, with a nudge in their own queue (see the queue-wake decision); the Codex Stop hook (agent-bus codex-stop-hook) also continues an ending turn with the thread's unread messages, and is optional since the nudge shipped." ;
     mem:tag "codex" ;
@@ -134,7 +151,7 @@ mem:decision-01m5x9h50yh252vteyr31k9jtk a mem:Decision ;
     mem:alternatives "lease token issued at join (must survive compaction and be handed to waits and hooks),identity in an HTTP header (connection headers stay fixed across /clear; one Codex daemon serves many threads),idle-based automatic takeover (inactivity cannot prove a session ended)" .
 
 mem:decision-01m5xn3ccvw8spz95s87csea3r a mem:Decision ;
-    mem:content "Codex threads not on the daemon (desktop Local threads, or a daemon join whose resume another app-server refused) are woken by a nudge in their own queue: serve starts a short-lived app-server of its own on stdio (the desktop's bundled CLI, serve --codex), lists the thread's queue (thread/queue/list) and adds one fixed nudge (thread/queue/add) only when none of ours waits for that address. The nudge carries no text from other sessions and marks nothing read; the thread's own bus_read moves its cursor. Shipped in 3d10fca, qualified live 2026-10-27." ;
+    mem:content "A Codex thread is woken by a nudge in its own queue: serve starts a short-lived app-server of its own on stdio (the desktop's bundled CLI, serve --codex), lists the thread's queue (thread/queue/list, every page) and adds one fixed nudge (thread/queue/add) only when none of ours waits for that address. The nudge carries no text from other sessions and marks nothing read; the thread's own bus_read moves its cursor." ;
     mem:tag "codex" ;
     mem:tag "delivery" ;
     mem:tag "desktop" ;
@@ -145,8 +162,24 @@ mem:decision-01m5xn3ccvw8spz95s87csea3r a mem:Decision ;
     mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:05:13.883838+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T05:37:33.994907+00:00"^^xsd:dateTime ;
     mem:rationale "The desktop app runs a queued item as a turn within seconds in an idle open thread and stays the thread's only writer. Listing before adding keeps at most one nudge waiting, which bounds empty turns to one per read, survives serve restarts and reconciles adds whose outcome is unknown." ;
     mem:alternatives "the desktop coordination socket (spike, never run past Gate 0),a heartbeat automation in the thread (crude fallback only),the daemon taking the thread (second writer locks the owner out),the codex queue CLI with an in-memory mark (reads before a nudge runs stack empty turns; timed-out adds force duplicate or missed wake),thread/queue/start (could run the item in an app-server that is not the thread's owner)" .
+
+mem:decision-01m5xxta7vr0wb7b7640a0wqyv a mem:Decision ;
+    mem:content "Every Codex thread is woken one way: a content-free nudge in its own queue that tells it to call bus_read. serve doesn't connect to the Codex app-server daemon, send messages as turns, steer busy turns or mark anything read; only the owner's read (bus_read, bus_wait, agent-bus wait or the Stop hook) moves its cursor. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
+    mem:tag "codex" ;
+    mem:tag "delivery" ;
+    mem:tag "queue" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/one-codex-route.md" ;
+    mem:artifactRef "src/Bus.ts" ;
+    mem:artifactRef "src/codex.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T05:37:33.947759+00:00"^^xsd:dateTime ;
+    mem:rationale "Agents are woken, never polled. The daemon runs a queued item for a thread it has loaded, with or without a client attached, within seconds when idle and after the current turn when busy, and keeps it for a thread nothing has loaded until one resumes it. So the daemon route's resume, turn/start, host classification and holds bought only steering and headless resume, at the cost of a second path that writes to threads and most of the delivery code. The empty-batch skip stays because Fluree's read from a cursor queries every commit up to the head, so a peer with no mail would otherwise re-read a growing range on every change." ;
+    mem:alternatives "keeping the daemon route for steering and closed TUI threads (a second writer path that nothing relied on),marking mail read when the nudge is queued (a lost nudge then loses the mail),dropping the empty-batch skip (the cost grows with the ledger)" .
 
 mem:fact-01m5x1ztcfrgxg1r3zcbxt5s0f a mem:Fact ;
     mem:content "The bus's Fluree token has no subject and is sent only to the data and admin APIs; the event stream stays open. In Fluree 4.2.4 a token with a subject is held to identity policies, which deny writes on a ledger without policies, and events auth refuses subject-less tokens. With CORS off, a cross-origin text/plain POST still writes, so auth is what protects the loopback server." ;
@@ -195,7 +228,7 @@ mem:fact-01m5xn3chn8n8q5wktct3xxn4s a mem:Fact ;
     mem:createdAt "2026-10-27T03:05:14.037431+00:00"^^xsd:dateTime .
 
 mem:fact-01m5xnf9zqad6yt71b5exbs2dc a mem:Fact ;
-    mem:content "The Codex app-server daemon runs a queued item (thread/queue/add from another process) as a turn for a thread it has loaded with a client attached: 5.8 s after the add, verified 2026-10-27 on 0.164. So the queue route can wake daemon-hosted threads too, not only desktop ones. Untested: a daemon thread with no client attached." ;
+    mem:content "The Codex app-server daemon runs a queued item (thread/queue/add from another process) as a turn for any thread it has loaded, with or without a client attached, within seconds when idle; an item added mid-turn runs as its own turn after the current one. A thread nothing has loaded keeps the item until an app-server resumes it, which runs it at once. A spawned subagent's queue refuses the add ('direct app-server input is not allowed for unloaded spawned sub-agents'). Verified on Codex 0.164." ;
     mem:tag "codex" ;
     mem:tag "daemon" ;
     mem:tag "queue" ;
@@ -203,4 +236,28 @@ mem:fact-01m5xnf9zqad6yt71b5exbs2dc a mem:Fact ;
     mem:scope mem:repo ;
     mem:artifactRef "docs/frames/queue-wake.md" ;
     mem:branch "main" ;
-    mem:createdAt "2026-10-27T03:11:44.631668+00:00"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T03:11:44.631668+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-27T05:37:34.030825+00:00"^^xsd:dateTime .
+
+mem:fact-01m5xp8sc3dxn0nzd394qprgrr a mem:Fact ;
+    mem:content "Effect 4.0.6 McpServer as official tooling sees it: any Origin is refused (403) unless in allowedOrigins, so the MCP conformance dns-rebinding check fails on a localhost Origin by design; an MCP-Protocol-Version header differing from the negotiated version gets 400 (-32020), though the spec requires 400 only for invalid or unsupported versions, failing conformance server-sse-multiple-streams; stateful versions always advertise completions, logging and tools.listChanged; tools carry default annotations (destructiveHint true, readOnlyHint false) unless set. Most conformance server scenarios need the reference server's fixture tools." ;
+    mem:tag "conformance" ;
+    mem:tag "effect" ;
+    mem:tag "mcp" ;
+    mem:tag "spec" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/mcp.ts" ;
+    mem:artifactRef "src/serve.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-27T03:25:39.587953+00:00"^^xsd:dateTime .
+
+mem:fact-01m5xp8mhr201tna2derhkerve a mem:Fact ;
+    mem:content "The official MCP SDK Client (@modelcontextprotocol/sdk 1.x) validates a tool's structuredContent only when that client's own listTools() cached the tool's output schema, and never for a tool without one; a tool whose success schema is void lists no outputSchema and returns empty text. So wire tests call listTools first and also assert structuredContent equals the JSON in the first text block. SDK 1.x always offers its latest protocol (2025-11-25) at initialize with no option to choose; it cannot speak the stateless 2026-07-28." ;
+    mem:tag "mcp" ;
+    mem:tag "sdk" ;
+    mem:tag "testing" ;
+    mem:tag "trap" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "test/mcp-official.test.ts" ;
+    mem:branch "test/official-mcp-client" ;
+    mem:createdAt "2026-10-27T03:25:34.648211+00:00"^^xsd:dateTime .

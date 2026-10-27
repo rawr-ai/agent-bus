@@ -1567,6 +1567,26 @@ describe("one session per address", () => {
       })
     ));
 
+  test("a CLI refusal prints its message alone and exits 1", () => {
+    // An empty session is refused before any call, so no bus or bus directory is reached.
+    const cli = Bun.spawnSync(
+      [
+        process.execPath,
+        join(import.meta.dir, "../src/bin.ts"),
+        "join",
+        "--address",
+        "claude/a",
+      ].concat(["--runtime", "claude", "--session", ""]),
+      {
+        env: { ...process.env, AGENT_BUS_PORT: "9", AGENT_BUS_DIR: join(tmpdir(), "no-agent-bus") },
+      }
+    );
+    expect([cli.exitCode, cli.stderr.toString().trim()]).toEqual([
+      1,
+      "--session is empty or an unexpanded placeholder.",
+    ]);
+  });
+
   test("the owner reconnects and rejoins with its mail; a left address is free, without it", () =>
     run(
       Effect.gen(function* () {

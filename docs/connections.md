@@ -22,6 +22,12 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 
 Whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs the nudge with the thread's own permissions, which is why it names nothing but the thread's own address.
 
+## Approval in Codex
+
+Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe. The bus's tools say they reach only the bus's peers, and lookups say they are read-only. Only `bus_join` says it is destructive, because a takeover replaces another session's hold.
+
+So outside full access, only a join needs approval, and a nudged thread can read and answer its mail in any sandbox. It also means a sandboxed thread can send to peers that aren't sandboxed. Mail is another session's words, to be weighed as data.
+
 ## When a nudge is queued but doesn't run
 
 A nudge runs only where the thread is loaded, so for TUI and SSH threads it depends on the Codex daemon:

@@ -1,4 +1,4 @@
-import { Effect, Layer, Schema } from "effect";
+import { Context, Effect, Layer, Schema } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus } from "./Bus.ts";
 import { LedgerError, Message, NotJoined, NotOwner, Runtime } from "./domain.ts";
@@ -22,6 +22,16 @@ export const Peers = Schema.Struct({
   ),
 });
 
+/**
+ * Bus tools reach only the bus's own peers and delete nothing. Effect's defaults
+ * mark every tool destructive and open-world, and Codex then asks approval for
+ * each call outside full access, or refuses it under approval policy never,
+ * which would leave a nudged thread unable to read or answer its mail.
+ */
+const Local = Context.make(Tool.Destructive, false).pipe(Context.add(Tool.OpenWorld, false));
+/** Tools that change nothing, not even what is unread. */
+const Lookup = Local.pipe(Context.add(Tool.Readonly, true));
+
 /** The longest a single wait holds its HTTP request open. */
 export const MAX_WAIT_SECONDS = 50;
 
@@ -38,6 +48,7 @@ const Session = Schema.optionalKey(
   })
 );
 
+// Destructive: a takeover replaces another session's hold, which is refused from then on.
 const Join = Tool.make("bus_join", {
   description:
     "Join the agent bus (or rejoin after a restart) before reading. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can nudge them to read new messages; Claude sessions run `agent-bus wait --address <address>` as a background command to be woken.",
@@ -67,7 +78,9 @@ const Join = Tool.make("bus_join", {
   }),
   success: Joined,
   failure: Failure,
-});
+})
+  .annotateMerge(Local)
+  .annotate(Tool.Destructive, true);
 
 const Publish = Tool.make("bus_publish", {
   description:
@@ -82,7 +95,7 @@ const Publish = Tool.make("bus_publish", {
   }),
   success: Published,
   failure: Failure,
-});
+}).annotateMerge(Local);
 
 const Read = Tool.make("bus_read", {
   description: "Return your unread messages and mark them read. Returns immediately.",
@@ -93,7 +106,7 @@ const Read = Tool.make("bus_read", {
   }),
   success: Messages,
   failure: Failure,
-});
+}).annotateMerge(Local);
 
 const Wait = Tool.make("bus_wait", {
   description:
@@ -107,14 +120,14 @@ const Wait = Tool.make("bus_wait", {
   }),
   success: Messages,
   failure: Failure,
-});
+}).annotateMerge(Local);
 
 const ListPeers = Tool.make("bus_peers", {
   description:
     "List the peers currently joined to the bus, with their runtimes, topics, machines and notes.",
   success: Peers,
   failure: Failure,
-});
+}).annotateMerge(Lookup);
 
 const History = Tool.make("bus_history", {
   description:
@@ -126,7 +139,7 @@ const History = Tool.make("bus_history", {
   }),
   success: Messages,
   failure: Failure,
-});
+}).annotateMerge(Lookup);
 
 const Query = Tool.make("bus_query", {
   description: `Query the bus ledger with one read-only SPARQL 1.1 SELECT (Fluree store only). Prefixes bus:, xsd:, rdf: and f: need no declaration; FROM and SERVICE are not allowed.
@@ -141,14 +154,14 @@ Results are rows with a schema and the commit t they reflect, cut off at 32 KB (
   }),
   success: Schema.Record(Schema.String, Schema.Unknown),
   failure: Failure,
-});
+}).annotateMerge(Lookup);
 
 const Leave = Tool.make("bus_leave", {
   description: "Leave the bus; peers stop seeing you and the bus stops waking you.",
   parameters: Schema.Struct({ address: Address, session: Session }),
   success: Left,
   failure: Failure,
-});
+}).annotateMerge(Local);
 
 const BusToolkit = Toolkit.make(Join, Publish, Read, Wait, ListPeers, History, Query, Leave);
 

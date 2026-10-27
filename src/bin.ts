@@ -305,6 +305,16 @@ const cli = Command.make("agent-bus").pipe(
 );
 
 Command.run(cli, { version: VERSION }).pipe(
+  // A refused or failed bus call is an answer, not a crash: its message alone, and status 1.
+  Effect.catchTag("BusCallError", (error) =>
+    Console.error(error.message).pipe(
+      Effect.andThen(
+        Effect.sync(() => {
+          process.exitCode = 1;
+        })
+      )
+    )
+  ),
   Effect.provide(Layer.mergeAll(BunServices.layer, FetchHttpClient.layer)),
   Effect.provide(Layer.succeed(Logger.LogToStderr)(true)),
   BunRuntime.runMain
