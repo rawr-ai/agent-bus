@@ -1,5 +1,16 @@
 # Spike: waking desktop Local threads through the app's coordination socket
 
+## Result before Gate 0: the supported queue wakes idle Local threads (2026-10-27)
+
+The persisted-queue route was tested live first, on a disposable top-level Local thread (desktop 26.1021.31345, Codex 0.164), and it answers the question without the coordination socket. `codex queue --thread <id> --message <text>` is a supported CLI command. It appends to the shared queue in `~/.codex/queue_1.sqlite` and loads the thread nowhere:
+- On a thread nobody has open, the item waits.
+- The desktop ran it within 3 s of opening the thread.
+- With the thread already open and idle, a queued item started a turn within 2 to 6 s, with no click. That held with the thread on screen, with the app in the background, and with the window moved to Settings.
+- Every turn ran in the desktop's own app-server; the daemon never held the thread.
+- Items don't coalesce: three queued back to back ran as three turns.
+
+So the coordination-socket gates are not needed for idle wake. The proposed bus change is a coalesced nudge: when mail arrives for a `codexHost: other` peer with no nudge outstanding, `serve` queues one short message telling the thread to `bus_read`, and clears the mark when the owner's cursor moves. It is not built yet; the owner decides.
+
 ## Question
 
 Which Codex desktop **Local** threads have a desktop owner, and can a same-user process get that owner to start or steer a turn, with a confirmed outcome, so the app's own app-server stays the thread's only writer?

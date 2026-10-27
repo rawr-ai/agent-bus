@@ -46,7 +46,7 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | --- | --- | --- |
 | Claude Code (desktop, terminal or `claude -p`) | A background `agent-bus wait`, which exits on arrival and wakes the session | Yes, within seconds, provided the wait is running. The session must restart it after every wake |
 | Codex `codex` TUI, or a desktop SSH project | The deliverer's `turn/start` through the daemon | Yes: an idle thread starts a turn, a busy one is steered |
-| **Codex desktop Local thread** | The `Stop` hook at the end of each of its turns, once the hook is installed. Otherwise only when the thread itself calls `bus_read` or `bus_wait` | **No.** An idle Local thread is never woken. The desktop-wake spike is about changing that |
+| **Codex desktop Local thread** | The `Stop` hook at the end of each of its turns, once trusted. Otherwise only when the thread itself calls `bus_read` or `bus_wait` | **Not yet.** An idle Local thread isn't woken today. `codex queue` was shown to start a turn in an idle, open Local thread within seconds ([result](frames/desktop-wake-spike.md)), so a coalesced nudge from `serve` would add idle wake |
 | `codex exec` | Only by calling `bus_read`. It is never woken, including after it exits | No |
 | A Codex or Claude subagent | Through its parent | Never woken directly |
 
@@ -102,7 +102,7 @@ Size: about 2,400 lines of source, 1,800 lines of tests, and a 190-line installe
 | Claude ids: set in the desktop app, the terminal and `claude -p`; `/clear` and forks change them; `--resume` keeps them | **Verified live** |
 | A desktop Local Codex thread's shell has `CODEX_THREAD_ID`, equal to its thread id, and its legacy address was adopted on rejoin | **Verified live** |
 | A session whose cached tool list predates `session` can pass it as an extra argument, in both Claude Code and Codex | **Verified live** |
-| Idle desktop Local threads can't be woken | **Known gap.** The desktop-wake spike may close it for threads that have a window open |
+| Idle desktop Local threads can't be woken | **Known gap, with a verified fix:** a coalesced `codex queue` nudge from `serve` (not built) |
 | The `Stop` hook is installed on both machines but not yet trusted | **Owner's step**: `/hooks` |
 | `codex exec` threads are never woken, even after they exit | **Open decision** (codex-wake item 7) |
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |
@@ -125,4 +125,5 @@ These were found while writing this map and are not recommendations. Each names 
 4. **Origin repo and branch on every message.** Each publish runs `git` twice to record them for commit-window views that were never built. Either build the view or stop recording them.
 5. **Legacy ownership paths.** These are adopting owner-less presences and ignoring owner-less presences. Once every live address has an owner and no pre-ownership `serve` remains, both can go.
 6. **Two locks per address** (`claiming` for ownership changes and sends, `exclusive` for cursor moves). They were split so sends don't wait behind slow deliveries. Keep them unless deliveries become fast enough not to matter.
-7. **Claude waking by background `wait`.** It works, but every session must restart its wait after each wake, and a forgotten restart silently stops delivery. A Claude Code `Stop` hook (listed as next in the README) would mirror the Codex one and could be simpler for sessions to keep right.
+7. **One Codex route for desktop threads.** If `serve` gains the `codex queue` nudge, it covers idle and busy Local threads alike. The `Stop` hook becomes optional (with both, a busy thread gets its mail inline and then runs one empty nudge turn), and the desktop-wake spike is unnecessary.
+8. **Claude waking by background `wait`.** It works, but every session must restart its wait after each wake, and a forgotten restart silently stops delivery. A Claude Code `Stop` hook (listed as next in the README) would mirror the Codex one and could be simpler for sessions to keep right.
