@@ -76,7 +76,7 @@ export class Bus extends Context.Service<
      * Claims an address for a session, or reconnects the session that owns it.
      * A different session is refused while the address is held, unless it
      * names the holder's join in `takeover`. `hooked` says this machine's bus
-     * has seen the session's wake hook, so the session needn't run a wait.
+     * has seen the session's wake hook, which wakes it when mail arrives.
      */
     readonly join: (
       input: JoinInput
@@ -543,8 +543,8 @@ export const layer = Layer.effect(
      * The reads, under each address's lock, can be interrupted, and an address
      * whose read fails is skipped for this pass, keeping its mark. The marks then
      * move in one step, only while this is still the session's wait. Each
-     * address it covers counts as an open wait (`counted`), as a background
-     * wait did, so a refused join can tell a live holder from a dead one.
+     * address it covers counts as an open wait (`counted`), as a `bus_wait`
+     * does, so a refused join can tell a live holder from a dead one.
      */
     const wakeable = (
       session: string,

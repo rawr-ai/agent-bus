@@ -232,3 +232,17 @@ After deploy, with throwaway sessions and `qual/*` addresses (the owner opens th
 9. **Hook processes:** after many turns, at most one waits per session, and none lingers for a session that hasn't joined (`ps`).
 10. **A session without the plugin:** its join has no `hooked`, and it runs `wait` as before.
 11. **Both machines:** the plugin is installed, its hook runs the primary checkout (through `~/.local/bin/agent-bus` since [finish-swap](finish-swap.md)), and `bun` resolves from Claude Code's environment.
+
+### Results (2026-10-27)
+
+Run on throwaway stream-json sessions (how the desktop app runs Claude Code) with `qual/*` addresses, after the launcher release:
+
+- **1, 2, 9:** joins returned `hooked: true`. Three idle arrivals in a row each woke the session once, in 1.6–2.6 s, and each was read by its own `bus_read`. One hook process waited after every turn, and none was left after the session ended.
+- **3:** mail sent mid-turn was read within that turn, with no extra turn after it.
+- **4:** an ignored nudge brought no further turn in 30 s of quiet; new mail then woke the session, and its read also returned the ignored mail.
+- **6:** after `/clear` and a new join, the new address was woken in 2.2 s. Mail to the pre-clear address caused exactly one stray turn.
+- **5:** a resumed session left idle was woken with no prompt, 1.5 s after it started.
+- **7:** a second address in one session was woken. A subagent's address wasn't tried: a subagent is reached through its parent.
+- **10:** a session without the plugin got no `hooked` and no hook process. Since [finish-swap](finish-swap.md) it isn't woken at all.
+- **11:** both machines run the hook through the link to the primary checkout.
+- **8:** the store being unavailable is covered by the unit tests. A `serve` restart while a hook waits is checked at the deploy that retires `wait`.

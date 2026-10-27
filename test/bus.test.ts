@@ -600,41 +600,6 @@ describe.if(flureeBin !== null)("fluree ledger", () => {
     ));
 });
 
-describe("codex delivery text", () => {
-  test("lists every message and how to reply to the first", () =>
-    Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const bus = yield* Bus.Bus;
-          yield* bus.join({
-            address: "claude/a",
-            runtime: "claude",
-            session: sid("claude/a"),
-            cwd: process.cwd(),
-          });
-          const first = yield* bus.publish({
-            from: "claude/a",
-            session: sid("claude/a"),
-            to: ["codex/b"],
-            subject: "s",
-            body: "one",
-          });
-          const second = yield* bus.publish({
-            from: "claude/a",
-            session: sid("claude/a"),
-            to: ["codex/b"],
-            body: "two",
-          });
-          const text = Client.formatDelivery("codex/b", [first, second]);
-          expect(text).toStartWith("[agent-bus] 2 new messages for codex/b");
-          expect(text).toContain("subject: s");
-          expect(text).toContain(`replyTo "${first.id}"`);
-        }),
-        jsonl().layer
-      )
-    ));
-});
-
 describe("codex delivery routing", () => {
   test("presences from earlier versions, which recorded where a thread ran, still decode", async () => {
     const earlier = JSON.stringify({
@@ -1519,11 +1484,11 @@ describe("one session per address", () => {
         expect(yield* Client.sessionFor("codex", undefined, inherited)).toBe("codex-id");
         expect(yield* Client.sessionFor("codex", "given", inherited)).toBe("given");
         const missing = yield* Effect.flip(Client.sessionFor("codex", undefined, claudeShell));
-        expect(missing.refused).toBe(true);
+        expect(missing._tag).toBe("BusCallError");
         const placeholder = { AGENT_BUS_SESSION: "${AGENT_BUS_SESSION}" };
-        expect(
-          (yield* Effect.flip(Client.sessionFor("other", undefined, placeholder))).refused
-        ).toBe(true);
+        expect((yield* Effect.flip(Client.sessionFor("other", undefined, placeholder)))._tag).toBe(
+          "BusCallError"
+        );
       })
     ));
 
@@ -1547,9 +1512,9 @@ describe("one session per address", () => {
     ]);
   });
 
-  const cliIn = (dir: string, args: ReadonlyArray<string>, stdin?: string) =>
+  const cliIn = (dir: string, args: ReadonlyArray<string>) =>
     Bun.spawnSync([process.execPath, join(import.meta.dir, "../src/bin.ts"), ...args], {
-      stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
+      stdin: "ignore",
       env: { ...process.env, AGENT_BUS_PORT: "9", AGENT_BUS_DIR: dir },
       timeout: 10_000,
     });
@@ -1558,17 +1523,6 @@ describe("one session per address", () => {
     run.stdout.toString(),
     run.stderr.toString(),
   ];
-
-  test("the retired Codex Stop hook lets the turn end, whatever its input", () => {
-    const inputs = [
-      '{"session_id":"t-1","transcript_path":null}',
-      "not json",
-      "x".repeat(4_000_000),
-    ];
-    for (const input of inputs) {
-      expect(outcome(cliIn(tempDir(), ["codex-stop-hook"], input))).toEqual([0, "", ""]);
-    }
-  });
 
   test("serve won't start without a Fluree ledger in config.json", () => {
     const missing = tempDir();
@@ -2051,7 +2005,7 @@ describe("claude wake", () => {
         yield* quiet(bus, a);
         expect((yield* join("claude/a")).hooked).toBe(true);
         expect((yield* join("claude/a2")).hooked).toBe(true);
-        // Only Claude addresses are woken, so only a Claude join is told it needn't wait.
+        // Only Claude addresses are woken, so only a Claude join is told whether its hook runs.
         expect(
           yield* bus.join({ address: "other/a", runtime: "other", session: a, cwd: process.cwd() })
         ).not.toHaveProperty("hooked");
@@ -2199,8 +2153,7 @@ describe("claude wake hook", () => {
   const input = JSON.stringify({ session_id: sid("claude/a"), hook_event_name: "Stop" });
   const answer = (addresses: ReadonlyArray<string>, owns = true, superseded = false) =>
     Effect.succeed({ addresses, owns, superseded });
-  const failure = (refused: boolean) =>
-    Effect.fail(new Client.BusCallError({ message: "no", refused }));
+  const failure = Effect.fail(new Client.BusCallError({ message: "no" }));
   // The stand-in never calls out, but the hook's type still names an HTTP client.
   const wake = (hookInput: string, call: ReturnType<typeof Client.call>) =>
     Effect.runPromise(
@@ -2237,12 +2190,12 @@ describe("claude wake hook", () => {
     Effect.runPromise(
       Effect.gen(function* () {
         // Unreachable, then refused (a bus from before bus_wake, or its store down), then up.
-        const retried = scripted([failure(false), failure(true), answer(["claude/a"])]);
+        const retried = scripted([failure, failure, answer(["claude/a"])]);
         const fiber = yield* Effect.forkChild(claudeWake("unused", input, retried.call));
         yield* TestClock.adjust("10 seconds");
         expect(yield* Fiber.join(fiber)).toEqual(Option.some(formatWake("claude/a")));
 
-        const down = scripted([failure(true)]);
+        const down = scripted([failure]);
         const giving = yield* Effect.forkChild(
           claudeWake("unused", input, down.call, Duration.minutes(10))
         );
@@ -2389,68 +2342,24 @@ describe("mcp over http", () => {
     );
   });
 
-  test("the CLI's wait returns arrivals, and an empty list at its timeout", () => {
+  test("the CLI looks up an address's runtime on the bus, and refuses one that hasn't joined", () => {
     const { url, layer } = serve();
     return Effect.runPromise(
       Effect.gen(function* () {
-        const call = Client.call(url);
-        for (const [address, runtime] of [
-          ["claude/a", "claude"],
-          ["codex/b", "codex"],
-        ]) {
-          yield* call("bus_join", Mcp.Joined, {
-            address,
-            runtime,
-            session: sid(address ?? ""),
-            cwd: process.cwd(),
-          });
-        }
-        const a = sid("claude/a");
-        expect(yield* Client.waitFor(url, "claude/a", a, 1)).toEqual([]);
-        const waiting = yield* Effect.forkChild(Client.waitFor(url, "claude/a", a));
-        yield* Effect.sleep("200 millis");
-        yield* call("bus_publish", Mcp.Published, {
-          from: "codex/b",
-          session: sid("codex/b"),
-          to: ["claude/a"],
-          body: "wake",
+        yield* Client.call(url)("bus_join", Mcp.Joined, {
+          address: "claude/a",
+          runtime: "claude",
+          session: sid("claude/a"),
+          cwd: process.cwd(),
         });
-        expect(bodies(yield* Fiber.join(waiting))).toEqual(["wake"]);
-        const notJoined = yield* Effect.flip(Client.waitFor(url, "claude/nobody", a, 1));
-        const stranger = yield* Effect.flip(Client.waitFor(url, "claude/a", "someone-else"));
-        expect(stranger.refused).toBe(true);
-        // An unreachable bus is retried until the deadline, not reported as a timeout at once.
-        const started = Date.now();
-        const unreachable = yield* Client.waitFor("http://127.0.0.1:9/mcp", "claude/a", a, 1.5);
-        expect(unreachable).toEqual([]);
-        expect(Date.now() - started).toBeGreaterThanOrEqual(1_400);
-        expect(notJoined.refused).toBe(true);
-
-        // Working out the session from the bus is retried the same way, and then used.
-        const lookup = (at: string) =>
-          Effect.flatMap(Client.runtimeOf(at, "claude/a"), (runtime) =>
-            Client.sessionFor(runtime, undefined, { CLAUDE_CODE_SESSION_ID: a })
-          );
-        const before = Date.now();
-        expect(
-          yield* Client.waitFor(
-            "http://127.0.0.1:9/mcp",
-            "claude/a",
-            lookup("http://127.0.0.1:9/mcp"),
-            1.5
-          )
-        ).toEqual([]);
-        expect(Date.now() - before).toBeGreaterThanOrEqual(1_400);
-        yield* call("bus_publish", Mcp.Published, {
-          from: "codex/b",
-          session: sid("codex/b"),
-          to: ["claude/a"],
-          body: "found",
-        });
-        expect(bodies(yield* Client.waitFor(url, "claude/a", lookup(url), 1))).toEqual(["found"]);
+        expect(yield* Client.runtimeOf(url, "claude/a")).toBe("claude");
+        expect((yield* Effect.flip(Client.runtimeOf(url, "claude/nobody")))._tag).toBe(
+          "BusCallError"
+        );
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });
+
   test("the plugin's hook command runs the checkout through ~/.local/bin/agent-bus, with bun only in ~/.bun/bin", () => {
     const { url, port, layer } = serve();
     const marketplace = JSON.parse(

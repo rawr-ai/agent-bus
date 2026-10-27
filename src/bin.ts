@@ -212,34 +212,6 @@ const publish = Command.make(
     })
 ).pipe(Command.withDescription("Send a message"));
 
-const wait = Command.make(
-  "wait",
-  {
-    address,
-    runtime: optionalRuntime,
-    session,
-    timeout: Flag.Int("timeout").pipe(
-      Flag.withDescription("Seconds to wait; 0 waits until a message arrives"),
-      Flag.withDefault(0)
-    ),
-  },
-  (input) =>
-    Effect.gen(function* () {
-      const messages = yield* Client.waitFor(
-        endpoint,
-        input.address,
-        sessionOf(input.address, input.runtime, input.session),
-        input.timeout > 0 ? input.timeout : undefined
-      );
-      if (messages.length === 0) return yield* Console.log("[agent-bus] no new messages");
-      yield* Console.log(Client.formatDelivery(input.address, messages));
-    })
-).pipe(
-  Command.withDescription(
-    "Block until messages arrive for an address, print them and mark them read"
-  )
-);
-
 const peers = Command.make("peers", {}, () =>
   Effect.gen(function* () {
     const { peers } = yield* call("bus_peers", Mcp.Peers, {});
@@ -251,13 +223,6 @@ const peers = Command.make("peers", {}, () =>
     }
   })
 ).pipe(Command.withDescription("List joined peers"));
-
-// Retired: Codex keeps a loaded thread's hooks until its app-server restarts, so
-// threads that loaded the old Stop hook still call this. It lets the turn end
-// (Codex ignores an unread input). Remove it once every app-server has restarted.
-const codexStopHook = Command.make("codex-stop-hook", {}, () => Effect.void).pipe(
-  Command.withDescription("Retired Codex Stop hook: does nothing")
-);
 
 const claudeWakeHook = Command.make("claude-wake", {}, () =>
   Effect.gen(function* () {
@@ -288,7 +253,7 @@ const fail = (error: { readonly message: string }) =>
 
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
-  Command.withSubcommands([serve, joinCommand, publish, wait, peers, claudeWakeHook, codexStopHook])
+  Command.withSubcommands([serve, joinCommand, publish, peers, claudeWakeHook])
 );
 
 Command.run(cli, { version: VERSION }).pipe(

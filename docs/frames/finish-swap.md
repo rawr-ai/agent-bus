@@ -130,3 +130,32 @@ Verified by the reviewers:
 - Bun resolves the entry to the link's target;
 - a `$HOME` with spaces works;
 - a missing link exits 126 and a missing `bun` exits 127, so neither wakes the session falsely.
+
+## Release B
+
+Every consumer is on the new paths:
+- the Claude sessions run the plugin through the link;
+- every Codex app-server on both machines started after the `Stop` hook was retired;
+- no `wait` process is left.
+
+So this release removes the transition:
+- **Commands:** `wait` and `codex-stop-hook` are removed from the CLI, along with the client's `waitFor`, `formatDelivery` and `describe`.
+- **Tests:** their tests are removed. A test of the CLI's runtime lookup replaces the one that went through `wait`.
+- **Docs:**
+  - the README, the overview and the tool descriptions no longer offer a background `wait`;
+  - a session without the plugin reads with `bus_read` or `bus_wait`;
+  - the README's note on upgrading from the stdio server is removed.
+
+The deploy restarts `serve` while a throwaway session's hook waits, the check the [Claude wake qualification](claude-wake.md#results-2026-10-27) left for it: the wake must still arrive.
+
+## Code review (Release B)
+
+Sol (xhigh) and Opus reviewed the diff. Accepted:
+- **The overview still promised that the CLI retries an unreachable bus.** Both reviewers flagged it. Only the removed `waitFor` retried. The overview now says a refusal or an unreachable bus ends a CLI command, and only the Claude wake hook retries.
+- **`BusCallError.refused` had no reader left** (both). It is removed, with the assertions that only checked it.
+- **The CLI test helper's unused `stdin`, and a comment about the retired wait** (both). Both are gone.
+- **The join instructions** now say:
+  - a session needs a new start after the plugin is installed;
+  - `hooked` lives in `serve`'s memory until the hook calls again after a restart (Opus).
+- **The deploy's `serve`-restart check** is now listed in this frame (Opus).
+- **Repo memories that still prescribe `wait` and the no-op hook** (both). Updated after deploy, from the primary checkout.

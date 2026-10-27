@@ -20,11 +20,10 @@ bun src/bin.ts --help
 | Command | Purpose |
 | --- | --- |
 | `agent-bus serve` | This machine's bus: MCP at `http://127.0.0.1:8096/mcp` (`AGENT_BUS_PORT`), and delivery to the Codex sessions that joined from this machine. Runs as the `ai.rawr.agent-bus` LaunchAgent |
-| `agent-bus wait --address A` | Block until messages arrive for `A`, print them, mark them read |
 | `agent-bus claude-wake` | The Claude Code plugin's hook: wake the session when mail arrives for its addresses ([how](#how-sessions-are-woken)) |
 | `agent-bus join` / `publish` / `peers` | The same operations from a shell; `join` records the current directory, and `--takeover` replaces an ended session |
 
-`wait`, `join`, `publish` and `peers` are MCP clients of the local `serve`; only `serve` touches the store. They present the session id of the address's runtime (`--runtime`, or the runtime the address joined with): `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude, `$AGENT_BUS_SESSION` otherwise, or `--session`. A refusal from the bus ends the command; only an unreachable bus is retried. `claude-wake`, also a client, takes its session from the hook input Claude Code gives it on stdin, and retries any failure for up to ten minutes.
+`join`, `publish` and `peers` are MCP clients of the local `serve`; only `serve` touches the store. They present the session id of the address's runtime (`--runtime`, or the runtime the address joined with): `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude, `$AGENT_BUS_SESSION` otherwise, or `--session`. A refusal from the bus, or an unreachable bus, ends the command with its message. `claude-wake`, also a client, takes its session from the hook input Claude Code gives it on stdin, and retries any failure for up to ten minutes.
 
 ## Addresses belong to sessions
 
@@ -94,7 +93,7 @@ The CLI prints each result as JSON and exits with status 5 when a tool returns `
 - **Subagents** share their parent's id, so mail to a subagent's own address wakes the parent.
 - **`claude -p` runs** aren't woken: Claude Code ends async hooks when the run ends.
 
-Once `serve` has seen a session's hook, `bus_join` returns `hooked: true`, and the session runs nothing. Without it, as in a session started before the plugin was installed, the session runs `agent-bus wait --address <address>` as a background command. That command exits when mail arrives, which wakes the session, and must be started again after each wake.
+Once `serve` has seen a session's hook, `bus_join` returns `hooked: true`. A session without the plugin isn't woken: it reads with `bus_read`, or `bus_wait` within a turn.
 
 **Codex** sessions join with their thread id. When the address has unread mail, `serve` puts one fixed message in the thread's own queue telling it to read its mail with `bus_read`. To do so it starts a short-lived `codex app-server` of its own on stdio (the desktop's bundled CLI, or `serve --codex <path>`), lists the thread's queue, and adds the nudge unless one of its nudges is already waiting. Whichever app-server has the thread loaded runs the nudge as a turn: the desktop app for Local threads, and the daemon for the `codex` TUI and SSH projects, whether or not a window or TUI is attached. It runs at once when the thread is idle (seen within 3–15 s), and after the current turn when the thread is busy. A thread nothing has loaded keeps it until the thread is next opened. The bus's tools say they are safe, so Codex lets a nudged thread read and answer without asking approval in any sandbox; only `bus_join`, which can take over an address, asks outside full access ([approval](docs/connections.md#approval-in-codex)). For TUI and SSH threads, `serve` needs that CLI on the machine that owns the thread, with the same Codex home ([when a nudge doesn't run](docs/connections.md#when-a-nudge-is-queued-but-doesnt-run)).
 
@@ -127,10 +126,6 @@ State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` name
 `install:launch-agents` first links `~/.local/bin/agent-bus` to this checkout's `src/bin.ts`, for the Claude Code plugin's hook, and checks that the link runs. On the bus host, it then runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
 
 Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions.
-
-**Retiring the Codex `Stop` hook.** The hook is gone: a nudged turn reads the mail itself. Remove the `agent-bus codex-stop-hook` entry from `~/.codex/hooks.json`. A thread that loaded the hook keeps calling it until its app-server restarts, so `codex-stop-hook` stays as a command that does nothing until then.
-
-**Upgrading from the per-session stdio server.** `agent-bus mcp` and `deliver-codex` are gone. Rerunning the installer turns on Fluree's token auth and replaces the deliverer with `serve`; on other machines rerun it with `--remote` too. Old stdio processes have no token, so they fail from then on: replace each machine's `agent-bus` registration with the HTTP one above, remove any `agent-bus-ledger` registration, and reconnect or reopen running sessions.
 
 ## Security
 

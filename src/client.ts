@@ -1,39 +1,14 @@
-import { Clock, Duration, Effect, Schema } from "effect";
+import { Effect, Schema } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
-import { type Message, type Runtime, validSession } from "./domain.ts";
-import { MAX_WAIT_SECONDS, Messages, Peers } from "./mcp.ts";
+import { type Runtime, validSession } from "./domain.ts";
+import { Peers } from "./mcp.ts";
 
 /** A failed call to the machine's bus process. */
 export class BusCallError extends Schema.TaggedError<BusCallError>()("BusCallError", {
   message: Schema.String,
-  /** The bus refused the call, as opposed to being unreachable. */
-  refused: Schema.Boolean,
 }) {}
 
 const CALL_TIMEOUT_SECONDS = 30;
-const RETRY_SECONDS = 5;
-
-const describe = (message: Message) =>
-  [
-    `id: ${message.id}`,
-    `from: ${message.from}`,
-    `to: ${message.to.join(", ")}`,
-    `at: ${message.ts}`,
-    ...(message.subject === undefined ? [] : [`subject: ${message.subject}`]),
-    ...(message.replyTo === undefined ? [] : [`in reply to: ${message.replyTo}`]),
-  ].join(" | ");
-
-/** Bus messages as a session sees them from `agent-bus wait`. */
-export const formatDelivery = (address: string, messages: ReadonlyArray<Message>) => {
-  const count = messages.length === 1 ? "1 new message" : `${messages.length} new messages`;
-  const blocks = messages.map((message) => `${describe(message)}\n\n${message.body}`);
-  const first = messages[0];
-  const replyHint =
-    first === undefined
-      ? ""
-      : `\n\nReply with the agent-bus bus_publish tool: from "${address}", to ["${first.from}"], replyTo "${first.id}".`;
-  return `[agent-bus] ${count} for ${address}\n\n${blocks.join("\n\n---\n\n")}${replyHint}`;
-};
 
 /** Drops undefined fields, which tool arguments omit rather than send. */
 export const defined = <T extends Record<string, unknown>>(fields: T) =>
@@ -66,7 +41,6 @@ export const sessionFor = (
             explicit === undefined
               ? `No usable session id for a ${runtime} session: pass --session, or run where $${variable} is set.`
               : "--session is empty or an unexpanded placeholder.",
-          refused: true,
         })
       );
 };
@@ -84,7 +58,7 @@ export const call =
       const client = yield* McpClient.McpClient;
       const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
       if (tool === undefined) {
-        return yield* new BusCallError({ message: `The bus has no ${name} tool.`, refused: true });
+        return yield* new BusCallError({ message: `The bus has no ${name} tool.` });
       }
       return yield* client.callTool(
         { tool, schema, arguments: args },
@@ -103,61 +77,9 @@ export const call =
         (error): BusCallError =>
           error instanceof BusCallError
             ? error
-            : new BusCallError({
-                message: error.reason.message,
-                refused: error.reason._tag === "ToolError",
-              })
+            : new BusCallError({ message: error.reason.message })
       )
     );
-
-/**
- * Waits for an address's next messages, in calls no longer than the server
- * holds a request open. While the bus process is unreachable (restarting, say)
- * it retries until the deadline rather than returning, since returning would
- * wake the session; that includes working out the session id, when it has to
- * ask the bus. A refusal ends the wait.
- */
-export const waitFor = <R = never>(
-  url: string,
-  address: string,
-  session: string | Effect.Effect<string, BusCallError, R>,
-  timeoutSeconds?: number
-) =>
-  Effect.gen(function* () {
-    const start = yield* Clock.currentTimeMillis;
-    const remaining = Effect.map(Clock.currentTimeMillis, (now) =>
-      timeoutSeconds === undefined
-        ? Number.POSITIVE_INFINITY
-        : Math.max(0, timeoutSeconds - (now - start) / 1000)
-    );
-    let id = typeof session === "string" ? session : undefined;
-    while (true) {
-      const seconds = Math.min(MAX_WAIT_SECONDS, yield* remaining);
-      const result = yield* Effect.result(
-        Effect.gen(function* () {
-          if (id === undefined && typeof session !== "string") id = yield* session;
-          return yield* call(url)(
-            "bus_wait",
-            Messages,
-            { address, session: id, timeoutSeconds: seconds },
-            seconds + 5
-          );
-        })
-      );
-      if (result._tag === "Success") {
-        const { messages } = result.success;
-        if (messages.length > 0 || (yield* remaining) <= 0) return messages;
-        continue;
-      }
-      if (result.failure.refused) return yield* result.failure;
-      const left = yield* remaining;
-      if (left <= 0) return [] as ReadonlyArray<Message>;
-      yield* Effect.logWarning(
-        `The bus at ${url} is unreachable (${result.failure.message}); retrying.`
-      );
-      yield* Effect.sleep(Duration.seconds(Math.min(RETRY_SECONDS, left)));
-    }
-  });
 
 /** The runtime an address joined with, which picks the session id the CLI presents for it. */
 export const runtimeOf = (url: string, address: string) =>
@@ -167,6 +89,5 @@ export const runtimeOf = (url: string, address: string) =>
     if (peer !== undefined) return peer.runtime;
     return yield* new BusCallError({
       message: `${address} has not joined the bus; join first, or pass --runtime.`,
-      refused: true,
     });
   });
