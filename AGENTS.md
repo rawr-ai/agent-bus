@@ -31,7 +31,7 @@ Place content by its kind first, then by the concern or task it serves; never by
 ### Page shapes
 
 Every current page opens with a scope line: what it covers and where its neighbours are.
-- **Architecture page:** `What it does` (the mechanism, with its diagram), `Rules` (numbered, so other pages can cite them), `Why` (the choice and the alternatives rejected), `Limits`, `Rests on` (linked platform claims), `History` (links to the frames that made it; never needed for current truth).
+- **Architecture page:** `What it does` (the mechanism, with its diagram), `Rules` (numbered, so other pages can cite them), `Why` (the choice and the alternatives rejected), `Limits`, `Rests on` (linked platform claims), `History` (links to the frames that made it; never needed for current truth). A catalogue page, such as `interfaces.md`, keeps these headings: its catalogue goes under `What it does`, and its `Rules` are the surface's invariants.
 - **Platform page:** claims marked with basis and version, listed in the findings register when version-sensitive. After upgrading a platform, recheck the installed-version table and the findings it lists ([upgrade](docs/runbooks/upgrade.md)).
 - **Runbook:** `Before you start`, then the steps with literal commands and how to check each, then `If it fails` (linking [recover](docs/runbooks/recover.md)).
 

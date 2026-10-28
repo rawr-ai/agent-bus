@@ -53,16 +53,16 @@ flowchart TB
   proxy -- "unix socket" --> daemon
   serve["agent-bus serve<br/>127.0.0.1:8096"]
   cc & hook & cli & desk & daemon -- "MCP, loopback HTTP" --> serve
-  serve -- "stdio: thread/queue/list, add" --> own["serve's Codex app-server<br/>one per nudge"]
+  serve -- "stdio: thread/queue/list, add, delete,<br/>thread/read" --> own["serve's Codex app-server<br/>one per post or removal"]
   codexhome[("~/.codex<br/>rollouts, state_5.sqlite,<br/>queue_1.sqlite, thread-writer-locks/")]
   desk --- codexhome
   daemon --- codexhome
-  own -- "storage: queue reads and inserts" --> codexhome
+  own -- "storage: queue reads, inserts<br/>and deletes" --> codexhome
 ```
 
 The transports, in short:
 - **Loopback HTTP:** every MCP call to `serve` (`/mcp`), and `serve`'s calls to Fluree (directly on the bus host, through the tunnel elsewhere).
-- **stdio:** the desktop app to its own app-server, and `serve` to the short-lived app-server it starts for each Codex nudge.
+- **stdio:** the desktop app to its own app-server, and `serve` to the short-lived app-server it starts each time it posts a Codex nudge or removes one.
 - **Unix socket:** the `codex` TUI and `codex app-server proxy` to the Codex daemon's control socket, `~/.codex/app-server-control/app-server-control.sock`. `serve` also connects to it, briefly, to borrow a thread ([delivery](delivery.md#codex-threads)).
 - **SSH tunnel:** another machine's `serve` to the bus host's Fluree (`ssh -N -L 127.0.0.1:8095:127.0.0.1:8095`).
 - **SSH proxy:** the desktop app's SSH project, which runs `codex app-server proxy` on the SSH host and so reaches that host's daemon. It is Codex's own connection, not the bus's; the bus only sees the thread as a daemon thread on the SSH host.
@@ -74,11 +74,11 @@ The transports, in short:
 | Fluree server | Bus host | LaunchAgent `ai.rawr.agent-bus.fluree` | HTTP, `127.0.0.1:8095` | `~/.agent-bus/fluree.log` |
 | SSH tunnel | Other machines | LaunchAgent `ai.rawr.agent-bus.tunnel` | Listens on `127.0.0.1:8095` | `~/.agent-bus/tunnel.log` |
 | `agent-bus serve` | Every machine | LaunchAgent `ai.rawr.agent-bus`, running the checkout's `src/bin.ts` with Bun | HTTP, `127.0.0.1:8096` (`/mcp`, `/health`) | `~/.agent-bus/agent-bus.log` |
-| `serve`'s Codex app-server | Every machine with the desktop app | `serve`, once per nudge; ended before the address's lock is released | stdio | Into `serve`'s log, on failure |
+| `serve`'s Codex app-server | Every machine with the desktop app (the bundled CLI by default; `serve --codex` replaces it) | `serve`, on every attempt that reaches the post (whether or not it adds a nudge) and on every removal; ended before the address's lock is released | stdio | Into `serve`'s log, on failure |
 | `claude-wake` hook | Every machine | Claude Code, in the background at `SessionStart`, `Stop` and `StopFailure` | Calls `serve` over HTTP | Its nudge goes to the session; nothing is logged |
 | `agent-bus join`, `publish`, `peers` | Any machine | A shell | Calls `serve` over HTTP | — |
 | Codex desktop app-server | Every machine with the desktop app | The ChatGPT desktop app | stdio, from the app | The app's logs |
-| Codex daemon | Any machine with Codex | Codex itself ([how](../platforms/codex.md#the-daemon)), or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | `~/.codex/app-server-control/app-server.log` |
+| Codex daemon | Any machine with Codex | Codex itself ([how](../platforms/codex.md#the-daemon)), or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | Codex's own log ([platforms: Codex](../platforms/codex.md#the-daemon)) |
 
 Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 10 s) and sets `AGENT_BUS_DIR` and `AGENT_BUS_PORT`. `scripts/install-launch-agents.sh` writes them ([install](../runbooks/install.md)). `serve` runs the code of the checkout the installer was run from, and so does the hook, through the `~/.local/bin/agent-bus` link; a deploy is a fast-forward of that checkout and a restart of `serve` ([deploy](../runbooks/deploy.md)). How to restart a process and read its log is in [operate](../runbooks/operate.md).
 
@@ -87,14 +87,14 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | State | Where | Written by | What it is |
 | --- | --- | --- | --- |
 | The ledger | Bus host: `~/.agent-bus/fluree/storage`, with the Fluree project in `~/.agent-bus/fluree/.fluree` | The Fluree server, for every machine's `serve` | Every message and presence entry, append-only, in ledger `agent-bus:main`. [Messaging](messaging.md) gives its model |
-| Cursors | Each machine: `~/.agent-bus/fluree-cursors/<ledger>/<first commit id>/` | That machine's `serve` | One per address joined from that machine: the last commit `t` read. A replaced ledger has a new first commit, so its subscribers start over |
+| Cursors | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>/` | That machine's `serve` | One per address joined from that machine: the last commit `t` read. A replaced ledger has a new first commit, so its subscribers start over |
 | `config.json` | Each machine: `~/.agent-bus/config.json` | The installer, only when absent | The Fluree URL and ledger. `serve` won't start without it |
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |
 | `fluree-key.json` | Bus host: `~/.agent-bus/fluree-key.json`, mode 0600 | The installer | The key the Fluree server trusts tokens from |
 | The launcher | Each machine: `~/.local/bin/agent-bus`, a link to the checkout's `src/bin.ts` | The installer | What the Claude Code plugin's hook runs |
 | The plugin | Each machine: Claude Code's plugin cache | `claude plugin install` | Only the manifest, `plugin/.claude-plugin/plugin.json` |
-| `serve`'s memory | Each machine | `serve` | Per-address locks, the marks of what each session or thread was last woken for, held subagent joins, and which sessions' hooks have called (`hooked`). Lost on restart, which costs at most one extra wake per address |
-| Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only adds to the queue | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
+| `serve`'s memory | Each machine | `serve` | Two locks per address (one for reads and deliveries, one for ownership and sends); which sessions' hooks have called (`hooked`); each address's last call and open waits; the marks of what each session was last woken for, and each session's current wake wait; and, for Codex peers, the back-off, refused joins, covered mail, logged reason and recorded nudge. Lost on restart, which costs at most one extra wake per address |
+| Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only lists, adds to and deletes its own nudges from the queue, and reads a thread's record | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
 
 `~/.agent-bus` is `AGENT_BUS_DIR` when that is set, and `serve`'s port is `AGENT_BUS_PORT` (8096 by default).
 
@@ -107,7 +107,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 5. **A `serve` wakes only the peers that joined from its own machine.** Each machine's Codex queues and Claude sessions are its own; no wake crosses machines.
 6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail.
 7. **`serve` and the hook run the installing checkout's code,** the first through its LaunchAgent and the second through the `~/.local/bin/agent-bus` link. That checkout changes only by a fast-forward at a deploy ([deploy](../runbooks/deploy.md)).
-8. **A cursor belongs to one ledger instance.** Cursors are kept per ledger and per its first commit, so a replaced ledger starts its subscribers over instead of skipping messages.
+8. **Each ledger instance has its own cursor directory.** The path names the ledger and its first commit ([messaging rule 11](messaging.md#rules) says what follows).
 9. **`serve` won't start without a `config.json` that names a Fluree ledger.** There is no fallback store.
 
 ## Why

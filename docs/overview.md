@@ -32,7 +32,7 @@ flowchart LR
   claude -- "MCP: join, publish, read" --> serve
   codex -- "MCP: join, publish, read" --> serve
   hook -- "bus_wake: waits for new mail" --> serve
-  hook -.->|"exits 2: wakes the session"| claude
+  hook -.->|"wakes the session"| claude
   serve -- "one nudge; a daemon borrow<br/>if the thread is loaded nowhere" --> queue
   queue -.->|"runs as a turn"| codex
 ```
@@ -48,7 +48,6 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
 | **Codex deliverer** (`src/codex.ts`, `src/rollout.ts`) | Gives each Codex thread with unread mail one nudge in its own queue, through a short-lived app-server of `serve`'s own. A thread loaded nowhere is borrowed by the machine's Codex daemon to run it, when its stored settings, read from its rollout, allow | Wakes every Codex thread, desktop or daemon, without a second writer |
-| **Ownership** (in `src/Bus.ts`) | One session per address, identified by the runtime's own id | Two sessions sharing an address were stealing each other's replies |
 | **Installer** (`scripts/install-launch-agents.sh`) | The LaunchAgents and the `~/.local/bin/agent-bus` link | Keeps the bus running across logins |
 
 agent-bus runs on Bun and is written with Effect; `package.json` pins the versions.
@@ -57,6 +56,7 @@ agent-bus runs on Bun and is written with Effect; `package.json` pins the versio
 
 - **An operator,** keeping the bus running: [topology](architecture/topology.md) for what runs where, then [install](runbooks/install.md), [operate](runbooks/operate.md) and [recover](runbooks/recover.md). [Deploy](runbooks/deploy.md) and [upgrade](runbooks/upgrade.md) are for when a version changes.
 - **An agent's owner,** deciding how sessions use the bus: [messaging](architecture/messaging.md) for whose address is whose and why, [delivery](architecture/delivery.md) for whether a session will be woken, then [launch agents](runbooks/launch-agents.md).
+- **An agent using the bus:** the `agent-bus` skill, `plugin/skills/agent-bus/SKILL.md`, which ships with the plugin; [messaging](architecture/messaging.md) for the rules behind it.
 - **A contributor:** [AGENTS.md](../AGENTS.md), the pieces above, then [messaging](architecture/messaging.md), [delivery](architecture/delivery.md), [interfaces](architecture/interfaces.md) and [connections](architecture/connections.md), with [platforms](platforms/README.md) for what each rests on. [Frames](frames/README.md) record how it got here.
 
 ## Which page owns each topic
@@ -79,5 +79,6 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Starting sessions the bus can wake | [Launch agents](runbooks/launch-agents.md) |
 | Upgrading a platform or the plugin | [Upgrade](runbooks/upgrade.md) |
 | Symptoms and fixes | [Recover](runbooks/recover.md) |
+| Using the bus as an agent: joining, reading on a wake, replying, leaving | The `agent-bus` skill, `plugin/skills/agent-bus/SKILL.md`, which ships with the plugin |
 | Contributing: the toolkit, the `Ledger` service, `bun run check`, repo memory, and where a new fact goes | [AGENTS.md](../AGENTS.md) |
 | Release records and retired mechanisms | [Frames](frames/README.md) |

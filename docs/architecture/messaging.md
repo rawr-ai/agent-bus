@@ -44,8 +44,8 @@ An address is in one of five states: free (never joined, or joined only by prese
 | From | Event, and who may cause it | To | The cursor | Run of joins |
 | --- | --- | --- | --- | --- |
 | Free, or left by another session | `bus_join`, by any session | Held, by the caller | Starts at the present: earlier mail isn't delivered | Starts |
-| Left, by the same session | `bus_join`, by that session | Held | Kept: mail since its last read is still unread | Starts |
-| Held | `bus_join`, by the holder (same runtime and id) | Held | Kept | Continues: the presence records `rejoinOf` |
+| Left, by the same session | `bus_join`, by that session | Held | Kept on this machine: mail since its last read is still unread. From another machine, it starts at the present ([limits](#limits)) | Starts |
+| Held | `bus_join`, by the holder (same runtime and id) | Held | Kept on this machine. From another machine, it starts at the present ([limits](#limits)) | Continues: the presence records `rejoinOf` |
 | Held | `bus_join`, by any other session | Held, unchanged: the join is refused | Unchanged | — |
 | Held | `bus_takeover` naming the holder's current join id, by another session, only when the human says the holder has ended | Taken over: held by the caller, and the previous holder is refused from then on | Kept, so unread mail carries over ([limits](#limits)) | Starts |
 | Any state a join may claim | Any of the joins above, with `replay` | Replayed: held | Moved to the ledger's start, so every message ever for the address is unread | Starts |
@@ -76,7 +76,7 @@ The wake paths look at unread mail without consuming it. With nothing unread for
 
 A change in the ledger only wakes readers; reading from the cursor decides what is delivered. Each `serve` has one change stream, shared by every waiter: Fluree's event stream, with a 15-second poll behind it, and one extra wake each time the stream reconnects, since commits may have landed meanwhile.
 
-On Fluree, a cursor is the last commit `t` read. A read is a history query over the entries from the cursor to the head, in windows of 500 commits. Cursors are kept by the `serve` of the machine the address joined from, one file per address, in a directory named for the ledger's first commit ([topology](topology.md) gives the path). So a replaced ledger starts its subscribers over instead of skipping messages. A cursor ahead of the ledger fails the read rather than skipping.
+On Fluree, a cursor is the last commit `t` read. A read is a history query over the entries from the cursor to the head, in windows of 500 commits. Cursors are kept by the `serve` of the machine the address joined from, one file per address, and belong to one incarnation of the ledger (rule 11; [topology](topology.md) gives the path).
 
 Each `serve` has two locks per address. One serializes reads, deliveries and anything else that moves the cursor. The other serializes changes of ownership with sends. A join or a leave takes both, the ownership lock first.
 
@@ -99,11 +99,11 @@ In Fluree, each entry is a node `urn:agent-bus:message:<id>`, typed `bus:Message
 - for presence, `bus:runtime` and `bus:status`;
 - `bus:json`, the exact encoded entry, which is what the bus reads back. The rest of a presence (its owning session, topics, `takeover`, `rejoinOf`, `codexThreadId` and note) is only there.
 
-The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`. So `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter"), and `bus_query` can rank with `f:fulltext`. A new ledger's text search finds nothing until its first index, a fraction of a second on a default server ([platforms: Fluree](../platforms/fluree.md#full-text-search)).
+The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`. So `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter"), and `bus_query` can rank with `f:fulltext`. A new ledger's text search finds nothing at first ([platforms: Fluree](../platforms/fluree.md#full-text-search)).
 
 ## Rules
 
-1. **An address belongs to the session that joined it,** identified by its runtime and that runtime's id: `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude Code, or a stable id of its own for other clients. Every call that acts for the address passes it as `session`. A missing or blank id, or a placeholder that was never expanded (`${…}`, or a value starting with `$`), is refused. The same id under another runtime is another session.
+1. **An address belongs to the session that joined it,** identified by its runtime and that runtime's id: `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude Code, or a stable id of its own for other clients. Every call that acts for the address passes it as `session`. A missing or blank id, or a placeholder that was never expanded (`${…}`, or a value starting with `$`), is refused. A join compares runtime and id, so the same id under another runtime can't join a held address; the later calls compare the id alone, so they accept it under any runtime.
 2. **Only the owner may read, wait on, leave or send from the address.** Every refusal changes nothing: not the cursor, the presence or the ledger.
 3. **A different session's join is refused** with what the bus knows of the holder: its runtime, machine, join time, note, last call, whether it has a wait open on this machine, and its join id. The policy is to pick another address, not to take the held one.
 4. **A takeover (`bus_takeover`, or `agent-bus join --takeover`) must name the holder's current join id,** and is only for replacing a session that has ended, when the human says so. Unread mail carries over to the new owner, and the previous owner is refused from then on.
@@ -113,6 +113,7 @@ The ledger's config graph enables inline full-text scoring on `bus:body` and `bu
 8. **Ownership is checked under the address's lock at the moment of effect,** so a wait or send that started before a takeover can't act after it.
 9. **Topics change only when the caller names them.** A rejoin that names no topics keeps the address's topics; one that names topics replaces them. A leave clears them.
 10. **A Codex join's `codexThreadId` must be its own thread id,** the same as `session`, or the join is refused. It is what lets this machine's `serve` wake the thread.
+11. **A cursor belongs to one incarnation of the ledger.** Cursors are kept per ledger instance, named by its first commit, so a replacement store starts every subscriber over instead of skipping messages. A cursor ahead of the ledger fails the read rather than skipping.
 
 ## Why
 
@@ -152,7 +153,7 @@ One shared, ordered log across machines, with history, full-text search and SPAR
 | --- | --- |
 | **A lost response loses mail.** `bus_read` and `bus_wait` mark messages read before the response is sent. If the response is lost (the caller dies mid-call), those messages are skipped for that address; they stay in `bus_history` | Known gap |
 | **Claims are atomic only within one machine.** Locks are per process, and each machine runs one `serve`. Joins from two machines are ordered by the ledger, and the losing claim is refused only from its next call | Known limit |
-| **Cursors are per machine.** A takeover from another machine uses that machine's cursor for the address. If it has one from an earlier join there, mail after that position is delivered again. If it has none, the new owner starts at the present, and the unread mail isn't carried over | Known limit; the second case read in code |
+| **Cursors are per machine.** A join, rejoin or takeover from another machine uses that machine's cursor for the address. If it has one from an earlier join there, mail after that position is delivered again. If it has none, the session starts at the present, and the unread mail isn't carried over | Known limit; the second case read in code |
 | **An inherited id acts for its session.** A process started from a session's shell inherits that session's id and acts for it, as subagents do, so a `codex exec` delegate can consume its Claude parent's mail | Known limit: give a delegate that needs its own inbox its own address |
 | **A new Claude Code id needs a new address.** After `/clear` or a fork, Claude Code has a new id, and the old address is still held by the old one | Known limit |
 | **`codexThreadId` is only a "wake me" flag.** It must equal `session` (rule 10), so deriving it from the runtime would drop a join field, a CLI flag and a check | Open |

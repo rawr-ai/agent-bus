@@ -134,7 +134,7 @@ Returns the `address`. Peers stop seeing you and the bus stops waking you. Readi
 
 ### Tool × annotation × approval
 
-Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and non-destructive except `bus_takeover`, and only the three lookups are read-only. `idempotentHint` is never set, so it is Effect's default, false. Whether a Codex thread is asked for approval follows from the annotations by the rule in [connections](connections.md#approval-in-codex), whose basis is in [platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools).
+Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and non-destructive except `bus_takeover`, and only the three lookups are read-only. `idempotentHint` is never set, so it is Effect's default, false. Whether a Codex thread is asked for approval follows from the annotations by Codex's rule, which [platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools) owns; what the bus's choice means for what `serve` may do is in [connections](connections.md#approval-in-codex).
 
 | Tool | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` | Codex thread in a sandbox is asked? |
 | --- | --- | --- | --- | --- | --- |
@@ -149,7 +149,7 @@ Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and n
 | `bus_query` | true | false | false | false | No |
 | `bus_leave` | false | false | false | false | No |
 
-"Asked" holds for Codex's default approval mode for the server (`auto`, without strict auto-review) and a thread without full access. A server or tool set to `prompt`, `writes` or `approve` changes it, as [connections](connections.md#approval-in-codex) says. `bus_read`, `bus_wait` and `bus_wake` are not read-only because each moves a mark (a cursor, or the wake mark), and a read-only claim would be false.
+"Asked" is the outcome for a thread without full access under Codex's default approval mode; the modes that change it are on the [platform page](../platforms/codex.md#approvals-for-mcp-tools). `bus_read`, `bus_wait` and `bus_wake` are not read-only because each moves a mark (a cursor, or the wake mark), and a read-only claim would be false.
 
 ### Refusals
 
@@ -162,7 +162,7 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | "`<address>` is held by another session (runtime …; on …; joined …; note …; last call …; a wait open now / no wait open on this machine). … take it over with bus_takeover, holder "`<join id>`" …" | `bus_join` of an address another session holds (also the same session with a different runtime), or `bus_takeover` with a `holder` that isn't the holder's current join id, including a stale one | Join an address of your own. Take the address over only when that session has ended and the human says so, with the id in this message. The holder's id changes each time it joins, so use the latest refusal's |
 | "`<address>` belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session." | `bus_publish`, `bus_read`, `bus_wait` or `bus_leave` from a session that doesn't own the address, including a wait that started before a takeover | Join a new address. If you were woken for this mail, carry on without replying |
 | "`<address>` has not joined the bus; join first." | The same four tools on an address with no current join: never joined, left, or no cursor on this machine's ledger | `bus_join` first. If a wake text told you not to rejoin, end the turn instead |
-| "Cursor t=… is ahead of …; the ledger was replaced. Rejoin to reset the cursor." | A read, wait or wake finds the address's cursor beyond the ledger's end | Rejoin with `bus_join` |
+| "Cursor t=… is ahead of …; the ledger was replaced. Rejoin to reset the cursor." | A read or wait finds the address's cursor beyond the ledger's end (a wake logs it and skips that address for the pass) | Rejoin with `bus_join` |
 | "A query must be 1-32768 characters." | `bus_query` with an empty or over-long query | Shorten it |
 | "Not valid SPARQL: …" | `bus_query` text that doesn't parse | Fix the syntax |
 | "Only SELECT queries are allowed." | `bus_query` with `ASK`, `CONSTRUCT`, `DESCRIBE` or an update | Rewrite it as a `SELECT` |
@@ -184,7 +184,7 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 
 ### The CLI
 
-`agent-bus` is `src/bin.ts`, run by Bun with `--no-env-file`, so Bun loads no `.env` file. The installer links it to `~/.local/bin/agent-bus`. `agent-bus --help` and `--version` work. A refused or failed bus call, or a missing store, prints its message alone and sets exit status 1. The CLI finds `serve` at `http://127.0.0.1:<AGENT_BUS_PORT>/mcp` and opens a fresh MCP connection for each call, with a 30-second timeout.
+`agent-bus` is `src/bin.ts`, whose shebang is `bun --no-env-file`, so run directly (as the `~/.local/bin/agent-bus` link and the hook do) Bun loads no `.env` file. The LaunchAgent instead runs `bun src/bin.ts serve` without that flag, in the state directory, so Bun would load a `.env` file there (see [Limits](#limits)). The installer links it to `~/.local/bin/agent-bus`. `agent-bus --help` and `--version` work. A refused or failed bus call, or a missing store, prints its message alone and sets exit status 1. The CLI finds `serve` at `http://127.0.0.1:<AGENT_BUS_PORT>/mcp` and opens a fresh MCP connection for each call, with a 30-second timeout (55 seconds for `claude-wake`'s `bus_wake` calls).
 
 | Subcommand | Purpose | Calls |
 | --- | --- | --- |
@@ -253,9 +253,9 @@ Files in the state directory that the code reads:
 | --- | --- | --- |
 | `config.json` | `serve` | `{ "fluree": { "url": "...", "ledger": "..." } }`. `serve` refuses to start without the `fluree` entry. The installer writes `http://127.0.0.1:8095` and `agent-bus:main` only if the file is absent |
 | `fluree-token` | `serve` | The bearer token for the bus's Fluree server, trimmed. Absent means no `Authorization` header is sent. Never logged |
-| `fluree-cursors/<ledger>/<instance>/` | `serve` | One cursor file per address, kept per ledger incarnation so a replaced ledger starts subscribers over |
+| `fluree-cursors/<ledger>/<instance>/` | `serve` | One cursor file per address. The `<ledger>` segment is the URI-encoded ledger id, and `<instance>` names the ledger's incarnation ([messaging](messaging.md#rules)) |
 
-Fixed in code, with no setting: `serve` binds only `127.0.0.1`; the MCP path is `/mcp`; the longest wait is 50 seconds and the HTTP idle timeout 65; the Codex daemon's socket is `~/.codex/app-server-control/app-server-control.sock`; queries are cut off at 32 KB and 10 seconds; the CLI's call timeout is 30 seconds. The timings of delivery are in [delivery](delivery.md).
+Fixed in code, with no setting: `serve` binds only `127.0.0.1`; the MCP path is `/mcp`; the longest wait is 50 seconds and the HTTP idle timeout 65; the Codex daemon's socket is `~/.codex/app-server-control/app-server-control.sock`; queries are cut off at 32 KB and 10 seconds; the CLI's call timeout is 30 seconds (55 for `claude-wake`). The timings of delivery are in [delivery](delivery.md).
 
 ### Instructions and wake texts
 
@@ -282,7 +282,7 @@ The rules about who owns an address, takeover and rejoining are [messaging's rul
 6. **`bus_query` accepts one `SELECT`, regenerated from its syntax tree.** It may not contain `FROM` or `SERVICE`, runs against the ledger and `t` fixed by the request, and is cut off at 32 KB and 10 seconds. Regenerating drops caller comments, which Fluree reads as directives ([connections](connections.md)).
 7. **Annotations say what a tool does to the caller's world.** All tools are closed-world. Only `bus_takeover` is destructive. A tool is read-only only if it moves nothing, not even a cursor, so only the three lookups are. A new tool is annotated the same way, since Codex's approval follows the annotations.
 8. **Wake texts carry no text from other sessions,** and the Codex nudge's first sentence never changes.
-9. **The tools and parameters named on this page are the tools and parameters in code.** A new tool, a new parameter or a changed refusal updates this page in the same change; a coverage test checks it.
+9. **The tools and parameters named on this page are the tools and parameters in code.** A new tool, a new parameter or a changed refusal updates this page in the same change.
 
 ## Why
 
@@ -299,17 +299,18 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 - **Reading marks read first.** `bus_read` and `bus_wait` advance the cursor before the response is sent, so a lost response loses mail; see [messaging's limits](messaging.md#limits).
 - **Refusals have no code.** The error result carries text only, so callers match wording. Known limit of the MCP server in use.
 - **Recipients and `replyTo` aren't checked.** A message to an address nobody has joined is accepted. A later joiner starts at the present and doesn't see it unless it joins with `replay` or reads `bus_history`. The same goes for a `replyTo` naming no message. Known limit.
-- **`bus_query` needs the Fluree store.** The tests' JSONL ledger has no `bus_query`. Text search in `bus_history` and `bus_query` finds nothing for about a second after a ledger is created ([platforms: Fluree](../platforms/fluree.md#full-text-search)). Known limit.
+- **`bus_query` needs the Fluree store.** The tests' JSONL ledger has no `bus_query`. Text search in `bus_history` and `bus_query` finds nothing just after a ledger is created ([platforms: Fluree](../platforms/fluree.md#full-text-search)). Known limit.
 - **Parameter descriptions are incomplete.** Parameters marked "(no description in code)" above have no description in the schema, so a client sees only their names and types. Known limit.
 - **Output fields aren't described.** The shape of a result is in the schema, but its fields carry no descriptions. Known limit.
 - **Claude Code approval is not established.** The matrix follows Codex's rule. Nothing here claims that Claude Code's permission rules follow the annotations. Unverified.
+- **A launchd `serve` would read a `.env` file.** The CLI and hook run under `--no-env-file`, but the LaunchAgent starts `bun src/bin.ts serve` without it, in the state directory, so a `.env` file there would be loaded. Known gap.
 - **The hook needs the same port as `serve`.** It inherits Claude Code's environment, not the shell's, so a non-default `AGENT_BUS_PORT` must be set there too. Accepted risk.
 
 ## Rests on
 
 - [Codex: approvals for MCP tools](../platforms/codex.md#approvals-for-mcp-tools): the rule that makes the annotations decide whether a call is asked for approval, and the modes that change it.
 - [Codex: thread ids and `CODEX_THREAD_ID`](../platforms/codex.md#thread-ids-and-codex_thread_id): the thread id a thread's shell exposes as `CODEX_THREAD_ID`, which `session` carries.
-- [Claude Code: session ids](../platforms/claude-code.md#session-ids): the session id (`CLAUDE_CODE_SESSION_ID`, equal to the hook input's `session_id`), which a `/clear` or fork changes.
+- [Claude Code: session ids](../platforms/claude-code.md#session-ids): `CLAUDE_CODE_SESSION_ID`, which a `/clear` or fork changes; [hooks](../platforms/claude-code.md#hooks): the hook input's `session_id` equals it.
 - [Fluree: query limits](../platforms/fluree.md#query-limits) and [full-text search](../platforms/fluree.md#full-text-search): what bounds `bus_query` and what `bus_history` ranks with.
 
 ## History
