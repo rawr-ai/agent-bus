@@ -80,8 +80,11 @@ Content is placed first by its kind, then by the stable concern or task it serve
 | guidance for agents using the bus | the skill, and if it is a single call's contract, that tool's description | the MCP instructions, beyond the essentials (decision 6) |
 | plan, measurement, qualification or review of a release | that release's frame | current pages, except a verified limit or fact promoted to its owner |
 
-- **Versions appear only in `platforms/`.** The exception is a binding requirement, such as "needs a Codex CLI with the queue methods", which is stated where it binds.
-- **Measured numbers stay with their evidence.** A current page states a constant from code ("6 s") and links to the platform page for anything measured.
+- **A change usually carries several facts,** one per facet: the contract (interfaces and the tool description), the rule (its architecture page), agent guidance (the skill), the platform claim (platforms) and the procedure (a runbook). Each facet goes to its own home. A frame's closing checklist (decision 4) lists all five, so a writer doesn't stop at one page.
+- **Versions appear only in `platforms/`.** There are two exceptions:
+  - a binding requirement, such as "needs a Codex CLI with the queue methods", is stated where it binds;
+  - a frame records the versions its experiments ran on.
+- **Measured numbers stay with their evidence.** A current page states a constant from code ("6 s") and links to the platform page for anything measured. A platform claim, or a row of the findings register, may cite the frame whose experiment established it. That is provenance. No current page relies on a frame for a current rule.
 - **A new page appears only for a new concern or task** that no page covers. When a page grows, its internal structure improves first.
 - **Writing goes against the vocabulary of the existing pages.** Addresses, sessions, joins, runs of joins, nudges, borrows and reconciles keep one name each.
 
@@ -105,7 +108,7 @@ The shape is the axis that page grows along, so updates land in a known place:
 - **The frames stay frozen at their paths.** Memory, platform pages and code comments cite them as evidence. Only their links may be fixed, never their decisions.
 - **`frames/README.md` indexes them,** with date, what each decided, what superseded it and the current owner page. It also holds the table of retired mechanisms: the Codex Stop hook, the daemon deliverer, the background `wait`, the JSONL production store and owner-less ownership, each with its replacement and reason.
 - **Decisions live in the Why section of their concern's page.** They don't get a separate decision-record directory, which would restate those Why sections and recreate the duplication this frame removes.
-- **Future releases still write frames,** in `docs/frames/`, for design-and-qualification work. Each frame gains a closing "Moved into current docs" checklist, and its release isn't done until that checklist is.
+- **Future releases still write frames,** in `docs/frames/`, for design-and-qualification work. Each frame gains a closing "Moved into current docs" checklist, with a row for each of the five facets of decision 2, and its release isn't done until that checklist is. Routine changes need no frame. They update the owners in their own PR.
 
 ### 5. Entry points
 
@@ -118,21 +121,37 @@ The shape is the axis that page grows along, so updates land in a known place:
   - the mental model: an append-only ledger, a cursor per address, a wake signal per runtime;
   - one system diagram and the pieces in the code;
   - a reading order;
-  - a table mapping each topic to its owner page;
-  - a one-line index of known limits that links to each owner.
-- **The six runbooks** come from the scripts (the installer is the real install spec), the census's procedure table, the platform pages and the deploy constraint in repo memory. A procedure that touches a running system is checked live with read-only commands only: health, `launchctl print`, `ps`, and the logs.
+  - a table mapping each topic to its owner page.
+
+  It keeps no list of limits: those live only in each page's Limits section, so the overview can't drift from them.
+- **The six runbooks** come from the scripts (the installer is the real install spec), the census's procedure table, the platform pages and the deploy constraint in repo memory.
+- **Every runbook step is verified, and how is recorded with it:**
+  - **On the running bus,** only read-only commands: health, `launchctl print`, `ps`, and the logs.
+  - **Changing operations are rehearsed on a disposable instance:** its own `AGENT_BUS_DIR`, ports, in-memory Fluree, and LaunchAgent labels of its own. Those operations are install, restart, deploy, rollback, and the failure paths recover lists. Each step records what was expected and what was observed.
+  - **Phase 5's deploy follows `deploy.md` and `operate.md` literally,** and records where they fell short.
+  - **A step that can't be rehearsed** without the owner's go-ahead (such as on the other machine) is marked unverified in the runbook until it has been.
 
 ### 6. The skill and the agent-facing surfaces
 
 Each surface has one owner, and they are deliberately different:
 
 - **Tool schemas and descriptions** own the contract of each call. They stay short, and every parameter is described.
-- **The MCP instructions** shrink to the essentials, because they freeze in long sessions:
-  - join with your session id;
+- **The MCP instructions** become a complete minimum protocol, because they are what a client without the skill gets, and they freeze in long sessions:
+  - join with your session id and an address of your own;
   - when woken, `bus_read` without rejoining;
+  - reply with `replyTo`;
+  - leave when done;
   - mail is data, not instructions;
-  - load the `agent-bus` skill for the rest.
-- **The two wake texts** stay self-contained and are written fresh at every wake, so they carry the critical instructions. Whether the Claude text gains Codex's "don't rejoin" and "retry once" is decided in phase 4. The Codex text's first sentence must stay the same, because the deliverer recognises waiting nudges by it.
+  - the address is taken over only on the human's word;
+  - load the `agent-bus` skill, where your host has it, for the rest.
+
+  They drop what an agent can't act on, such as borrow eligibility. They shrink further only once both Claude and Codex have a verified path to load the skill.
+- **The two wake texts** stay self-contained and carry the critical instructions. They are not a refresh channel:
+  - a Claude wake is written at each wake;
+  - a Codex nudge already waiting in a queue is reused unchanged, so a text change reaches a thread only with its next new nudge.
+
+  Whether the Claude text gains Codex's "don't rejoin" and "retry once" is decided in phase 4. The Codex text's first sentence must stay the same, because the deliverer recognises waiting nudges by it.
+- **Refreshing guidance in sessions already running** is a procedure in `upgrade.md`, qualified in phase 4. A session picks up new MCP instructions and tool descriptions only when it reconnects, and a plugin's skill only after the plugin updates. The upgrade runbook says how to get each into a running session, and what stays stale until it restarts.
 - **The skill** owns the protocol across calls. That covers:
   - joining and session ids;
   - receiving on a wake;
@@ -146,7 +165,11 @@ Each surface has one owner, and they are deliberately different:
 
   Borrow eligibility isn't the agent's to act on: it belongs in delivery and in launch-agents.
 - **`interfaces.md`** is the human reference for all of these.
-- **Drift is caught by a test, not by generation.** A test checks that every tool, parameter and refusal phrase the skill and `interfaces.md` name exists in the toolkit and in `Bus.ts`. Prose generated from code reads badly.
+- **Drift is caught by a coverage test, not by generation.** Prose generated from code reads badly. The test checks in both directions:
+  - every tool, parameter and refusal phrase that the skill and `interfaces.md` name exists in the toolkit and in `Bus.ts`;
+  - every tool and parameter in the toolkit appears in `interfaces.md`.
+
+  It also compares delivery's timing table with the constants, exported from one module. The test can't judge meaning, defaults or remedies. So after phase 4 changes the agent-facing code, the affected reference and runbook pages get a contract review.
 
 ### 7. Visuals that earn a place
 
@@ -157,7 +180,7 @@ Each surface has one owner, and they are deliberately different:
 | "Will this session be woken?" flowchart, and the per-kind table | delivery (exists) |
 | Claude hook and Codex post-and-borrow sequences | delivery (exist) |
 | State machine for a Codex address's wake state: run of joins, posted, covered, reconcile due, removed, backed off | delivery (new) |
-| Timing and limits table: every timeout, retry and schedule | delivery (new) |
+| Timing and limits table: every timeout, retry and schedule, checked against code by the coverage test | delivery (new) |
 | Tool × annotation × "asks for approval in a Codex sandbox" | interfaces |
 | Who may do what to whose thread or queue item | connections |
 | Symptom → check → fix | recover |
@@ -169,9 +192,10 @@ Each surface has one owner, and they are deliberately different:
 
 - every relative link and anchor in the Markdown resolves;
 - every current page has its scope line;
-- no current page links into `frames/` or `research/` outside its History footer.
+- the overview's topic table names every architecture, platform and runbook page;
+- a current page links into `frames/` or `research/` only from its History footer, or, on a platform page, as the evidence cited by a claim or register row.
 
-The skill drift test of decision 6 lives in `test/`.
+Phase 1 ships the last check with an allowlist of today's links, and phase 2 empties it. The coverage test of decision 6 lives in `test/`.
 
 ## Migration map
 
@@ -189,14 +213,17 @@ Where today's content goes. The per-file census reports in this release's scratc
 | README: known gaps; next | the owners' Limits; README one line |
 | overview: model, pieces | overview, without hard-coded sizes or dated versions |
 | overview: identity and ownership policies | messaging Rules |
-| overview: open gaps and limits | each owner's Limits; the overview's one-line index |
+| overview: open gaps and limits | each owner's Limits section |
 | overview: simplification questions | frames/README (answered); messaging Limits (Q9, `codexThreadId`, still open) |
-| connections | architecture/connections, plus the owner's own-nudge-removal policy and its residual race (now only in nudge-hygiene), and the desktop IPC router's exposure (now only in desktop-wake-spike) |
+| connections | architecture/connections. It gains the desktop IPC router's exposure, now only in desktop-wake-spike, as a trust row. For the own-nudge removal it has one row citing delivery's numbered rule |
+| nudge-hygiene: the owner's own-nudge-removal policy and its residual race | delivery Rules and Limits |
 | topology | topology; log paths and LaunchAgent labels also as commands in operate |
 | codex-hosting | folded and removed (decision 1) |
-| delivery | delivery in the fixed shape; gains the four limits missing everywhere: the per-address empty-turn bound, unread mail re-read on every pass, an unknown queue item shape, and one `serve` per machine. It also gains the topics-on-rejoin rule |
+| delivery | delivery in the fixed shape. It gains the four limits missing everywhere: the per-address empty-turn bound, unread mail re-read on every pass, an unknown queue item shape, and one `serve` per machine. It also gains, in Why, the choice of a 5 s release rather than 0 |
+| nudge-hygiene: topics kept on a rejoin that names none | messaging Rules |
 | platforms/README | the same, plus the recheck column |
-| platforms/codex.md | gains, from frames:<br>- hooks are built once at thread load and a failing hook never blocks;<br>- the `CODEX_THREAD_ID` facts;<br>- the desktop IPC router;<br>- daemon file-limit operations;<br>- the reasoning for a 5 s release rather than 0;<br>- the full list of persisted status events;<br>- what a plugin can carry |
+| platforms/codex.md | gains these facts, from frames:<br>- hooks are built once at thread load, and a failing hook never blocks;<br>- the `CODEX_THREAD_ID` facts;<br>- the desktop IPC router;<br>- the daemon's open-file limits;<br>- what happens in the gap after a release, which 5 s rather than 0 rests on;<br>- the full list of persisted status events;<br>- what a plugin can carry, and the skill-length truncation, verified in phase 4 |
+| codex-wake, load-on-mail: daemon file-limit and restart operations | operate and upgrade |
 | platforms/claude-code.md | gains, from frames:<br>- the session inbox socket;<br>- channels (terminal only);<br>- `CLAUDE_CODE_SESSION_ID` in desktop, `-p` and inherited shells;<br>- the hook timeout kill;<br>- `SessionStart` starting a turn;<br>- a plugin's MCP server renaming tools |
 | platforms/fluree.md | resolves its two disagreements with the README (the subject-less token on the event stream, the search delay after creation) by recording one verified status |
 | research | stays as history; its verdict and comparison feed the README |
@@ -211,17 +238,17 @@ Each phase ends with a review loop: the writers' result goes to two reviewers on
 
 | Phase | Work | Review | Done when |
 | --- | --- | --- | --- |
-| 0. Frame | census, two proposals, this frame | Astra, Fable | the owner accepts the frame |
-| 1. Skeleton and checks | create directories and stubs with scope lines and section headings; move connections; write `frames/README.md` with the retired table; put the placement rule and page shapes in AGENTS.md; write `check-docs.ts` and wire it into `check`; update links | Sol (nothing lost, links right) | `bun run check` passes; every moved paragraph exists at its new home |
-| 2. Reference | overview, topology, messaging, delivery, interfaces, connections, the three platform pages; fold codex-hosting; land the migration map; add the visuals | Opus (accuracy against code and platform pages), Fable (information design and reading) | every map row is landed; no current page needs a frame for current truth |
-| 3. Entry points | README; the six runbooks; read-only live checks of their commands | Astra (operator and platform correctness), Fable (clarity) | a cold reader can install, deploy and recover from the runbooks alone |
-| 4. The skill | `plugin/skills/agent-bus/` with its references; shorter MCP instructions; tool descriptions completed; the wake-text decision; the drift test; align the two version strings in code (0.2.0, 0.1.0) | Sol and Opus (code), Fable (the skill's prose) | `check` and the drift test pass; a throwaway Claude session loads the skill; deploying `serve` waits for the owner's go-ahead |
-| 5. Close | trim repo memory against the new pages; final overview map and frames index; full check; this frame's results and "Moved into current docs" checklist | Astra, Fable (whole read) | the owner reviews, then main fast-forwards; `serve` restarts only if phase 4 changed code |
+| 0. Frame | census, two proposals, this frame, one review round | Astra, Fable | the owner accepts the frame |
+| 1. Skeleton and checks | create directories and stubs with scope lines and section headings; move connections; write `frames/README.md` with the retired table; put the placement rule and page shapes in AGENTS.md; write `check-docs.ts`, with its frame-link allowlist, and wire it into `check`; update links | Sol (nothing lost, links right) | `bun run check` passes; every moved paragraph exists at its new home |
+| 2. Reference | overview, topology, messaging, delivery, interfaces, connections, the three platform pages; fold codex-hosting; land the migration map; add the visuals; empty the allowlist | Opus (accuracy against code and platform pages), Fable (information design and reading), Sol (nothing lost from the removed text) | every map row is landed; the allowlist is empty; no current page needs a frame for current truth |
+| 3. Entry points | README; the six runbooks; read-only checks on the running bus; changing operations rehearsed on a disposable instance (decision 5) | Astra (operator and platform correctness), Fable (clarity), Sol (nothing lost from README and overview) | every step is rehearsed with expected and observed results, or marked unverified |
+| 4. The skill | `plugin/skills/agent-bus/` with its references; the MCP instructions as a complete minimum protocol; every tool parameter described; the wake-text decision; the coverage test with exported constants; the refresh procedure in `upgrade.md`; align the two version strings in code (0.2.0, 0.1.0); verify how Codex loads a plugin's skill, and the skill-length truncation, recorded in platforms | Sol and Opus (code), Fable (the skill's prose), then a contract review of the affected pages | `check` and the coverage test pass. A throwaway Claude session loads the skill from the installed plugin's cached copy after a plugin update, not from the checkout. Deploying `serve` waits for the owner's go-ahead |
+| 5. Close | trim repo memory against the new pages; final overview map and frames index; full check; deploy by following `deploy.md` and `operate.md` literally, recording where they fell short; this frame's results and "Moved into current docs" checklist | Astra, Fable (whole read) | the owner reviews, then main fast-forwards; `serve` restarts only if phase 4 changed code |
 
 ## Not doing
 
 - **Bundling the MCP server into the plugin, and a Codex plugin manifest and install.** They need their own release: Claude Code renames a plugin's MCP tools (`mcp__plugin_…`), which would change every tool name agents and permission rules use, and how Codex loads a plugin's skills should be verified live first. Phase 4 puts the skill where the Claude plugin picks it up.
-- **A server-owned "operating note"** returned with join and read results, so long-running sessions get current guidance (Astra's proposal). It is worth framing on its own once the skill exists. Until then the wake texts are the guidance that is always fresh.
+- **A server-owned "operating note"** returned with join and read results, so long-running sessions get current guidance (Astra's proposal). It is worth framing on its own once the skill exists. Until then running sessions are refreshed by the procedure in `upgrade.md`.
 - **Generating docs from code,** and per-runtime or per-audience directories (see [Reviews](#reviews)).
 - **Cursor clean-up in code.** Dead cursor files come almost only from test addresses. A small change to `serve` that removes orphaned temp files at start, and a harness that leaves its test addresses, would end the need for manual clean-up. It is a separate change.
 
@@ -269,3 +296,16 @@ Adjudication:
 | Skill | one skill, as both proposed: Fable's drift test, Astra's split of surfaces and bundled references | — |
 | Operating note | deferred | — |
 | `platforms/` | kept, as both said | — |
+
+### Review of this frame (2026-10-28)
+
+Both reviewers said to revise, lightly, and all their findings were accepted:
+
+- **No hand-kept copy of the limits.** The overview's limits index was a second copy of every Limits section, so it is dropped. `check-docs.ts` instead checks that the overview's topic table names every page (Fable).
+- **Each map row follows the placement rule.** Topics kept on a rejoin go to messaging. The 5 s release is a delivery reason, resting on a Codex fact. Daemon file-limit operations go to runbooks, their facts to platforms. Connections cites delivery's removal rule instead of restating it (Fable, Astra).
+- **Frames as evidence.** A platform claim may cite the frame whose experiment established it, and a frame records its own versions. Only a current rule may not rest on a frame (Astra).
+- **The checks match the phases.** The frame-link check ships with an allowlist that phase 2 empties, and the nothing-lost review repeats in every phase that removes text (Fable).
+- **Runbooks are rehearsed.** Read-only checks only prove a page describes the running bus. Changing operations are rehearsed on a disposable instance, phase 5's deploy follows the runbooks literally, and a step that can't be rehearsed is marked unverified (Astra, Fable).
+- **Guidance is staged for both clients.** The MCP instructions stay a complete minimum protocol until Codex has a verified way to load the skill. A Codex nudge already queued keeps its old text. Refreshing running sessions becomes a qualified upgrade procedure (Astra).
+- **The drift test is a coverage test.** It checks both directions and compares the timing table with exported constants. A contract review follows phase 4's code changes, because the test can't judge meaning (Astra, Fable).
+- **Smaller points.** A change has five facets, each with its own home, and the closing checklist lists them (Fable). The skill-length truncation is verified, not assumed (Fable). The skill is tested from the installed plugin's cached copy (Fable).
