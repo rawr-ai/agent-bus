@@ -94,17 +94,21 @@ mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
     mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
 
 mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
-    mem:content "serve never loads, resumes, subscribes to or starts turns on a Codex thread. It only lists and adds to the thread's queue, through a short-lived app-server of its own, so whichever app-server has the thread loaded stays its only writer and runs the nudge." ;
+    mem:content "serve loads a Codex thread only to run its own queued nudge, and only through the machine's daemon: after posting under the address's lock, it reads the thread's rollout and, if the thread is eligible, borrows it (thread/resume with excludeTurns and config thread_unload_delay_secs 5, then thread/unsubscribe, then disconnect). It starts or steers no turn and waits for none; the writer lock refuses the borrow while another process holds the thread, and that process runs the nudge. Eligible means: approval never, Default collaboration mode, permissions a resume keeps (full access, read-only, or a built-in profile whose saved form denies nothing), and no client-registered dynamic tools. Anything unreadable is ineligible." ;
     mem:tag "app-server" ;
     mem:tag "codex" ;
+    mem:tag "daemon" ;
     mem:tag "guard" ;
     mem:tag "queue" ;
     mem:tag "wake" ;
     mem:scope mem:repo ;
     mem:severity "must" ;
+    mem:artifactRef "docs/frames/load-on-mail.md" ;
     mem:artifactRef "src/codex.ts" ;
+    mem:artifactRef "src/rollout.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T05:37:33.860507Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-28T04:43:17.635129+00:00"^^xsd:dateTime ;
     mem:rationale "A thread has one writer. Resuming a desktop-app thread once the app released it made the daemon its writer and locked the owner's window ('open in another app'). A queued item runs in whichever app-server has the thread loaded, so adding one needs no knowledge of where the thread lives." ;
     mem:alternatives "classifying each join's host (codexHost) and resuming only daemon threads (a wait at every join; stale once the thread moves),retrying a refused resume with back-off (contends with the owner's app)" .
 
@@ -196,18 +200,18 @@ mem:decision-01m5xn3ccvw8spz95s87csea3r a mem:Decision ;
     mem:alternatives "the desktop coordination socket (spike, never run past Gate 0),a heartbeat automation in the thread (crude fallback only),the daemon taking the thread (second writer locks the owner out),the codex queue CLI with an in-memory mark (reads before a nudge runs stack empty turns; timed-out adds force duplicate or missed wake),thread/queue/start (could run the item in an app-server that is not the thread's owner)" .
 
 mem:decision-01m5xxta7vr0wb7b7640a0wqyv a mem:Decision ;
-    mem:content "Every Codex thread is woken one way: a content-free nudge in its own queue that tells it to call bus_read. serve doesn't connect to the Codex app-server daemon, load or resume threads, send messages as turns, steer busy turns or mark anything read; only the owner's read (bus_read or bus_wait) marks its mail read. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
+    mem:content "Every Codex thread is woken by a content-free nudge in its own queue that tells it to call bus_read; a thread loaded nowhere is then borrowed by the daemon so the nudge runs, if it is eligible. serve sends no messages as turns, steers no busy turn and marks nothing read; only the owner's read (bus_read or bus_wait) marks its mail read. Unread mail is reconciled 5, 15 and 60 minutes after the attempt that covered it, then hourly, re-posting a nudge that has gone. With nothing for the subscriber, serve moves its cursor past entries that aren't its mail, as that read would." ;
     mem:tag "codex" ;
     mem:tag "delivery" ;
     mem:tag "queue" ;
     mem:tag "wake" ;
     mem:scope mem:repo ;
-    mem:artifactRef "docs/frames/one-codex-route.md" ;
-    mem:artifactRef "src/Bus.ts" ;
+    mem:artifactRef "docs/architecture/delivery.md" ;
+    mem:artifactRef "docs/frames/load-on-mail.md" ;
     mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T05:37:33.947759Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T23:36:03.999283+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-28T04:43:17.673600+00:00"^^xsd:dateTime ;
     mem:rationale "Agents are woken, never polled. The daemon runs a queued item for a thread it has loaded, with or without a client attached, within seconds when idle and after the current turn when busy, and keeps it for a thread nothing has loaded until one resumes it. So the daemon route's resume, turn/start, host classification and holds bought only steering and headless resume, at the cost of a second path that writes to threads and most of the delivery code. The empty-batch skip stays because Fluree's read from a cursor queries every commit up to the head, so a peer with no mail would otherwise re-read a growing range on every change." ;
     mem:alternatives "keeping the daemon route for steering and closed TUI threads (a second writer path that nothing relied on),marking mail read when the nudge is queued (a lost nudge then loses the mail),dropping the empty-batch skip (the cost grows with the ledger)" .
 
@@ -293,15 +297,16 @@ mem:fact-01m5x1zte4rznzfcj9npy234jz a mem:Fact ;
     mem:rationale "Found in Effect 4.0.6's source while wiring serve; nothing fails visibly, deliveries just stop being serialized with reads." .
 
 mem:fact-01m5x1ztfs8vfda4m06w25nvj8 a mem:Fact ;
-    mem:content "codex app-server daemon restart and stop refuse a daemon the CLI auto-started on first use ('not managed by codex app-server daemon'), and a running daemon never updates itself. To replace one: kill -TERM it, then run codex app-server daemon start from a shell with ulimit -S -n 10240. Restarting drops its loaded threads." ;
+    mem:content "codex app-server daemon stop and restart act only on a daemon the managed lifecycle started (daemon start); they leave one an SSH-project proxy or the CLI auto-started. A managed daemon runs an update loop by default, for a stable standalone release only, and restarts on a new version (Codex 0.164, read in code). On the bus host a desktop SSH project from another machine restarts a stopped daemon within about 5 s, unmanaged, from the desktop's bundled CLI (its SSH connection starts it; codex app-server proxy itself only connects). A running daemon keeps the login it started with: after a Codex login change its turns run as the old user (seen as 'out of credits') until it restarts. To replace an unmanaged one, kill -TERM it by PID; restarting drops its loaded threads." ;
     mem:tag "app-server" ;
     mem:tag "codex" ;
     mem:tag "daemon" ;
     mem:tag "operations" ;
     mem:scope mem:repo ;
-    mem:artifactRef "README.md" ;
+    mem:artifactRef "docs/platforms/codex.md" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-26T21:31:14.297018Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-28T04:43:17.710501+00:00"^^xsd:dateTime ;
     mem:rationale "The daemon inherits its starter's open-file limit (macOS default 256), and each loaded thread costs about 33 descriptors, so a few threads exhaust it." .
 
 mem:fact-01m5xn3chn8n8q5wktct3xxn4s a mem:Fact ;
@@ -347,6 +352,19 @@ mem:fact-01m5y0xfrbrcwbym2ws681paww a mem:Fact ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T06:31:43.627731Z"^^xsd:dateTime .
+
+mem:fact-01m60d3nbs2fz6yv2hyvwgf417 a mem:Fact ;
+    mem:content "Codex runs no queued input for a thread whose status is Interrupted, and a resume restores that status, so a borrow loads such a thread and runs nothing (0.164, ext/queue/src/service.rs; seen live). A turn is interrupted by the user's Stop, or by a codex exec run exiting mid-turn: codex exec resume takes a nudge queued during its turn right after that turn, then exits and cuts it off. The queued nudge waits until new input starts a turn." ;
+    mem:tag "codex" ;
+    mem:tag "exec" ;
+    mem:tag "limit" ;
+    mem:tag "queue" ;
+    mem:tag "wake" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/architecture/delivery.md" ;
+    mem:artifactRef "docs/platforms/codex.md" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-28T04:43:17.753257+00:00"^^xsd:dateTime .
 
 mem:fact-01m5xp8mhr201tna2derhkerve a mem:Fact ;
     mem:content "The official MCP SDK Client (@modelcontextprotocol/sdk 1.x) validates a tool's structuredContent only when that client's own listTools() cached the tool's output schema, and never for a tool without one; a tool whose success schema is void lists no outputSchema and returns empty text. So wire tests call listTools first and also assert structuredContent equals the JSON in the first text block. SDK 1.x always offers its latest protocol (2025-11-25) at initialize with no option to choose; it cannot speak the stateless 2026-07-28." ;
