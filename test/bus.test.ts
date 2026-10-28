@@ -1219,6 +1219,44 @@ describe("codex delivery", () => {
       })
     ));
 
+  test("a rejoin after the cycle read its peers starts the back-off over for the new join", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, daemonState, holds, deliver, send } = yield* setup;
+        // A second peer, which the cycle reaches after codex/a.
+        const joinZero = bus.join({
+          address: "codex/0",
+          runtime: "codex",
+          session: "t-0",
+          cwd: process.cwd(),
+          codexThreadId: "t-0",
+        });
+        const mailZero = (body: string) =>
+          bus.publish({ from: "claude/b", session: sid("claude/b"), to: ["codex/0"], body });
+        yield* joinZero;
+        yield* mailZero("x");
+        daemonState.answer = "fails";
+        yield* deliver;
+        expect(holds.get("codex/0")?.failures).toBe(1);
+        yield* TestClock.adjust("30 seconds");
+        yield* send("two");
+        yield* mailZero("y");
+        daemonState.borrows = [];
+        daemonState.gate = yield* Deferred.make<void>();
+        const cycle = yield* Effect.forkChild(deliver);
+        while (daemonState.borrows.length === 0) yield* Effect.promise(() => Bun.sleep(5));
+        expect(daemonState.borrows).toEqual(["t-1"]);
+        // codex/0 rejoins after the cycle read the peers, before its turn comes.
+        yield* joinZero;
+        yield* Deferred.succeed(daemonState.gate, undefined);
+        yield* Fiber.join(cycle);
+        daemonState.gate = undefined;
+        expect(daemonState.borrows).toEqual(["t-1", "t-0"]);
+        // The new join's first failure, not the old join's second.
+        expect(holds.get("codex/0")?.failures).toBe(1);
+      })
+    ));
+
   test("a thread that rejoins while its borrow is in flight isn't nudged again", () =>
     run(
       Effect.gen(function* () {

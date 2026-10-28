@@ -644,16 +644,20 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       const hold = holds.get(peer.address);
       return hold !== undefined && carries(hold, attempted) ? hold : undefined;
     };
+    /** The hold, if it is for the attempted join itself: a subagent refusal and the back-off belong to the join. */
+    const joined = () => {
+      const hold = current();
+      return hold?.joinId === attempted.joinId ? hold : undefined;
+    };
     /** Changes what is known about the attempted subscriber's thread, keeping the rest. */
     const update = (change: Partial<Hold>) => {
       const known = current();
       holds.set(peer.address, {
         joinId: attempted.joinId,
         run: runOf(attempted),
-        // A subagent refusal and the back-off belong to the join.
-        refused: known?.joinId === attempted.joinId && known.refused,
-        failures: known?.joinId === attempted.joinId ? known.failures : 0,
-        until: known?.joinId === attempted.joinId ? known.until : 0,
+        refused: joined()?.refused ?? false,
+        failures: joined()?.failures ?? 0,
+        until: joined()?.until ?? 0,
         covered: known?.covered,
         warned: known?.warned,
         posted: known?.posted,
@@ -669,7 +673,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         if (threadId === undefined || deliveryTargets([subscriber], host).length === 0) {
           return undefined;
         }
-        if ((current()?.until ?? 0) > now) return undefined;
+        if ((joined()?.until ?? 0) > now) return undefined;
         const covered = current()?.covered;
         const again = covered?.unread === unread;
         if (again && now < covered.at + Duration.toMillis(reconcileDelay(covered.reconciles))) {
@@ -757,7 +761,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       if (ineligible !== undefined) {
         if (!warned) {
           yield* Effect.logWarning(
-            `Not borrowing ${peer.address}'s Codex thread: ${ineligible.replaceAll(woken.threadId, "<thread>")}. Its nudge runs wherever the thread is next loaded.`
+            `Not borrowing ${peer.address}'s Codex thread: ${ineligible.replaceAll(woken.threadId, "<thread>")}. Its nudge stays queued.`
           );
         }
         if (woken.added) {
@@ -776,7 +780,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         yield* Effect.logWarning(
           ineligible === undefined
             ? `${peer.address} hasn't read its mail after ${woken.reconciles} attempts to wake it since the first; trying hourly until it does.`
-            : `${peer.address} hasn't read its mail after ${woken.reconciles} checks that its nudge still waits; its thread can't be borrowed (${ineligible.replaceAll(woken.threadId, "<thread>")}), so the nudge runs only when the thread is next loaded. Checking hourly.`
+            : `${peer.address} hasn't read its mail after ${woken.reconciles} checks that its nudge still waits; its thread can't be borrowed (${ineligible.replaceAll(woken.threadId, "<thread>")}), so its nudge stays queued. Checking hourly.`
         );
       }
       continue;
@@ -797,7 +801,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       );
       continue;
     }
-    const failures = (current()?.failures ?? 0) + 1;
+    const failures = (joined()?.failures ?? 0) + 1;
     const delay = Duration.min(Duration.times(FIRST_RETRY, 2 ** (failures - 1)), LAST_RETRY);
     // The delay runs from the failure, which may have taken a request timeout to arrive.
     const failedAt = yield* Clock.currentTimeMillis;

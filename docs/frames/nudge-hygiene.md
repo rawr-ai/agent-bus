@@ -211,3 +211,9 @@ Astra (max) and Fable reviewed the first draft, both against the 0.164 source. A
 - the warning is per run and reason: a different reason is logged again;
 - docs: the limit on found nudges includes an earlier run's; removal's hold on the lock; the `codex exec` row;
 - tests: an older client passing `takeover` to `bus_join`, a failed rollout read, removal outcomes not warning, and a rejoin while a borrow is in flight.
+
+Sol: fix first, one P2 and four P3s, all accepted:
+- **P2:** a rejoin after the cycle read its peers inherited the old join's failure count, through the failure arithmetic as well as the copy (the same as Opus's first item, which fixed only the copy). Join-local state (refusal, failures, back-off) is now read only from a hold for the attempted join itself, with a regression test that reproduced it.
+- the trust table in `connections.md` names `thread/queue/delete`, and the approval claim there names its conditions;
+- an ineligible thread's log says its nudge stays queued, not that it runs when next loaded, which is false for an interrupted thread;
+- the repo memory that says `bus_join` stays destructive is updated at close-out.
