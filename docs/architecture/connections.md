@@ -60,7 +60,7 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 
 - **Loopback, a `Host` check and an `Origin` check, rather than a credential on `serve`.** The bus serves one user's processes on one machine, and a session's id is only a claim it makes. Ownership was added after two unrelated sessions shared an address and one consumed the other's reply, as collision protection, with no pretence of security.
 - **A token on Fluree, as well as loopback.** CORS off alone doesn't stop a cross-origin `text/plain` POST from writing, so the token is what protects the loopback server. The token has no subject because Fluree holds a token that names an identity to its identity policies, and those deny writes on a ledger that has none.
-- **An open event stream.** It carries only change notices. A token with no subject is not accepted there ([platforms: Fluree](../platforms/fluree.md#the-event-stream) has its status), so `serve` sends none.
+- **An open event stream.** It carries only change notices, so the install leaves its authentication off and `serve` sends no token. Fluree would refuse the bus's subject-less token there if events authentication were required ([platforms: Fluree](../platforms/fluree.md#the-event-stream)).
 - **A queue for waking, not a socket that starts turns.** `serve` adds a fixed nudge to the thread's own queue and lets the thread's writer run it, so it never drives a turn itself. The borrow loads a thread only so that its queue runs, behind the writer lock. This keeps the bus's reach to a text the owner can see, in a place the owner can edit.
 - **Rejected: starting or steering turns through the daemon,** as the first Codex route did. It made the bus a second writer, which locked the owner out of a desktop thread.
 - **Rejected: the desktop's IPC router,** to start or steer a turn in a window that owns the thread. It is private and unauthenticated, any same-user process can use it, and the queue already wakes idle Local threads. It was never built.
@@ -78,7 +78,6 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
 | A sandboxed Codex thread can send to peers that aren't sandboxed | **Known limit**: mail is data to be weighed, not instruction |
 | The experimental queue methods `serve` relies on | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
-| That the event stream refuses a token with no subject | **Unverified** here; recorded on [the platform page](../platforms/fluree.md#the-event-stream) |
 
 ## Rests on
 

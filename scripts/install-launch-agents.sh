@@ -14,6 +14,10 @@
 # and copies the token from the bus host.
 #
 # Rerunning is safe: existing config, credentials and messages are kept.
+#
+# AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL (the label prefix) and
+# AGENT_BUS_LAUNCHER (the `agent-bus` link) override the defaults, so a disposable instance can
+# run beside the real one.
 
 set -eu
 
@@ -33,20 +37,21 @@ token_file="$bus_dir/fluree-token"
 ledger="agent-bus:main"
 agents="$HOME/Library/LaunchAgents"
 domain="gui/$(id -u)"
+prefix="${AGENT_BUS_LABEL:-ai.rawr.agent-bus}"
 
 mkdir -p "$bus_dir" "$agents"
 
 # The `agent-bus` command: a link to this checkout, which the Claude Code plugin's hook runs.
 # Checked as the hook runs it: a launchd-style PATH after the user's bun directories, outside
 # the checkout.
-launcher="$HOME/.local/bin/agent-bus"
+launcher="${AGENT_BUS_LAUNCHER:-$HOME/.local/bin/agent-bus}"
 if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
   echo "$launcher exists and is not a link; move it aside and rerun" >&2
   exit 1
 fi
-mkdir -p "$HOME/.local/bin"
+mkdir -p "$(dirname "$launcher")"
 ln -sfn "$repo_dir/src/bin.ts" "$launcher"
-(cd / && env -i HOME="$HOME" PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+(cd / && env -i HOME="$HOME" PATH="$(dirname "$launcher"):$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   "$launcher" --help >/dev/null) || { echo "$launcher does not run" >&2; exit 1; }
 
 # write_agent LABEL LOG ARG... writes a KeepAlive LaunchAgent running ARGs.
@@ -160,7 +165,7 @@ if [ -z "$remote" ]; then
     echo "created the Fluree token in $token_file"
   fi
   issuer=$(key_field "$key_file" did)
-  write_agent ai.rawr.agent-bus.fluree "$bus_dir/fluree.log" \
+  write_agent "$prefix.fluree" "$bus_dir/fluree.log" \
     "$fluree_bin" server run \
     --config "$fluree_dir/.fluree/config.toml" \
     --storage-path "$fluree_dir/storage" \
@@ -175,7 +180,7 @@ else
   valid_token "$token_file.tmp" || { echo "could not copy the token from $remote" >&2; exit 1; }
   mv "$token_file.tmp" "$token_file"
   # The server listens on loopback only, so other machines reach it through SSH.
-  write_agent ai.rawr.agent-bus.tunnel "$bus_dir/tunnel.log" \
+  write_agent "$prefix.tunnel" "$bus_dir/tunnel.log" \
     /usr/bin/ssh -N -o BatchMode=yes -o ExitOnForwardFailure=yes \
     -o ServerAliveInterval=15 -o ServerAliveCountMax=3 \
     -L "127.0.0.1:$port:127.0.0.1:$port" "$remote"
@@ -190,7 +195,7 @@ if [ ! -f "$bus_dir/config.json" ]; then
   echo "bus store: $ledger at $url"
 fi
 
-write_agent ai.rawr.agent-bus "$bus_dir/agent-bus.log" \
+write_agent "$prefix" "$bus_dir/agent-bus.log" \
   "$bun_bin" "$repo_dir/src/bin.ts" serve
 wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
 

@@ -1,69 +1,250 @@
 # Install
 
-Use this to set up the bus host, add another machine, and register the MCP server and the Claude plugin. Upgrading an existing install is in [upgrade](upgrade.md).
+Use this to set up the bus host, add another machine, and register the MCP server and the Claude plugin. Upgrading an existing install is in [upgrade](upgrade.md); putting a new version into service is in [deploy](deploy.md).
+
+Each step ends with how it was checked. *Rehearsed* means run on a disposable instance with its own directory, ports and LaunchAgent labels (the overrides in the installer's header), which behaves as the default install does. The commands here use the default values.
 
 ## Before you start
 
-## Machine prerequisites
+Install from the checkout that `serve` will run, which stays on a deployed `main` ([deploy](deploy.md#before-you-start)). The installer links `~/.local/bin/agent-bus` to it, so if you move the checkout later, rerun the installer.
 
-<!-- draft from phase 2: docs/architecture/codex-hosting.md, "What waking needs from each machine" -->
+What each machine needs:
 
-- **`serve` has to reach the thread's queue.** It needs a queue-capable Codex CLI (`serve --codex`, by default the desktop's bundled one, `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`), run as the same user with the same Codex home, on the machine that owns the thread. For a desktop SSH project, that is the SSH host. There is no `PATH` fallback: `serve` runs under launchd's `PATH`, and another CLI's protocol could differ. The queue methods are experimental, and the bundled CLI is the same build as the desktop that reads the queue.
-- **A daemon.** `serve` borrows through the daemon, and runs `codex app-server daemon start` when nothing listens on its socket, which needs a managed daemon package (or the invoking CLI to install one). [Platforms: Codex](../platforms/codex.md#the-daemon) has how the daemon starts, outlives its starter and updates itself. On the bus host, a desktop SSH project from another machine keeps a daemon running, though not the managed one, so `serve` rarely starts it there, and that daemon doesn't take the managed package's updates (inferred).
-- **The daemon's login is the one its turns run under.** It keeps the login it started with, so after the owner changes the Codex login, borrowed turns run as the old user until the daemon restarts ([platforms: Codex](../platforms/codex.md#the-daemon)). See [recover](recover.md).
+| Needs | On | Why |
+| --- | --- | --- |
+| macOS and `bun`, at the version pinned in `package.json` | Every machine | The installer writes LaunchAgents and runs `serve` with Bun. It looks for `bun` on `PATH`, then in `~/.bun/bin` |
+| The `fluree` CLI on `PATH` | The bus host only | The installer runs the Fluree server from it. Other machines run none ([topology](../architecture/topology.md#two-machine-roles)) |
+| `~/.local/bin` on your shell's `PATH` | Every machine | `agent-bus` is the installer's link there |
+| The Claude Code CLI, `claude` | Machines with Claude sessions | Registers the MCP server and installs the plugin |
+| The Codex CLI, `codex`, and the ChatGPT desktop app | Machines with Codex threads | `codex` registers the MCP server. `serve` posts nudges through the desktop's bundled CLI, which has the queue methods |
+| An SSH alias for the bus host with key authentication, and `scp` | The other machine only | The installer copies the token with `scp` and keeps the tunnel with `ssh`, both without prompts (`BatchMode`) |
 
-## The other machine's SSH PATH lacks bun
+Waking Codex threads has three more needs, which the installer doesn't set up:
+- **A queue-capable Codex CLI, run by the user who owns the thread, with that user's Codex home, on the machine that owns it.** For a desktop SSH project that machine is the SSH host. `serve` runs the desktop's bundled CLI by default (`serve --codex` replaces it). There is no `PATH` fallback: `serve` runs under launchd's `PATH`, and another CLI's protocol could differ. The queue methods are experimental ([platforms: Codex](../platforms/codex.md#the-bundled-cli-and-private-app-servers)).
+- **A Codex daemon, for borrows.** `serve` runs `codex app-server daemon start` when nothing listens on the daemon's socket. That needs a managed daemon package, or an invoking CLI that can install one. [Platforms: Codex](../platforms/codex.md#the-daemon) says how the daemon starts, outlives its starter and updates itself. On a machine that a desktop SSH project reaches, that project keeps a daemon running which isn't the managed one, so `serve` rarely starts it there (inferred).
+- **A daemon whose login is the one its turns should run under.** It keeps the login it started with, so after the owner changes the Codex login, restart it ([recover](recover.md)).
 
-<!-- draft from phase 2: docs/overview.md, "Open gaps and limits" (status "Operations"; the row is removed from the overview in phase 2) -->
+### Check the prerequisites
 
-The other machine's non-interactive SSH `PATH` lacks `bun`: remote commands need `~/.bun/bin`. The same limit is in [recover](recover.md).
-
-## Install on the bus host and on another machine
-
-<!-- draft from phase 2: README.md, "Commands" and "Setup and other machines" -->
-
-State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` names the Fluree ledger, and `serve` won't start without it:
-
-```json
-{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }
-```
+Run on the machine you are installing:
 
 ```sh
-bun install                      # also clones the Effect source into .repos/effect
-bun run install:launch-agents    # on the bus host: Fluree server + agent-bus serve, as LaunchAgents
-bun run install:launch-agents -- --remote <ssh host of the bus host>   # on another machine
+bun --version
+fluree --version
+command -v claude codex
+ls /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+echo "$PATH" | tr ':' '\n' | grep -x "$HOME/.local/bin"
 ```
 
-`install:launch-agents` first links `~/.local/bin/agent-bus` to this checkout's `src/bin.ts`, for the Claude Code plugin's hook, and checks that the link runs. On the bus host, it then runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
+Expected: the Bun version in `packageManager` in `package.json`; a Fluree version (bus host only); a path for each CLI you will use; the bundled Codex path; and `~/.local/bin` echoed back. Fix anything missing first: with no `fluree`, the installer exits with status 1 and prints nothing ([If it fails](#if-it-fails)). *Checked read-only on the running bus (2026-10-28).*
 
-Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions. [Topology](../architecture/topology.md) shows both machine roles, every process and where each piece of state lives.
+## Install on the bus host
 
-From `scripts/install-launch-agents.sh`, which the commands above run: an existing `~/.local/bin/agent-bus` that is not a link stops the install ("move it aside and rerun"); the script needs `fluree` on the bus host's `PATH`; `AGENT_BUS_DIR`, `AGENT_BUS_FLUREE_PORT` (8095) and `AGENT_BUS_PORT` (8096) override its defaults; and `--remote` takes an ssh host alias for the bus host and copies `~/.agent-bus/fluree-token` from it with `scp`.
+State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with the installer's overrides, is in [operate](operate.md).
 
-## Registering the MCP server
+1. **Install the dependencies,** from the checkout:
 
-<!-- draft from phase 2: README.md, "Registering the MCP server" -->
+   ```sh
+   bun install
+   ```
 
-Every session on a machine shares that machine's `serve`:
+   Expected: Bun's package summary, and on the first run Effect's source cloned into `.repos/effect` (the `prepare` script). A rerun reports no changes. *Rehearsed: expected the summary and the clone, observed both (2026-10-28).*
+
+2. **Run the installer:**
+
+   ```sh
+   bun run install:launch-agents
+   ```
+
+   Expected on a first install, in about a second, with full paths:
+
+   ```text
+   created the Fluree signing key in ~/.agent-bus/fluree-key.json
+   created the Fluree token in ~/.agent-bus/fluree-token
+   loaded ai.rawr.agent-bus.fluree; log: ~/.agent-bus/fluree.log
+   bus store: agent-bus:main at http://127.0.0.1:8095
+   loaded ai.rawr.agent-bus; log: ~/.agent-bus/agent-bus.log
+   ```
+
+   Then the registration commands, which the next sections cover. *Rehearsed: expected these lines in this order, observed them in this order (2026-10-28).*
+
+3. **Check what it created:**
+
+   ```sh
+   ls -l ~/.local/bin/agent-bus ~/.agent-bus
+   cat ~/.agent-bus/config.json
+   ls ~/Library/LaunchAgents | grep ai.rawr.agent-bus
+   ```
+
+   | Created | Where | Note |
+   | --- | --- | --- |
+   | The launcher | `~/.local/bin/agent-bus`, a link to the checkout's `src/bin.ts` | What the Claude plugin's hook runs. The installer checks it runs under a launchd-style `PATH` from outside the checkout, and stops if a file that isn't a link is already there |
+   | The signing key | `~/.agent-bus/fluree-key.json`, mode 0600 | The key the Fluree server trusts tokens from |
+   | The token | `~/.agent-bus/fluree-token`, mode 0600 | The bearer token for Fluree's data and admin APIs. It has no subject and lasts 520 weeks ([connections](../architecture/connections.md#limits)) |
+   | `config.json` | `~/.agent-bus/config.json` | `{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`, written only if absent. `serve` won't start without it |
+   | The Fluree project and storage | `~/.agent-bus/fluree/` | The ledger lives here |
+   | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; loaded at once |
+
+   Expected: the link points into your checkout, the key and token show `-rw-------`, `config.json` names port 8095, and both plists are listed. Both servers listen on loopback only. *Rehearsed: expected these, observed these (2026-10-28).*
+
+4. **Check that both LaunchAgents run:**
+
+   ```sh
+   launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E 'state =|pid ='
+   launchctl print gui/$(id -u)/ai.rawr.agent-bus.fluree | grep -E 'state =|pid ='
+   ```
+
+   Expected: `state = running` and a `pid` for each. *Rehearsed: expected `running` and a pid, observed both (2026-10-28). Checked read-only on the running bus (2026-10-28).*
+
+5. **Check health and the log's start line:**
+
+   ```sh
+   curl -fsS http://127.0.0.1:8096/health
+   curl -fsS http://127.0.0.1:8095/health
+   tail -n 3 ~/.agent-bus/agent-bus.log
+   ```
+
+   Expected: `ok` from `serve`; `{"status":"ok", …}` from Fluree; and a log line `INFO (#…): Listening on http://127.0.0.1:8096`, which `serve` prints once it serves. Reading logs is in [operate](operate.md). *Rehearsed: expected `ok`, a Fluree status and the Listening line, observed all three (2026-10-28). Checked read-only on the running bus (2026-10-28).*
+
+6. **Check that the token is enforced.** The installer does this itself before it starts `serve`. It asks Fluree about the ledger without a token (expecting 401) and with one (expecting 200), for up to half a minute, and stops with an error if the answers differ, which means another server holds the port. To check it yourself, with the token in a header file, not on a command line:
+
+   ```sh
+   probe=http://127.0.0.1:8095/v1/fluree/exists/agent-bus%3Amain
+   curl -s -o /dev/null -w 'no token: %{http_code}\n' "$probe"
+   curl -s -o /dev/null -w 'bad token: %{http_code}\n' -H 'Authorization: Bearer x.y.z' "$probe"
+   curl -s -o /dev/null -w 'token: %{http_code}\n' \
+     -H @<(printf 'Authorization: Bearer %s\n' "$(cat ~/.agent-bus/fluree-token)") "$probe"
+   ```
+
+   Expected: `no token: 401`, `bad token: 401`, `token: 200`. The `@<( … )` form needs `bash` or `zsh`. *Rehearsed: expected 401, 401, 200, observed 401, 401, 200 (2026-10-28). Also rehearsed, the installer's own refusal: with a server that doesn't enforce the token already on the port, it printed "does not enforce the bus token (without: 200, with: 200)" after 33 s, exited 1 and left `serve` unloaded. Checked read-only on the running bus: 401, 401, 200 (2026-10-28).*
+
+7. **Check the command line:**
+
+   ```sh
+   agent-bus --version
+   agent-bus peers
+   ```
+
+   Expected: `agent-bus v…`, then the joined peers (none on a fresh bus). A failure here means the link or `serve` is broken. *Rehearsed: expected a version and an empty list, observed both (2026-10-28). Checked read-only on the running bus: `peers` listed the joined addresses (2026-10-28).*
+
+### Rerun the installer
+
+Rerunning is safe. It keeps the key, the token, `config.json` and every message, rewrites both plists and restarts both servers. It is therefore also how to apply a change to the installer itself. `serve`'s memory is lost, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
+
+```sh
+bun run install:launch-agents
+```
+
+Expected: the two `loaded …` lines and no `created …` line; the same checksums for `fluree-key.json`, `fluree-token` and `config.json` (`shasum`); new process ids; every earlier message still readable. A "Fluree events disconnected, reconnecting" warning in `serve`'s log during the restart is expected. *Rehearsed: expected the key, token, config and messages unchanged and new pids, observed that (2026-10-28).*
+
+## Register the MCP server
+
+Every session on a machine shares that machine's `serve`. Register it once per runtime, with the port the installer printed (8096 by default):
 
 ```sh
 claude mcp add --scope user --transport http agent-bus http://127.0.0.1:8096/mcp
 codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 ```
 
-The installer prints these commands, with the port it used, when it finishes.
+Check each with the runtime's read-only command:
 
-## Installing the Claude plugin
+```sh
+claude mcp get agent-bus
+codex mcp get agent-bus
+```
 
-<!-- draft from phase 2: README.md, "Registering the MCP server" (the plugin paragraphs) and the installer's closing output -->
+Expected: `Status: ✔ Connected` and the URL for Claude Code; `enabled: true` and the URL for Codex. A session picks the server up when it next starts. *Unverified by run: the two `add` commands change the owner's Claude and Codex configuration. Their syntax was read from `claude mcp add --help` and `codex mcp add --help`. Checked read-only on the running bus: both `get` commands showed the live registration (2026-10-28).*
+
+## Install the Claude plugin
 
 Claude sessions are woken by the agent-bus plugin, which this repo serves as a local marketplace. Install it once per machine, after the installer, from the checkout `serve` runs:
 
 ```sh
-claude plugin marketplace add <agent-bus checkout>
+claude plugin marketplace add "$PWD"
 claude plugin install agent-bus@agent-bus
 ```
 
-The plugin (`plugin/`) is only a manifest, which Claude Code copies into its cache. Its hook runs `~/.local/bin/agent-bus claude-wake`, the installer's link to the checkout's `src/bin.ts`. So the hook runs the checkout's code with its dependencies, and picks up a deploy at once. After a change to `plugin/`, run `claude plugin marketplace update agent-bus` and `claude plugin update agent-bus@agent-bus`. Hooks inherit Claude Code's environment rather than your shell's, so the hook looks for `bun` in `~/.local/bin`, then `~/.bun/bin`, then on that `PATH`. It needs the same `AGENT_BUS_PORT` as `serve` (or neither set). Sessions get it when they next start, or with `/reload-plugins`. Deploy `serve` first, so the hook finds `bus_wake`.
+Check:
+
+```sh
+claude plugin marketplace list
+claude plugin list
+```
+
+Expected: a marketplace `agent-bus` whose source is the checkout, and `agent-bus@agent-bus` with `Status: ✔ enabled`. Sessions get the plugin when they next start, or with `/reload-plugins`. *Unverified by run: `marketplace add` and `install` change the owner's Claude configuration. Their syntax was read from `claude plugin --help`. Checked read-only on the running bus: both list commands showed the live install (2026-10-28). That `/reload-plugins` loads the hook into a running session wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#plugins)).*
+
+What to know about it:
+- **The plugin is only a manifest** (`plugin/.claude-plugin/plugin.json`), which Claude Code copies into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)).
+- **Its hook runs the checkout,** through `~/.local/bin/agent-bus claude-wake`. A deploy therefore reaches the hook at once, with no plugin update ([delivery](../architecture/delivery.md#claude-code-sessions)).
+- **The hook finds `bun`** in `~/.local/bin`, then `~/.bun/bin`, then on Claude Code's `PATH`, because hooks inherit Claude Code's environment, not your shell's.
+- **It needs the same `AGENT_BUS_PORT` as `serve`,** or neither set.
+- **Deploy `serve` before the plugin,** so the hook finds `bus_wake` ([deploy](deploy.md#when-the-plugin-changed)).
+
+### After a change to the plugin
+
+Only a change under `plugin/` or `.claude-plugin/` needs this:
+
+```sh
+claude plugin marketplace update agent-bus
+claude plugin update agent-bus@agent-bus
+```
+
+Then sessions get the change when they next start, or with `/reload-plugins`: `claude plugin update --help` says a restart is required to apply it. *Unverified by run: it would change the owner's installed plugin.*
+
+## Add another machine
+
+Another machine runs its own `serve` and an SSH tunnel to the bus host's Fluree server, on the same local port. It runs no Fluree. Every step here runs on that machine, which this page has not been run on.
+
+1. **Clone the repo on `main`, check [the prerequisites](#before-you-start)** (it needs no `fluree`), **and install the dependencies:**
+
+   ```sh
+   bun install
+   ```
+
+   *Unverified: needs the other machine.*
+
+2. **Check that SSH works without prompts,** with the alias you will give the installer, as the account that owns `~/.agent-bus` on the bus host:
+
+   ```sh
+   ssh -o BatchMode=yes <ssh host of the bus host> ls .agent-bus/fluree-token
+   ```
+
+   Expected: the file name, with no password or host-key prompt. *Unverified: needs the other machine.*
+
+3. **Run the installer with `--remote`:**
+
+   ```sh
+   bun run install:launch-agents -- --remote <ssh host of the bus host>
+   ```
+
+   Expected: it copies `~/.agent-bus/fluree-token` from the bus host with `scp` into a mode-0600 file, and stops if what arrived isn't a token. It loads `ai.rawr.agent-bus.tunnel` (log `~/.agent-bus/tunnel.log`), waits for Fluree through the tunnel, checks the token is enforced there, writes `config.json` if absent, and loads `ai.rawr.agent-bus`. *Unverified: needs the other machine. The script is the bus host's, with the tunnel in place of Fluree.*
+
+4. **Check it:**
+
+   ```sh
+   launchctl print gui/$(id -u)/ai.rawr.agent-bus.tunnel | grep -E 'state =|pid ='
+   launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E 'state =|pid ='
+   curl -fsS http://127.0.0.1:8096/health
+   curl -fsS http://127.0.0.1:8095/health
+   agent-bus peers
+   ```
+
+   Expected: both agents `running`, `ok`, a Fluree status through the tunnel, and the same peers as on the bus host. The token check (step 6 above) works unchanged through the tunnel. *Unverified: needs the other machine.*
+
+5. **Register the MCP server and install the plugin,** with the commands above.
+
+### `bun` on the other machine's remote shell
+
+The other machine's non-interactive SSH `PATH` lacks `bun`, so a command run over SSH, say `ssh <host> bun install`, can fail to find it. Give the path (`ssh <host> '~/.bun/bin/bun --version'`) or put `~/.bun/bin` on the `PATH` that remote commands get. The installer is not affected: it runs on the machine itself, and finds Bun on the shell's `PATH` or in `~/.bun`. See also [recover](recover.md). *Unverified: needs the other machine. The limit is recorded from earlier use, with no error message.*
 
 ## If it fails
+
+| What you see | What it means and what to do |
+| --- | --- |
+| The installer exits with status 1 and prints nothing | `fluree` isn't on `PATH` (bus host). Check with `command -v fluree`, fix the `PATH`, rerun. *Rehearsed: exit 1, no output (2026-10-28). The silence is a fault in the script, which should say so.* |
+| `… exists and is not a link; move it aside and rerun` | A real file sits at `~/.local/bin/agent-bus`. Move it aside, rerun. *Rehearsed (2026-10-28).* |
+| `… does not run` | The link's target can't run under a launchd-style `PATH`. Check that `bun` is in `~/.bun/bin` or `~/.local/bin` and that `bun install` finished |
+| `The Fluree server at … does not enforce the bus token` | Another server holds the Fluree port. Find it with `lsof -nP -iTCP:8095 -sTCP:LISTEN`, stop it by its pid, rerun. *Rehearsed (2026-10-28).* |
+| `Nothing answers at … ; see <log>` | A server didn't come up within 20 s. Read the log it names ([operate](operate.md)) |
+| `could not copy the token from <host>` | The `scp` failed or the file isn't a token. Repeat step 2 of [Add another machine](#add-another-machine) |
+| Installed, but sessions aren't woken or a Codex thread is stuck | [Recover](recover.md) |

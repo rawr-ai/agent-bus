@@ -1,133 +1,57 @@
 # agent-bus
 
-A pub/sub message bus that lets Claude and Codex sessions talk to each other. Sessions join with an address, publish to addresses, `#topics` or `*`, and are woken when messages arrive for them.
+agent-bus lets Claude Code and Codex sessions message each other, on one machine or several. Every message is appended to one shared ledger, and each session reads its mail from an address it owns. A session doesn't have to poll: when mail arrives for one of its addresses, the bus wakes it, even when it is idle. A Claude Code session is woken by the agent-bus plugin's hook, a Codex thread by a nudge in its own queue, and the session's own read then delivers the mail ([delivery](docs/architecture/delivery.md)).
 
-Built on Bun and Effect 4. Each machine runs one bus process, `agent-bus serve`, which serves the bus tools over MCP (streamable HTTP, `effect/ai`'s `McpServer`) on loopback and wakes that machine's Codex sessions. Storage is a Fluree ledger on the bus's own transaction server, behind a `Ledger` service; the unit tests use a JSONL file instead.
+## Why it exists: MCP alone can't wake a session
 
-The [overview](docs/overview.md) maps the system and links to the architecture: [topology](docs/architecture/topology.md) (machines, processes and stores), [messaging](docs/architecture/messaging.md) (addresses, ownership and the ledger) and [delivery](docs/architecture/delivery.md) (how each kind of session is woken). Platform facts, with their versions, are in [platforms](docs/platforms/README.md): [Codex](docs/platforms/codex.md), [Claude Code](docs/platforms/claude-code.md) and [Fluree](docs/platforms/fluree.md).
+An MCP server has no portable way to put something in front of the model, or to start a turn in a session that is idle: Claude Code and Codex treat notifications as plumbing, elicitation asks the human rather than the model, and neither supports sampling. The one push that does reach the model, Claude Code's channels, works only in the terminal and behind an allowlist or a development flag. So agent-bus keeps the mail in a durable ledger, rings a doorbell that carries no content through each runtime's own wake path, and serves the read as an MCP tool, the shape the rest of the field has converged on too ([research: verdict](docs/research/mcp-native-messaging.md#verdict)).
 
-## Commands
+## How it compares
 
-```sh
-bun install                      # also clones the Effect source into .repos/effect
-bun run check                    # typecheck, lint, test
-bun run lint:effect              # stricter linteffect rules; advisory
-bunx knip                        # unused files, exports and dependencies
-bun run qualify:fluree           # rerun after upgrading Fluree (durable server, restart, index boundary)
-bun run install:launch-agents    # on the bus host: Fluree server + agent-bus serve, as LaunchAgents
-bun run install:launch-agents -- --remote <ssh host of the bus host>   # on another machine
-bun src/bin.ts --help
-```
+As surveyed on 2026-10-26, from the research's [field survey](docs/research/mcp-native-messaging.md#comparable-servers-and-tools) and [mechanisms by client](docs/research/mcp-native-messaging.md#mechanisms-by-client-and-session-state). What other projects do comes from their own docs and issues, not from running them here.
 
-| Command | Purpose |
-| --- | --- |
-| `agent-bus serve` | This machine's bus: MCP at `http://127.0.0.1:8096/mcp` (`AGENT_BUS_PORT`), and delivery to the Codex sessions that joined from this machine. Runs as the `ai.rawr.agent-bus` LaunchAgent |
-| `agent-bus claude-wake` | The Claude Code plugin's hook: wake the session when mail arrives for its addresses ([how](#how-sessions-are-woken)) |
-| `agent-bus join` / `publish` / `peers` | The same operations from a shell; `join` records the current directory, and `--takeover` replaces an ended session |
+| Approach | Wakes an idle session | Keeps history | Claude and Codex | Across machines | What it does well |
+| --- | --- | --- | --- | --- | --- |
+| An MCP mailbox the agent polls, such as mcp_agent_mail | No: the agent has to think to check | Yes, a mailbox | Any MCP client | Not surveyed | Works in any client with nothing added to the host; adds file reservations |
+| Claude Code channels, such as claude-peers-mcp | Claude in the terminal only, behind an allowlist or a development flag | No: claude-peers-mcp loses messages on restart | Claude only | Not surveyed | The only MCP push that puts a message straight in front of the model |
+| Claude Code's own features: Monitor, the session inbox, agent teams | Yes, for Claude. A Monitor line woke an idle desktop session, but one the model arms expires within 30 min; the inbox takes outside mail only under a setting, and the desktop drops held mail after 5 min | Agent teams keep a file mailbox | Claude only | Not surveyed | Built in, with nothing to install |
+| Codex's own features: `codex queue`, multi-agent wake | Yes, for a thread that is open, through its queue. The multi-agent wake covers only its own agents' mail, and is off by default | No mailbox | Codex only | Not surveyed | The queue is the one verified idle wake for a desktop thread, and agent-bus uses it |
+| Mailbox-and-doorbell tools: hardline-mcp, harness-summit, agent-chat, agent-send, agent-group-mcp | Yes, reported in the terminal. None publishes a desktop test, and one says its Claude wake fails there | Yes, a mailbox | Yes | Not claimed | The same shape as agent-bus, and lighter to install; all new and small |
+| A relay across a tailnet: agent-tincan | Claude yes. Codex gets a new `codex exec` run, not the open thread | Not surveyed | Yes | Yes | Reaches sessions on other machines |
+| Orchestrators: Claude Squad, ccmanager, agent-deck, Sculptor, claude-flow | Only sessions they launched, by typing into their terminal | Not surveyed | Not surveyed | Not surveyed | Drive the sessions they start, with no setup inside them |
+| **agent-bus** | Yes: Claude Code in the desktop app or the terminal, through the plugin's hook; Codex threads through their queue, and a thread loaded nowhere only if its settings allow a borrow | Yes: an append-only ledger, searchable, with SPARQL | Yes | Yes: one ledger, and a `serve` on each machine for its own sessions | Costs more to run: a Fluree server and LaunchAgents on macOS, and a plugin for Claude |
 
-`join`, `publish` and `peers` are MCP clients of the local `serve`; only `serve` touches the store. They present the session id of the address's runtime (`--runtime`, or the runtime the address joined with): `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude, `$AGENT_BUS_SESSION` otherwise, or `--session`. A refusal from the bus, or an unreachable bus, ends the command with its message. `claude-wake`, also a client, takes its session from the hook input Claude Code gives it on stdin, and retries any failure for up to ten minutes.
+## Install in brief
 
-## Addresses belong to sessions
+agent-bus runs on macOS as LaunchAgents, with Bun and a Fluree server. On the machine that will host the bus, from the root of a clone of this repo:
 
-An address is one session's private inbox: reading consumes, so two sessions on one address would each miss the messages the other read. Groups share a `#topic` instead, where every subscriber has its own address and gets every message.
+1. Install the dependencies, then the Fluree server and this machine's `serve`:
+   ```sh
+   bun install && bun run install:launch-agents
+   ```
+2. Register the bus's MCP server with Claude Code:
+   ```sh
+   claude mcp add --scope user --transport http agent-bus http://127.0.0.1:8096/mcp
+   ```
+3. Register it with Codex:
+   ```sh
+   codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
+   ```
+4. Install the Claude plugin, whose hook wakes Claude sessions:
+   ```sh
+   claude plugin marketplace add "$PWD" && claude plugin install agent-bus@agent-bus
+   ```
 
-The session that joins an address owns it, identified by its runtime and the runtime's own id for it (a Codex thread id, a Claude Code session id; other clients pass a stable id of their own). Every call passes that id as `session`, and only the owner can read, wait, leave or send from the address. A different session's join is refused with what the bus knows of the holder (its note, last call, whether it has a wait open), and should pick another address. Rejoining with the same id keeps unread messages; after `/clear` or a fork, Claude Code has a new id, so the session needs a new address. A process started from a session's shell inherits that session's id and acts for it, as subagents do, so give a delegate that needs its own inbox its own address. A client whose tool list predates `session` can pass it as an extra argument without reconnecting.
+The installer prints steps 2 to 4, with the port it used, when it finishes. [Install](docs/runbooks/install.md) covers the prerequisites, adding another machine, and checking that each step worked.
 
-To replace a session that has ended, call `bus_takeover` (or `agent-bus join --takeover`) with the holder's join id, which the refusal gives. The new owner keeps the unread messages, and the previous one is refused from then on. Joins and leaves written without an owner, by a `serve` from before owners, are ignored.
+## Where to go next
 
-Ownership is checked under the address's lock as each call takes effect, so a wait or send that started before a takeover can't act after it. It is collision protection between cooperating sessions, not security: every process of the user can reach `serve` and the store. Claims are atomic within one machine's `serve`; joins from different machines are ordered by the ledger, and the losing session is refused from its next call. A cursor belongs to the machine its owner joined from, so a takeover from another machine may redeliver messages from that machine's position.
+The [overview](docs/overview.md) shows how the parts fit and which page owns each topic. From there:
 
-## Registering the MCP server
+- **An operator** keeps the bus running with [operate](docs/runbooks/operate.md) (start, stop, health and logs), [deploy](docs/runbooks/deploy.md) (putting a new version into service) and [recover](docs/runbooks/recover.md) (symptoms and fixes).
+- **An agent's owner** starts sessions the bus can wake with [launch agents](docs/runbooks/launch-agents.md). The agents learn the protocol themselves, from the instructions the MCP server gives them when they connect and from the `agent-bus` skill, which ships with the plugin in `plugin/skills/agent-bus/`.
+- **A contributor** starts with [AGENTS.md](AGENTS.md), for the toolkit, the checks and where a new fact goes, then the overview's pieces in the code.
 
-Every session on a machine shares that machine's `serve`:
+## Planned: history queried by meaning
 
-```sh
-claude mcp add --scope user --transport http agent-bus http://127.0.0.1:8096/mcp
-codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
-```
-
-| Tool | Purpose |
-| --- | --- |
-| `bus_join` | Claim (or reconnect to) an address with your runtime, session id, working directory, topics, and for Codex the thread id to wake |
-| `bus_takeover` | Replace a session that has ended, naming the holder's join id; only when the human says so |
-| `bus_publish` | Send to addresses, `#topic` or `*`; `replyTo` answers a message |
-| `bus_read` / `bus_wait` | Unread messages now, or once they arrive (at most 50 s per call) |
-| `bus_wake` | For the Claude Code plugin's hook: wait until the session's addresses have mail it hasn't been woken for, reading nothing |
-| `bus_peers` | Joined peers, with runtime, machine, topics and notes |
-| `bus_history` | Search past messages by text and participant |
-| `bus_query` | Read-only SPARQL `SELECT` over the whole ledger, at the head or an earlier commit `t` |
-| `bus_leave` | Leave the bus |
-
-Claude sessions are woken by the agent-bus plugin, which this repo serves as a local marketplace. Install it once per machine, after the installer, from the checkout `serve` runs:
-
-```sh
-claude plugin marketplace add <agent-bus checkout>
-claude plugin install agent-bus@agent-bus
-```
-
-The plugin (`plugin/`) is only a manifest, which Claude Code copies into its cache. Its hook runs `~/.local/bin/agent-bus claude-wake`, the installer's link to the checkout's `src/bin.ts`. So the hook runs the checkout's code with its dependencies, and picks up a deploy at once. After a change to `plugin/`, run `claude plugin marketplace update agent-bus` and `claude plugin update agent-bus@agent-bus`. Hooks inherit Claude Code's environment rather than your shell's, so the hook looks for `bun` in `~/.local/bin`, then `~/.bun/bin`, then on that `PATH`. It needs the same `AGENT_BUS_PORT` as `serve` (or neither set). Sessions get it when they next start, or with `/reload-plugins`. Deploy `serve` first, so the hook finds `bus_wake`.
-
-## Checking with MCP Inspector
-
-The official [MCP Inspector](https://github.com/modelcontextprotocol/inspector) reaches `serve` as any other client does. Its CLI mode lists and calls the tools. Calls write the ledger and consume messages, so point it at a throwaway bus rather than the machine's on 8096:
-
-```sh
-fluree server run --memory --listen-addr 127.0.0.1:18095 &   # a throwaway Fluree, no auth
-dir=$(mktemp -d)
-echo '{ "fluree": { "url": "http://127.0.0.1:18095", "ledger": "check:main" } }' > "$dir/config.json"
-AGENT_BUS_DIR=$dir AGENT_BUS_PORT=8196 bun src/bin.ts serve &   # stop both with kill %1 %2
-npx @modelcontextprotocol/inspector@2.12.0 --cli http://127.0.0.1:8196/mcp --method tools/list
-npx @modelcontextprotocol/inspector@2.12.0 --cli http://127.0.0.1:8196/mcp --method tools/call \
-  --tool-name bus_join --tool-arg address=claude/check runtime=claude session=check cwd=$PWD
-```
-
-The CLI prints each result as JSON and exits with status 5 when a tool returns `isError`. `test/mcp-official.test.ts` makes the same kind of calls with the official TypeScript SDK on every `bun run check`.
-
-## How sessions are woken
-
-A wake only tells a session that mail is waiting; its own read delivers the mail ([why](docs/architecture/delivery.md#waking-is-separate-from-delivery)).
-
-- **Claude Code** sessions with the agent-bus plugin are woken by its hook, `agent-bus claude-wake`, which Claude Code runs in the background (`asyncRewake`) at session start and every turn end. It waits in `bus_wake` until the session's addresses have new mail, then wakes the session, in the desktop app and the terminal.
-- **Codex** threads join with their thread id. `serve` puts one nudge in the thread's own queue, through a short-lived `codex app-server` of its own, and whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs it as a turn. For a thread loaded nowhere, `serve` asks the machine's daemon to borrow it: the daemon runs the nudge and lets the thread go 5 s after it goes idle. The writer lock refuses the borrow while another process holds the thread, so a thread never has a second writer. Only threads stored with approval `never` and permissions a resume keeps are borrowed.
-
-[Delivery](docs/architecture/delivery.md#how-each-kind-of-session-receives-mail) says which kinds of session are woken and when, and gives the policies; [platforms: Codex](docs/platforms/codex.md) covers the app-servers and which threads run where, and [install](docs/runbooks/install.md) what waking needs from each machine.
-
-## Setup and other machines
-
-State lives in `~/.agent-bus` (`AGENT_BUS_DIR` overrides it). `config.json` names the Fluree ledger, and `serve` won't start without it:
-
-```json
-{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }
-```
-
-`install:launch-agents` first links `~/.local/bin/agent-bus` to this checkout's `src/bin.ts`, for the Claude Code plugin's hook, and checks that the link runs. On the bus host, it then runs a dedicated Fluree server on `127.0.0.1:8095` (`ai.rawr.agent-bus.fluree`, project and storage in `~/.agent-bus/fluree`) and `agent-bus serve`. On first install it creates a signing key (`fluree-key.json`) and a token (`fluree-token`), both readable only by you, and writes `config.json` if there is none. Rerunning it is safe.
-
-Both servers listen on loopback only. Another machine clones this repo and runs `install:launch-agents -- --remote <ssh host>`: it copies the token, keeps an SSH tunnel to the Fluree server on the same local port (`ai.rawr.agent-bus.tunnel`), and runs its own `serve` for its own sessions. [Topology](docs/architecture/topology.md) shows both machine roles, every process and where each piece of state lives.
-
-## Security
-
-The bus trusts every process of the user on the machine; loopback is not authentication. [Connections and trust boundaries](docs/architecture/connections.md) lists every connection the bus makes or depends on, and what protects it.
-
-- **Fluree** requires the token on its data and admin APIs (`--data-auth-mode required`, `--admin-auth-mode required`) and has CORS off. Without this, any web page could write to it with a cross-origin `text/plain` POST. Its event stream stays open: it carries only ledger names and commit pointers, never message content (a subject-less token, which writes need, is refused there). The token is never logged.
-- **`serve`** accepts only requests whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`, which stops DNS rebinding, and the MCP endpoint rejects any browser `Origin`.
-- **`bus_query`** accepts one SPARQL `SELECT`, parsed and regenerated from its syntax tree (so caller comments, which Fluree reads for `PRAGMA`s, never reach it), with no `FROM` or `SERVICE` anywhere. The ledger and `t` are fixed in the request path, results are cut off at 32 KB of rows, and a query is abandoned after 10 seconds. A Fluree fuel limit would replace the budgeted Agent JSON with an unbudgeted result ([platforms: Fluree](docs/platforms/fluree.md#query-limits)), so none is set.
-
-## Ledger model
-
-Every entry (`src/domain.ts`) has a time-ordered UUIDv7 `id`, ISO `ts`, `from`, `to`, optional `subject` and `replyTo`, and an `origin`: the machine, and the sender's joined directory with its repo and branch, worked out when the entry is written. Repo and branch are optional metadata for queries; a branch can't be recovered once its worktree or branch is gone. Presence entries record joins and leaves; the latest per address with an owner is that peer's state.
-
-A change notification only wakes readers; reading from the subscriber's cursor decides what is delivered, and a cursor advances only after a complete read. There is one change stream per process, shared by every waiter.
-
-**Fluree** (`src/Fluree.ts`). All bus processes share one transaction server over HTTP, which serializes writers. Each message is one `/insert`, so one commit, and a cursor is the last commit `t` read. Reads are history queries over the `bus:json` assertions from the cursor to the head, in windows of 500 commits. The `/v1/fluree/events` SSE stream wakes readers, with a 15-second poll behind it and a catch-up read after every reconnect. Cursors live in `fluree-cursors/<ledger>/<first commit id>/`, so a replaced ledger starts subscribers over rather than skipping messages; a cursor ahead of the ledger fails loudly.
-
-Each message is a node `urn:agent-bus:message:<id>` typed `bus:Message` or `bus:Presence` (`bus:` is `https://rawr.ai/ns/agent-bus#`), with `bus:id`, `bus:ts` (`xsd:dateTime`), `bus:from`, `bus:to`, `bus:subject`, `bus:body`, `bus:replyTo` (a link to the answered message), `bus:host`, `bus:cwd`, `bus:repo`, `bus:branch`, `bus:runtime` and `bus:status` for presence (whose owning session is in `bus:json`), and `bus:json`, the exact encoded message the bus reads back. The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`, so `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter") and `bus_query` can rank with `f:fulltext`. For about a second after a ledger is created, text search finds nothing or fails ([platforms: Fluree](docs/platforms/fluree.md#full-text-search)).
-
-The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`): byte-offset cursors, file watching, substring search and no `bus_query`.
-
-## Known gaps
-
-- `bus_read` and `bus_wait` mark messages read before the response is sent. If the response is lost (the caller dies mid-call), those messages are skipped for that address; they remain in `bus_history`.
-
-## Next
-
-- **Richer ledger properties** (topic, task, workstream, decisions, tags, reference docs), so history can be queried by meaning with `bus_query`, not only by text.
+The ledger's entries are to gain richer properties (topic, task, workstream, decisions, tags, reference docs), so that `bus_query` can find history by meaning, not only by text ([messaging](docs/architecture/messaging.md#fluree-as-the-one-store)).

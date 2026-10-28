@@ -62,7 +62,7 @@ A failed read of one address can therefore never hide another's mail. The change
 **5. Identity, and which addresses count.**
 - **Identity.** The hook presents its input's `session_id`, which equals the session's `CLAUDE_CODE_SESSION_ID`.
 - **Which addresses.** A call covers the addresses that session holds as `claude`, joined from this machine, the one whose `serve` keeps their cursors. An address joined from this machine whose cursor is missing (a replaced ledger, say) is logged and skipped, as the Codex deliverer does.
-- **After `/clear`** the session has a new id. `SessionStart` arms a hook for it, which finds no addresses until the session joins again; a cleared session already needs a new address ([README](../../README.md#addresses-belong-to-sessions)). The hook from before `/clear` keeps waiting under the old id. It fires at most once, if mail reaches the old addresses: the cleared conversation's `bus_read` is then refused, and the nudge tells it to carry on.
+- **After `/clear`** the session has a new id. `SessionStart` arms a hook for it, which finds no addresses until the session joins again; a cleared session already needs a new address ([messaging](../architecture/messaging.md#limits)). The hook from before `/clear` keeps waiting under the old id. It fires at most once, if mail reaches the old addresses: the cleared conversation's `bus_read` is then refused, and the nudge tells it to carry on.
 - **`--resume`** keeps the id. `SessionStart` re-arms the wake.
 - **Subagents** share their parent's id, so mail to a subagent's own address wakes the parent, which may read it.
 - **Two processes resuming the same id** share one wait: the one that armed last is the one woken.

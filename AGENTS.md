@@ -63,4 +63,11 @@ When a decision, constraint or trap changes, `update` its memory instead of addi
 
 ## Verification
 
-`bun run check` must pass before committing. `bun run lint:effect` is advisory.
+`bun run check` must pass before committing. It runs `typecheck`, `lint`, `test` and `check:docs`, each also a script of its own. `bun run lint:effect` (stricter Effect rules) and `bunx knip` (unused files, exports and dependencies) are advisory.
+
+```sh
+bun install                 # also clones the Effect source into .repos/effect
+bun run check
+bun run qualify:fluree      # after upgrading Fluree
+bun src/bin.ts --help       # the CLI, from the checkout
+```

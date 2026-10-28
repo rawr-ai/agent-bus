@@ -11,7 +11,7 @@ The contract of every way into the bus: the MCP tools and their parameters, anno
 | MCP over HTTP | The ten tools below, at `http://127.0.0.1:<port>/mcp` on loopback, served by `serve` | Claude and Codex sessions |
 | `agent-bus` CLI | `join`, `publish` and `peers` from a shell, each an MCP client of the local `serve`; and `serve` itself | People, scripts and shell-only agents |
 | Plugin hook | `agent-bus claude-wake`, a CLI command that calls `bus_wake` and wakes a Claude session | Claude Code, through the agent-bus plugin |
-| `GET /health` | Returns `ok`; no authentication | The installer's waits, operators |
+| `GET /health` | Returns `ok`; no authentication. It reports only that `serve` answers, and stays `ok` while Fluree is down, so `agent-bus peers` is the end-to-end check ([operate](../runbooks/operate.md)) | The installer's waits, operators |
 
 `serve` is the only process that touches the store. The CLI and the hook reach it through the same tools as an agent. The server answers the MCP revisions listed in `src/mcp.ts` under the name `agent-bus`, and sends the `instructions` described under [Instructions and wake texts](#instructions-and-wake-texts). Its tool list never changes while it runs, and it offers no subscriptions.
 
