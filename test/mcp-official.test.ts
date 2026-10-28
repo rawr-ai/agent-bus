@@ -110,7 +110,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
   // Codex asks approval for a tool that is destructive, or not read-only and possibly
   // open-world (requires_mcp_tool_approval in codex-rs/core/src/mcp_tool_call.rs), and
   // refuses the call outright under approval policy never outside full access.
-  test("annotates the tools as closed-world, lookups as read-only and only bus_join as destructive", async () => {
+  test("annotates the tools as closed-world, lookups as read-only and only bus_takeover as destructive", async () => {
     const { tools } = await connect();
     const changes = { destructiveHint: false, openWorldHint: false, readOnlyHint: false };
     const lookup = { ...changes, readOnlyHint: true };
@@ -126,7 +126,8 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
         ])
       )
     ).toEqual({
-      bus_join: { ...changes, destructiveHint: true },
+      bus_join: changes,
+      bus_takeover: { ...changes, destructiveHint: true },
       bus_publish: changes,
       bus_read: changes,
       bus_wait: changes,
@@ -142,6 +143,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     const { tools } = await connect();
     const required = {
       bus_join: ["address", "cursor"],
+      bus_takeover: ["address", "cursor"],
       bus_publish: ["id", "ts"],
       bus_read: ["messages"],
       bus_wait: ["messages"],
@@ -204,6 +206,25 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     await succeed("bus_join", joining(owner));
     await refused("bus_read", { address: owner }, /own session id as `session`/);
     await refused("bus_read", { address: owner, session: "x" }, /belongs to another session/);
+
+    // A held address is taken over only through bus_takeover, naming the holder's current join.
+    const held = await call("bus_join", { ...joining(owner), session: "other" });
+    expect(held.isError).toBe(true);
+    const said = text(held);
+    expect(said).toContain("bus_takeover");
+    const joinId = /holder "([^"]+)"/.exec(said)?.[1];
+    expect(joinId).toBeDefined();
+    const other = { ...joining(owner), session: "other" };
+    await refused("bus_takeover", { ...other, holder: "stale" }, /held by another session/);
+    expect(await succeed("bus_takeover", { ...other, holder: joinId })).toEqual({
+      address: owner,
+      cursor: expect.any(Number),
+    });
+    await refused(
+      "bus_read",
+      { address: owner, session: sid(owner) },
+      /belongs to another session/
+    );
 
     // Arguments the schema rejects were a protocol error until 2025-11-25 made them tool errors.
     const outOfRange = { address: owner, session: sid(owner), timeoutSeconds: 51 };

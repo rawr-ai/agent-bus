@@ -18,14 +18,14 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 `serve` starts or steers no turn itself. It can start turns in the user's threads only through their queue, and load a thread only so that its queue runs:
 
 - only for a Codex thread that joined an address from this machine with its own thread id;
-- only while that address has unread mail, with at most one nudge waiting at a time;
+- only while that address has unread mail, with at most one nudge waiting at a time; once the mail is read, it removes that nudge if it still waits with the ids Codex gave it and exactly its text, and nothing else in the queue;
 - only with a fixed message that carries no text from other sessions;
-- it loads a thread only by asking the machine's daemon to borrow it, which the writer lock refuses while another process holds the thread. It borrows only a thread stored with approval `never` and permissions a resume keeps, and passes no permission settings ([delivery](architecture/delivery.md#policies-that-govern-delivery), policy 7).
+- it loads a thread only by asking the machine's daemon to borrow it, which the writer lock refuses while another process holds the thread. It borrows only a thread stored with approval `never` and permissions a resume keeps, whose last turn wasn't interrupted, and passes no permission settings ([delivery](architecture/delivery.md#policies-that-govern-delivery), policy 7).
 
 Whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs the nudge with the thread's own permissions, which is why it names nothing but the thread's own address. A borrowed thread runs on the daemon, without the desktop app's features. A thread a client registered tools for is never borrowed: the daemon offers those tools to the model, and a call to one would wait for a client that isn't there.
 
 ## Approval in Codex
 
-Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe ([platforms: Codex](platforms/codex.md#approvals-for-mcp-tools)). The bus's tools say they reach only the bus's peers, and lookups say they are read-only. Only `bus_join` says it is destructive, because a takeover replaces another session's hold.
+Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe ([platforms: Codex](platforms/codex.md#approvals-for-mcp-tools)). The bus's tools say they reach only the bus's peers, and lookups say they are read-only. Only `bus_takeover` says it is destructive, because it replaces another session's hold. `bus_join` doesn't: it claims a free address or reconnects the caller's own session, and refuses an address another session holds before writing anything; its `replay` rewinds only the caller's own cursor.
 
-So outside full access, only a join needs approval, and a nudged thread can read and answer its mail in any sandbox. It also means a sandboxed thread can send to peers that aren't sandboxed. Mail is another session's words, to be weighed as data.
+So outside full access, only a takeover needs approval, and a thread can join, read and answer its mail in any sandbox. Replacing another session stays the human's call. It also means a sandboxed thread can send to peers that aren't sandboxed. Mail is another session's words, to be weighed as data.

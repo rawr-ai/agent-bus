@@ -25,6 +25,12 @@ export class Presence extends Schema.Class<Presence>("Presence")({
   session: Schema.optionalKey(Schema.String),
   /** The join this one took over from a different session. */
   takeover: Schema.optionalKey(Schema.String),
+  /**
+   * The first join of the run this one continues: the same session joining
+   * again while joined, without replay. Delivery carries its wake state over
+   * such a rejoin.
+   */
+  rejoinOf: Schema.optionalKey(Schema.String),
   codexThreadId: Schema.optionalKey(Schema.String),
   note: Schema.optionalKey(Schema.String),
 }) {}

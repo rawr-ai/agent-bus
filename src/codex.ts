@@ -358,13 +358,25 @@ const nudgeHead = (address: string) => `[agent-bus] New messages for ${JSON.stri
  * runs as the owner's own input, so their text stays in `bus_read`'s result.
  */
 export const formatNudge = (address: string) =>
-  `${nudgeHead(address)} Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
+  `${nudgeHead(address)} You are already joined; don't call bus_join. Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
+
+/** An item waiting in a thread's queue: Codex's ids for it, which an edit keeps, and its text. */
+export interface Queued {
+  readonly id: string | undefined;
+  readonly clientUserMessageId: string | undefined;
+  readonly text: string;
+}
 
 /** A thread's queue: whichever app-server has the thread loaded runs its items as turns, in order. */
 export interface Queue {
-  /** The text of each item waiting in the thread's queue. */
-  readonly list: (threadId: string) => Effect.Effect<ReadonlyArray<string>, CodexError>;
-  readonly add: (threadId: string, text: string) => Effect.Effect<void, CodexError>;
+  /** Each item waiting in the thread's queue. */
+  readonly list: (threadId: string) => Effect.Effect<ReadonlyArray<Queued>, CodexError>;
+  readonly add: (threadId: string, text: string) => Effect.Effect<Queued, CodexError>;
+  /**
+   * Removes the item with this id, whatever it holds by then; whether one was
+   * there. Codex has no delete that checks the content.
+   */
+  readonly remove: (threadId: string, id: string) => Effect.Effect<boolean, CodexError>;
   /** Where the thread's rollout, its session file, is, from `thread/read`, which loads nothing. */
   readonly rollout: (threadId: string) => Effect.Effect<Stored, CodexError>;
 }
@@ -374,16 +386,23 @@ const QueuedItems = Schema.Struct({
 });
 const decodeQueued = Schema.decodeUnknownEffect(QueuedItems);
 
-/** A queued item's text. Items of shapes this doesn't know read as no text, not as an error. */
-const queuedText = (item: unknown) => {
+/** A queued item. Items of shapes this doesn't know read as no text, not as an error. */
+const queuedItem = (item: unknown): Queued => {
+  const id = field(item, "id");
+  const clientUserMessageId = field(item, "clientUserMessageId");
   const input = field(item, "input");
-  if (!Array.isArray(input)) return "";
-  return input
-    .map((part: unknown) => {
-      const text = field(part, "text");
-      return typeof text === "string" ? text : "";
-    })
-    .join("\n");
+  return {
+    id: typeof id === "string" ? id : undefined,
+    clientUserMessageId: typeof clientUserMessageId === "string" ? clientUserMessageId : undefined,
+    text: Array.isArray(input)
+      ? input
+          .map((part: unknown) => {
+            const text = field(part, "text");
+            return typeof text === "string" ? text : "";
+          })
+          .join("\n")
+      : "",
+  };
 };
 
 /**
@@ -408,7 +427,7 @@ const NUDGE_TIMEOUT = Duration.seconds(6);
 
 /**
  * Thread queues through an app-server of serve's own (`thread/queue/*`, which
- * the protocol marks experimental). Listing, adding and reading load the
+ * the protocol marks experimental). Listing, adding, removing and reading load the
  * thread nowhere. Whichever app-server has the thread loaded (the desktop
  * app's, or the daemon's) runs an item at once when the thread is idle and
  * after the current turn when it is busy; a thread nothing has loaded keeps it
@@ -421,7 +440,7 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
       // Every page, so a waiting nudge further down is still found.
       list: (threadId) =>
         Effect.gen(function* () {
-          const texts: Array<string> = [];
+          const items: Array<Queued> = [];
           const seen = new Set<string>();
           let cursor: string | null = null;
           do {
@@ -435,10 +454,10 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
             const page: typeof QueuedItems.Type = yield* server
               .request("thread/queue/list", { threadId, limit: 100, cursor })
               .pipe(Effect.flatMap(decodeQueued));
-            texts.push(...page.data.map(queuedText));
+            items.push(...page.data.map(queuedItem));
             cursor = page.nextCursor ?? null;
           } while (cursor !== null);
-          return texts;
+          return items;
         }).pipe(
           Effect.mapError(
             (cause) => new CodexError({ method: "thread/queue/list", message: cause.message })
@@ -451,7 +470,11 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
             clientUserMessageId: Bun.randomUUIDv7(),
             input: [{ type: "text", text, text_elements: [] }],
           })
-          .pipe(Effect.asVoid),
+          .pipe(Effect.map((added) => queuedItem(field(added, "queuedSubmission")))),
+      remove: (threadId, id) =>
+        server
+          .request("thread/queue/delete", { threadId, queuedSubmissionId: id })
+          .pipe(Effect.map((answer) => field(answer, "deleted") === true)),
       rollout: (threadId) =>
         server.request("thread/read", { threadId }).pipe(
           Effect.map((read): Stored => {
@@ -504,10 +527,28 @@ interface Covered {
   readonly reconciles: number;
 }
 
-/** What the deliverer has learned about a peer's current join. */
+/** A nudge of ours as Codex queued it: the only item the deliverer ever removes. */
+interface Posted {
+  readonly id: string;
+  readonly clientUserMessageId: string;
+  readonly text: string;
+}
+
+const postedOf = ({ id, clientUserMessageId, text }: Queued): Posted | undefined =>
+  id === undefined || clientUserMessageId === undefined
+    ? undefined
+    : { id, clientUserMessageId, text };
+
+/** What the deliverer has learned about a peer's thread. */
 interface Hold {
-  /** The join this applies to; rejoining starts over. */
+  /** The join this applies to. */
   readonly joinId: string;
+  /**
+   * The first join of its run: an ordinary rejoin by the same session
+   * continues the run, and carries over what is known about the thread; a
+   * replay, a leave or a takeover starts a new one.
+   */
+  readonly run: string;
   /** The thread takes no direct input (a subagent): never nudge this join. */
   readonly refused: boolean;
   /** Consecutive failures, and when to try again. */
@@ -520,9 +561,21 @@ interface Hold {
    * only on the reconcile schedule, until the owner reads or newer mail arrives.
    */
   readonly covered?: Covered | undefined;
-  /** The log has said why this join's thread can't be borrowed. */
+  /** The log has said why this thread can't be borrowed. */
   readonly warned?: boolean | undefined;
+  /**
+   * The nudge this deliverer last added, as Codex answered the add, kept apart
+   * from `covered`: an add that landed is known even if the borrow afterwards
+   * failed. Once the mail is read, it is removed if it still waits unchanged.
+   * One found waiting isn't recorded, since the owner can queue our text too.
+   */
+  readonly posted?: Posted | undefined;
 }
+
+const runOf = (subscriber: Subscriber) => subscriber.presence.rejoinOf ?? subscriber.joinId;
+
+/** Whether a hold still applies to this subscriber: the same join, or an ordinary rejoin of it. */
+const carries = (hold: Hold, subscriber: Subscriber) => hold.run === runOf(subscriber);
 
 /** What the deliverer knows about each peer, by address. */
 export type Holds = Map<string, Hold>;
@@ -542,7 +595,13 @@ const noDirectInput = (error: CodexError) =>
  *
  * Mail that stays unread is attempted again on the reconcile schedule, which
  * re-posts a nudge that has gone and borrows again. Failures are retried after
- * a delay that doubles to five minutes.
+ * a delay that doubles to five minutes. What it knows about a thread carries
+ * over an ordinary rejoin, so a woken thread that rejoins before reading isn't
+ * nudged again.
+ *
+ * Once the mail is read, as by a read inside a running turn, it removes our
+ * nudge if it still waits with the ids Codex gave it and our exact text, so
+ * it doesn't run as an empty turn. Removal is best effort: it is tried once.
  */
 export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
   openQueue: Effect.Effect<Queue, CodexError, Scope.Scope>,
@@ -553,7 +612,21 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
   const bus = yield* Bus;
   const now = yield* Clock.currentTimeMillis;
   let stalled: CodexError | undefined;
-  const ready = deliveryTargets(yield* bus.peers, host).filter((peer) => {
+  const targets = deliveryTargets(yield* bus.peers, host);
+  // An ordinary rejoin keeps what was learned, but a subagent refusal and failures belong to the join.
+  for (const peer of targets) {
+    const hold = holds.get(peer.address);
+    if (hold !== undefined && hold.joinId !== peer.joinId && carries(hold, peer)) {
+      holds.set(peer.address, {
+        ...hold,
+        joinId: peer.joinId,
+        refused: false,
+        failures: 0,
+        until: 0,
+      });
+    }
+  }
+  const ready = targets.filter((peer) => {
     const hold = holds.get(peer.address);
     return (
       hold === undefined || hold.joinId !== peer.joinId || (!hold.refused && hold.until <= now)
@@ -566,8 +639,24 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
     let attempted: Subscriber = peer;
     const current = () => {
       const hold = holds.get(peer.address);
-      return hold?.joinId === attempted.joinId ? hold : undefined;
+      return hold !== undefined && carries(hold, attempted) ? hold : undefined;
     };
+    /** Changes what is known about the attempted subscriber's thread, keeping the rest. */
+    const update = (change: Partial<Hold>) => {
+      const known = current();
+      holds.set(peer.address, {
+        joinId: attempted.joinId,
+        run: runOf(attempted),
+        refused: known?.joinId === attempted.joinId && known.refused,
+        failures: known?.failures ?? 0,
+        until: known?.until ?? 0,
+        covered: known?.covered,
+        warned: known?.warned,
+        posted: known?.posted,
+        ...change,
+      });
+    };
+    const hold = (change: Partial<Hold>) => update({ failures: 0, until: 0, ...change });
     const post = ({ subscriber, messages }: Pending) =>
       Effect.gen(function* () {
         attempted = subscriber;
@@ -585,18 +674,49 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         const queued = yield* Effect.scoped(
           Effect.gen(function* () {
             const queue = yield* openQueue;
-            const waiting = (yield* queue.list(threadId)).some((text) =>
+            const ours = formatNudge(subscriber.address);
+            // Any nudge of ours covers the mail, but only one this deliverer added is ever removed:
+            // the owner can queue our text too.
+            const waiting = (yield* queue.list(threadId)).some(({ text }) =>
               text.startsWith(nudgeHead(subscriber.address))
             );
-            if (!waiting) yield* queue.add(threadId, formatNudge(subscriber.address));
+            if (!waiting) update({ posted: postedOf(yield* queue.add(threadId, ours)) });
             return { added: !waiting, stored: yield* queue.rollout(threadId) };
           })
         ).pipe(timeLimit("queue nudge", NUDGE_TIMEOUT));
         return { threadId, unread, reconciles: again ? covered.reconciles + 1 : 0, ...queued };
       });
     // Reading the rollout and the borrow run outside the lock: the owner's read needn't wait on them.
+    // With the mail read, our nudge would run as an empty turn: remove it if it still waits unchanged.
+    const retract = (subscriber: Subscriber) =>
+      Effect.gen(function* () {
+        attempted = subscriber;
+        const posted = current()?.posted;
+        const threadId = subscriber.presence.codexThreadId;
+        if (posted === undefined || threadId === undefined) return;
+        update({ posted: undefined });
+        const outcome = yield* Effect.scoped(
+          Effect.gen(function* () {
+            const queue = yield* openQueue;
+            const item = (yield* queue.list(threadId)).find(({ id }) => id === posted.id);
+            if (item === undefined) return "it had already run";
+            if (
+              item.clientUserMessageId !== posted.clientUserMessageId ||
+              item.text !== posted.text
+            ) {
+              return "it was edited, so it was left";
+            }
+            return (yield* queue.remove(threadId, posted.id)) ? "removed it" : "it had already run";
+          })
+        ).pipe(timeLimit("remove nudge", NUDGE_TIMEOUT), Effect.result);
+        yield* Effect.logDebug(
+          outcome._tag === "Success"
+            ? `${peer.address} read its mail while our nudge waited: ${outcome.success}`
+            : `Could not remove ${peer.address}'s nudge: ${outcome.failure.method}: ${outcome.failure.message.replaceAll(threadId, "<thread>")}`
+        );
+      });
     const waking = Effect.gen(function* () {
-      const posted = yield* bus.deliver(peer.address, post);
+      const posted = yield* bus.deliver(peer.address, post, retract);
       if (posted === undefined) return undefined;
       const eligibility = yield* readEligibility(posted.threadId, posted.stored);
       if (!eligibility.eligible) return { ...posted, eligibility, borrowed: undefined };
@@ -616,16 +736,6 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       return { ...posted, eligibility, borrowed };
     });
     const outcome = yield* Effect.result(waking);
-    const hold = (change: Partial<Hold>) =>
-      holds.set(peer.address, {
-        joinId: attempted.joinId,
-        refused: current()?.refused ?? false,
-        failures: 0,
-        until: 0,
-        covered: current()?.covered,
-        warned: current()?.warned,
-        ...change,
-      });
 
     if (outcome._tag === "Success") {
       const woken = outcome.success;
@@ -661,7 +771,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         yield* Effect.logWarning(
           ineligible === undefined
             ? `${peer.address} hasn't read its mail after ${woken.reconciles} attempts to wake it since the first; trying hourly until it does.`
-            : `${peer.address} hasn't read its mail after ${woken.reconciles} checks that its nudge still waits; its thread can't be borrowed, so the nudge runs only when the thread is next loaded. Checking hourly.`
+            : `${peer.address} hasn't read its mail after ${woken.reconciles} checks that its nudge still waits; its thread can't be borrowed (${ineligible.replaceAll(woken.threadId, "<thread>")}), so the nudge runs only when the thread is next loaded. Checking hourly.`
         );
       }
       continue;

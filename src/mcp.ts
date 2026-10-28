@@ -61,33 +61,48 @@ const Session = Schema.optionalKey(
   })
 );
 
-// Destructive: a takeover replaces another session's hold, which is refused from then on.
+const joinFields = {
+  address: Address,
+  runtime: Runtime,
+  session: Session,
+  cwd: Schema.String.check(Schema.isStartingWith("/")).annotate({
+    description: "Your absolute working directory. Messages you send record its repo and branch.",
+  }),
+  topics: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description:
+        "Topics to receive #topic messages for. Omitted when you rejoin, your current topics are kept; given, they replace them.",
+    })
+  ),
+  codexThreadId: Schema.optionalKey(
+    Schema.String.annotate({ description: "Codex only: your thread id, the same as session." })
+  ),
+  note: Schema.optionalKey(
+    Schema.String.annotate({ description: "What you are working on, for other peers." })
+  ),
+  replay: Schema.optionalKey(
+    Schema.Boolean.annotate({ description: "Also deliver messages sent before you joined." })
+  ),
+};
+
+// Not destructive: it claims a free address, or reconnects the session that holds it.
 const Join = Tool.make("bus_join", {
   description:
     "Join the agent bus (or rejoin after a restart) before reading. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can nudge them to read new messages. A Claude session is woken by the agent-bus plugin's hook, and then its join returns hooked: true; without the plugin it isn't woken, and reads with bus_read or bus_wait.",
+  parameters: Schema.Struct(joinFields),
+  success: Joined,
+  failure: Failure,
+}).annotateMerge(Local);
+
+// Destructive: it replaces another session's hold, which is refused from then on.
+const Takeover = Tool.make("bus_takeover", {
+  description:
+    "Only to replace a session that has ended, when the human says so: joins an address another session holds, naming that holder's join id from bus_join's refusal. Its unread messages carry over to you, and it is refused from then on. The holder id is checked only while another session holds the address; on a free address, or your own, this joins as bus_join does. Otherwise join an address of your own with bus_join.",
   parameters: Schema.Struct({
-    address: Address,
-    runtime: Runtime,
-    session: Session,
-    takeover: Schema.optionalKey(
-      Schema.String.annotate({
-        description:
-          "Only to replace a session that has ended, when the human says so: the holder's join id from the refusal. Its unread messages carry over and it is refused from then on.",
-      })
-    ),
-    cwd: Schema.String.check(Schema.isStartingWith("/")).annotate({
-      description: "Your absolute working directory. Messages you send record its repo and branch.",
+    ...joinFields,
+    holder: Schema.String.annotate({
+      description: "The holder's join id, as bus_join's refusal gives it.",
     }),
-    topics: Schema.optionalKey(Schema.Array(Schema.String)),
-    codexThreadId: Schema.optionalKey(
-      Schema.String.annotate({ description: "Codex only: your thread id, the same as session." })
-    ),
-    note: Schema.optionalKey(
-      Schema.String.annotate({ description: "What you are working on, for other peers." })
-    ),
-    replay: Schema.optionalKey(
-      Schema.Boolean.annotate({ description: "Also deliver messages sent before you joined." })
-    ),
   }),
   success: Joined,
   failure: Failure,
@@ -185,7 +200,18 @@ const Leave = Tool.make("bus_leave", {
   failure: Failure,
 }).annotateMerge(Local);
 
-const BusToolkit = Toolkit.make(Join, Publish, Read, Wait, Wake, ListPeers, History, Query, Leave);
+const BusToolkit = Toolkit.make(
+  Join,
+  Takeover,
+  Publish,
+  Read,
+  Wait,
+  Wake,
+  ListPeers,
+  History,
+  Query,
+  Leave
+);
 
 const decodeRecord = Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown));
 const toLedgerError = (error: LedgerError | Schema.SchemaError) =>
@@ -199,6 +225,8 @@ const BusHandlers = BusToolkit.toLayer(
     const ledger = yield* Ledger;
     return {
       bus_join: (params) => bus.join({ ...params, session: params.session }),
+      bus_takeover: ({ holder, ...params }) =>
+        bus.join({ ...params, session: params.session, takeover: holder }),
       bus_publish: (params) =>
         bus
           .publish({ ...params, session: params.session })
@@ -238,10 +266,10 @@ const BusHandlers = BusToolkit.toLayer(
 
 const instructions = `agent-bus lets Claude and Codex sessions message each other.
 1. Join once per session with bus_join, giving your working directory and an address specific to this session, such as claude/<project>-<task> or codex/<team>. An address is one session's private inbox; groups share a #topic instead.
-   Pass your runtime's session id as session on every call (join, publish, read, wait, leave): read it from your shell, $CODEX_THREAD_ID in Codex or $CLAUDE_CODE_SESSION_ID in Claude Code. A different session can't use your address, and you can't use one another session holds: choose another address rather than taking it over.
+   Pass your runtime's session id as session on every call (join, publish, read, wait, leave): read it from your shell, $CODEX_THREAD_ID in Codex or $CLAUDE_CODE_SESSION_ID in Claude Code. A different session can't use your address, and you can't use one another session holds: choose another address. bus_takeover replaces a session that has ended, only when the human says so.
    Codex sessions also pass their thread id as codexThreadId so the bus can wake them with new messages.
    Claude sessions: the agent-bus Claude Code plugin's hook wakes you with a note to call bus_read whenever mail arrives for an address you own, and bus_join returns hooked: true once it runs (serve holds this in memory, so after a serve restart it returns once your hook calls again). Without the plugin you aren't woken: install it and start a new session, or read with bus_read or bus_wait. Subagents act for their parent and share its id, so a subagent that reads independently needs its own address, and with the hook its mail wakes the parent.
-   Being woken depends on how you run, not on your address or topics, which only decide what is yours to read. Codex threads get a queued nudge to call bus_read, which runs as a turn wherever the thread is loaded (the desktop app, or the TUI's daemon): at once when idle, after the current turn when busy. If nothing has the thread loaded, the machine's Codex daemon loads it briefly to run the nudge, but only for a thread in Default mode whose approval policy is never, whose permissions a resume keeps (full access, read-only, or a built-in profile), and with no tools a client registered; otherwise the nudge runs when the thread is next opened. A codex exec run is woken only after it exits, so leave the bus with bus_leave when your job is done. Claude sessions with the hook are woken in the desktop app and the terminal, at once when idle and after the current step when busy. Waking isn't guaranteed for claude -p runs or subagents: they read with bus_read or bus_wait.
+   Being woken depends on how you run, not on your address or topics, which only decide what is yours to read. Codex threads get a queued nudge to call bus_read, which runs as a turn wherever the thread is loaded (the desktop app, or the TUI's daemon): at once when idle, after the current turn when busy. A nudged thread is already joined: call bus_read, not bus_join. If you read your mail some other way while a nudge waits, the bus removes that nudge if it can, so it doesn't run as an empty turn. If nothing has the thread loaded, the machine's Codex daemon loads it briefly to run the nudge, but only for a thread in Default mode whose approval policy is never, whose permissions a resume keeps (full access, read-only, or a built-in profile), with no tools a client registered, and whose last turn wasn't interrupted (Codex runs no queued input then, until the thread gets new input); otherwise the nudge runs when the thread is next opened. A codex exec run is woken only after it exits, so leave the bus with bus_leave when your job is done. Claude sessions with the hook are woken in the desktop app and the terminal, at once when idle and after the current step when busy. Waking isn't guaranteed for claude -p runs or subagents: they read with bus_read or bus_wait.
 2. Send with bus_publish; answer a message by setting replyTo to its id.
 3. bus_read returns unread messages now; bus_wait blocks until a reply arrives. bus_peers shows who is on the bus; bus_history searches past messages; bus_query runs SPARQL over the whole ledger.`;
 

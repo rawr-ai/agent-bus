@@ -98,13 +98,15 @@ export class Bus extends Context.Service<
      * passes over what isn't its mail, as the owner's read would. Joins,
      * leaves, reads and nudges for one address run one at a time, so a nudge
      * acts on the subscriber's current state. Returns what `nudge` returns, or
-     * undefined when it had nothing to act on. This is the Codex deliverer's
-     * path; sessions read through `take` and `wait`.
+     * undefined when it had nothing to act on, in which case `idle`, if given,
+     * runs for the subscriber, still under the lock. This is the Codex
+     * deliverer's path; sessions read through `take` and `wait`.
      */
-    readonly deliver: <A, E>(
+    readonly deliver: <A, E, E2 = never>(
       address: string,
-      nudge: (pending: Pending) => Effect.Effect<A, E>
-    ) => Effect.Effect<A | undefined, LedgerError | NotJoined | E>;
+      nudge: (pending: Pending) => Effect.Effect<A, E>,
+      idle?: (subscriber: Subscriber) => Effect.Effect<void, E2>
+    ) => Effect.Effect<A | undefined, LedgerError | NotJoined | E | E2>;
     /** Returns the owner's unread messages and marks them read. */
     readonly take: (
       address: string,
@@ -313,7 +315,7 @@ export const layer = Layer.effect(
       ];
       return new NotOwner({
         address: holder.address,
-        message: `${holder.address} is held by another session (${facts.join("; ")}). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, rejoin with takeover "${holder.joinId}".`,
+        message: `${holder.address} is held by another session (${facts.join("; ")}). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, take it over with bus_takeover, holder "${holder.joinId}" (agent-bus join --takeover from a shell).`,
       });
     };
 
@@ -384,12 +386,21 @@ export const layer = Layer.effect(
           if (input.takeover !== last.joinId) return yield* heldBy(last);
           takeover = last.joinId;
         }
+        const renews =
+          last !== undefined && mine && last.presence.status === "joined" && input.replay !== true;
+        // A rejoin that names no topics keeps its subscriptions; only the caller changes them.
+        const topics =
+          input.topics ??
+          (last !== undefined && mine && last.presence.status === "joined"
+            ? last.presence.topics
+            : []);
         const presence = new Presence({
           runtime: input.runtime,
           status: "joined",
-          topics: [...(input.topics ?? [])],
+          topics: [...topics],
           session,
           ...optional("takeover", takeover),
+          ...optional("rejoinOf", renews ? (last.presence.rejoinOf ?? last.joinId) : undefined),
           ...optional("codexThreadId", input.codexThreadId),
           ...optional("note", input.note),
         });
@@ -473,7 +484,11 @@ export const layer = Layer.effect(
 
     const ack = (address: string, cursor: number) => cursors.set(address, cursor);
 
-    const deliver = <A, E>(address: string, nudge: (pending: Pending) => Effect.Effect<A, E>) =>
+    const deliver = <A, E, E2 = never>(
+      address: string,
+      nudge: (pending: Pending) => Effect.Effect<A, E>,
+      idle?: (subscriber: Subscriber) => Effect.Effect<void, E2>
+    ) =>
       Effect.gen(function* () {
         // A peer that left since the deliverer listed peers has nothing to nudge.
         const subscriber = yield* peer(address);
@@ -483,6 +498,7 @@ export const layer = Layer.effect(
         // With nothing for this subscriber, pass over what was read, as its own read would,
         // so later passes don't read it again.
         yield* ack(address, next);
+        if (idle !== undefined) yield* idle(subscriber);
         return undefined;
       }).pipe(exclusive(address), Effect.withSpan("Bus.deliver"));
 

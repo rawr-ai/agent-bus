@@ -24,8 +24,17 @@ export interface Settings {
     | {
         /** Tools a client registered for the thread, which only that client answers. */
         readonly dynamicTools: number;
+        /** A fork by reference, which resumes with its lineage's history up to the fork point. */
+        readonly forked: boolean;
       }
     | undefined;
+  /**
+   * The latest persisted status event (`task_started`, `task_complete` or
+   * `turn_aborted`), which a resume restores the thread's status from
+   * (`core/src/agent/status.rs`; `rollout/src/policy.rs` persists no others).
+   * Undefined if the thread's own rollout has none.
+   */
+  readonly status: { readonly type: string; readonly reason: unknown } | undefined;
   /** From the latest `turn_context` or `thread_settings_applied`, whoever wrote it. */
   readonly approval: unknown;
   /**
@@ -55,10 +64,16 @@ const parse = (line: string): unknown => {
   }
 };
 
-/** A rollout line, as a settings record: its approval policy, and the snapshot if `threadId` owns it. */
+const STATUS_EVENTS = ["task_started", "task_complete", "turn_aborted"];
+
+/** A rollout line, as a status event, or as a settings record: its approval policy, and the snapshot if `threadId` owns it. */
 const recordOf = (line: string, threadId: string) => {
-  // Most lines are neither kind, and can be large.
-  if (!line.includes('"turn_context"') && !line.includes('"thread_settings_applied"')) {
+  // Most lines are none of these kinds, and can be large.
+  if (
+    !line.includes('"turn_context"') &&
+    !line.includes('"thread_settings_applied"') &&
+    !STATUS_EVENTS.some((type) => line.includes(`"${type}"`))
+  ) {
     return undefined;
   }
   const record = parse(line);
@@ -66,12 +81,12 @@ const recordOf = (line: string, threadId: string) => {
   if (field(record, "type") === "turn_context") {
     return { approval: field(payload, "approval_policy"), snapshot: undefined };
   }
-  if (
-    field(record, "type") !== "event_msg" ||
-    field(payload, "type") !== "thread_settings_applied"
-  ) {
-    return undefined;
+  if (field(record, "type") !== "event_msg") return undefined;
+  const type = field(payload, "type");
+  if (typeof type === "string" && STATUS_EVENTS.includes(type)) {
+    return { status: { type, reason: field(payload, "reason") } };
   }
+  if (type !== "thread_settings_applied") return undefined;
   const settings = field(payload, "thread_settings");
   return {
     approval: field(settings, "approval_policy"),
@@ -89,8 +104,13 @@ const recordOf = (line: string, threadId: string) => {
 const sessionOf = (line: string): Settings["session"] => {
   const record = parse(line);
   if (field(record, "type") !== "session_meta") return undefined;
-  const tools = field(field(record, "payload"), "dynamic_tools");
-  return { dynamicTools: Array.isArray(tools) ? tools.length : 0 };
+  const payload = field(record, "payload");
+  const tools = field(payload, "dynamic_tools");
+  const base = field(payload, "history_base");
+  return {
+    dynamicTools: Array.isArray(tools) ? tools.length : 0,
+    forked: base !== undefined && base !== null,
+  };
 };
 
 /** A reason a rollout can't be read that names no path, so no thread id. */
@@ -113,9 +133,9 @@ const concat = (parts: ReadonlyArray<Uint8Array>) => {
 /**
  * What a resume of `threadId` would restore: the session record from the
  * rollout's first line, and the settings read backwards from its end a chunk
- * at a time, so a long thread's file isn't read whole. Reading stops at the
- * thread's own snapshot, or at an approval policy that makes it ineligible
- * anyway. A failure says only what kind it was.
+ * at a time, so a long thread's file isn't read whole. Reading stops once it
+ * has the latest status event and the thread's own snapshot, or at an approval
+ * policy that makes it ineligible anyway. A failure says only what kind it was.
  */
 export const latestSettings = (path: string, threadId: string, chunkSize = 64 * 1024) =>
   Effect.tryPromise({
@@ -141,12 +161,17 @@ export const latestSettings = (path: string, threadId: string, chunkSize = 64 * 
 
       let approval: { readonly value: unknown } | undefined;
       let snapshot: Settings["snapshot"];
+      let status: Settings["status"];
       const take = (bytes: Uint8Array) => {
         const record = recordOf(decoder.decode(bytes), threadId);
         if (record === undefined) return false;
-        approval ??= { value: record.approval };
-        snapshot ??= record.snapshot;
-        return snapshot !== undefined || approval.value !== "never";
+        if ("status" in record) status ??= record.status;
+        else {
+          approval ??= { value: record.approval };
+          snapshot ??= record.snapshot;
+        }
+        if (approval !== undefined && approval.value !== "never") return true;
+        return snapshot !== undefined && status !== undefined;
       };
       let end = file.size;
       // The pieces of a line whose beginning is in an earlier chunk, in file order.
@@ -166,7 +191,7 @@ export const latestSettings = (path: string, threadId: string, chunkSize = 64 * 
         end = start;
       }
       if (!done) take(concat(rest));
-      return { session, approval: approval?.value, snapshot };
+      return { session, approval: approval?.value, snapshot, status };
     },
     catch: (cause) => {
       if (cause instanceof Unreadable) return cause.message;
@@ -175,6 +200,9 @@ export const latestSettings = (path: string, threadId: string, chunkSize = 64 * 
       return typeof code === "string" ? `error ${code}` : "an unexpected error";
     },
   });
+
+/** Abort reasons a resume restores as `Interrupted`, whose queue Codex doesn't run (`ext/queue/src/service.rs`). */
+const INTERRUPTED = new Set(["interrupted", "budget_limited"]);
 
 /** Codex's own profiles, which every config compiles (Codex 0.164, `config/permissions.rs`). */
 const BUILT_IN_PROFILES = new Set([":read-only", ":workspace", ":danger-full-access"]);
@@ -197,9 +225,30 @@ const denies = (entry: unknown) =>
  * own latest snapshot. It compiles a named profile again by name, which drops
  * any denials carried over from an earlier profile, and keeps an unnamed one
  * only if it lists no specific paths (`core/src/config/mod.rs`); otherwise it
- * applies the daemon's default. Anything this doesn't recognise is not eligible.
+ * applies the daemon's default. It restores the status of the last turn, and
+ * runs no queued input while that is `Interrupted`. Anything this doesn't
+ * recognise is not eligible.
  */
-export const eligibility = ({ session, approval, snapshot }: Settings): Eligibility => {
+export const eligibility = (settings: Settings): Eligibility => {
+  const permitted = permissions(settings);
+  if (!permitted.eligible) return permitted;
+  const { session, status } = settings;
+  if (status === undefined) {
+    return session?.forked === true
+      ? no(
+          "it hasn't run a turn since it was forked, so its status comes from another thread's history"
+        )
+      : yes;
+  }
+  return status.type === "turn_aborted" && INTERRUPTED.has(String(status.reason))
+    ? no(
+        "its last turn was interrupted, so Codex runs no queued input until the thread gets new input"
+      )
+    : yes;
+};
+
+/** Whether a resume keeps what the thread may do, and nothing in it can wait on a person or a client. */
+const permissions = ({ session, approval, snapshot }: Settings): Eligibility => {
   if (approval !== "never") {
     return no(
       approval === undefined

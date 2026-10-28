@@ -168,18 +168,21 @@ const joinCommand = Command.make(
   },
   (input) =>
     Effect.gen(function* () {
-      const joined = yield* call("bus_join", Mcp.Joined, {
+      const joining = {
         address: input.address,
         runtime: input.runtime,
         session: yield* Client.sessionFor(input.runtime, Option.getOrUndefined(input.session)),
         cwd: process.cwd(),
         ...Client.defined({
-          takeover: Option.getOrUndefined(input.takeover),
           topics: list(input.topics),
           codexThreadId: Option.getOrUndefined(input.codexThread),
           note: Option.getOrUndefined(input.note),
         }),
         replay: input.replay,
+      };
+      const joined = yield* Option.match(input.takeover, {
+        onNone: () => call("bus_join", Mcp.Joined, joining),
+        onSome: (holder) => call("bus_takeover", Mcp.Joined, { ...joining, holder }),
       });
       yield* Console.log(`joined as ${joined.address}`);
     })

@@ -30,6 +30,7 @@ import {
   formatNudge,
   type Holds,
   type Queue,
+  type Queued,
   startDaemon,
 } from "../src/codex.ts";
 import { LedgerError, Message, MessageJson, Origin, Presence } from "../src/domain.ts";
@@ -742,16 +743,35 @@ describe("codex delivery", () => {
    * session file is.
    */
   const fakeQueue = () => {
-    const items = new Map<string, Array<string>>();
+    const items = new Map<string, Array<Queued>>();
     const queueState = {
       queue: "accept" as "accept" | "fail" | "lands, then fails" | "subagent" | "hangs",
+      /** Removal alone fails, or finds the writer took the item first. */
+      remove: "accept" as "accept" | "fail" | "not deleted",
       opened: 0,
       listing: false,
+      removed: [] as Array<string>,
       rollout: fullAccess as (threadId: string) => Stored,
     };
-    const waiting = (threadId: string) => items.get(threadId) ?? [];
+    let added = 0;
+    const queued = (threadId: string) => items.get(threadId) ?? [];
+    /** The text of each waiting item, in order. */
+    const waiting = (threadId: string) => queued(threadId).map(({ text }) => text);
     const fail = (method: string, message = "no answer within 2 seconds") =>
       Effect.fail(new CodexError({ method, message }));
+    /** An item the owner queued, with ids of its own. */
+    const put = (threadId: string, text: string) => {
+      added += 1;
+      const item = { id: `owner-${added}`, clientUserMessageId: `owner-c${added}`, text };
+      items.set(threadId, [...queued(threadId), item]);
+      return item;
+    };
+    /** The owner edits an item, which keeps its ids. */
+    const edit = (threadId: string, id: string | undefined, text: string) =>
+      items.set(
+        threadId,
+        queued(threadId).map((item) => (item.id === id ? { ...item, text } : item))
+      );
     const queue: Queue = {
       list: (threadId) => {
         if (queueState.queue === "fail") return fail("thread/queue/list");
@@ -760,7 +780,7 @@ describe("codex delivery", () => {
             queueState.listing = true;
           }).pipe(Effect.andThen(Effect.never));
         }
-        return Effect.succeed(waiting(threadId));
+        return Effect.succeed(queued(threadId));
       },
       add: (threadId, text) => {
         if (queueState.queue === "fail") return fail("thread/queue/add");
@@ -770,8 +790,26 @@ describe("codex delivery", () => {
             "direct app-server input is not allowed for unloaded spawned sub-agents"
           );
         }
-        items.set(threadId, [...waiting(threadId), text]);
-        return queueState.queue === "lands, then fails" ? fail("thread/queue/add") : Effect.void;
+        added += 1;
+        const item = { id: `q${added}`, clientUserMessageId: `c${added}`, text };
+        items.set(threadId, [...queued(threadId), item]);
+        return queueState.queue === "lands, then fails"
+          ? fail("thread/queue/add")
+          : Effect.succeed(item);
+      },
+      remove: (threadId, id) => {
+        if (queueState.queue === "fail" || queueState.remove === "fail") {
+          return fail("thread/queue/delete");
+        }
+        const before = queued(threadId);
+        items.set(
+          threadId,
+          before.filter((item) => item.id !== id)
+        );
+        // Not deleted: the writer took the item first.
+        if (queueState.remove === "not deleted") return Effect.succeed(false);
+        queueState.removed.push(id);
+        return Effect.succeed(before.some((item) => item.id === id));
       },
       rollout: (threadId) => Effect.succeed(queueState.rollout(threadId)),
     };
@@ -780,8 +818,8 @@ describe("codex delivery", () => {
       return queue;
     });
     /** Whichever app-server has the thread loaded runs its next waiting item. */
-    const runNext = (threadId: string) => items.set(threadId, waiting(threadId).slice(1));
-    return { openQueue, waiting, runNext, queueState };
+    const runNext = (threadId: string) => items.set(threadId, queued(threadId).slice(1));
+    return { openQueue, waiting, queued, put, edit, runNext, queueState };
   };
 
   /**
@@ -942,6 +980,224 @@ describe("codex delivery", () => {
       })
     ));
 
+  test("a woken thread that rejoins before reading isn't nudged again; a replay, a leave or a takeover starts over", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, runNext, holds, deliver, send, join: rejoin } = yield* setup;
+        const joinA = (extra: Partial<Bus.JoinInput> = {}) =>
+          bus.join({
+            address: "codex/a",
+            runtime: "codex",
+            session: "t-1",
+            cwd: process.cwd(),
+            codexThreadId: "t-1",
+            ...extra,
+          });
+        yield* deliver;
+        const covered = holds.get("codex/a")?.covered;
+        // The nudge runs, and its turn rejoins before reading: the same mail, so no second nudge.
+        runNext("t-1");
+        yield* rejoin;
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        expect(holds.get("codex/a")?.covered).toEqual(covered);
+        // Twice over, between cycles.
+        yield* rejoin;
+        yield* rejoin;
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+
+        // A replay asks for its mail again: woken afresh, though the unread mail is the same.
+        yield* joinA({ replay: true });
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        runNext("t-1");
+        // So is a join after a leave, even when both land between cycles.
+        yield* bus.leave("codex/a", "t-1");
+        yield* rejoin;
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        runNext("t-1");
+        // And either, followed by ordinary rejoins before the next cycle.
+        yield* joinA({ replay: true });
+        yield* rejoin;
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        runNext("t-1");
+        yield* bus.leave("codex/a", "t-1");
+        yield* rejoin;
+        yield* rejoin;
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        runNext("t-1");
+        // And new mail after a rejoin is woken as before.
+        yield* rejoin;
+        yield* send("two");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+
+        // A takeover by another thread starts over for it.
+        const holder = (yield* bus.peers).find((peer) => peer.address === "codex/a");
+        yield* bus.join({
+          address: "codex/a",
+          runtime: "codex",
+          session: "t-2",
+          cwd: process.cwd(),
+          codexThreadId: "t-2",
+          takeover: holder?.joinId,
+        });
+        yield* deliver;
+        expect(waiting("t-2").length).toBe(1);
+      })
+    ));
+
+  test("a rejoin keeps the reconcile schedule", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, runNext, holds, deliver, join: rejoin } = yield* setup;
+        yield* deliver;
+        runNext("t-1");
+        yield* TestClock.adjust("5 minutes");
+        yield* deliver;
+        expect(holds.get("codex/a")?.covered?.reconciles).toBe(1);
+        runNext("t-1");
+        yield* rejoin;
+        // Not due again for 15 minutes from the reconcile, rejoin or not.
+        yield* TestClock.adjust("5 minutes");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        yield* TestClock.adjust("10 minutes");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.covered?.reconciles).toBe(2);
+      })
+    ));
+
+  test("once the mail is read, our waiting nudge is removed, and nothing of the owner's", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, put, queueState, holds, deliver } = yield* setup;
+        yield* deliver;
+        // The owner's own input, one quoting our header, and one that is our text word for word.
+        put("t-1", "my own input");
+        put("t-1", `${formatNudge("codex/a").split(".")[0]}. please`);
+        put("t-1", formatNudge("codex/a"));
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(queueState.removed).toEqual(["q1"]);
+        expect(waiting("t-1")).toEqual([
+          "my own input",
+          `${formatNudge("codex/a").split(".")[0]}. please`,
+          formatNudge("codex/a"),
+        ]);
+        expect(holds.get("codex/a")?.posted).toBeUndefined();
+        // Removal is tried once: later cycles start no app-server for it.
+        const opened = queueState.opened;
+        yield* deliver;
+        expect(queueState.opened).toBe(opened);
+      })
+    ));
+
+  test("a copy of our nudge that the owner queued is never removed", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, put, runNext, queueState, holds, deliver, send } = yield* setup;
+        yield* deliver;
+        runNext("t-1");
+        // The owner pastes our text word for word; new mail finds it waiting and adds nothing.
+        put("t-1", formatNudge("codex/a"));
+        yield* send("two");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(queueState.removed).toEqual([]);
+        expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
+        expect(holds.get("codex/a")?.posted).toBeUndefined();
+      })
+    ));
+
+  test("a nudge that has run, or was edited, is left, and the record is cleared", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, edit, queued, runNext, queueState, holds, deliver, send } =
+          yield* setup;
+        yield* deliver;
+        runNext("t-1");
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(queueState.removed).toEqual([]);
+        expect(holds.get("codex/a")?.posted).toBeUndefined();
+
+        // The owner edits our nudge, which keeps its ids: it is theirs now.
+        yield* send("two");
+        yield* deliver;
+        edit("t-1", queued("t-1")[0]?.id, "my edit");
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(queueState.removed).toEqual([]);
+        expect(waiting("t-1")).toEqual(["my edit"]);
+        expect(holds.get("codex/a")?.posted).toBeUndefined();
+      })
+    ));
+
+  test("a removal that fails, or finds the item taken, clears the record without back-off", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, runNext, queueState, holds, deliver, send } = yield* setup;
+        for (const failure of ["not deleted", "fail", "list fails"] as const) {
+          yield* deliver;
+          expect(holds.get("codex/a")?.posted).toBeDefined();
+          yield* bus.take("codex/a", "t-1");
+          if (failure === "list fails") queueState.queue = "fail";
+          else queueState.remove = failure;
+          yield* deliver;
+          expect(holds.get("codex/a")?.posted).toBeUndefined();
+          expect(holds.get("codex/a")?.failures).toBe(0);
+          queueState.queue = "accept";
+          queueState.remove = "accept";
+          // A nudge the removal missed runs once, as an empty turn; the next mail is woken at once.
+          if (waiting("t-1").length > 0) runNext("t-1");
+          yield* send(failure);
+        }
+      })
+    ));
+
+  test("a waiting nudge stays while any of the mail it covers is unread, and new mail after a removal is woken", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, queueState, deliver, send } = yield* setup;
+        yield* send("two");
+        yield* deliver;
+        // A partial read leaves the nudge for the rest.
+        yield* bus.take("codex/a", "t-1", 1);
+        yield* deliver;
+        expect(queueState.removed).toEqual([]);
+        expect(waiting("t-1").length).toBe(1);
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        yield* send("three");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+      })
+    ));
+
+  test("a nudge whose borrow failed is still known, and removed once the mail is read", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, daemonState, holds, deliver } = yield* setup;
+        daemonState.answer = "fails";
+        yield* deliver;
+        expect(holds.get("codex/a")?.failures).toBe(1);
+        expect(holds.get("codex/a")?.posted).toBeDefined();
+        yield* bus.take("codex/a", "t-1");
+        yield* TestClock.adjust("30 seconds");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+      })
+    ));
+
   test("an add that lands but reports failure is retried without a second nudge", () =>
     run(
       Effect.gen(function* () {
@@ -1097,6 +1353,7 @@ describe("codex delivery", () => {
     run(
       Effect.gen(function* () {
         const {
+          bus,
           waiting,
           daemonState,
           queueState,
@@ -1131,9 +1388,14 @@ describe("codex delivery", () => {
         expect(daemonState.borrows).toEqual([]);
         expect(warnings().length).toBe(1);
 
-        // A new join is told afresh.
+        // The thread rejoining as it runs isn't told again; a join after a leave is.
         yield* rejoin;
         yield* send("four");
+        yield* deliver;
+        expect(warnings().length).toBe(1);
+        yield* bus.leave("codex/a", "t-1");
+        yield* rejoin;
+        yield* send("five");
         yield* deliver;
         expect(warnings().length).toBe(2);
         expect(warnings()[1]).toContain("can't be read (it doesn't exist)");
@@ -1143,7 +1405,7 @@ describe("codex delivery", () => {
   test("a reason that would name the thread is logged without it", () =>
     run(
       Effect.gen(function* () {
-        const { queueState, deliver, send, join: rejoin } = yield* setup;
+        const { bus, queueState, deliver, send, join: rejoin } = yield* setup;
         // Codex's own words are quoted in some reasons.
         queueState.rollout = (threadId) => ({ path: undefined, historyMode: threadId });
         yield* deliver;
@@ -1152,6 +1414,7 @@ describe("codex delivery", () => {
         writeFileSync(unreadable, `${JSON.stringify(snapshot("t-1", "never"))}\n`);
         chmodSync(unreadable, 0o000);
         queueState.rollout = () => ({ path: unreadable, historyMode: "legacy" });
+        yield* bus.leave("codex/a", "t-1");
         yield* rejoin;
         yield* send("two");
         yield* deliver;
@@ -1341,6 +1604,7 @@ for await (const line of console) {
   }
   else if (message.method === "thread/queue/list") reply(message.id, { result: { data: [{ id: "q1", clientUserMessageId: "c1", input: [{ type: "text", text: "waiting", text_elements: [] }] }, { id: "q2", input: [{ type: "image", url: 7 }] }, { id: "q3" }], nextCursor: null } });
   else if (message.method === "thread/read") reply(message.id, { result: { thread: { id: message.params.threadId, historyMode: "legacy", path: message.params.threadId === "t-1" ? "/codex/sessions/rollout-t-1.jsonl" : null } } });
+  else if (message.method === "thread/queue/delete") reply(message.id, { result: { deleted: message.params.queuedSubmissionId === "q1" } });
   else reply(message.id, { result: { queuedSubmission: { id: "q2", clientUserMessageId: message.params.clientUserMessageId, input: message.params.input } } });
 }
 `
@@ -1370,7 +1634,11 @@ for await (const line of console) {
       })
     );
     // Items of shapes it doesn't know read as no text rather than failing the list.
-    expect(result._tag === "Success" && result.success).toEqual(["waiting", "", ""]);
+    expect(result._tag === "Success" && result.success).toEqual([
+      { id: "q1", clientUserMessageId: "c1", text: "waiting" },
+      { id: "q2", clientUserMessageId: undefined, text: "" },
+      { id: "q3", clientUserMessageId: undefined, text: "" },
+    ]);
     const [initialize, initialized, list, add] = codex.requests();
     expect(initialize?.params?.capabilities).toEqual({ experimentalApi: true });
     expect(initialized?.method).toBe("initialized");
@@ -1399,7 +1667,9 @@ for await (const line of console) {
   test("a listing follows every page", async () => {
     const codex = fakeCodex("pages");
     const result = await withQueue(codex.bin, (queue) => queue.list("t-1"));
-    expect(result._tag === "Success" && result.success).toEqual(["first page", "second page"]);
+    expect(
+      result._tag === "Success" && result.success && result.success.map(({ text }) => text)
+    ).toEqual(["first page", "second page"]);
     expect(codex.requests().map((request) => request.params?.cursor)).toEqual([
       undefined,
       undefined,
@@ -1454,9 +1724,10 @@ describe("codex thread eligibility", () => {
     approval: unknown,
     snapshot: Partial<NonNullable<Settings["snapshot"]>>
   ): Settings => ({
-    session: { dynamicTools: 0 },
+    session: { dynamicTools: 0, forked: false },
     approval,
     snapshot: { profileId: undefined, profile: { type: "disabled" }, mode: "default", ...snapshot },
+    status: undefined,
   });
   const restricted = (...entries: Array<unknown>) => ({
     type: "managed",
@@ -1516,12 +1787,13 @@ describe("codex thread eligibility", () => {
       eligibility(owned("never", { profileId: ":read-only", profile: restricted(root, secrets) }))
     ).toMatchObject({ eligible: false, reason: expect.stringContaining("denies paths") });
     // With no snapshot of its own, a resume applies the daemon's default.
-    const session = { dynamicTools: 0 };
-    expect(eligible({ session, approval: "never", snapshot: undefined })).toBe(false);
-    expect(eligible({ session, approval: undefined, snapshot: undefined })).toBe(false);
+    const session = { dynamicTools: 0, forked: false };
+    const status = undefined;
+    expect(eligible({ session, approval: "never", snapshot: undefined, status })).toBe(false);
+    expect(eligible({ session, approval: undefined, snapshot: undefined, status })).toBe(false);
     // A resume restores a client's tools, and a call to one waits for that client.
     const full = owned("never", { profileId: ":danger-full-access" });
-    expect(eligibility({ ...full, session: { dynamicTools: 2 } })).toMatchObject({
+    expect(eligibility({ ...full, session: { dynamicTools: 2, forked: false } })).toMatchObject({
       eligible: false,
       reason: expect.stringContaining("registered tools"),
     });
@@ -1566,13 +1838,14 @@ describe("codex thread eligibility", () => {
     // A record still being written, with no line end yet.
     writeFileSync(file, JSON.stringify(snapshot("t-1", "on-request")).slice(0, 90), { flag: "a" });
     expect(await latest(file)).toEqual({
-      session: { dynamicTools: 1 },
+      session: { dynamicTools: 1, forked: false },
       approval: "never",
       snapshot: {
         profileId: ":danger-full-access",
         profile: { type: "disabled" },
         mode: "default",
       },
+      status: undefined,
     });
     // A latest approval other than never settles it: the rest isn't read.
     const newer = rolloutOf([snapshot("t-1", "never"), context("on-request")]);
@@ -1580,10 +1853,16 @@ describe("codex thread eligibility", () => {
       session: undefined,
       approval: "on-request",
       snapshot: undefined,
+      status: undefined,
     });
     // Only another thread's snapshot: none of its own.
     const copied = await latest(rolloutOf([snapshot("t-parent", "never"), context("never")]));
-    expect(copied).toEqual({ session: undefined, approval: "never", snapshot: undefined });
+    expect(copied).toEqual({
+      session: undefined,
+      approval: "never",
+      snapshot: undefined,
+      status: undefined,
+    });
   });
 
   test("a rollout is read backwards in chunks, across lines that span them", async () => {
@@ -1604,13 +1883,95 @@ describe("codex thread eligibility", () => {
     for (const chunkSize of [7, 64, 4_096, 1 << 20]) {
       const settings = await latest(file, chunkSize);
       expect(settings.snapshot?.mode).toBe("default");
-      expect(settings.session).toEqual({ dynamicTools: 0 });
+      expect(settings.session).toEqual({ dynamicTools: 0, forked: false });
+      expect(settings.status).toEqual({ type: "task_complete", reason: undefined });
     }
     expect(await latest(rolloutOf([{ type: "session_meta", payload: {} }]), 7)).toEqual({
-      session: { dynamicTools: 0 },
+      session: { dynamicTools: 0, forked: false },
       approval: undefined,
       snapshot: undefined,
+      status: undefined,
     });
+  });
+
+  const event = (type: string, reason?: string) => ({
+    type: "event_msg",
+    payload: { type, ...(reason === undefined ? {} : { reason }) },
+  });
+
+  test("a thread whose last turn was interrupted isn't eligible, since Codex runs no queued input then", async () => {
+    const meta = (payload: Record<string, unknown> = {}) => ({
+      type: "session_meta",
+      payload: { id: "t-1", ...payload },
+    });
+    const check = async (...lines: Array<unknown>) =>
+      eligibility(await latest(rolloutOf([meta(), snapshot("t-1", "never"), ...lines])));
+    for (const reason of ["interrupted", "budget_limited"]) {
+      expect(await check(event("task_started"), event("turn_aborted", reason))).toMatchObject({
+        eligible: false,
+        reason: expect.stringContaining("interrupted"),
+      });
+    }
+    // Other abort reasons and a failed turn restore an errored status, which runs the queue.
+    for (const reason of ["replaced", "review_ended"]) {
+      expect(await check(event("turn_aborted", reason))).toEqual({ eligible: true });
+    }
+    const failed = {
+      type: "event_msg",
+      payload: { type: "task_complete", error: { message: "x" } },
+    };
+    expect(await check(failed)).toEqual({ eligible: true });
+    // A later turn, or one cut off by a crash, leaves the interruption behind.
+    expect(
+      await check(
+        event("turn_aborted", "interrupted"),
+        event("task_started"),
+        event("task_complete")
+      )
+    ).toEqual({ eligible: true });
+    expect(await check(event("turn_aborted", "interrupted"), event("task_started"))).toEqual({
+      eligible: true,
+    });
+    // Transient events are never written, but one that was wouldn't count.
+    expect(await check(event("turn_aborted", "interrupted"), event("error"))).toMatchObject({
+      eligible: false,
+    });
+    // A thread that has never run a turn isn't interrupted; a fork by reference with no turn of
+    // its own takes its status from its lineage, which its own file doesn't hold.
+    expect(await check()).toEqual({ eligible: true });
+    const fork = rolloutOf([meta({ history_base: { ordinal: 3 } }), snapshot("t-1", "never")]);
+    expect(eligibility(await latest(fork))).toMatchObject({
+      eligible: false,
+      reason: expect.stringContaining("forked"),
+    });
+    const ran = rolloutOf([
+      meta({ history_base: { ordinal: 3 } }),
+      snapshot("t-1", "never"),
+      event("task_complete"),
+    ]);
+    expect(eligibility(await latest(ran))).toEqual({ eligible: true });
+  });
+
+  test("the status event and the snapshot are both found, in either order and across chunks", async () => {
+    const statusFirst = rolloutOf([
+      { type: "session_meta", payload: {} },
+      event("turn_aborted", "interrupted"),
+      { type: "response_item", payload: { text: "y".repeat(3_000) } },
+      snapshot("t-1", "never"),
+    ]);
+    const snapshotFirst = rolloutOf([
+      { type: "session_meta", payload: {} },
+      snapshot("t-1", "never"),
+      { type: "response_item", payload: { text: "y".repeat(3_000) } },
+      event("turn_aborted", "interrupted"),
+    ]);
+    for (const chunkSize of [5, 512, 1 << 20]) {
+      for (const file of [statusFirst, snapshotFirst]) {
+        const settings = await latest(file, chunkSize);
+        expect(settings.status).toEqual({ type: "turn_aborted", reason: "interrupted" });
+        expect(settings.snapshot?.mode).toBe("default");
+      }
+    }
   });
 
   test("a rollout that is missing, or of a history mode it doesn't know, makes a thread ineligible, not a failure", async () => {
@@ -2339,6 +2700,74 @@ describe("one session per address", () => {
         );
         expect(results.filter((result) => result._tag === "Success")).toHaveLength(1);
         expect((yield* bus.peers).map((peer) => peer.address)).toEqual(["claude/a"]);
+      })
+    ));
+
+  test("a rejoin that names no topics keeps them; one that names topics replaces them; a leave clears them", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const topicsOf = () =>
+          Effect.map(
+            bus.peers,
+            (peers) => peers.find((peer) => peer.address === "claude/a")?.presence.topics
+          );
+        yield* bus.join({
+          address: "claude/a",
+          runtime: "claude",
+          session: "s1",
+          cwd,
+          topics: ["x", "y"],
+        });
+        yield* bus.join({ address: "claude/b", runtime: "claude", session: "sb", cwd });
+        yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
+        expect(yield* topicsOf()).toEqual(["x", "y"]);
+        // Topic mail sent before a rejoin is still the subscriber's to read.
+        yield* bus.publish({ from: "claude/b", session: "sb", to: ["#x"], body: "topic" });
+        yield* bus.join({
+          address: "claude/a",
+          runtime: "claude",
+          session: "s1",
+          cwd,
+          replay: false,
+        });
+        expect(bodies(yield* bus.take("claude/a", "s1"))).toEqual(["topic"]);
+        yield* bus.join({
+          address: "claude/a",
+          runtime: "claude",
+          session: "s1",
+          cwd,
+          topics: ["y"],
+        });
+        expect(yield* topicsOf()).toEqual(["y"]);
+        yield* bus.leave("claude/a", "s1");
+        yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
+        expect(yield* topicsOf()).toEqual([]);
+      })
+    ));
+
+  test("a rejoin while joined continues its run of joins; a replay, a join after a leave or a takeover starts one", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const join = (session: string, extra: Partial<Bus.JoinInput> = {}) =>
+          bus.join({ address: "claude/a", runtime: "claude", session, cwd, ...extra });
+        const current = () =>
+          Effect.map(bus.peers, (peers) => peers.find((peer) => peer.address === "claude/a"));
+        yield* join("s1");
+        const first = (yield* current())?.joinId;
+        expect((yield* current())?.presence.rejoinOf).toBeUndefined();
+        yield* join("s1");
+        yield* join("s1");
+        expect((yield* current())?.presence.rejoinOf).toBe(first);
+        yield* join("s1", { replay: true });
+        expect((yield* current())?.presence.rejoinOf).toBeUndefined();
+        yield* bus.leave("claude/a", "s1");
+        yield* join("s1");
+        expect((yield* current())?.presence.rejoinOf).toBeUndefined();
+        const holder = (yield* current())?.joinId;
+        yield* join("s2", { takeover: holder });
+        expect((yield* current())?.presence.rejoinOf).toBeUndefined();
       })
     ));
 
@@ -3195,6 +3624,56 @@ describe("mcp over http", () => {
           return { code, stderr: stderr.trim() };
         });
         expect(result).toEqual({ code: 2, stderr: formatWake("claude/a") });
+      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
+
+  test("the CLI takes an address over only with --takeover, through bus_takeover", () => {
+    const { url, port, layer } = serve();
+    const cli = (...args: Array<string>) =>
+      Effect.promise(async () => {
+        const child = Bun.spawn(
+          [process.execPath, join(import.meta.dir, "../src/bin.ts"), ...args],
+          {
+            timeout: 20_000,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, AGENT_BUS_PORT: String(port) },
+          }
+        );
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        return { code, out: (stdout + stderr).trim() };
+      });
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        yield* Client.call(url)("bus_join", Mcp.Joined, {
+          address: "claude/a",
+          runtime: "claude",
+          session: "old",
+          cwd: process.cwd(),
+        });
+        const joining = [
+          "join",
+          "--address",
+          "claude/a",
+          "--runtime",
+          "claude",
+          "--session",
+          "new",
+        ];
+        const refused = yield* cli(...joining);
+        expect(refused.code).toBe(1);
+        expect(refused.out).toContain("bus_takeover");
+        const holder = /holder "([^"]+)"/.exec(refused.out)?.[1] ?? "";
+        expect(yield* cli(...joining, "--takeover", holder)).toEqual({
+          code: 0,
+          out: "joined as claude/a",
+        });
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });

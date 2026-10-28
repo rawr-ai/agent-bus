@@ -52,7 +52,7 @@ From [address-ownership](frames/address-ownership.md); the [README](../README.md
 1. An address belongs to the session that joined it, identified by runtime and id: `$CODEX_THREAD_ID` for Codex, `$CLAUDE_CODE_SESSION_ID` for Claude Code, or a stable id of its own for other clients. Every call passes it as `session`.
 2. Only the owner may read, wait on, leave or send from the address. Every refusal changes nothing: not the cursor, the presence or the ledger.
 3. A different session's join is refused with the holder's note, last call and whether it has a wait open. The policy is to pick another address, not to take the held one.
-4. A takeover must name the holder's current join id, and is only for replacing a session that has ended, when the human says so. Unread mail carries over to the new owner, and the previous owner is refused from then on.
+4. A takeover (`bus_takeover`, or `agent-bus join --takeover`) must name the holder's current join id, and is only for replacing a session that has ended, when the human says so. Unread mail carries over to the new owner, and the previous owner is refused from then on.
 5. Rejoining with the same id keeps unread mail. A new owner of an address that was left starts at the present.
 6. The CLI never takes another runtime's id variable. Outside `join`, it uses the runtime the address joined with.
 7. Joins and leaves written without an owner, by a `serve` from before owners, are ignored.

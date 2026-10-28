@@ -70,6 +70,9 @@ Each thread has a queue of input in `queue_1.sqlite`, reached through the experi
 - **`thread/queue/start`** runs an item only in an app-server that already has the thread loaded and idle (read in code).
 - **A thread loaded nowhere keeps its items.** The first app-server to resume it runs them at once (verified live).
 - **Items don't coalesce,** and adding twice with the same `clientUserMessageId` queues two (verified live).
+- **Each item has two ids.** `add` answers with the item (`queuedSubmission`: `id`, `input`, `clientUserMessageId`), and `list` returns the same fields (read in `app-server-protocol/src/protocol/v2/thread.rs`, 0.164.0-alpha.11.1).
+- **An owner's edit keeps the ids.** `update` replaces an item's input under the same `id` and `clientUserMessageId` (read in code).
+- **`delete {threadId, queuedSubmissionId}` answers `{deleted}`,** with no condition on the item's content, and like `add` needs no loaded thread (read in code). The writer's dispatch reads an item, starts its turn, then deletes the row, under a lock local to its own app-server, so a delete from another server can land after the turn started and still answer `deleted: true`; `deleted: false` means the row was already gone (read in `ext/queue/src/service.rs`, inferred for the race).
 - **An unknown thread,** or a new one with no rollout yet, fails with "no rollout found"; an archived one with "session is archived" (verified live).
 - **A spawned subagent's queue refuses the add:** "direct app-server input is not allowed for unloaded spawned sub-agents" (verified live on the daemon; for desktop subagents, inferred from the same check).
 
@@ -216,4 +219,6 @@ The queue service's automatic dispatch runs nothing while a thread's status is `
 
 ## Approvals for MCP tools
 
-Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe: not destructive, and not open-world (verified live and read in `codex-rs`, Codex 0.164).
+Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe: read-only, or neither destructive nor open-world, with an unset hint counting as destructive and open-world (verified live and read in `core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval`, Codex 0.164).
+- **This is the default, `auto`, approval mode.** A server's `default_tools_approval_mode`, or a tool's `approval_mode`, in `[mcp_servers.<name>]` can be `prompt`, which asks for every call, or `approve`, which allows every call, destructive or not (read in `codex-mcp/src/mcp/mod.rs` and `server.rs`).
+- **Strict auto-review** skips the annotation exemption (read in `maybe_request_mcp_tool_approval`).
