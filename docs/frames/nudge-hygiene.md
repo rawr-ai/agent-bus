@@ -185,6 +185,27 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
 6. The Director, observed: no empty turn after its mid-turn reads.
 7. A read-only Codex thread under approval `never` joins itself with `bus_join`, and is refused `bus_takeover` (Codex only).
 
+## Results (2026-10-28)
+
+Deployed at `06f07b6` to both machines (Codex 0.164.0-alpha.11.1 CLI with the bus host's daemon; the other machine's managed daemon 0.165.0). Live items, on throwaway threads and `qual/*` addresses; every one passed.
+
+| Item | Bus host | Other machine | What was seen |
+| --- | --- | --- | --- |
+| 1. A rejoin before reading | pass | pass | Rejoined 0.3 s and 1.6 s after the send, before the read: one wake, one turn, nothing left queued. Unprompted, the woken model also didn't rejoin when the mail asked it to; it followed the nudge's "don't call `bus_join`" |
+| 2. A read in a running turn | pass | pass | The nudge waited behind the turn; the turn read its mail about 22 s after the send; the nudge was gone within one tick, and no empty turn followed |
+| 3. An interrupted thread | pass | pass | Not borrowed; one warning naming the reason; the nudge stayed queued, ran after new input, and the next mail was borrowed again at once (not over-blocked) |
+| 4. `serve` starts the daemon | — | pass | With the owner's go-ahead, the managed daemon was stopped and a thread mailed 0.5 s later. A managed daemon (`--managed-daemon`, the 0.165.0 package) was listening 2 s after the stop, and the thread answered in 11.5 s. The managed update loop survived the stop but restarts only a running daemon (`update_loop.rs`, `try_restart_if_running`), and an SSH client starts an unmanaged one, so `serve` started it. Its file limit wasn't observed live, since macOS shows another process's limits only to root; a managed daemon raises its own to 4096 ([platforms: Codex](../platforms/codex.md#the-daemon), read in code) |
+| 5. Reconciles | pass | — | An eligible thread that skips its mail: woken, then reconciled after 5, 15 and 60 minutes, with the warning at the third. An interrupted thread: one warning, quiet checks, and at the third reconcile a warning naming the reason; one nudge throughout |
+| 6. The Director | pass | — | In a 20-minute turn reading with `bus_wait`, mail arriving mid-turn got one nudge, which covered later mail; the Director read it all in the turn, no turn followed, and its queue is empty. One nudge queued before the deploy ran empty once, as Known limits says |
+| 7. A read-only thread under `never` | pass | — | `bus_join` went through; `bus_takeover`, with the real holder id, was refused by Codex ("MCP tool call requires approval, but approval policy is never"), and the holder kept its address |
+
+**Falsification of the removal,** live on the bus host, each against a thread busy in a long turn:
+- **Control:** an owner item and our nudge; after the read, ours was removed and the owner's kept.
+- **An owner's copy of our exact text,** queued before the mail: found waiting, so nothing was added; after the read it was kept.
+- **An owner's edit of our nudge** (same ids, new text): kept.
+
+**Mutation pass** over the release's logic (24 mutants of the removal checks, runs of joins, back-off, topics, eligibility and the takeover split, each run against the whole suite with a baseline): 22 killed. One survivor was closed with a test that removal needs both ids and the text. Two remain and are left on purpose: removal matching by text instead of id is masked by the separate client-id check, since Codex can't produce an item with our text and client id under another id; and carrying a subagent refusal through `update` is unobservable, because a refused join is filtered out before the cycle and the re-key resets it for a new join.
+
 ## Reviews
 
 Astra (max) and Fable reviewed the first draft, both against the 0.164 source. Accepted:
