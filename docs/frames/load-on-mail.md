@@ -239,7 +239,7 @@ The future skill is out of scope.
 - **On the bus host, item 1 first failed** for a reason outside agent-bus. The daemon had started before the owner's Codex login changed, and kept the earlier user, whose weekly limit was used up. So each borrowed turn failed with "Your workspace is out of credits". After the daemon restarted (item 7), every item passed.
 - **Item 2 passes:**
   - **Passed while the desktop held the thread.** The owner's disposable Local thread (stored `never`, `:danger-full-access`, paginated, eligible) was refused as held, the desktop's own poll ran the nudge, and it acknowledged after 21 s.
-  - **Passed after the desktop let the thread go.** Once the owner restarted the app, the daemon borrowed the thread. It acknowledged after 6.4 s, the lock went 5.4 s after idle, and its settings were unchanged.
+  - **Passed after the desktop let the thread go.** Once the owner restarted the app, the daemon borrowed the thread. It acknowledged after 6.4 s, the lock went 5.4 s after idle, and its settings were unchanged. The owner then opened it in the desktop: it opened normally, with no "open in another app" and no Retry, and showed both bus turns.
 - **Item 3 fails as specified.**
   - `codex exec resume` took the nudge queued during its turn right after that turn, then exited 2 s later, cutting it off.
   - Codex runs no queued input for an interrupted thread, even after a resume (`ext/queue/src/service.rs`). So the 5-minute reconcile's borrow loaded the thread and ran nothing.
