@@ -9,7 +9,7 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 | `serve` | Fluree's event stream | The same port, no token | Carries ledger names and commit pointers only, never message content | Anyone on the machine |
 | `serve` on another machine | The bus host's Fluree | SSH local forward (`ai.rawr.agent-bus.tunnel`), on the same local port | SSH host key and key authentication, plus the Fluree token, copied over `scp` at install | The SSH account on the bus host |
 | `serve` | A `codex app-server` it starts for each nudge (the desktop's bundled CLI) | stdio (a child process), ended before the address's lock is released | Process boundary. The child runs with the user's Codex configuration and `~/.codex`; `serve` sends it only `thread/queue/list`, `thread/queue/add` and `thread/read`, which load no thread | The Codex CLI binary |
-| `serve` | The machine's Codex daemon, to borrow a thread | WebSocket JSON-RPC at `/rpc` on the daemon's Unix socket (`~/.codex/app-server-control/app-server-control.sock`), one short connection per borrow | The socket is mode 0600 in a 0700 directory, the same boundary as `~/.codex`; the daemon has no other authentication. `serve` sends only `thread/resume` and `thread/unsubscribe` | Every process of the user on the machine, as the TUI does |
+| `serve` | The machine's Codex daemon, to borrow a thread | WebSocket JSON-RPC at `/rpc` on the daemon's Unix socket (`~/.codex/app-server-control/app-server-control.sock`), one short connection per borrow | The socket is mode 0600 in a 0700 directory, the same boundary as `~/.codex`; the daemon has no other authentication. `serve` first checks that something listens with a plain connection, then sends only `initialize`, `thread/resume` and `thread/unsubscribe` | Every process of the user on the machine, as the TUI does |
 | `serve` | `codex app-server daemon start`, when the daemon isn't running | A child process, ended within 10 s; the daemon it starts runs in a session of its own | Process boundary. It runs the managed daemon package installed in `~/.codex`, with the user's configuration | The Codex CLI and its managed package |
 | The Codex desktop app, SSH project | The daemon on the SSH host, through `codex app-server proxy` | SSH, then the daemon's Unix socket | SSH host key and key authentication | The SSH account |
 
@@ -22,7 +22,7 @@ Every connection the bus makes or depends on, what protects it, and what it trus
 - only with a fixed message that carries no text from other sessions;
 - it loads a thread only by asking the machine's daemon to borrow it, which the writer lock refuses while another process holds the thread. It borrows only a thread stored with approval `never` and permissions a resume keeps, and passes no permission settings ([delivery](architecture/delivery.md#policies-that-govern-delivery), policy 7).
 
-Whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs the nudge with the thread's own permissions, which is why it names nothing but the thread's own address. A borrowed thread runs on the daemon, without desktop tools.
+Whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs the nudge with the thread's own permissions, which is why it names nothing but the thread's own address. A borrowed thread runs on the daemon, without the desktop app's features. A thread a client registered tools for is never borrowed: the daemon offers those tools to the model, and a call to one would wait for a client that isn't there.
 
 ## Approval in Codex
 

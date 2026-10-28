@@ -66,8 +66,8 @@ The design was checked live on 2026-10-27, on throwaway threads, with the bus ho
 ## Decisions
 
 **1. A borrow follows every post, outside the lock.**
-1. **Under the address's lock**, through its own short-lived app-server, `serve` lists the thread's queue, adds the nudge if none of ours waits, and reads the thread's stored permissions (decision 6). None of this loads the thread. It ends that app-server before the lock is released, as today, so a late add can't land after a takeover.
-2. **Then, outside the lock**, if the thread is eligible (decision 6), it connects to the daemon's control socket: WebSocket JSON-RPC, `ws+unix://~/.codex/app-server-control/app-server-control.sock:/rpc`. It sends `initialize`, then:
+1. **Under the address's lock**, through its own short-lived app-server, `serve` lists the thread's queue, adds the nudge if none of ours waits, and asks where the thread's rollout is (`thread/read`). None of this loads the thread. It ends that app-server before the lock is released, as today, so a late add can't land after a takeover.
+2. **Then, outside the lock**, it reads the rollout, within 5 s, to decide whether the thread is eligible (decision 6). If it is, it connects to the daemon's control socket: WebSocket JSON-RPC, `ws+unix://~/.codex/app-server-control/app-server-control.sock:/rpc`. It sends `initialize`, then:
    ```json
    { "method": "thread/resume",
      "params": { "threadId": "<thread>", "excludeTurns": true,
@@ -75,7 +75,7 @@ The design was checked live on 2026-10-27, on throwaway threads, with the bus ho
    ```
    then `thread/unsubscribe`, and disconnects.
 3. It sends nothing that starts or steers a turn, and never waits for a turn.
-4. The whole borrow has a deadline of 15 s, plus 10 s when the daemon has to be started, so a hung daemon can't stall every other peer.
+4. Connecting and the resume have a deadline of 15 s, and 25 s in all when the daemon has to be started first. The unsubscribe has 2 s of its own and isn't waited on beyond that, so a slow one can't turn a load into a failure. Once a borrow times out, the cycle's other borrows fail at once and back off, so a hung daemon costs the other peers one deadline, not one each.
 5. A nudge that was found waiting is handled the same as one just added: the lock makes the borrow idempotent.
 
 A borrow can run after a takeover, a rejoin or a leave. Its result applies only to the join that was nudged, so a stale result can't hold off the new owner. The cost is one turn in the old thread, whose `bus_read` is refused. The borrow still takes the writer lock for that turn, and runs anything else waiting in that thread's queue.
@@ -88,13 +88,14 @@ A borrow can run after a takeover, a rejoin or a leave. Its result applies only 
 | "already has an active writer" | Another process holds it: the desktop's server, whose poll will run the nudge, or a running `codex exec`, which won't | Mark the attempt. Decision 5's retry covers the `exec` case once it exits |
 | "is closing; retry…" | It is being released at this moment | One retry after 1 s; if that fails too, back-off |
 | "no rollout found", "session is archived" | The thread can't be loaded | Back-off, as today |
-| The socket is missing or refuses the connection | No daemon | Decision 3 |
+| The socket is missing, or nothing listens on it | No daemon | Decision 3 |
+| Something listens but refuses the connection | A daemon that is restarting, updating or broken | Back-off, with no start |
 | No answer within the deadline | A wedged daemon | Back-off, with a warning |
 
 A "wait one poll, then resume" rule was rejected. It is itself a check whose answer can go stale, and it adds latency. A queued item also stays queued while its thread is busy, so a waiting nudge doesn't mean the thread is loaded nowhere.
 
 **3. `serve` starts the daemon if it isn't running.**
-1. When the socket is missing or refuses, `serve` runs `<codex> app-server daemon start`, with the CLI it already uses for the queue.
+1. When the socket is missing or nothing listens on it (a plain connection is refused), `serve` runs `<codex> app-server daemon start`, with the CLI it already uses for the queue.
 2. It waits up to 10 s for the socket, then retries the borrow once.
 3. If that fails too, the attempt backs off unmarked.
 
@@ -118,25 +119,28 @@ This covers a borrowed turn that crashed or failed before reading, a daemon upda
 **6. Only threads that can't block, and can't widen, are borrowed.**
 - **Where the settings come from.** No Codex call reports a thread's stored permissions without loading it: `thread/read` has no such field (0.164, in code and live). A resume takes them from the thread's rollout, its session file (0.164, `thread_processor.rs`):
   - the approval policy from the latest `turn_context` or `thread_settings_applied` record;
-  - the permissions and collaboration mode only from the latest `thread_settings_applied` the thread wrote itself (its `thread_id` is the thread's). Copied history, as a fork carries, holds another thread's. With no such snapshot, a resume applies the daemon's default.
+  - the permissions and collaboration mode only from the latest `thread_settings_applied` the thread wrote itself (its `thread_id` is the thread's). Copied history, as a fork carries, holds another thread's. With no such snapshot, a resume applies the daemon's default;
+  - the tools a client registered for the thread (`dynamic_tools`), from its own first record, `session_meta` (`core/src/session/mod.rs`). A fork that reads earlier history from its ancestors' rollouts (`history_base`, as the Director is) resumes with its own `session_meta` first, skipping theirs (`thread-store/src/local/model_context.rs`). A call to one is sent to that client and waits with no deadline (`tools/handlers/dynamic.rs`); on a borrow no client is subscribed.
 
-  `serve` reads the same records. It gets the file's location and history mode from `thread/read`, and reads backwards from the end until it has both. This holds for both history modes: a paginated thread (the desktop's, such as the Director) resumes from its latest compaction onwards. Codex writes an owned snapshot with every input and right after every compaction, so its latest one is in that span (0.164, `model_context.rs`, `retained_context.rs`).
+  `serve` reads the same records. It gets the file's location and history mode from `thread/read`, reads the first line, then reads backwards from the end until it has the approval policy and the owned snapshot, or until the latest approval policy isn't `never`. This holds for both history modes: a paginated thread (the desktop's, such as the Director) resumes from its latest compaction onwards. Codex writes an owned snapshot with every input and right after every compaction, so its latest one is in that span (0.164, `model_context.rs`, `retained_context.rs`).
 - **Eligible:** approval policy `never`, an owned snapshot, collaboration mode Default, and permissions a resume keeps:
-  - a built-in profile (`:danger-full-access`, the owner's default; `:workspace`; `:read-only`), which every config compiles; or
+  - a built-in profile (`:danger-full-access`, the owner's default; `:workspace`; `:read-only`), which every config compiles, whose saved form denies nothing; or
   - full access (a `disabled` profile); or
   - a managed profile with no readable entries for specific paths, which is read-only.
 - **Not eligible:**
   - any other approval policy, under which a turn could wait on an approval with no end;
   - Plan mode, whose `request_user_input` waits on the user whatever the approval policy;
   - a profile from the owner's own config, which a resume silently replaces with the default if it no longer compiles;
+  - a built-in profile whose saved form denies paths. Switching to a built-in keeps the earlier profile's denials (`session/session.rs`, `preserve_deny_read_restrictions_from`), and a resume compiles the built-in again by name, which drops them (`thread_processor.rs`) (Sol's code review);
+  - tools a client registered, which a borrowed turn could call and then wait on with nobody to answer (Opus's code review). On the bus host, 1 of 502 rollouts from the last 30 days had them (checked 2026-10-28);
   - a managed profile with readable entries for specific paths: the older `workspace-write` setting, which a resume replaces with the daemon's default;
   - no owned snapshot.
-- **Fails closed:** a missing path or file, a history mode it doesn't know, no record, or a shape `serve` doesn't recognise all count as not eligible.
+- **Fails closed:** a missing path or file, a history mode it doesn't know, no record, a first record that isn't `session_meta`, a read that takes longer than 5 s, or a shape `serve` doesn't recognise all count as not eligible. A reason names the kind of failure (`error EACCES`), never the path, which names the thread.
 - **An ineligible thread** still gets its nudge, which runs wherever it is loaded. `serve` doesn't borrow it, and logs once per join why it can't be woken unattended.
 
 `serve` passes no permission settings on the borrow, and no MCP client extensions (with the form-input extension, a full-access thread would surface MCP forms and wait). A resume persists the settings it applies at once, before any turn (seen live: the widened profile was recorded right after the resume), so anything passed would outlive the borrow.
 
-Reading the rollout ties `serve` to Codex's record format; that is a Codex gap, since no API reports these settings. The rule mirrors Codex 0.164's resume code: `persisted_resume_settings.rs`, the owned-snapshot lookup in `thread_processor.rs`, and the profile filter in `core/src/config/mod.rs`. Qualification checks it on both machines' versions, and the platform docs pin it to them.
+Reading the rollout ties `serve` to Codex's record format; that is a Codex gap, since no API reports these settings. The rule mirrors Codex 0.164's resume code: `persisted_resume_settings.rs`, the owned-snapshot lookup in `thread_processor.rs`, the profile filter in `core/src/config/mod.rs`, the denial carry-over in `session/session.rs`, and the dynamic-tools restore in `session/mod.rs`. Qualification checks it on both machines' versions, and the platform docs pin it to them.
 
 **7. Threads: guidance in the docs, not code.**
 - Long-lived collaborators start in the desktop, the TUI, or by `thread/start` on the daemon, under full access or `never`.
@@ -240,3 +244,12 @@ Fable's suggestion to move the docs split to its own frame was not taken: the ow
 - **Known limits:** `requirements.toml`, and compressed rollouts.
 
 Not taken: failing closed on paginated history. In 0.164 the paginated rollout is canonical, and its latest owned snapshot is in the span a resume reads. The Director is paginated, so failing closed would have excluded the release's main beneficiary.
+
+**The code review** of the build was by Sol (xhigh) and Opus, both from the 0.164 source. Accepted, each checked against the source:
+- **A built-in id can drop denials** (Sol). Decision 6 now requires a saved built-in profile to deny nothing.
+- **Stored dynamic tools can hang a borrowed turn** (Opus). Decision 6 now excludes them.
+- **Only an absent daemon is started** (Sol). A listener that refuses the connection backs off. Decision 2.
+- **One deadline for a borrow with a start** (Sol), **the unsubscribe outside it** (Opus), **and one timeout per cycle** (Opus). Decision 1.4.
+- **The rollout read leaves the lock** (Opus). It has its own 5 s limit and stops at an approval policy other than `never`. Decision 1.
+- **Reasons name no path** (Sol), **and the warning is logged once per join** (Sol). Tests now check the log lines.
+- **Stale claims** (both) in the docs, `mcp.ts` and repo memory. The docs and instructions are fixed in this change; memory is updated at close-out.

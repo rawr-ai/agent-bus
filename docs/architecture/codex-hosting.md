@@ -24,12 +24,12 @@ A Codex thread runs in an app-server: the process that holds its state, runs its
 | App-server | Started by | Clients reach it over | Runs |
 | --- | --- | --- | --- |
 | **The desktop app's own** | The ChatGPT desktop app, as a child process: the bundled CLI's `codex app-server`, with the desktop's `-c` overrides | stdio, from the app only | Local-project threads. The only app-server with the desktop's features |
-| **The daemon** | The first `codex` TUI or `codex app-server proxy` to need it (`codex app-server --listen unix:// --managed-daemon`); nothing starts it at boot | The control socket `~/.codex/app-server-control/app-server-control.sock` | `codex` TUI threads, threads started on the control socket, and desktop SSH-project threads arriving through `codex app-server proxy` |
-| **`serve`'s** | agent-bus `serve`, once per nudge | stdio, from `serve` only | Nothing: it lists and adds to queues, which loads no thread |
+| **The daemon** | The first `codex` TUI or `codex app-server proxy` to need it (`codex app-server --listen unix:// --managed-daemon`), or agent-bus `serve` when it borrows a thread and finds none (`codex app-server daemon start`); nothing starts it at boot | The control socket `~/.codex/app-server-control/app-server-control.sock` | `codex` TUI threads, threads started on the control socket, and desktop SSH-project threads arriving through `codex app-server proxy` |
+| **`serve`'s** | agent-bus `serve`, once per nudge | stdio, from `serve` only | Nothing: it lists and adds to queues and asks where a thread's rollout is (`thread/read`), none of which loads a thread. `serve`'s borrows go to the daemon |
 | **`codex exec`'s** | Each `codex exec` run, in its own process | In-process | That run's thread, until the run exits |
 | Others | A private `codex app-server` on stdio; the OpenAI tunnel client (on demand) | stdio | Whatever their client starts |
 
-Verified live from the process lists on both machines, except the tunnel client's, which comes from the earlier [codex-wake](../frames/codex-wake.md) investigation and wasn't rechecked. `codex queue` is a client, not a server of its own: it adds through the running daemon, refuses `--no-daemon`, and starts an embedded server only when no daemon is running (read in `tui/src/session_queue_commands.rs`). The daemon may run a different version from the CLI: on the other machine it is 0.165.0 beside 0.164 CLIs, and a running daemon never updates itself.
+Verified live from the process lists on both machines, except the tunnel client's, which comes from the earlier [codex-wake](../frames/codex-wake.md) investigation and wasn't rechecked. `codex queue` is a client, not a server of its own: it adds through the running daemon, refuses `--no-daemon`, and starts an embedded server only when no daemon is running (read in `tui/src/session_queue_commands.rs`). The daemon may run a different version from the CLI: on the other machine it is 0.165.0 beside 0.164 CLIs, and the managed daemon updates itself: its update loop is on by default (read in the 0.164 source; see [load-on-mail](../frames/load-on-mail.md)).
 
 ### What Codex keeps where
 
@@ -77,7 +77,7 @@ A thread's lock lasts as long as some app-server keeps it loaded. Read in Codex 
 
 **Is the lock a limit today?** Separately for any Codex user and for agent-bus:
 - **Any Codex user** meets it when opening a TUI or SSH-project thread in the desktop within the delay of leaving it, when the TUI opens a Local thread the desktop holds (for hours), and when opening an SSH-project thread in that machine's own desktop.
-- **agent-bus** never takes a lock: a queue add loads nothing. But a nudge that runs as a turn on a loaded thread restarts the idle clock, so each message can prolong an existing lock by up to the delay.
+- **agent-bus** takes a lock only by borrowing a thread through the daemon, which holds it for the bus's turns and lets it go 5 s after the thread is idle and unsubscribed ([delivery](delivery.md)). A queue add loads nothing. A nudge that runs as a turn on a thread already loaded restarts its holder's idle clock, so each message can prolong that lock by up to the holder's delay.
 - Observed 2026-10-27: on the bus host, three locks, all held by the desktop, and none by the daemon; on the other machine, none.
 
 ### The shared queue

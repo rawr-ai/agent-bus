@@ -22,6 +22,9 @@ const Reply = Schema.fromJsonString(
 );
 const decodeReply = Schema.decodeUnknownOption(Reply);
 
+const field = (value: unknown, key: string): unknown =>
+  typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
+
 type Resolve = (reply: {
   readonly result?: unknown;
   readonly error?: { readonly message: string };
@@ -174,12 +177,36 @@ const defaultSocket = join(homedir(), ".codex", "app-server-control", "app-serve
 const NOT_LISTENING = "no Codex daemon is listening on its control socket";
 
 /**
+ * Whether anything listens on the daemon's socket: a missing socket, or one a
+ * daemon left behind when it stopped, refuses the connection. Only then is
+ * starting the daemon the remedy.
+ */
+const probeDaemon = (socket: string) =>
+  Effect.tryPromise({
+    try: async () => {
+      const probe = await Bun.connect({ unix: socket, socket: { data: () => undefined } });
+      probe.end();
+    },
+    catch: (cause) => {
+      const code = field(cause, "code");
+      return new CodexError({
+        method: "connect",
+        message:
+          code === "ENOENT" || code === "ECONNREFUSED"
+            ? NOT_LISTENING
+            : `the control socket refused a connection (${typeof code === "string" ? code : "unknown error"})`,
+      });
+    },
+  });
+
+/**
  * A connection to the Codex daemon: JSON-RPC over a WebSocket at `/rpc` on its
  * Unix socket, as the TUI connects. The scope closes it, which also drops
  * anything it subscribed to.
  */
 const connectDaemon = (socket: string, timeout: Duration.Duration) =>
   Effect.gen(function* () {
+    yield* probeDaemon(socket);
     // The scope owns the socket from the moment it exists, so a handshake that
     // never completes can be abandoned at the deadline and still be closed.
     const ws = yield* Effect.acquireRelease(
@@ -189,9 +216,14 @@ const connectDaemon = (socket: string, timeout: Duration.Duration) =>
       }),
       (ws) => Effect.sync(() => ws.close())
     );
+    // Something listens, so a failure here is the daemon's answer, not its absence.
     yield* Effect.callback<void, CodexError>((resume) => {
       const refused = () =>
-        resume(Effect.fail(new CodexError({ method: "connect", message: NOT_LISTENING })));
+        resume(
+          Effect.fail(
+            new CodexError({ method: "connect", message: "the daemon refused the connection" })
+          )
+        );
       ws.onopen = () => resume(Effect.void);
       ws.onerror = refused;
       ws.onclose = refused;
@@ -216,17 +248,21 @@ export interface Daemon {
 
 /** How long the daemon keeps a borrowed thread loaded once it is idle and unsubscribed. */
 const RELEASE_SECONDS = 5;
-/** A borrow's deadline, so a wedged daemon can't hold up the other peers. */
+/** A load's deadline, so a wedged daemon can't hold up the other peers. */
 const BORROW_TIMEOUT = Duration.seconds(15);
 /** The extra time a borrow has when it must start the daemon first. */
 const START_TIMEOUT = Duration.seconds(10);
 /** The daemon is releasing the thread; it is gone within milliseconds. */
 const CLOSING_RETRY = Duration.seconds(1);
+/** Unsubscribing only hastens the release, so it isn't waited on long. */
+const UNSUBSCRIBE_TIMEOUT = Duration.seconds(2);
 
 const notListening = (error: CodexError) =>
   error.method === "connect" && error.message === NOT_LISTENING;
 const activeWriter = (error: CodexError) => error.message.includes("already has an active writer");
 const closing = (error: CodexError) => error.message.includes("is closing");
+/** A deadline passed: the daemon, or whatever it waits on, isn't answering. */
+const timedOut = (error: CodexError) => error.message.startsWith("no answer within");
 
 /**
  * Starts this machine's Codex daemon, as the TUI does when it finds none:
@@ -269,39 +305,47 @@ export const startDaemon = (codex: string, timeout: Duration.Duration = START_TI
  * which runs whatever waits in its queue, to let it go a few seconds after it
  * goes idle, and then unsubscribes and disconnects. It starts or steers no
  * turn and waits for none. The writer lock decides the rest: a thread another
- * process holds is refused, and that process runs its queue. A missing daemon
- * is started once.
+ * process holds is refused, and that process runs its queue. A daemon that
+ * isn't listening is started once, within one deadline for the whole load.
  */
 export const daemonBorrower = (options: {
   readonly socket: string;
   readonly start: Effect.Effect<void, CodexError>;
   readonly timeout?: Duration.Duration;
+  readonly startTimeout?: Duration.Duration;
 }): Daemon => {
   const timeout = options.timeout ?? BORROW_TIMEOUT;
-  const resume = (threadId: string) =>
-    Effect.scoped(
-      Effect.gen(function* () {
-        const daemon = yield* connectDaemon(options.socket, timeout);
-        yield* daemon.request("thread/resume", {
-          threadId,
-          excludeTurns: true,
-          config: { thread_unload_delay_secs: RELEASE_SECONDS },
-        });
-        // Disconnecting would drop the subscription too; this starts the release at once.
-        yield* Effect.ignore(daemon.request("thread/unsubscribe", { threadId }));
-        return "loaded" as Borrowed;
-      })
-    ).pipe(Effect.catchIf(activeWriter, () => Effect.succeed("held" as Borrowed)));
-  const attempt = (threadId: string) =>
-    resume(threadId).pipe(
-      Effect.catchIf(closing, () => Effect.andThen(Effect.sleep(CLOSING_RETRY), resume(threadId))),
-      timeLimit("thread/resume", timeout)
-    );
+  const deadline = Duration.sum(timeout, options.startTimeout ?? START_TIMEOUT);
   return {
     borrow: (threadId) =>
-      attempt(threadId).pipe(
-        Effect.catchIf(notListening, () => Effect.andThen(options.start, attempt(threadId)))
-      ),
+      Effect.scoped(
+        Effect.gen(function* () {
+          const resume = Effect.gen(function* () {
+            const daemon = yield* connectDaemon(options.socket, timeout);
+            yield* daemon.request("thread/resume", {
+              threadId,
+              excludeTurns: true,
+              config: { thread_unload_delay_secs: RELEASE_SECONDS },
+            });
+            return daemon;
+          });
+          const attempt = resume.pipe(
+            Effect.catchIf(closing, () => Effect.andThen(Effect.sleep(CLOSING_RETRY), resume)),
+            timeLimit("thread/resume", timeout)
+          );
+          const daemon = yield* attempt.pipe(
+            Effect.catchIf(notListening, () => Effect.andThen(options.start, attempt)),
+            timeLimit("borrow", deadline)
+          );
+          // Disconnecting would drop the subscription too; this starts the release at once.
+          yield* Effect.ignore(
+            daemon
+              .request("thread/unsubscribe", { threadId })
+              .pipe(timeLimit("thread/unsubscribe", UNSUBSCRIBE_TIMEOUT))
+          );
+          return "loaded" as Borrowed;
+        })
+      ).pipe(Effect.catchIf(activeWriter, () => Effect.succeed("held" as Borrowed))),
   };
 };
 
@@ -329,9 +373,6 @@ const QueuedItems = Schema.Struct({
   nextCursor: Schema.optionalKey(Schema.NullOr(Schema.String)),
 });
 const decodeQueued = Schema.decodeUnknownEffect(QueuedItems);
-
-const field = (value: unknown, key: string): unknown =>
-  typeof value === "object" && value !== null ? (value as Record<string, unknown>)[key] : undefined;
 
 /** A queued item's text. Items of shapes this doesn't know read as no text, not as an error. */
 const queuedText = (item: unknown) => {
@@ -479,8 +520,8 @@ interface Hold {
    * only on the reconcile schedule, until the owner reads or newer mail arrives.
    */
   readonly covered?: Covered | undefined;
-  /** Why this join's thread can't be borrowed, as last logged. */
-  readonly ineligible?: string | undefined;
+  /** The log has said why this join's thread can't be borrowed. */
+  readonly warned?: boolean | undefined;
 }
 
 /** What the deliverer knows about each peer, by address. */
@@ -492,10 +533,12 @@ const noDirectInput = (error: CodexError) =>
 /**
  * Wake each of this machine's Codex peers that has unread messages, in two
  * acts. Under the address's lock, it posts one fixed nudge to the thread's
- * queue, unless one of ours already waits, and reads whether the thread may
- * be borrowed. Then it asks the daemon to load the thread, so that whichever
- * process has it runs the nudge as a turn. The messages stay unread until the
- * thread reads them. One waiting nudge also covers newer mail.
+ * queue, unless one of ours already waits, and finds the thread's rollout.
+ * Then, if the rollout says the thread may be borrowed, it asks the daemon to
+ * load the thread, so that whichever process has it runs the nudge as a turn.
+ * The messages stay unread until the thread reads them. One waiting nudge also
+ * covers newer mail. Once a borrow times out, the cycle's other borrows fail
+ * at once, so a wedged daemon costs one deadline, not one per peer.
  *
  * Mail that stays unread is attempted again on the reconcile schedule, which
  * re-posts a nudge that has gone and borrows again. Failures are retried after
@@ -509,6 +552,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
 ) {
   const bus = yield* Bus;
   const now = yield* Clock.currentTimeMillis;
+  let stalled: CodexError | undefined;
   const ready = deliveryTargets(yield* bus.peers, host).filter((peer) => {
     const hold = holds.get(peer.address);
     return (
@@ -545,20 +589,31 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
               text.startsWith(nudgeHead(subscriber.address))
             );
             if (!waiting) yield* queue.add(threadId, formatNudge(subscriber.address));
-            const eligibility = yield* readEligibility(threadId, yield* queue.rollout(threadId));
-            return { added: !waiting, eligibility };
+            return { added: !waiting, stored: yield* queue.rollout(threadId) };
           })
         ).pipe(timeLimit("queue nudge", NUDGE_TIMEOUT));
         return { threadId, unread, reconciles: again ? covered.reconciles + 1 : 0, ...queued };
       });
-    // The borrow runs outside the lock: the owner's read needn't wait on the daemon.
+    // Reading the rollout and the borrow run outside the lock: the owner's read needn't wait on them.
     const waking = Effect.gen(function* () {
       const posted = yield* bus.deliver(peer.address, post);
       if (posted === undefined) return undefined;
-      const borrowed = posted.eligibility.eligible
-        ? yield* daemon.borrow(posted.threadId)
-        : undefined;
-      return { ...posted, borrowed };
+      const eligibility = yield* readEligibility(posted.threadId, posted.stored);
+      if (!eligibility.eligible) return { ...posted, eligibility, borrowed: undefined };
+      if (stalled !== undefined) {
+        return yield* new CodexError({
+          method: "borrow",
+          message: `not tried, since an earlier borrow this cycle got ${stalled.message}`,
+        });
+      }
+      const borrowed = yield* daemon.borrow(posted.threadId).pipe(
+        Effect.tapError((error) =>
+          Effect.sync(() => {
+            if (timedOut(error)) stalled = error;
+          })
+        )
+      );
+      return { ...posted, eligibility, borrowed };
     });
     const outcome = yield* Effect.result(waking);
     const hold = (change: Partial<Hold>) =>
@@ -568,7 +623,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         failures: 0,
         until: 0,
         covered: current()?.covered,
-        ineligible: current()?.ineligible,
+        warned: current()?.warned,
         ...change,
       });
 
@@ -576,15 +631,18 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       const woken = outcome.success;
       if (woken === undefined) continue;
       const at = yield* Clock.currentTimeMillis;
-      const before = current()?.ineligible;
+      const warned = current()?.warned === true;
       const ineligible = woken.eligibility.eligible ? undefined : woken.eligibility.reason;
-      hold({ covered: { unread: woken.unread, at, reconciles: woken.reconciles }, ineligible });
+      hold({
+        covered: { unread: woken.unread, at, reconciles: woken.reconciles },
+        warned: warned || ineligible !== undefined,
+      });
       const posted = woken.added ? "queued a nudge" : "a nudge was already waiting";
-      const doing = woken.reconciles > 0 ? "Its mail is still unread" : "Waking";
+      const doing = woken.reconciles > 0 ? "Still waking" : "Waking";
       if (ineligible !== undefined) {
-        if (ineligible !== before) {
+        if (!warned) {
           yield* Effect.logWarning(
-            `Not borrowing ${peer.address}'s Codex thread: ${ineligible}. Its nudge runs wherever the thread is next loaded.`
+            `Not borrowing ${peer.address}'s Codex thread: ${ineligible.replaceAll(woken.threadId, "<thread>")}. Its nudge runs wherever the thread is next loaded.`
           );
         }
         if (woken.added) {
@@ -601,7 +659,9 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       }
       if (woken.reconciles === RECONCILES_BEFORE_WARNING) {
         yield* Effect.logWarning(
-          `${peer.address} hasn't read its mail after ${woken.reconciles} attempts to wake it since the first; trying hourly until it does.`
+          ineligible === undefined
+            ? `${peer.address} hasn't read its mail after ${woken.reconciles} attempts to wake it since the first; trying hourly until it does.`
+            : `${peer.address} hasn't read its mail after ${woken.reconciles} checks that its nudge still waits; its thread can't be borrowed, so the nudge runs only when the thread is next loaded. Checking hourly.`
         );
       }
       continue;

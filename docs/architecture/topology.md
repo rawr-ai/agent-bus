@@ -76,7 +76,7 @@ The transports, in short:
 | `claude-wake` hook | Every machine | Claude Code, in the background at `SessionStart`, `Stop` and `StopFailure` | Calls `serve` over HTTP | Its nudge goes to the session; nothing is logged |
 | `agent-bus join`, `publish`, `peers` | Any machine | A shell | Calls `serve` over HTTP | — |
 | Codex desktop app-server | Every machine with the desktop app | The ChatGPT desktop app | stdio, from the app | The app's logs |
-| Codex daemon | Any machine with Codex | The first `codex` TUI or SSH proxy to need it; nothing starts it at boot | The control socket | `~/.codex/app-server-control/app-server.log` |
+| Codex daemon | Any machine with Codex | The first `codex` TUI or SSH proxy to need it, or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | `~/.codex/app-server-control/app-server.log` |
 
 Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 10 s) and set `AGENT_BUS_DIR` and `AGENT_BUS_PORT`. `scripts/install-launch-agents.sh` writes them; the [README](../../README.md#setup-and-other-machines) has the commands. `serve` runs the code of the checkout the installer was run from, and so does the hook, through the `~/.local/bin/agent-bus` link; a deploy is a fast-forward of that checkout and a restart of `serve`.
 
