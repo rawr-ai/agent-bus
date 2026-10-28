@@ -58,26 +58,27 @@ Read in the Codex 0.164.0-alpha.11.1 source unless marked.
 ## Decisions
 
 **1. Wake state survives an ordinary rejoin by the same thread.**
-- **The rule.** The deliverer keeps its wake state per Codex thread, for the same address: the session and `codexThreadId`, which are the same value for Codex peers. Before, it kept it per join. The wake state is the posted nudge (decision 2), the coverage mark and the warned flag. So a rejoin by the same thread finds our nudge recorded, and if the unread span is unchanged it posts nothing.
-- **What resets it.** A `bus_join` with `replay`, which asks for its mail again, and a takeover by another session or thread. A leave also resets it, even when the same thread joins again before the next cycle. The leave is in the ledger. `replay` is a `bus_join` input today (`Bus.join`), not part of the subscriber the deliverer reads, so the build carries it on the subscriber.
-- **What stays per join.** The subagent refusal, which is documented as retried after a rejoin.
+- **The rule.** The deliverer keeps its wake state per run of joins: a join, and the ordinary rejoins that renew it. Before, it kept it per join. The wake state is the posted nudge (decision 2), the coverage mark and the warned flag. So a rejoin by the same thread finds our nudge recorded, and if the unread span is unchanged it posts nothing.
+- **Where the run comes from.** The deliverer sees only each address's latest presence, so the run is written into it. A join records `rejoinOf`, the first join of the run it continues, when the address's previous presence is a join by the same session and the new join has no `replay`. Any other join records none and starts a new run: a `replay`, which asks for its mail again; a join after a leave; and a takeover. Because `rejoinOf` names the run's first join, not the join before it, any number of ordinary rejoins between two cycles keep the run, and a replay or leave followed by ordinary rejoins still starts a new one (Fable, Astra).
+- **What stays per join.** The subagent refusal, which is documented as retried after a rejoin, and the failure back-off.
+- **Topics on a rejoin.** A rejoin that names no topics keeps the address's topics; one that names topics replaces them. Before, a rejoin without topics dropped every subscription, and a later read passed over pending topic mail (Astra). Models rejoin with few arguments, so this is a fix in its own right.
 - **What still posts.** A rejoin whose unread span changed (new mail, a partial read) is woken as before, and decision 2 cleans up after it.
 - **The wording.** The nudge text also says "You are already joined; don't call `bus_join`". Its first sentence (`nudgeHead`) is unchanged, so nudges already waiting are still recognised. The wording isn't relied on: models didn't follow the existing "without rejoining".
 
 **2. `serve` removes its own nudge once the mail is read, if it can.**
-1. **Knowing which nudge is ours.** When `serve` adds a nudge, it records the item's `id`, `clientUserMessageId` and exact text. When it finds one of its nudges already waiting (exactly `formatNudge(address)`), it records that item's ids instead. This "posted" record is kept apart from the coverage mark, so an add that succeeded is known even when the rollout read or the borrow afterwards failed.
+1. **Knowing which nudge is ours.** When `serve` adds a nudge, it records the `id`, `clientUserMessageId` and exact text Codex answered the add with. Only its own add is recorded: a nudge found already waiting still covers the mail, so nothing is added, but it isn't recorded, since the owner can queue our exact text too (Astra, Fable). This "posted" record is kept apart from the coverage mark, so an add that succeeded is known even when the rollout read or the borrow afterwards failed.
 2. **When.** On a cycle that finds a posted record and no unread mail. `Bus.deliver` gains an optional second callback, run under the address's lock when the subscriber has nothing unread.
 3. **What.** Through its short-lived app-server, within the existing 6 s nudge deadline:
    - list the queue;
    - delete the recorded item only if it is still there with the recorded ids and exactly the recorded text;
    - clear the record.
 
-   Prefix matching isn't used, so input the owner typed, even one quoting our header, is never touched.
+   Prefix matching isn't used, and found items aren't adopted, so input the owner queued, even our text word for word, is never touched.
 4. **Best effort.**
    - **`deleted: true` doesn't mean no turn.** The writer may already have started the turn, which then runs empty, as today.
    - **`deleted: false`** means the writer took it.
    - **A failed list or delete** is logged at debug level, and the record is cleared anyway: no back-off, no retry storm.
-5. **The residual risk.** An owner's edit to that nudge, landing between the list and the delete, a window of milliseconds, would be deleted with it. Codex has no conditional delete. See [Policy](#policy-for-the-owner).
+5. **The residual risk.** An owner's edit to that nudge, landing between the list and the delete, a window of milliseconds, would be deleted with it. Codex has no conditional delete. See [Policy](#policy-for-the-owner). This is the only owner input the removal can touch.
 6. **The cost.** Every normal wake ends with a posted record and no unread mail. So each wake costs one more short-lived app-server, which lists the queue and usually finds the nudge gone.
 
 **3. A thread whose last turn was interrupted isn't borrowed.**
@@ -109,14 +110,16 @@ Read in the Codex 0.164.0-alpha.11.1 source unless marked.
   - `docs/connections.md`: what `serve` may do to Codex threads;
   - the MCP instructions in `src/mcp.ts`: the removal, and don't rejoin when nudged;
   - [platforms: Codex](../platforms/codex.md): queue ids, delete and editing, and the MCP approval rule with its config override;
-  - decision 6: `docs/connections.md#approval-in-codex`, the README's takeover paragraph, `docs/overview.md`, and the MCP instructions;
+  - decision 6: `docs/connections.md#approval-in-codex`, the README's takeover paragraph, `docs/overview.md`, the MCP instructions, and the repo memory that says `bus_join` stays destructive (Fable);
   - the frame: results.
 
 **6. Takeover is its own tool.**
-- **The split.** `bus_join` loses its `takeover` parameter and says it is neither destructive nor open-world, like `bus_publish`. A new `bus_takeover` takes the same inputs plus the holder's join id (required), and says it is destructive. Its behaviour is today's join with `takeover`, unchanged: the same lock, the same check of the current join id, unread mail carried over, the previous owner refused from then on.
-- **The refusal** for a held address names `bus_takeover` and the join id, in place of "rejoin with takeover".
-- **The CLI** keeps `agent-bus join --takeover`: a shell isn't asked for MCP approval.
-- **What it changes.** A sandboxed Codex thread under `never` can join and rejoin itself; a takeover still needs approval or full access, so replacing another session stays the human's call. Claude Code reads the same hints for its own permission prompts, so the same holds there.
+- **The split.** `bus_join` loses its `takeover` parameter and says it is neither destructive nor open-world, like `bus_publish`. A new `bus_takeover` takes the same inputs plus the holder's join id (required), and says it is destructive. Its behaviour is today's join with `takeover`, unchanged: the same lock, unread mail carried over, the previous owner refused from then on. The holder id is checked only while another session holds the address; on a free address, or the caller's own, it joins as `bus_join` does, as `Bus.join` always has (Astra).
+- **Why `bus_join` isn't destructive.** Without `takeover`, it claims a free address or reconnects the caller's own session, and refuses a held address before writing anything; `replay` rewinds only the caller's own cursor; topics change only when the caller names them (decision 1). It affects only the caller's own state, the standard under which `bus_leave` was already marked non-destructive ([one-codex-route](one-codex-route.md)). Astra read MCP's definition ("only additive updates") strictly; the omitted-topics case it found was a real loss of mail and is fixed, and an explicit topic change stays the caller's choice about its own subscriptions.
+- **The refusal** for a held address names `bus_takeover` and `agent-bus join --takeover`, since the CLI shares it (Fable).
+- **The CLI** keeps `agent-bus join --takeover`, which now calls `bus_takeover`.
+- **What it changes, in Codex 0.164.** A thread with approval `never` and no full access can join and rejoin itself, where before its join was refused. The rule (`core/src/mcp_tool_call.rs`, `maybe_request_mcp_tool_approval`) holds under the default per-server approval mode (`auto`) without strict auto-review; a server or tool set to `prompt` asks for everything, and one set to `approve` allows even the takeover (Astra). A takeover still needs approval or full access by default. The annotation is not the human's authorization: `bus_takeover`'s description keeps "only when the human says so". Claude Code has its own permission rules, and nothing here claims they follow the hints (Fable, Astra).
+- **This reverses** one-codex-route's rejection of a takeover tool ("adds a tool"). The balance changed: read-only reviewers and other sandboxed Codex threads under `never` couldn't join at all (Fable).
 
 ## Policy for the owner
 
@@ -141,6 +144,7 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
 - **Retraction depends on experimental queue methods,** like the post itself.
 - **An interrupted thread's mail waits** for the owner's next input. The nudge stays queued for it, and the log says why.
 - **After an ordinary rejoin,** a nudge that was consumed and cut off (the `exec` case) is re-posted only at the next reconcile, not at once.
+- **Only a nudge this `serve` added is removed.** One found waiting (an add whose answer timed out, or one from before a `serve` restart or this release's deploy) still covers the mail but runs once, empty, after a mid-turn read (Fable).
 
 ## Qualification
 
@@ -151,7 +155,7 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
   - the reconcile schedule and the warned flag carry across an ordinary rejoin.
 - **Removal:**
   - a read clears the record and deletes only the recorded item;
-  - the owner's items are untouched, including one that quotes our header, and one with our ids but edited text;
+  - the owner's items are untouched, including one that quotes our header, one that is our text word for word (whether found before or after ours), and one with our ids but edited text;
   - `deleted: false`, a failed list and a failed delete each clear the record without back-off, and log at debug level;
   - removal never runs while unread mail exists;
   - mail arriving between the empty read and the delete is woken on the next cycle;
@@ -160,7 +164,11 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
 - **Takeover:**
   - `bus_join` has no `takeover` input and isn't marked destructive; `bus_takeover` is, and requires the join id;
   - a takeover through `bus_takeover` behaves as today's (unread carried over, the old owner refused); a stale join id is refused;
-  - the held-address refusal names `bus_takeover`.
+  - the held-address refusal names `bus_takeover`, and the CLI's `--takeover` reaches it.
+- **Runs and topics:**
+  - `rejoinOf` is recorded for a rejoin while joined, naming the run's first join, and not for a replay, a join after a leave or a takeover;
+  - a replay or a leave followed by ordinary rejoins between cycles starts over;
+  - a rejoin without topics keeps them, with pending topic mail still readable; one naming topics replaces them.
 - **Eligibility:**
   - a last `turn_aborted` with `interrupted` or `budget_limited` is ineligible;
   - other abort reasons, a `task_complete` carrying an error, a later `task_started`, or a last `task_started` from a crash are not;
@@ -174,7 +182,7 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
 4. `serve` starts the daemon on the other machine (decision 4, with the owner's go-ahead).
 5. The 5-, 15- and 60-minute reconciles, and the warning that names the reason.
 6. The Director, observed: no empty turn after its mid-turn reads.
-7. A read-only Codex thread under approval `never` joins itself with `bus_join`, and is refused `bus_takeover`.
+7. A read-only Codex thread under approval `never` joins itself with `bus_join`, and is refused `bus_takeover` (Codex only).
 
 ## Reviews
 
@@ -188,3 +196,10 @@ Astra (max) and Fable reviewed the first draft, both against the 0.164 source. A
 - **A fork by reference with no status event of its own** can't be judged from its own file, so it fails closed (both).
 - **The cost of removal per wake,** and wake state that holds only while the span is unchanged (Fable).
 - **The tests both listed.**
+
+**Re-review of the revision** (2026-10-28), by Astra and Fable as persistent reviewers on the bus, against `aaf62eb`. Both found the first round's findings fixed, and asked for revision. Accepted, all:
+- **Exact text isn't authorship** (Astra must-fix, Fable optional): only `serve`'s own add is recorded (decision 2.1).
+- **The deliverer can't see a leave, or a reset before another rejoin** (Fable and Astra must-fix): the run of joins is written into the presence as `rejoinOf`, naming the run's first join (decision 1).
+- **A rejoin without topics dropped subscriptions** (Astra must-fix): it keeps them now (decision 1). Its other half, that `bus_join` must be marked destructive while it can change topics at all, is rejected with the reason in decision 6.
+- **Permission claims** (both): Codex's conditions are stated; the Claude Code equivalence is removed (decision 6).
+- **The CLI's `--takeover`, the refusal text, the takeover precondition, the reversal of one-codex-route, the stale memory, and the limits on found nudges** (Astra and Fable optional).
