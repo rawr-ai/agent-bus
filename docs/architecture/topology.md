@@ -76,7 +76,7 @@ The transports, in short:
 | `claude-wake` hook | Every machine | Claude Code, in the background at `SessionStart`, `Stop` and `StopFailure` | Calls `serve` over HTTP | Its nudge goes to the session; nothing is logged |
 | `agent-bus join`, `publish`, `peers` | Any machine | A shell | Calls `serve` over HTTP | — |
 | Codex desktop app-server | Every machine with the desktop app | The ChatGPT desktop app | stdio, from the app | The app's logs |
-| Codex daemon | Any machine with Codex | The first `codex` TUI or SSH proxy to need it, or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | `~/.codex/app-server-control/app-server.log` |
+| Codex daemon | Any machine with Codex | The first `codex` TUI to need it, a desktop SSH project's connection (unmanaged), or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | `~/.codex/app-server-control/app-server.log` |
 
 Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 10 s) and set `AGENT_BUS_DIR` and `AGENT_BUS_PORT`. `scripts/install-launch-agents.sh` writes them; the [README](../../README.md#setup-and-other-machines) has the commands. `serve` runs the code of the checkout the installer was run from, and so does the hook, through the `~/.local/bin/agent-bus` link; a deploy is a fast-forward of that checkout and a restart of `serve`.
 
@@ -92,6 +92,6 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | The launcher | Each machine: `~/.local/bin/agent-bus`, a link to the checkout's `src/bin.ts` | The installer | What the Claude Code plugin's hook runs |
 | The plugin | Each machine: Claude Code's plugin cache | `claude plugin install` | Only the manifest, `plugin/.claude-plugin/plugin.json` |
 | `serve`'s memory | Each machine | `serve` | Per-address locks, the marks of what each session or thread was last woken for, held subagent joins, and which sessions' hooks have called (`hooked`). Lost on restart, which costs at most one extra wake per address |
-| Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only adds to the queue | Rollouts, the thread index, the queue and the writer locks. [Codex hosting](codex-hosting.md#what-codex-keeps-where) describes them |
+| Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only adds to the queue | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
 
 Nothing else holds bus state. Message text lives only in the ledger: wakes carry an address, never the mail.

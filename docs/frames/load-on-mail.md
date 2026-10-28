@@ -122,7 +122,7 @@ This covers a borrowed turn that crashed or failed before reading, a daemon upda
   - the permissions and collaboration mode only from the latest `thread_settings_applied` the thread wrote itself (its `thread_id` is the thread's). Copied history, as a fork carries, holds another thread's. With no such snapshot, a resume applies the daemon's default;
   - the tools a client registered for the thread (`dynamic_tools`), from its own first record, `session_meta` (`core/src/session/mod.rs`). A fork that reads earlier history from its ancestors' rollouts (`history_base`, as the Director is) resumes with its own `session_meta` first, skipping theirs (`thread-store/src/local/model_context.rs`). A call to one is sent to that client and waits with no deadline (`tools/handlers/dynamic.rs`); on a borrow no client is subscribed.
 
-  `serve` reads the same records. It gets the file's location and history mode from `thread/read`, reads the first line, then reads backwards from the end until it has the approval policy and the owned snapshot, or until the latest approval policy isn't `never`. This holds for both history modes: a paginated thread (the desktop's, such as the Director) resumes from its latest compaction onwards. Codex writes an owned snapshot with every input and right after every compaction, so its latest one is in that span (0.164, `model_context.rs`, `retained_context.rs`).
+  `serve` reads the same records. It gets the file's location and history mode from `thread/read`, reads the first line, then reads backwards from the end until it has the approval policy and the owned snapshot, or until the latest approval policy isn't `never`. This holds for both history modes: a paginated thread (the desktop's, such as the Director) resumes from its latest compaction onwards. Codex writes an owned snapshot right after every compaction, so its latest one is in that span (0.164, `model_context.rs`, `retained_context.rs`).
 - **Eligible:** approval policy `never`, an owned snapshot, collaboration mode Default, and permissions a resume keeps:
   - a built-in profile (`:danger-full-access`, the owner's default; `:workspace`; `:read-only`), which every config compiles, whose saved form denies nothing; or
   - full access (a `disabled` profile); or
@@ -190,6 +190,9 @@ The future skill is out of scope.
 - **The daemon's socket has no authentication.** Its directory is 0700 and the socket 0600: the same boundary as `~/.codex`.
 - **Eligibility reads Codex's rollout format.** If a Codex update changes the record, `serve` stops borrowing and warns once per join, which leaves threads as they are today. A Codex API field for stored permissions would remove the dependency.
 - **An administrator's `requirements.toml` can override `never`.** Codex replaces a disallowed explicit approval policy with a warning, not an error (0.164, `config/mod.rs`). Neither machine has a requirements file in `~/.codex` or `/etc/codex`, or Codex requirements in its managed preferences (checked 2026-10-27).
+- **An interrupted thread isn't woken.** Codex runs no queued input after a turn was interrupted (by the user's Stop, or by a `codex exec` run exiting mid-turn), even after a resume. A borrow then loads the thread and runs nothing, and the mail waits until the thread gets new input. Reconciles keep borrowing hourly, to no effect, and the third logs the warning. Reading the last turn's outcome from the rollout, and treating such a thread as ineligible, is a follow-up.
+- **Borrowed turns run as the daemon's login.** A daemon keeps the login it started with, so after the owner changes the Codex login, borrowed turns run as the earlier user until the daemon restarts.
+- **On the bus host, a desktop SSH project keeps a daemon running** from the desktop's bundled CLI, outside the managed lifecycle (started by its SSH connection, inferred). So `codex app-server daemon stop` doesn't stop it, and it presumably doesn't take the managed package's updates (inferred).
 - **Compressed rollouts aren't borrowed.** With Codex's rollout compression on (off by default), rollouts older than 7 days become `.jsonl.zst`; `thread/read` still reports the plain path, so `serve` finds no file and fails closed.
 
 ## Qualification
@@ -221,6 +224,34 @@ The future skill is out of scope.
 8. A failed turn: a borrowed turn that ends without reading is reconciled on the schedule.
 9. The Director: record its stored permissions. After the release, see that the next real mail wakes it once the desktop has let it go. This is observed, not provoked.
 10. `serve`'s log: borrows and reconciles follow decisions 2 and 5, with no warning beyond those expected.
+
+*Results (2026-10-28, after deploying `af3650f`):*
+- **Versions:** on the bus host, CLI and daemon 0.164.0-alpha.11.1; on the other machine, daemon 0.165.0 with CLI 0.164.0. Desktop 26.1021.31345 on both.
+- **Harness:** `qual-load/ql.py`, in the release's scratch area, not the repo.
+  - Each throwaway thread joins as itself, on a `qual/lom-*` address.
+  - A `qual/sender-*` address mails it and asks for an ACK.
+  - The harness measures the lock and compares the thread's stored settings before and after.
+- **Items 1, 4, 5 and 6 pass on both machines.**
+  1. A cold `codex exec` thread, a released private-server thread and a released daemon thread each acknowledged 8.5–12 s after the mail. Each was let go 5.0–5.5 s after going idle, with its stored settings unchanged.
+  4. Three messages 5 s apart were all read, and the thread was let go 5.4 s after the run ended.
+  5. A daemon thread with a client attached: the client stayed subscribed and saw the turn, and the thread stayed loaded until the client left.
+  6. An `on-request` thread wasn't borrowed: one warning for the join, and its nudge waits.
+- **On the bus host, item 1 first failed** for a reason outside agent-bus. The daemon had started before the owner's Codex login changed, and kept the earlier user, whose weekly limit was used up. So each borrowed turn failed with "Your workspace is out of credits". After the daemon restarted (item 7), every item passed.
+- **Item 2 passes:**
+  - **Passed while the desktop held the thread.** The owner's disposable Local thread (stored `never`, `:danger-full-access`, paginated, eligible) was refused as held, the desktop's own poll ran the nudge, and it acknowledged after 21 s.
+  - **Passed after the desktop let the thread go.** Once the owner restarted the app, the daemon borrowed the thread. It acknowledged after 6.4 s, the lock went 5.4 s after idle, and its settings were unchanged.
+- **Item 3 fails as specified.**
+  - `codex exec resume` took the nudge queued during its turn right after that turn, then exited 2 s later, cutting it off.
+  - Codex runs no queued input for an interrupted thread, even after a resume (`ext/queue/src/service.rs`). So the 5-minute reconcile's borrow loaded the thread and ran nothing.
+  - The mail waits until new input starts a turn. This is now a known limit.
+- **Item 7, partly.** With the owner's go-ahead, the bus host's daemon (holding no threads) was stopped, twice.
+  - Both times, before any mail, a new one was running within 5 s under an incoming SSH session (a desktop SSH project on another machine; its connection starts the server, inferred, since `codex app-server proxy` itself only connects). It ran the desktop's bundled CLI, outside the managed lifecycle.
+  - So `serve`'s own start on demand didn't run live; the unit tests cover it.
+  - The daemons outlived `serve`'s restarts at deploy, with the same PIDs on both machines.
+- **Item 8 passes.** A turn told to skip agent-bus messages ended without reading. The mail was reconciled 5 minutes later: a new nudge was posted, and the thread was borrowed again.
+- **Item 9:** the Director is stored as `never` with `:danger-full-access`. It is paginated, a fork by reference, and eligible. No mail reached it during qualification.
+- **Item 10 passes.** Since the deploy, the only warnings are the expected `on-request` ones.
+- **Seen in passing:** some borrowed turns called `bus_join` before reading. The rejoin resets the join's mark, so a second nudge was queued, and it ran as one empty turn.
 
 ## Reviews
 

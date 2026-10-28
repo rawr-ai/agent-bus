@@ -1,6 +1,6 @@
 # Delivery: how mail reaches each kind of session
 
-How a message gets from the ledger to the session that owns its address, for each kind of session, and the policies that govern it. Claude Code and Codex each have their own section, with the platform's behaviour first and agent-bus's decisions after it. Platform claims carry their basis and version ([platforms](platforms.md)).
+How a message gets from the ledger to the session that owns its address, for each kind of session, and the policies that govern it. Claude Code and Codex each have their own section, with the platform's behaviour first and agent-bus's decisions after it. Platform facts are kept in [platforms](../platforms/README.md), with their basis and version; this page summarises what it needs and links there.
 
 For where the processes run, see [topology](topology.md); for Codex's app-servers and threads, [Codex hosting](codex-hosting.md).
 
@@ -34,7 +34,7 @@ flowchart TD
 
 ## How each kind of session receives mail
 
-This is the one table of who is woken; the other pages link here. Codex timings are kept in [Codex hosting](codex-hosting.md#the-shared-queue).
+This is the one table of who is woken; the other pages link here. Codex timings are kept in [platforms: Codex](../platforms/codex.md#the-shared-queue).
 
 | Session | How it receives | Woken? |
 | --- | --- | --- |
@@ -43,7 +43,7 @@ This is the one table of who is woken; the other pages link here. Codex timings 
 | `claude -p` | Only by calling `bus_read` or `bus_wait` | No: Claude Code ends async hooks when the run ends |
 | Codex desktop Local thread | A nudge in its queue, which the desktop runs as a turn while it has the thread loaded; once it has let go, the daemon borrows the thread to run it | Yes, within seconds while the desktop has the thread loaded: at once when idle, after the current turn when busy ([queue-wake results](../frames/queue-wake.md#qualification-2026-10-27)). Once the desktop has let it go, the daemon borrows it if it is eligible ([load-on-mail](../frames/load-on-mail.md)). The borrowed turn runs without the desktop app's features, and a thread a client registered tools for isn't borrowed. The desktop shows "open in another app" until 5 s after the thread goes idle |
 | Codex `codex` TUI, or a desktop SSH project | A nudge in its queue, which the daemon runs as a turn, with or without the TUI attached | Yes, within seconds while the daemon has the thread loaded, and after the current turn when busy ([one-codex-route](../frames/one-codex-route.md)). After the unload delay with no client, or a daemon stop, the daemon borrows it again if it is eligible, and `serve` starts the daemon if it isn't running |
-| `codex exec` | A nudge in its queue. A running `exec` holds the thread's lock but has no queue service, so the nudge waits until the run exits | Yes, once the run has exited, at the next reconcile (5, 15 or 60 minutes, then hourly), if it is eligible. A delegate that is done should `bus_leave`, or it keeps being woken while mail waits |
+| `codex exec` | A nudge in its queue. A running `exec` holds the thread's lock, and takes a queued nudge after its own turn, but may exit before that turn ends ([platforms: Codex](../platforms/codex.md#codex-exec)) | Mail sent after the run has exited: yes, borrowed like any thread loaded nowhere. Mail sent while it runs: no. The run takes the nudge and exits mid-turn, which leaves the thread interrupted, and Codex runs no queued input for it until new input starts a turn, so later borrows load it and run nothing (verified live 2026-10-28). A delegate that is done should `bus_leave` |
 | A Codex or Claude subagent | Through its parent | Never directly: a Codex subagent's queue refuses the nudge, and a Claude subagent shares its parent's id, so its mail wakes the parent |
 
 ## How a message moves
@@ -59,14 +59,7 @@ This is the one table of who is woken; the other pages link here. Codex timings 
 
 ### What Claude Code provides
 
-Verified live on 2026-10-27, on throwaway sessions running Claude Code 2.1.310, in the terminal and in stream-json mode, the way the desktop app runs it ([claude-wake](../frames/claude-wake.md#what-it-rests-on)). The desktop app's installed build is 2.1.308; that it behaves as 2.1.310 did in stream-json mode is extrapolated.
-- **The desktop app runs Claude Code in stream-json mode,** as `claude --input-format stream-json --output-format stream-json`, with no terminal (verified live, from the process list).
-- **Plugin monitors start in the terminal but not in stream-json mode.** A monitor is a long-running command a plugin declares, and a line it prints wakes an idle session. In the terminal it started about 1 s after the folder was trusted and woke idle sessions; in stream-json mode the plugin loaded but its monitor never ran, in two runs of more than 5 minutes (verified live).
-- **`asyncRewake` hooks work in both.** A hook marked `asyncRewake` runs in the background, and when it exits 2, its stderr wakes the session, even an idle one. `Stop` and `SessionStart` hooks, from settings or from a plugin, woke idle stream-json sessions (verified live). A `timeout` of 30 days is accepted (verified live). `StopFailure` with `asyncRewake` is documented but wasn't probed.
-- **The hook's input** carries the session's id, equal to its `CLAUDE_CODE_SESSION_ID` (verified live). `/clear` and forks change the id; `--resume` keeps it; subagents share their parent's (verified live).
-- **Hooks inherit Claude Code's environment,** not a shell's, so `PATH` may lack `bun` (documented; the hook was checked with the desktop app's `PATH` and with launchd's).
-- **`claude -p` ends async hooks** when the run ends (documented).
-- **A plugin installed from a marketplace is copied** into Claude Code's cache, not loaded in place (verified live at deploy, [finish-swap](../frames/finish-swap.md)).
+[Platforms: Claude Code](../platforms/claude-code.md) has the facts, with their versions and basis (Claude Code 2.1.310, verified live; the desktop's 2.1.308 extrapolated). In short: the desktop app runs Claude Code in stream-json mode, where plugin monitors don't start but `asyncRewake` hooks wake idle sessions; a hook's input carries the session id; and `claude -p` ends async hooks when the run ends.
 
 ### Monitor or hook?
 
@@ -120,7 +113,7 @@ Rejected, with reasons in [claude-wake](../frames/claude-wake.md#rejected): a pl
 
 ### What Codex provides
 
-A thread's queue is shared through `~/.codex`. Any app-server can add to it without loading the thread, and the app-server that has the thread loaded, its only writer, runs a queued item as a turn: at once when idle, after the current turn when busy, and as soon as an app-server loads it if nothing has it loaded. A subagent's queue refuses the add. A load asked of the daemon is refused while another process holds the thread's writer lock. The daemon lets a thread go a set time after it is both idle and unsubscribed, and a load can set that time for itself. [Codex hosting](codex-hosting.md#the-shared-queue) gives the details, with their basis (Codex 0.164).
+In short ([platforms: Codex](../platforms/codex.md) has the facts and their basis): a thread's queue is shared through `~/.codex`, any app-server can add to it without loading the thread, and the app-server that has the thread loaded, its only writer, runs a queued item as a turn. A subagent's queue refuses the add. A load asked of the daemon is refused while another process holds the writer lock, and the daemon lets a borrowed thread go a set time after it is idle and unsubscribed ([a resume with no client](../platforms/codex.md#a-resume-with-no-client)). What a resume restores decides which threads may be borrowed ([what a resume restores](../platforms/codex.md#what-a-resume-restores)). [Platforms: Codex](../platforms/codex.md#the-shared-queue) gives the details, with their basis (Codex 0.164).
 
 ### What agent-bus does
 
@@ -173,14 +166,14 @@ sequenceDiagram
   - a built-in permission profile (such as the owner's `:danger-full-access`) that denies nothing beyond it, full access, or read-only. A resume compiles a built-in again by name, which drops denials carried over from an earlier profile; it replaces the older `workspace-write` setting with the daemon's default, and a profile from the owner's config too if it no longer compiles.
 
   No Codex call reports these settings without loading the thread. So `serve` reads them from the thread's rollout, its session file, where a resume reads them, after the address's lock is released and within 5 s: the registered tools from its first record, the approval policy from the latest settings record, and the rest from the latest snapshot the thread wrote itself. Anything it can't read or doesn't recognise is not eligible. An ineligible thread still gets its nudge, and `serve` logs once per join why it isn't borrowed.
-- **The unread-span mark, and reconciling.** `serve` remembers in memory the unread mail its last attempt covered. An attempt covers it once a nudge waits and the daemon has answered the borrow, or the thread is ineligible. While that mail stays unread, `serve` attempts it again 5, 15 and 60 minutes later, then hourly, re-posting a nudge that has gone. This covers a borrowed turn that ends without reading, an `exec` that held the lock, and a daemon restart mid-turn. After the third reconcile, it logs a warning. New mail, a partial read, a rejoin or a `serve` restart starts over. A failed borrow leaves the mail uncovered, under the failure back-off. The mail stays unread and readable throughout.
+- **The unread-span mark, and reconciling.** `serve` remembers in memory the unread mail its last attempt covered. An attempt covers it once a nudge waits and the daemon has answered the borrow, or the thread is ineligible. While that mail stays unread, `serve` attempts it again 5, 15 and 60 minutes later, then hourly, re-posting a nudge that has gone. This covers a borrowed turn that ends without reading, and a daemon restart mid-turn. It doesn't help a thread left interrupted, as a `codex exec` run that exits mid-turn leaves it ([platforms: Codex](../platforms/codex.md#an-interrupted-thread-runs-no-queued-input)). After the third reconcile, it logs a warning. New mail, a partial read, a rejoin or a `serve` restart starts over. A failed borrow leaves the mail uncovered, under the failure back-off. The mail stays unread and readable throughout.
 - **No text, nothing marked read.** The nudge names only the recipient address and tells the thread to call `bus_read`, and to end the turn quietly if there is nothing or the address isn't its own. Sender text never enters the thread as its owner's input. Only the thread's own read marks its mail read.
 - **No approval needed for the read.** The bus's tools say they are safe, so Codex lets a nudged thread read and answer in any sandbox; only `bus_join` asks outside full access ([connections](../connections.md#approval-in-codex)).
 - **Failures** (a missing CLI, no rollout yet, the queue not answering) are retried after 30 s, then after a delay that doubles to five minutes, with the mail kept unread.
 - **Subagents.** A subagent's refused add holds that join: its messages stay unread for `bus_read`, and it is tried again only after a rejoin or a `serve` restart.
 - **Which machine.** Each machine's `serve` wakes only the Codex peers whose join came from that machine (`origin.host`, compared without case or domain), since each machine's queues, threads and daemon are its own. That machine needs the CLI and a managed daemon package, which `serve` starts if it isn't running.
 
-Within `serve`, joins, leaves, reads and nudges for one address run one at a time, so a nudge acts on the subscriber's current state. The borrow runs after the lock is released, so the owner's read never waits on the daemon. Its result applies only to the join it was for: after a takeover or rejoin, the new join is woken afresh. `serve` starts or steers no turn itself, and the only load it asks for is the daemon's borrow, which the writer lock refuses while another process holds the thread. So a thread never has a second writer ([Codex hosting](codex-hosting.md#one-writer-per-thread)).
+Within `serve`, joins, leaves, reads and nudges for one address run one at a time, so a nudge acts on the subscriber's current state. The borrow runs after the lock is released, so the owner's read never waits on the daemon. Its result applies only to the join it was for: after a takeover or rejoin, the new join is woken afresh. `serve` starts or steers no turn itself, and the only load it asks for is the daemon's borrow, which the writer lock refuses while another process holds the thread. So a thread never has a second writer ([platforms: Codex](../platforms/codex.md#one-writer-per-thread)).
 
 ## Policies that govern delivery
 

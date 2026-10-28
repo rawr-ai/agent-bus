@@ -21,9 +21,9 @@ agent-bus is an **append-only message log with one read cursor per address, plus
 | Document | Read it for |
 | --- | --- |
 | [Topology](architecture/topology.md) | The two machine roles, every process and port, the transports between them (loopback HTTP, stdio, unix socket, SSH tunnel, SSH proxy), and where the ledger, cursors, token and Codex state live |
-| [Codex hosting](architecture/codex-hosting.md) | How many Codex app-servers run and what each is for, the one-writer lock and how long a thread stays loaded, the shared queue and its timings, what "desktop-capable" means, how each route creates a thread, the desktop's wake link, and why `serve` uses a short-lived app-server of its own |
+| [Codex hosting](architecture/codex-hosting.md) | What agent-bus runs on Codex: why `serve` posts through a short-lived app-server of its own and borrows through the daemon, which threads it wakes, the owner's unload delay, and what each machine needs. Codex's own behaviour (app-servers, the writer lock, the queue, desktop features, the wake link, resuming, the daemon) is in [platforms: Codex](platforms/codex.md) |
 | [Delivery](architecture/delivery.md) | Whether and how each kind of session is woken (the one table of it), the Claude wake hook and the Codex nudge step by step, why Claude uses a hook rather than a monitor, and the delivery policies |
-| [Platforms and versions](architecture/platforms.md) | The installed Codex, Claude Code, Fluree, Bun and macOS versions, the owner's Codex setting, the versions each finding was observed on, and how claims are marked |
+| [Platforms and versions](platforms/README.md), with [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md) and [Fluree](platforms/fluree.md) | The installed Codex, Claude Code, Fluree, Bun and macOS versions, the owner's Codex setting, the versions each finding was observed on, and how claims are marked |
 | [Connections and trust boundaries](connections.md) | What protects each connection, what `serve` may do to Codex threads, and approval in Codex |
 | [README](../README.md) | Commands, setup, the MCP tools, address ownership, security settings and the ledger format |
 | [Frames](frames/) | Each decision, with its evidence, the alternatives rejected and its qualification results. Frames are history: a later frame may supersede an earlier one |
@@ -66,15 +66,17 @@ From [address-ownership](frames/address-ownership.md); the [README](../README.md
 
 ## Open gaps and limits
 
-What is still open, unverified or accepted as a limit. What has been verified is recorded with its versions in [platforms](architecture/platforms.md#version-sensitive-findings), and each frame's qualification results give the evidence: [address-ownership](frames/address-ownership.md#qualification-2026-10-26), [queue-wake](frames/queue-wake.md#qualification-2026-10-27), [one-codex-route](frames/one-codex-route.md#qualification-2026-10-27), [simplification-pass](frames/simplification-pass.md#qualification-2026-10-27) and [claude-wake](frames/claude-wake.md#results-2026-10-27), whose last open item, a `serve` restart while a hook waits, passed on 2026-10-27.
+What is still open, unverified or accepted as a limit. What has been verified is recorded with its versions in [platforms](platforms/README.md#version-sensitive-findings), and each frame's qualification results give the evidence: [address-ownership](frames/address-ownership.md#qualification-2026-10-26), [queue-wake](frames/queue-wake.md#qualification-2026-10-27), [one-codex-route](frames/one-codex-route.md#qualification-2026-10-27), [simplification-pass](frames/simplification-pass.md#qualification-2026-10-27) and [claude-wake](frames/claude-wake.md#results-2026-10-27), whose last open item, a `serve` restart while a hook waits, passed on 2026-10-27.
 
 | Item | Status |
 | --- | --- |
-| How long the desktop holds a thread its wake link woke | **Measured** past 34 min; likely until the app restarts or the thread is opened and left (inferred, [Codex hosting](architecture/codex-hosting.md#the-threadswake-link)) |
+| How long the desktop holds a thread its wake link woke | **Measured** past 34 min; likely until the app restarts or the thread is opened and left (inferred, [platforms: Codex](platforms/codex.md#the-threadswake-link)) |
 | That a change to `thread_unload_delay_secs` takes effect without restarting the daemon | **Read in code, not tested** |
 | Which threads the daemon borrows depends on Codex's rollout format, read for each thread's stored permissions, since no Codex call reports them | **Accepted dependency** ([load-on-mail](frames/load-on-mail.md)): a format change makes threads ineligible, with a warning, which leaves them as they were before borrowing |
 | A thread borrowed while the desktop had let it go shows "open in another app" in the desktop until 5 s after it goes idle; whether the desktop's Retry fires by itself is unverified | **Accepted limit** ([load-on-mail](frames/load-on-mail.md#known-limits)) |
-| Another machine's desktop running a nudge; a desktop subagent's add being refused like the daemon's; a daemon-thread nudge where the daemon (0.165.0) is newer than the bundled CLI (0.164) | **Unverified** |
+| A thread whose last turn was interrupted (by Stop, or by a `codex exec` run exiting mid-turn) runs no queued input, even when borrowed, so its mail waits until it gets new input ([platforms: Codex](platforms/codex.md#an-interrupted-thread-runs-no-queued-input)) | **Known limit**; reading the last turn's outcome and treating the thread as ineligible is a follow-up |
+| Borrowed turns run as the login the daemon started with, so after a Codex login change they run as the earlier user until the daemon restarts ([platforms: Codex](platforms/codex.md#the-daemon)) | **Known limit**: restart the daemon after changing the login |
+| Another machine's desktop running a nudge; a desktop subagent's add being refused like the daemon's | **Unverified** |
 | The desktop's installed Claude Code (2.1.308) behaving as the probed 2.1.310 did in stream-json mode | **Extrapolated** |
 | The queue methods (`thread/queue/*`) are experimental in the Codex app-server protocol | **Accepted risk:** `serve` uses the desktop's bundled CLI, so protocol and app move together; a change shows as logged errors, and the mail waits unread for the thread's next read |
 | `bus_read` and `bus_wait` mark messages read before the response is sent, so a lost response loses those messages for that address (they stay in history) | **Known gap** |

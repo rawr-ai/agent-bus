@@ -266,8 +266,7 @@ export interface Stored {
 /**
  * How a thread's history is kept. Both keep the rollout canonical: a paginated
  * thread resumes from its latest compaction onwards, and Codex writes a
- * snapshot with every input and after every compaction, so its latest one is
- * in that span (Codex 0.164, `thread-store/src/local/model_context.rs`).
+ * snapshot after every compaction, so its latest one is in that span (Codex 0.164, `thread-store/src/local/model_context.rs`).
  */
 const HISTORY_MODES = new Set(["legacy", "paginated"]);
 

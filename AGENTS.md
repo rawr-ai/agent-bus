@@ -2,9 +2,10 @@
 
 [README](README.md) owns commands, setup and the ledger format. [Overview](docs/overview.md) is the entry map: the system's shape, ownership policies, what is verified and the known gaps. `docs/architecture/` owns the rest of the architecture, one concern per page:
 - [topology](docs/architecture/topology.md): machines, processes, ports, transports and where state lives;
-- [Codex hosting](docs/architecture/codex-hosting.md): Codex's app-servers, the writer lock, desktop features, and why `serve` uses its own short-lived app-server;
+- [Codex hosting](docs/architecture/codex-hosting.md): what agent-bus runs on Codex, and why `serve` uses its own short-lived app-server;
 - [delivery](docs/architecture/delivery.md): how each kind of session is woken, and the delivery policies;
-- [platforms](docs/architecture/platforms.md): the platform versions each finding was observed on.
+
+`docs/platforms/` owns the platform facts agent-bus rests on, each with its version and basis: [the index and versions](docs/platforms/README.md), [Codex](docs/platforms/codex.md), [Claude Code](docs/platforms/claude-code.md) and [Fluree](docs/platforms/fluree.md).
 
 Update the page that owns a fact when it changes; link to it from elsewhere rather than repeating it. Keep platform behaviour (Codex, Claude Code, Fluree) apart from agent-bus's decisions, mark each platform claim verified live, read in code or inferred, and tag it with the version it was observed on. After upgrading a platform, recheck the version table and the findings it lists. [Connections](docs/connections.md) owns trust boundaries. Frames in `docs/frames/` are history: don't rewrite their decisions.
 
