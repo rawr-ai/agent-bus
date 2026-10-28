@@ -66,7 +66,7 @@ The design was checked live on 2026-10-27, on throwaway threads, with the bus ho
 ## Decisions
 
 **1. A borrow follows every post, outside the lock.**
-1. **Under the address's lock**, through its own short-lived app-server, `serve` lists the thread's queue, adds the nudge if none of ours waits, and reads the thread's stored permissions (`thread/read`, which loads nothing). It ends that app-server before the lock is released, as today, so a late add can't land after a takeover.
+1. **Under the address's lock**, through its own short-lived app-server, `serve` lists the thread's queue, adds the nudge if none of ours waits, and reads the thread's stored permissions (decision 6). None of this loads the thread. It ends that app-server before the lock is released, as today, so a late add can't land after a takeover.
 2. **Then, outside the lock**, if the thread is eligible (decision 6), it connects to the daemon's control socket: WebSocket JSON-RPC, `ws+unix://~/.codex/app-server-control/app-server-control.sock:/rpc`. It sends `initialize`, then:
    ```json
    { "method": "thread/resume",
@@ -116,13 +116,18 @@ This starts whatever managed package that machine has installed, with its update
 This covers a borrowed turn that crashed or failed before reading, a daemon update mid-turn, `bus_read` failing, and the `exec` that held the lock. The cost is at most one extra turn an hour, and only for a thread whose mail stays unread. The rejected choice (a) left such mail until a human acted.
 
 **6. Only threads that can't block, and can't widen, are borrowed.**
-- **Eligible:** a thread whose stored permissions, read under the lock, are either:
-  - full access (sandbox `danger-full-access`), which is the owner's default; or
-  - approval policy `never` with a sandbox a cold resume keeps: read-only, or the `":workspace"` profile.
-- **Not eligible:** anything else, such as `on-request` with a sandbox, or the older `workspace-write` setting, which a borrow would widen to the daemon's default.
-- **An ineligible thread** still gets its nudge, which runs wherever it is loaded. `serve` doesn't borrow it, and logs once per join that it can't be woken unattended.
+- **Where the permissions come from.** No Codex call reports a thread's stored permissions without loading it: `thread/read` has no such field (0.164, in code and live). A resume takes them from the thread's rollout, its session file: the latest `turn_context` or `thread_settings_applied` record. `serve` reads that same record. It gets the file's location from `thread/read`'s `path`, and reads backwards from the end until it finds the record.
+- **Eligible:** the record's approval policy is `never`, and its permissions are ones a resume keeps:
+  - a named profile, such as `:danger-full-access` (the owner's default) or `:workspace`; or
+  - full access (a `disabled` profile); or
+  - a managed profile with no entries for specific paths, which is read-only.
+- **Not eligible:** any other approval policy, which could wait on an approval with no end. Also a managed profile with entries for specific paths: the older `workspace-write` setting, which a resume drops for the daemon's default.
+- **Fails closed:** a missing path, an unreadable file, no record, or a shape `serve` doesn't recognise all count as not eligible.
+- **An ineligible thread** still gets its nudge, which runs wherever it is loaded. `serve` doesn't borrow it, and logs once per join why it can't be woken unattended.
 
-`serve` passes no permission settings on the borrow. A cold resume stores what it is given, so a borrowed `never` would outlive the borrow.
+`serve` passes no permission settings on the borrow. A resume persists the settings it applies at once, before any turn (seen live: the widened profile was recorded right after the resume), so anything passed would outlive the borrow.
+
+Reading the rollout ties `serve` to Codex's record format; that is a Codex gap, since no API reports the field. The rule mirrors Codex 0.164's resume code (`persisted_resume_settings.rs`, and the profile filter in `core/src/config/mod.rs`). Qualification checks it on both machines' versions, and the platform docs pin it to them.
 
 **7. Threads: guidance in the docs, not code.**
 - Long-lived collaborators start in the desktop, the TUI, or by `thread/start` on the daemon, under full access or `never`.
@@ -170,10 +175,16 @@ The future skill is out of scope.
 - **A daemon update during a borrow** reloads the thread under the global 300 s.
 - **Daemon turns post no desktop notification.**
 - **The daemon's socket has no authentication.** Its directory is 0700 and the socket 0600: the same boundary as `~/.codex`.
+- **Eligibility reads Codex's rollout format.** If a Codex update changes the record, `serve` stops borrowing and warns once per join, which leaves threads as they are today. A Codex API field for stored permissions would remove the dependency.
 
 ## Qualification
 
 **Before building,** check live on throwaway threads that `thread/read`, from a short-lived app-server that loads nothing, reports the stored sandbox and approval policy decision 6 needs. Cover full access, `never` with read-only, the `":workspace"` profile, the older `workspace-write`, and `on-request`. If it doesn't, decision 6 is reframed before any code is written.
+
+*Result (2026-10-27, 0.164.0-alpha.11.1):*
+- **`thread/read` reports no permissions,** in code and live. Decision 6 was reframed to read the rollout's latest settings record.
+- **That record separates every case,** across 15 throwaway rollouts from the investigation: `never` and `on-request`; read-only, the older `workspace-write`, and `:workspace`; and threads before and after a widening borrow.
+- **Both Codex peers on the bus** (the Director and one subagent) are stored as `never` with the named profile `:danger-full-access`, so both are eligible.
 
 **Unit tests**, with a stand-in daemon and queue:
 - every answer in decision 2, including "active writer" from an `exec` holder followed by a later successful re-borrow;
