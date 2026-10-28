@@ -220,5 +220,5 @@ The queue service's automatic dispatch runs nothing while a thread's status is `
 ## Approvals for MCP tools
 
 Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe: read-only, or neither destructive nor open-world, with an unset hint counting as destructive and open-world (verified live and read in `core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval`, Codex 0.164).
-- **This is the default, `auto`, approval mode.** A server's `default_tools_approval_mode`, or a tool's `approval_mode`, in `[mcp_servers.<name>]` can be `prompt`, which asks for every call, or `approve`, which allows every call, destructive or not (read in `codex-mcp/src/mcp/mod.rs` and `server.rs`).
+- **This is the default, `auto`, approval mode.** A server's `default_tools_approval_mode`, or a tool's `approval_mode`, in `[mcp_servers.<name>]` can be `prompt`, which asks for every call, `writes`, which asks for every call not marked read-only, or `approve`, which allows every call, destructive or not (read in `codex-mcp/src/mcp/mod.rs` and `server.rs`).
 - **Strict auto-review** skips the annotation exemption (read in `maybe_request_mcp_tool_approval`).
