@@ -38,7 +38,7 @@ To wake a thread, the bus adds one nudge to the thread's queue and lets the thre
 
 ### Which threads `serve` wakes
 
-`serve` nudges a Codex peer only when it joined from this machine with its own thread id, since each machine's queues are in that machine's `~/.codex`. It doesn't care which app-server runs the thread: the desktop's or the daemon's, whichever is the writer, runs the nudge. A thread loaded nowhere is borrowed by the daemon, if it is eligible. A running `codex exec` holds the lock and takes a nudge queued during its turn, but may exit before that nudge's turn ends, which leaves the thread interrupted; Codex then runs no queued input for it, so later borrows run nothing ([platforms: Codex](../platforms/codex.md#an-interrupted-thread-runs-no-queued-input)). [Delivery](delivery.md#how-each-kind-of-session-receives-mail) gives the outcome for each kind of thread.
+`serve` nudges a Codex peer only when it joined from this machine with its own thread id, since each machine's queues are in that machine's `~/.codex`. It doesn't care which app-server runs the thread: the desktop's or the daemon's, whichever is the writer, runs the nudge. A thread loaded nowhere is borrowed by the daemon, if it is eligible. A running `codex exec` holds the lock and takes a nudge queued during its turn, but may exit before that nudge's turn ends, which leaves the thread interrupted; Codex then runs no queued input for it, so `serve` doesn't borrow it until it has run a new turn ([platforms: Codex](../platforms/codex.md#an-interrupted-thread-runs-no-queued-input)). [Delivery](delivery.md#how-each-kind-of-session-receives-mail) gives the outcome for each kind of thread.
 
 ### The unload delay the owner chose
 
