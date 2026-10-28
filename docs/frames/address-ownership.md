@@ -17,7 +17,7 @@ Two independent Claude sessions on one machine both used `claude/opa-website`. O
 - So two sessions on one address act as competing consumers: each directed message goes to whichever reads first. And any session can send under another's address, so replies go back to the wrong place.
 - Topics are the group mechanism: each subscriber has its own address and cursor, and every subscriber gets every topic message.
 
-This is collision protection between cooperating local sessions, not security. Every process of the user can reach `serve` and its store anyway (see [connections](../connections.md)).
+This is collision protection between cooperating local sessions, not security. Every process of the user can reach `serve` and its store anyway (see [connections](../architecture/connections.md)).
 
 ## Decision
 

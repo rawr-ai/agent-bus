@@ -36,7 +36,7 @@ Each of these was seen live on 2026-10-28 (Codex 0.164.0-alpha.11.1 on the bus h
 
 **Joins outside full access.**
 - Codex 0.164 asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access, the server is set to approve, or the tool says it is read-only, or neither destructive nor open-world (`core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval`; `codex-mcp/src/mcp/mod.rs`).
-- agent-bus's tools say so, except `bus_join`, which says it is destructive because its optional `takeover` replaces another session's hold ([connections](../connections.md#approval-in-codex)). So a read-only thread under `never` can read and answer its mail, but can't join or rejoin itself. Seen while setting up this release's persistent reviewers: a read-only Codex reviewer would have needed the coordinator to join it.
+- agent-bus's tools say so, except `bus_join`, which says it is destructive because its optional `takeover` replaces another session's hold ([connections](../architecture/connections.md#approval-in-codex)). So a read-only thread under `never` can read and answer its mail, but can't join or rejoin itself. Seen while setting up this release's persistent reviewers: a read-only Codex reviewer would have needed the coordinator to join it.
 
 **Open checks.**
 - `serve` starting the daemon never ran live. On the bus host, a desktop SSH project from another machine restarted the daemon within 5 s of each stop.

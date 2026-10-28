@@ -16,7 +16,8 @@
     "lint:effect": "biome lint --config-path=biome.effect.json .",
     "format": "biome check --write .",
     "test": "bun test",
-    "check": "bun run typecheck && bun run lint && bun run test",
+    "check": "bun run typecheck && bun run lint && bun run test && bun run check:docs",
+    "check:docs": "bun scripts/check-docs.ts",
     "qualify:fluree": "bun scripts/qualify-fluree.ts",
     "install:launch-agents": "./scripts/install-launch-agents.sh"
   },

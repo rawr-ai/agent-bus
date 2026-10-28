@@ -178,7 +178,7 @@ In every case the mail was still unread when the thread read it, since the threa
 - **`bus_join` stays destructive,** because a takeover replaces another session's hold. Outside full access, a join asks approval once, or is refused under `never`; the nudge never joins.
   - Rejected: a separate `bus_takeover` tool. It would keep joins approval-free, but adds a tool.
 - **`bus_leave` is non-destructive.** It affects only the caller, and a rejoin by the same session keeps its cursor. Sol disagreed.
-- **`bus_publish` needs no approval,** so a nudged thread can answer. The cost: a sandboxed thread can send to peers that aren't sandboxed ([connections](../connections.md#approval-in-codex)).
+- **`bus_publish` needs no approval,** so a nudged thread can answer. The cost: a sandboxed thread can send to peers that aren't sandboxed ([connections](../architecture/connections.md#approval-in-codex)).
 
 The same release prints a CLI refusal as one line, with exit status 1, instead of a stack trace.
 

@@ -16,18 +16,27 @@ agent-bus is an **append-only message log with one read cursor per address, plus
   So it is pub/sub in the sense that topics fan out. Underneath, each subscriber reads its own mailbox.
 - **Waking is separate from delivery:** a wake only signals that mail may be waiting, and the owner's read decides what is delivered ([delivery](architecture/delivery.md#waking-is-separate-from-delivery)).
 
-## Where to read what
+## Which page owns each topic
 
-| Document | Read it for |
+Each topic has one owner page; other pages link to it rather than restate it.
+
+| Topic | Owner |
 | --- | --- |
-| [Topology](architecture/topology.md) | The two machine roles, every process and port, the transports between them (loopback HTTP, stdio, unix socket, SSH tunnel, SSH proxy), and where the ledger, cursors, token and Codex state live |
-| [Codex hosting](architecture/codex-hosting.md) | What agent-bus runs on Codex: why `serve` posts through a short-lived app-server of its own and borrows through the daemon, which threads it wakes, the owner's unload delay, and what each machine needs. Codex's own behaviour (app-servers, the writer lock, the queue, desktop features, the wake link, resuming, the daemon) is in [platforms: Codex](platforms/codex.md) |
-| [Delivery](architecture/delivery.md) | Whether and how each kind of session is woken (the one table of it), the Claude wake hook and the Codex nudge step by step, why Claude uses a hook rather than a monitor, and the delivery policies |
-| [Platforms and versions](platforms/README.md), with [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md) and [Fluree](platforms/fluree.md) | The installed Codex, Claude Code, Fluree, Bun and macOS versions, the owner's Codex setting, the versions each finding was observed on, and how claims are marked |
-| [Connections and trust boundaries](connections.md) | What protects each connection, what `serve` may do to Codex threads, and approval in Codex |
-| [README](../README.md) | Commands, setup, the MCP tools, address ownership, security settings and the ledger format |
-| [Frames](frames/) | Each decision, with its evidence, the alternatives rejected and its qualification results. Frames are history: a later frame may supersede an earlier one |
-| [Research](research/mcp-native-messaging.md) | Whether MCP or an existing server could wake sessions more simply (no) |
+| Machines, processes, ports, transports, and where state lives | [Topology](architecture/topology.md) |
+| Addresses, sessions and ownership; topics and replies; the ledger and cursors | [Messaging](architecture/messaging.md) |
+| Whether and how each kind of session is woken; the Claude hook and the Codex nudge | [Delivery](architecture/delivery.md) |
+| What agent-bus runs on Codex, and why (folded into delivery, platforms and the runbooks during this consolidation) | [Codex hosting](architecture/codex-hosting.md) |
+| The MCP tools and parameters, annotations, refusals, the CLI, configuration and environment | [Interfaces](architecture/interfaces.md) |
+| Trust boundaries, and what `serve` may do to a thread | [Connections](architecture/connections.md) |
+| Installed versions, the findings register, and how platform claims are marked | [Platforms](platforms/README.md) |
+| How Codex, Claude Code and Fluree behave | [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md), [Fluree](platforms/fluree.md) |
+| Setting up the bus host and other machines | [Install](runbooks/install.md) |
+| Starting, stopping, health and logs | [Operate](runbooks/operate.md) |
+| Putting a new version into service | [Deploy](runbooks/deploy.md) |
+| Starting sessions the bus can wake | [Launch agents](runbooks/launch-agents.md) |
+| Upgrading a platform or the plugin | [Upgrade](runbooks/upgrade.md) |
+| Symptoms and fixes | [Recover](runbooks/recover.md) |
+| Release records and retired mechanisms | [Frames](frames/README.md) |
 
 ## The pieces in the code
 
@@ -61,7 +70,7 @@ From [address-ownership](frames/address-ownership.md); the [README](../README.md
 ### Other policies, where they live
 
 - **Delivery and Codex thread safety:** [delivery](architecture/delivery.md#policies-that-govern-delivery).
-- **Security:** [connections](connections.md) (what each connection trusts and what protects it) and the [README](../README.md#security) (Fluree's token, `serve`'s Host check, `bus_query`'s limits).
+- **Security:** [connections](architecture/connections.md) (what each connection trusts and what protects it) and the [README](../README.md#security) (Fluree's token, `serve`'s Host check, `bus_query`'s limits).
 - **Engineering:** [AGENTS.md](../AGENTS.md) (the `Ledger` service, `bun run check`, repo memory with no personal details).
 
 ## Open gaps and limits

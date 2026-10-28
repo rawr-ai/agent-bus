@@ -1,6 +1,6 @@
 # Topology: machines, processes and stores
 
-Where agent-bus runs: which processes run on which machine, how they reach each other, and where every piece of state lives. For what protects each connection, see [connections and trust boundaries](../connections.md). For the Codex app-servers in detail, see [Codex hosting](codex-hosting.md); for how mail reaches a session, [delivery](delivery.md).
+Where agent-bus runs: which processes run on which machine, how they reach each other, and where every piece of state lives. For what protects each connection, see [connections and trust boundaries](connections.md). For the Codex app-servers in detail, see [Codex hosting](codex-hosting.md); for how mail reaches a session, [delivery](delivery.md).
 
 ## Two machine roles
 

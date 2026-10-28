@@ -148,7 +148,7 @@ Reading the rollout ties `serve` to Codex's record format; that is a Codex gap, 
 - To reach a thread the daemon is running, attach from a terminal with `codex resume --remote` (see [codex-wake](codex-wake.md)), or Retry in the desktop once the run ends. Use Retry, not Fork, which splits the thread.
 
 **8. What goes.**
-- **The "never" policy:** "`serve` never loads, resumes or starts a turn in a Codex thread, and never connects to the Codex daemon" goes, in [delivery](../architecture/delivery.md) policy 7, [connections](../connections.md), Codex hosting ("the bus must never load a thread"), the README, the overview and repo memory. In its place: "`serve` loads a thread only to run its own queued nudge, through the daemon; the lock rules out a second writer".
+- **The "never" policy:** "`serve` never loads, resumes or starts a turn in a Codex thread, and never connects to the Codex daemon" goes, in [delivery](../architecture/delivery.md) policy 7, [connections](../architecture/connections.md), Codex hosting ("the bus must never load a thread"), the README, the overview and repo memory. In its place: "`serve` loads a thread only to run its own queued nudge, through the daemon; the lock rules out a second writer".
 - **The old cost:** one-codex-route's accepted "no headless resume" is superseded.
 - **The open items:** the overview's wake-link and `codex exec` items are closed.
 - **Wrong platform claims:** "a running daemon never updates itself", and Codex hosting's "when a nudge doesn't run", are corrected.

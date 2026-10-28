@@ -1,13 +1,41 @@
 # agent-bus
 
-[README](README.md) owns commands, setup and the ledger format. [Overview](docs/overview.md) is the entry map: the system's shape, ownership policies, what is verified and the known gaps. `docs/architecture/` owns the rest of the architecture, one concern per page:
-- [topology](docs/architecture/topology.md): machines, processes, ports, transports and where state lives;
-- [Codex hosting](docs/architecture/codex-hosting.md): what agent-bus runs on Codex, and why `serve` uses its own short-lived app-server;
-- [delivery](docs/architecture/delivery.md): how each kind of session is woken, and the delivery policies;
+Contributor rules for agent-bus: where documentation goes, the toolkit, the invariants, project memory and verification. Users of the bus start at the [README](README.md); agents using it load the `agent-bus` skill.
 
-`docs/platforms/` owns the platform facts agent-bus rests on, each with its version and basis: [the index and versions](docs/platforms/README.md), [Codex](docs/platforms/codex.md), [Claude Code](docs/platforms/claude-code.md) and [Fluree](docs/platforms/fluree.md).
+## Documentation
 
-Update the page that owns a fact when it changes; link to it from elsewhere rather than repeating it. Keep platform behaviour (Codex, Claude Code, Fluree) apart from agent-bus's decisions, mark each platform claim verified live, read in code or inferred, and tag it with the version it was observed on. After upgrading a platform, recheck the version table and the findings it lists. [Connections](docs/connections.md) owns trust boundaries. Frames in `docs/frames/` are history: don't rewrite their decisions.
+The docs have three layers, each with fixed homes:
+- **Reference:** [`docs/architecture/`](docs/architecture/) says what agent-bus does, one concern per page; [`docs/platforms/`](docs/platforms/README.md) holds the Codex, Claude Code and Fluree behaviour it rests on. The [overview](docs/overview.md) shows how the parts fit and names the page that owns each topic.
+- **Entry points:** the [README](README.md) says what agent-bus is, why, and how to install it; [`docs/runbooks/`](docs/runbooks/) holds the procedures.
+- **The skill:** `plugin/skills/agent-bus/` teaches agents to use the bus.
+
+[Frames](docs/frames/README.md) and research are history, frozen at their paths: fix their links, never their decisions.
+
+### Where a new fact goes
+
+Place content by its kind first, then by the concern or task it serves; never by release or by runtime.
+
+| A new… | goes to | never |
+| --- | --- | --- |
+| fact about how Codex, Claude Code or Fluree behaves | `docs/platforms/<platform>.md`, marked verified live, read in code or inferred, with the version it was observed on; plus a row in the findings register when an upgrade could change it | restated elsewhere; other pages link to it |
+| rule, behaviour, reason or limit of agent-bus | the `docs/architecture/` page that owns the concern, in that page's fixed section | a second architecture page, the README or the overview |
+| procedure an operator follows | `docs/runbooks/<task>.md` | inside reference pages, beyond a link |
+| guidance for agents using the bus | the skill; a single call's contract goes in that tool's description | the MCP instructions, beyond their minimum protocol |
+| plan, measurement, qualification or review of a release | that release's frame | current pages, except a verified fact or limit promoted to its owner |
+
+- **A change usually has several facets:** the contract (`interfaces.md` and the tool description), the rule (its architecture page), agent guidance (the skill), the platform claim (platforms) and the procedure (a runbook). Update each home, not just the first.
+- **Versions appear only in `docs/platforms/`,** except a binding requirement where it binds, and a frame's record of what its experiments ran on. A current page states constants from code and links to the platform page for anything measured.
+- **A new page is for a new concern or task** that no page covers. When a page grows, improve its internal structure first.
+- **Use the existing vocabulary:** address, session, join, run of joins, nudge, borrow, reconcile each keep one name.
+
+### Page shapes
+
+Every current page opens with a scope line: what it covers and where its neighbours are.
+- **Architecture page:** `What it does` (the mechanism, with its diagram), `Rules` (numbered, so other pages can cite them), `Why` (the choice and the alternatives rejected), `Limits`, `Rests on` (linked platform claims), `History` (links to the frames that made it; never needed for current truth).
+- **Platform page:** claims marked with basis and version, listed in the findings register when version-sensitive. After upgrading a platform, recheck the installed-version table and the findings it lists ([upgrade](docs/runbooks/upgrade.md)).
+- **Runbook:** `Before you start`, then the steps with literal commands and how to check each, then `If it fails` (linking [recover](docs/runbooks/recover.md)).
+
+A release that designs and qualifies something writes a frame, which ends with a "Moved into current docs" checklist of the five facets above. Routine changes update the owner pages in their own PR. `bun run check` runs `scripts/check-docs.ts`, which checks links and anchors, scope lines, page shapes, the overview's topic table, and that current pages link frames only from their History footer (platform pages may cite a frame inline as a claim's evidence).
 
 ## Toolkit
 

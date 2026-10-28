@@ -33,7 +33,7 @@ In the incident, the desktop app's own app-server shut down at 15:36:32 (the app
 
 ## Decision
 
-**Superseded (2026-10-26): keep working in Local threads.** The first decision was "desktop on the daemon": the owner would work through the desktop app's SSH connection to the same machine. Reading the app's code then showed that SSH projects and the `CODEX_APP_SERVER_WS_URL` override both lose desktop features the owner needs: browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools (see [connections](../connections.md)). So:
+**Superseded (2026-10-26): keep working in Local threads.** The first decision was "desktop on the daemon": the owner would work through the desktop app's SSH connection to the same machine. Reading the app's code then showed that SSH projects and the `CODEX_APP_SERVER_WS_URL` override both lose desktop features the owner needs: browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools (see [connections](../architecture/connections.md)). So:
 
 - **The guard is permanent** (shipped in b4aa1f5): the bus never takes a thread from another app-server.
 - **A Codex `Stop` hook** (shipped in ba3ab5e) delivers to Local threads when a turn ends.
@@ -78,7 +78,7 @@ Three reviews (GPT-6 Astra at max effort, GPT-6.1 Sol at extra-high, Claude Opus
 ## Operations (the owner's machines)
 
 1. **Daemon open-file limit. Done 2026-10-26:** both daemons now run 0.164 with a soft limit of 10240. The CLI's `daemon restart` refuses daemons it auto-started; stop those with `kill -TERM`, then `daemon start` from a shell with the raised limit. Background: Restart it from a login shell (`ulimit -S -n 10240`), once its loaded threads are accounted for, because a restart drops them. Keep the daemon's own `start|restart` management; don't add a competing launchd job. Qualify `codex app-server daemon bootstrap` before relying on it for restarts after a reboot. After every start, check the limit: a child process's `getrlimit`, or `lsof -p <pid>` counts.
-2. **SSH from each machine to itself: dropped**, with the launch override, because both lose desktop features. Both are described in [connections](../connections.md) for reference.
+2. **SSH from each machine to itself: dropped**, with the launch override, because both lose desktop features. Both are described in [connections](../architecture/connections.md) for reference.
 3. **Open each thread from one place.** Both app-servers read the same `~/.codex`, so a thread id opens under either, but only one can be its writer: a thread the daemon holds shows "open in another app" in a Local window until the daemon unloads it.
 4. **Recovering a thread the daemon holds today:** `codex resume --remote unix:// <thread uuid>` attaches to it, with no restart needed. Never archive or delete a thread to release it.
 
