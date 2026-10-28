@@ -116,18 +116,27 @@ This starts whatever managed package that machine has installed, with its update
 This covers a borrowed turn that crashed or failed before reading, a daemon update mid-turn, `bus_read` failing, and the `exec` that held the lock. The cost is at most one extra turn an hour, and only for a thread whose mail stays unread. The rejected choice (a) left such mail until a human acted.
 
 **6. Only threads that can't block, and can't widen, are borrowed.**
-- **Where the permissions come from.** No Codex call reports a thread's stored permissions without loading it: `thread/read` has no such field (0.164, in code and live). A resume takes them from the thread's rollout, its session file: the latest `turn_context` or `thread_settings_applied` record. `serve` reads that same record. It gets the file's location from `thread/read`'s `path`, and reads backwards from the end until it finds the record.
-- **Eligible:** the record's approval policy is `never`, and its permissions are ones a resume keeps:
-  - a named profile, such as `:danger-full-access` (the owner's default) or `:workspace`; or
+- **Where the settings come from.** No Codex call reports a thread's stored permissions without loading it: `thread/read` has no such field (0.164, in code and live). A resume takes them from the thread's rollout, its session file (0.164, `thread_processor.rs`):
+  - the approval policy from the latest `turn_context` or `thread_settings_applied` record;
+  - the permissions and collaboration mode only from the latest `thread_settings_applied` the thread wrote itself (its `thread_id` is the thread's). Copied history, as a fork carries, holds another thread's. With no such snapshot, a resume applies the daemon's default.
+
+  `serve` reads the same records. It gets the file's location and history mode from `thread/read`, and reads backwards from the end until it has both. This holds for both history modes: a paginated thread (the desktop's, such as the Director) resumes from its latest compaction onwards. Codex writes an owned snapshot with every input and right after every compaction, so its latest one is in that span (0.164, `model_context.rs`, `retained_context.rs`).
+- **Eligible:** approval policy `never`, an owned snapshot, collaboration mode Default, and permissions a resume keeps:
+  - a built-in profile (`:danger-full-access`, the owner's default; `:workspace`; `:read-only`), which every config compiles; or
   - full access (a `disabled` profile); or
-  - a managed profile with no entries for specific paths, which is read-only.
-- **Not eligible:** any other approval policy, which could wait on an approval with no end. Also a managed profile with entries for specific paths: the older `workspace-write` setting, which a resume drops for the daemon's default.
-- **Fails closed:** a missing path, an unreadable file, no record, or a shape `serve` doesn't recognise all count as not eligible.
+  - a managed profile with no readable entries for specific paths, which is read-only.
+- **Not eligible:**
+  - any other approval policy, under which a turn could wait on an approval with no end;
+  - Plan mode, whose `request_user_input` waits on the user whatever the approval policy;
+  - a profile from the owner's own config, which a resume silently replaces with the default if it no longer compiles;
+  - a managed profile with readable entries for specific paths: the older `workspace-write` setting, which a resume replaces with the daemon's default;
+  - no owned snapshot.
+- **Fails closed:** a missing path or file, a history mode it doesn't know, no record, or a shape `serve` doesn't recognise all count as not eligible.
 - **An ineligible thread** still gets its nudge, which runs wherever it is loaded. `serve` doesn't borrow it, and logs once per join why it can't be woken unattended.
 
-`serve` passes no permission settings on the borrow. A resume persists the settings it applies at once, before any turn (seen live: the widened profile was recorded right after the resume), so anything passed would outlive the borrow.
+`serve` passes no permission settings on the borrow, and no MCP client extensions (with the form-input extension, a full-access thread would surface MCP forms and wait). A resume persists the settings it applies at once, before any turn (seen live: the widened profile was recorded right after the resume), so anything passed would outlive the borrow.
 
-Reading the rollout ties `serve` to Codex's record format; that is a Codex gap, since no API reports the field. The rule mirrors Codex 0.164's resume code (`persisted_resume_settings.rs`, and the profile filter in `core/src/config/mod.rs`). Qualification checks it on both machines' versions, and the platform docs pin it to them.
+Reading the rollout ties `serve` to Codex's record format; that is a Codex gap, since no API reports these settings. The rule mirrors Codex 0.164's resume code: `persisted_resume_settings.rs`, the owned-snapshot lookup in `thread_processor.rs`, and the profile filter in `core/src/config/mod.rs`. Qualification checks it on both machines' versions, and the platform docs pin it to them.
 
 **7. Threads: guidance in the docs, not code.**
 - Long-lived collaborators start in the desktop, the TUI, or by `thread/start` on the daemon, under full access or `never`.
@@ -176,6 +185,8 @@ The future skill is out of scope.
 - **Daemon turns post no desktop notification.**
 - **The daemon's socket has no authentication.** Its directory is 0700 and the socket 0600: the same boundary as `~/.codex`.
 - **Eligibility reads Codex's rollout format.** If a Codex update changes the record, `serve` stops borrowing and warns once per join, which leaves threads as they are today. A Codex API field for stored permissions would remove the dependency.
+- **An administrator's `requirements.toml` can override `never`.** Codex replaces a disallowed explicit approval policy with a warning, not an error (0.164, `config/mod.rs`). Neither machine has a requirements file in `~/.codex` or `/etc/codex`, or Codex requirements in its managed preferences (checked 2026-10-27).
+- **Compressed rollouts aren't borrowed.** With Codex's rollout compression on (off by default), rollouts older than 7 days become `.jsonl.zst`; `thread/read` still reports the plain path, so `serve` finds no file and fails closed.
 
 ## Qualification
 
@@ -220,3 +231,12 @@ Astra (max) and Fable reviewed the first draft, after the live check. Both picke
 - **Qualification gaps** (both): a real desktop Local thread, an `exec` holder, continuous mail, Retry, the daemon start and its outliving `serve`, an ineligible thread, a failed turn.
 
 Fable's suggestion to move the docs split to its own frame was not taken: the owner asked for it in this release. It is decision 9, a separate step that is now scoped.
+
+**The reframed decision 6** (after the pre-build check) was reviewed by Fable, which kept the rollout read over documenting the rule or watching and interrupting turns. Accepted, after checking each against the 0.164 source:
+- **Permissions come only from the thread's own latest snapshot,** not from any `turn_context`.
+- **Plan mode waits on the user** whatever the approval policy, so it is excluded.
+- **Only built-in profile names** are trusted to survive a resume.
+- **The borrow passes no MCP client extensions.**
+- **Known limits:** `requirements.toml`, and compressed rollouts.
+
+Not taken: failing closed on paginated history. In 0.164 the paginated rollout is canonical, and its latest owned snapshot is in the span a resume reads. The Director is paginated, so failing closed would have excluded the release's main beneficiary.

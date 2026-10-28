@@ -9,7 +9,7 @@ For the processes and transports on each machine, see [topology](topology.md); f
 | Question | Answer |
 | --- | --- |
 | How many Codex app-servers run on a machine? | Two long-lived ones: the desktop app's own, and the daemon. Short-lived ones come and go: `serve`'s, one per nudge; one inside each `codex exec`; and others ([below](#the-app-servers-on-a-machine)) |
-| Why does the bus use a short-lived app-server of its own? | It only needs the thread's queue, which any app-server can reach without loading the thread, so the bus never becomes a thread's writer ([below](#why-serve-uses-a-short-lived-app-server-of-its-own)) |
+| Why does the bus use a short-lived app-server of its own? | To post a nudge it needs only the thread's queue, which any app-server can reach without loading the thread, so posting works even with the daemon down. Loading a thread is left to the daemon's borrow ([below](#why-serve-uses-a-short-lived-app-server-of-its-own)) |
 | Can several app-servers drive one thread? | No. One app-server at a time holds a thread's writer lock; the others can only read it from disk ([below](#one-writer-per-thread)) |
 | How long does an app-server keep a thread? | The daemon, for `thread_unload_delay_secs` after its last client and activity: 1800 s by default, 300 s as the owner has set it. The desktop, while the thread is on screen, then for up to about 3 h ([below](#how-long-a-thread-stays-loaded)) |
 | What is "desktop-capable"? | A thread whose app tools the desktop app itself answers, which needs the desktop's own app-server. Daemon threads lack it, and SSH-project threads have only part of it. Full access is a separate, per-thread setting ([below](#what-desktop-capable-means)) |
@@ -56,7 +56,7 @@ A thread has one writer: the app-server holding its lock (verified live with two
 
 What a person sees (read in code): the TUI shows a read-only view, "This thread is open elsewhere". The desktop shows "This is open in another app", with **Retry** and **Fork chat**.
 
-This is why the bus must never load a thread. [codex-wake](../frames/codex-wake.md) records the incident: the bus's resume made the daemon a desktop thread's writer, and the owner's window locked.
+[codex-wake](../frames/codex-wake.md) records the incident this caused: the bus's resume made the daemon a desktop thread's writer for the full unload delay, and the owner's window locked. So the bus now loads a thread only by a short borrow through the daemon, which the lock refuses while another process holds the thread, and which lets the thread go 5 s after it goes idle ([load-on-mail](../frames/load-on-mail.md)).
 
 ### How long a thread stays loaded
 
@@ -185,7 +185,7 @@ The desktop handles `codex://threads/wake/<id>`: it runs whatever is already in 
 - It works only for the local desktop, depends on the private link route and the experimental queue, and could change with any app update.
 - Any local process can open the link, without authentication (read in code). That adds little, since writing the queue already needs access to `~/.codex` (inferred).
 
-**What it means for agent-bus.** It can't replace the queue add: the link carries no message, only "run what's queued". It can't replace the poll either: for a thread another app-server has loaded, the link fails and that server's poll runs the item. At most it complements them, for threads loaded nowhere, which today wait until someone opens them: `serve` would add the nudge as now, then `open -g` the link. agent-bus doesn't do this; adopting it is an open decision for the owner, and it bears on the open `codex exec` question ([codex-wake](../frames/codex-wake.md), item 7).
+**What it means for agent-bus.** It can't replace the queue add: the link carries no message, only "run what's queued". It can't replace the poll either: for a thread another app-server has loaded, the link fails and that server's poll runs the item. At most it could complement them, for threads loaded nowhere. agent-bus doesn't use it: it holds a thread until the app restarts, which shuts out the daemon and SSH projects, and it is private. Threads loaded nowhere are borrowed by the daemon instead ([load-on-mail](../frames/load-on-mail.md#rejected)).
 
 ## What agent-bus runs, and why
 
@@ -193,24 +193,26 @@ Everything in this half is agent-bus's own design, read in `src/codex.ts` and th
 
 ### Why `serve` uses a short-lived app-server of its own
 
-To wake a thread, the bus adds one nudge to the thread's queue and lets the thread's writer run it ([delivery](delivery.md#codex-threads)). For that, `serve` needs only `thread/queue/list` and `thread/queue/add`, and any app-server on the machine serves those without loading the thread. So `serve` starts one of its own:
-- **It is never a writer.** Its app-server loads no thread, so whichever app-server runs the thread stays its only writer. No thread can have a second writer because of the bus, by construction ([one-codex-route](../frames/one-codex-route.md)).
-- **The alternatives each cost more.** The daemon's socket would give `serve` full control of every thread the daemon can load, and the daemon doesn't run Local threads anyway. The desktop's app-server has no entrance for other processes: its stdio belongs to the app, and driving its windows through the app's coordination socket was dropped untested ([desktop-wake-spike](../frames/desktop-wake-spike.md)). `thread/queue/start` runs an item only where the thread is already loaded, so `serve`'s app-server would first have to resume the thread and become its writer.
+To wake a thread, the bus adds one nudge to the thread's queue and lets the thread's writer run it, then asks the daemon to borrow a thread loaded nowhere ([delivery](delivery.md#codex-threads)). For the post, `serve` needs only `thread/queue/list`, `thread/queue/add` and `thread/read`, and any app-server on the machine serves those without loading the thread. So `serve` starts one of its own:
+- **It is never a writer.** Its app-server loads no thread. The only load the bus asks for is the daemon's borrow, which the writer lock refuses while another process holds the thread ([load-on-mail](../frames/load-on-mail.md)).
+- **The post doesn't depend on the daemon.** Mail is posted even when the daemon is down or the thread can't be borrowed, and runs wherever the thread is next loaded.
+- **The alternatives each cost more.** Posting through the daemon's socket would make every post depend on the daemon. The desktop's app-server has no entrance for other processes: its stdio belongs to the app, and driving its windows through the app's coordination socket was dropped untested ([desktop-wake-spike](../frames/desktop-wake-spike.md)). `thread/queue/start` runs an item only where the thread is already loaded, so `serve`'s app-server would first have to resume the thread and become its writer.
 - **Short-lived bounds it.** It is started for each nudge and ended, killed if need be, and reaped before the address's lock is released, so an add that timed out can't land after a takeover. Each request gets 2 s and a whole nudge 6 s.
 - **It is the desktop's bundled CLI** (`/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`, or `serve --codex <path>`). The queue methods are experimental, and the bundled CLI is the same build as the desktop that reads the queue. There is no `PATH` fallback: `serve` runs under launchd's `PATH`, and another CLI's protocol could differ. For daemon threads, the daemon must accept the same protocol; on the other machine the daemon is 0.165.0 and the bundled CLI 0.164.0-alpha.11.1, and a daemon-thread nudge there hasn't been checked on that pair (unverified).
 
 ### Which threads `serve` wakes
 
-`serve` nudges a Codex peer only when it joined from this machine with its own thread id, since each machine's queues are in that machine's `~/.codex`. It doesn't care which app-server runs the thread: the desktop's or the daemon's, whichever is the writer, runs the nudge. A thread loaded nowhere keeps its nudge until it is opened; whether a running `codex exec` runs one isn't established. [Delivery](delivery.md#how-each-kind-of-session-receives-mail) gives the outcome for each kind of thread.
+`serve` nudges a Codex peer only when it joined from this machine with its own thread id, since each machine's queues are in that machine's `~/.codex`. It doesn't care which app-server runs the thread: the desktop's or the daemon's, whichever is the writer, runs the nudge. A thread loaded nowhere is borrowed by the daemon, if it is eligible. A running `codex exec` holds the lock but never runs its queue, so its nudge runs after it exits, at the next reconcile. [Delivery](delivery.md#how-each-kind-of-session-receives-mail) gives the outcome for each kind of thread.
 
 ### The unload delay the owner chose
 
 On 2026-10-27 the owner set `thread_unload_delay_secs = 300` in `~/.codex/config.toml` on both machines (Codex 0.164 on the bus host; the other machine's daemon is 0.165). It is a deliberate configuration, chosen so threads left on the daemon are freed in 5 minutes rather than 30.
 
 The trade-off for the bus:
-- **A shorter delay** frees threads sooner for the desktop or another client. A nudge runs at once only while the thread is still loaded, so mail for a thread that has unloaded waits until the thread is reopened. None is lost.
-- **A longer delay** keeps nudges running headlessly for longer, but each nudge restarts the clock, so a thread mailed more often than the delay stays loaded, and locked, indefinitely.
-- The desktop's hold is driven by its UI, not by this setting, so the setting matters mainly for the daemon. A thread meant to keep waking headlessly could get a longer delay per thread, through the request `config`.
+- **Waking doesn't depend on it.** A thread that has unloaded is borrowed again when mail comes, and each borrow carries its own 5 s release.
+- **It governs threads a human loads** in the TUI or an SSH project: how long the daemon keeps them after the last client leaves. A borrow cuts that short for a thread already idle and left (to about 5 s after the borrowed turn), but not while a client is attached.
+- **It applies after a daemon restart or update,** which reloads threads under the global delay, not a borrow's.
+- The desktop's hold is driven by its UI, not by this setting.
 
 That the setting takes effect without a restart was read in code, not tested.
 
@@ -218,9 +220,9 @@ That the setting takes effect without a restart was read in code, not tested.
 
 The first fix for the incident in [codex-wake](../frames/codex-wake.md) was to move the owner's threads onto the daemon, through an SSH project to the same machine or the `CODEX_APP_SERVER_WS_URL` override. An SSH project loses desktop features, and the override loses at least `codex_app` ([above](#what-desktop-capable-means)), so the owner stays in Local threads, and the bus reaches them through their queue instead.
 
-### When a queued nudge doesn't run
+### What waking needs from each machine
 
-A nudge runs only where the thread is loaded, so for TUI and SSH-project threads it depends on the daemon:
-- **`serve` has to reach the thread's queue.** It needs a queue-capable Codex CLI (`serve --codex`, by default the desktop's bundled one), run as the same user with the same Codex home, on the machine that owns the thread. For a desktop SSH project, that is the SSH host. The CLI's protocol has to match the daemon's.
-- **An unloaded thread waits.** After the unload delay with no client, or a daemon stopped with a signal, its nudge waits, and its mail stays unread, until the thread is reopened, which runs the nudge. A graceful `codex app-server daemon restart` or update resumes the loaded root threads and retakes their locks (read in `daemon_snapshot.rs`), but the CLI refuses that command for a daemon auto-started on first use, which then has to be stopped with a signal.
-- **Nothing starts the daemon at boot;** the CLI and SSH proxies start it on first use. It inherits the open-file limit of whatever started it. When it reports `Too many open files` (in `~/.codex/app-server-control/app-server.log`), restart it from a shell with `ulimit -S -n 10240`, remembering that a stop by signal unloads its threads.
+- **`serve` has to reach the thread's queue.** It needs a queue-capable Codex CLI (`serve --codex`, by default the desktop's bundled one), run as the same user with the same Codex home, on the machine that owns the thread. For a desktop SSH project, that is the SSH host.
+- **A managed daemon package.** `serve` borrows through the daemon, and starts it with `codex app-server daemon start` when it isn't running. That runs the managed package in `~/.codex/packages/app-server-daemon/`, installing it from the invoking CLI only if none is present (read in code, 0.164). The daemon starts in a session of its own, so it outlives `serve`, and it raises its own soft open-file limit to 4096 (read in code). Nothing starts it at boot; the first borrow, the TUI or an SSH proxy does.
+- **The managed daemon updates itself.** A started daemon runs an update loop, on by default; a new version restarts it, which reloads its threads under the global unload delay (read in code, 0.164). So a daemon can be ahead of the CLI that started it, as on the other machine.
+- **A wedged daemon,** whose socket answers but whose requests time out, makes borrows fail and back off with a warning. It needs restarting by hand.

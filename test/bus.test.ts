@@ -21,17 +21,28 @@ import { claudeWake, formatWake } from "../src/claude.ts";
 import * as Client from "../src/client.ts";
 import {
   appServerQueue,
+  type Borrowed,
   CodexError,
+  type Daemon,
+  daemonBorrower,
   deliverOnce,
   deliveryTargets,
   formatNudge,
   type Holds,
   type Queue,
+  startDaemon,
 } from "../src/codex.ts";
 import { LedgerError, Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Mcp from "../src/mcp.ts";
+import {
+  eligibility,
+  latestSettings,
+  readEligibility,
+  type Settings,
+  type Stored,
+} from "../src/rollout.ts";
 import * as Serve from "../src/serve.ts";
 import { validateSelect } from "../src/sparql.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
@@ -683,12 +694,52 @@ describe("codex delivery routing", () => {
     ));
 });
 
+/** A settings snapshot record, as Codex writes one at each thread start and resume. */
+const snapshot = (
+  threadId: string | undefined,
+  approval: unknown,
+  options: { profile?: unknown; profileId?: string; mode?: string } = {}
+) => ({
+  type: "event_msg",
+  payload: {
+    type: "thread_settings_applied",
+    thread_id: threadId,
+    thread_settings: {
+      approval_policy: approval,
+      permission_profile: options.profile ?? { type: "disabled" },
+      active_permission_profile: options.profileId === undefined ? null : { id: options.profileId },
+      collaboration_mode: { mode: options.mode ?? "default", settings: {} },
+    },
+  },
+});
+
+/** A rollout file of these lines. */
+const rolloutOf = (lines: ReadonlyArray<unknown>) => {
+  const file = join(tempDir(), "rollout.jsonl");
+  writeFileSync(
+    file,
+    `${lines.map((line) => (typeof line === "string" ? line : JSON.stringify(line))).join("\n")}\n`
+  );
+  return file;
+};
+
 describe("codex delivery", () => {
+  /** Each thread's rollout: the owner's default, full access with approval never. */
+  const fullAccess = (threadId: string) => ({
+    path: rolloutOf([
+      { type: "session_meta", payload: { id: threadId } },
+      snapshot(threadId, "never", { profileId: ":danger-full-access" }),
+      { type: "event_msg", payload: { type: "task_complete" } },
+    ]),
+    historyMode: "legacy",
+  });
+
   /**
    * Codex thread queues: each thread's waiting items, in order. `queue` makes
    * every request fail, makes an add land and then report a failure, as a
    * timed-out request might, or refuses adds as a subagent's queue does.
-   * `opened` counts the app-servers started.
+   * `opened` counts the app-servers started; `rollout` is where each thread's
+   * session file is.
    */
   const fakeQueue = () => {
     const items = new Map<string, Array<string>>();
@@ -696,6 +747,7 @@ describe("codex delivery", () => {
       queue: "accept" as "accept" | "fail" | "lands, then fails" | "subagent" | "hangs",
       opened: 0,
       listing: false,
+      rollout: fullAccess as (threadId: string) => Stored,
     };
     const waiting = (threadId: string) => items.get(threadId) ?? [];
     const fail = (method: string, message = "no answer within 2 seconds") =>
@@ -721,6 +773,7 @@ describe("codex delivery", () => {
         items.set(threadId, [...waiting(threadId), text]);
         return queueState.queue === "lands, then fails" ? fail("thread/queue/add") : Effect.void;
       },
+      rollout: (threadId) => Effect.succeed(queueState.rollout(threadId)),
     };
     const openQueue = Effect.sync(() => {
       queueState.opened += 1;
@@ -731,12 +784,40 @@ describe("codex delivery", () => {
     return { openQueue, waiting, runNext, queueState };
   };
 
+  /**
+   * The daemon: each borrow is recorded and answered as `answer` says. A
+   * `gate` holds borrows until it is opened.
+   */
+  const fakeDaemon = () => {
+    const daemonState = {
+      answer: "loaded" as Borrowed | "fails",
+      borrows: [] as Array<string>,
+      gate: undefined as Deferred.Deferred<void> | undefined,
+    };
+    const daemon: Daemon = {
+      borrow: (threadId) =>
+        Effect.gen(function* () {
+          daemonState.borrows.push(threadId);
+          if (daemonState.gate !== undefined) yield* Deferred.await(daemonState.gate);
+          if (daemonState.answer === "fails") {
+            return yield* new CodexError({
+              method: "thread/resume",
+              message: `no rollout found for thread id ${threadId}`,
+            });
+          }
+          return daemonState.answer;
+        }),
+    };
+    return { daemon, daemonState };
+  };
+
   /** A Codex peer `codex/a` on thread t-1 with one message from `claude/b`, and a deliverer for it. */
   const setup = Effect.gen(function* () {
     const bus = yield* Bus.Bus;
     const queued = fakeQueue();
+    const { daemon, daemonState } = fakeDaemon();
     const holds: Holds = new Map();
-    const deliverer = (state: Holds) => deliverOnce(queued.openQueue, hostname(), state);
+    const deliverer = (state: Holds) => deliverOnce(queued.openQueue, daemon, hostname(), state);
     const join = bus.join({
       address: "codex/a",
       runtime: "codex",
@@ -757,6 +838,7 @@ describe("codex delivery", () => {
     return {
       bus,
       ...queued,
+      daemonState,
       holds,
       deliver: deliverer(holds),
       /** A deliverer that has just started, as after a restart. */
@@ -979,6 +1061,155 @@ describe("codex delivery", () => {
         expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
       })
     ));
+
+  test("an eligible thread's nudge is followed by one borrow, and covered mail isn't borrowed again", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, daemonState, queueState, holds, deliver } = yield* setup;
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
+        expect(daemonState.borrows).toEqual(["t-1"]);
+        expect(holds.get("codex/a")?.covered?.reconciles).toBe(0);
+        yield* deliver;
+        expect(daemonState.borrows).toEqual(["t-1"]);
+        expect(queueState.opened).toBe(1);
+        // A borrow moves no cursor: only the owner's read does.
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
+      })
+    ));
+
+  test("a thread that can't be borrowed still gets its nudge, and says why once", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, daemonState, queueState, holds, deliver, send } = yield* setup;
+        queueState.rollout = (threadId) => ({
+          path: rolloutOf([snapshot(threadId, "on-request")]),
+          historyMode: "legacy",
+        });
+        yield* deliver;
+        yield* send("two");
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        expect(daemonState.borrows).toEqual([]);
+        expect(holds.get("codex/a")?.ineligible).toContain('approval policy is "on-request"');
+
+        // Nor is one whose rollout can't be found.
+        queueState.rollout = () => ({
+          path: join(tempDir(), "missing.jsonl"),
+          historyMode: "legacy",
+        });
+        yield* send("three");
+        yield* deliver;
+        expect(daemonState.borrows).toEqual([]);
+        expect(holds.get("codex/a")?.ineligible).toContain("can't be read");
+      })
+    ));
+
+  test("a failed borrow leaves the mail uncovered, and the retry borrows without a second nudge", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, daemonState, holds, deliver } = yield* setup;
+        daemonState.answer = "fails";
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.failures).toBe(1);
+        expect(holds.get("codex/a")?.covered).toBeUndefined();
+
+        daemonState.answer = "loaded";
+        yield* TestClock.adjust("29 seconds");
+        yield* deliver;
+        expect(daemonState.borrows.length).toBe(1);
+        yield* TestClock.adjust("1 second");
+        yield* deliver;
+        expect(daemonState.borrows.length).toBe(2);
+        expect(waiting("t-1").length).toBe(1);
+        expect(holds.get("codex/a")?.failures).toBe(0);
+      })
+    ));
+
+  test("unread mail is reconciled after 5, 15 and 60 minutes, then hourly, until the owner reads it", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, runNext, daemonState, holds, deliver } = yield* setup;
+        // Another process holds the thread, as a running codex exec might, and never runs the nudge.
+        daemonState.answer = "held";
+        yield* deliver;
+        const borrowsAfter = (wait: Duration.Input) =>
+          Effect.gen(function* () {
+            yield* TestClock.adjust(wait);
+            yield* deliver;
+            return daemonState.borrows.length;
+          });
+        expect(yield* borrowsAfter("299 seconds")).toBe(1);
+        // Our nudge still waits: the daemon is asked again, with no second nudge.
+        daemonState.answer = "loaded";
+        expect(yield* borrowsAfter("1 second")).toBe(2);
+        expect(waiting("t-1").length).toBe(1);
+
+        // The nudge ran but the turn didn't read: the next reconcile posts it again.
+        runNext("t-1");
+        expect(yield* borrowsAfter("14 minutes")).toBe(2);
+        expect(yield* borrowsAfter("1 minute")).toBe(3);
+        expect(waiting("t-1").length).toBe(1);
+        expect(yield* borrowsAfter("59 minutes")).toBe(3);
+        expect(yield* borrowsAfter("1 minute")).toBe(4);
+        expect(yield* borrowsAfter("60 minutes")).toBe(5);
+        expect(holds.get("codex/a")?.covered?.reconciles).toBe(4);
+
+        // Once read, nothing more.
+        yield* bus.take("codex/a", "t-1");
+        expect(yield* borrowsAfter("2 hours")).toBe(5);
+      })
+    ));
+
+  test("new mail is attempted at once, not on the old mail's schedule", () =>
+    run(
+      Effect.gen(function* () {
+        const { daemonState, holds, deliver, send } = yield* setup;
+        yield* deliver;
+        yield* send("two");
+        yield* deliver;
+        expect(daemonState.borrows.length).toBe(2);
+        expect(holds.get("codex/a")?.covered?.reconciles).toBe(0);
+      })
+    ));
+
+  test("a borrow's result belongs to the join it was for: a takeover during it is woken afresh", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, daemonState, holds, deliver } = yield* setup;
+        daemonState.gate = yield* Deferred.make<void>();
+        const borrowing = yield* Effect.forkChild(deliver);
+        while (daemonState.borrows.length === 0) yield* Effect.promise(() => Bun.sleep(5));
+        const holder = (yield* bus.peers).find((peer) => peer.address === "codex/a");
+        yield* bus.join({
+          address: "codex/a",
+          runtime: "codex",
+          session: "t-2",
+          cwd: process.cwd(),
+          codexThreadId: "t-2",
+          takeover: holder?.joinId,
+        });
+        yield* Deferred.succeed(daemonState.gate, undefined);
+        yield* Fiber.join(borrowing);
+        daemonState.gate = undefined;
+        expect(holds.get("codex/a")?.joinId).toBe(holder?.joinId);
+
+        yield* deliver;
+        expect(daemonState.borrows).toEqual(["t-1", "t-2"]);
+        expect(waiting("t-2").length).toBe(1);
+      })
+    ));
+
+  test("a subagent, refused at the queue, is never borrowed", () =>
+    run(
+      Effect.gen(function* () {
+        const { daemonState, queueState, deliver } = yield* setup;
+        queueState.queue = "subagent";
+        yield* deliver;
+        expect(daemonState.borrows).toEqual([]);
+      })
+    ));
 });
 
 describe("codex app-server queue", () => {
@@ -1018,6 +1249,7 @@ for await (const line of console) {
     reply(message.id, { result: { data: [], nextCursor: null } });
   }
   else if (message.method === "thread/queue/list") reply(message.id, { result: { data: [{ id: "q1", clientUserMessageId: "c1", input: [{ type: "text", text: "waiting", text_elements: [] }] }, { id: "q2", input: [{ type: "image", url: 7 }] }, { id: "q3" }], nextCursor: null } });
+  else if (message.method === "thread/read") reply(message.id, { result: { thread: { id: message.params.threadId, historyMode: "legacy", path: message.params.threadId === "t-1" ? "/codex/sessions/rollout-t-1.jsonl" : null } } });
   else reply(message.id, { result: { queuedSubmission: { id: "q2", clientUserMessageId: message.params.clientUserMessageId, input: message.params.input } } });
 }
 `
@@ -1056,6 +1288,21 @@ for await (const line of console) {
     expect(add?.params?.input).toEqual([
       { type: "text", text: "read your mail", text_elements: [] },
     ]);
+  });
+
+  test("a thread's rollout is found with a thread/read that loads nothing", async () => {
+    const codex = fakeCodex("answers");
+    const result = await withQueue(codex.bin, (queue) =>
+      Effect.all([queue.rollout("t-1"), queue.rollout("t-ephemeral")])
+    );
+    expect(result._tag === "Success" && result.success).toEqual([
+      { path: "/codex/sessions/rollout-t-1.jsonl", historyMode: "legacy" },
+      { path: undefined, historyMode: "legacy" },
+    ]);
+    expect(codex.requests()[2]).toMatchObject({
+      method: "thread/read",
+      params: { threadId: "t-1" },
+    });
   });
 
   test("a listing follows every page", async () => {
@@ -1108,6 +1355,346 @@ for await (const line of console) {
   test("a missing CLI is a failure, not a crash", async () => {
     const result = await withQueue(join(tempDir(), "missing"), (queue) => queue.list("t-1"));
     expect(result._tag).toBe("Failure");
+  });
+});
+
+describe("codex thread eligibility", () => {
+  const owned = (
+    approval: unknown,
+    snapshot: Partial<NonNullable<Settings["snapshot"]>>
+  ): Settings => ({
+    approval,
+    snapshot: { profileId: undefined, profile: { type: "disabled" }, mode: "default", ...snapshot },
+  });
+  const restricted = (...entries: Array<unknown>) => ({
+    type: "managed",
+    file_system: { type: "restricted", entries },
+    network: "restricted",
+  });
+  const root = { path: { type: "special", value: { kind: "root" } }, access: "read" };
+  const cwd = { path: { type: "path", path: "/work" }, access: "write" };
+
+  test("only a thread that can't wait on a person, and keeps its permissions on resume, is eligible", () => {
+    const eligible = (settings: Settings) => eligibility(settings).eligible;
+    // Never asks, in Default mode, with permissions a resume keeps: a built-in profile,
+    // full access, read-only.
+    for (const profileId of [":workspace", ":read-only", ":danger-full-access"]) {
+      expect(eligible(owned("never", { profileId, profile: restricted(root, cwd) }))).toBe(true);
+    }
+    expect(eligible(owned("never", { profile: { type: "disabled" } }))).toBe(true);
+    expect(eligible(owned("never", { profile: restricted(root) }))).toBe(true);
+    expect(
+      eligible(
+        owned("never", { profile: { type: "managed", file_system: { type: "unrestricted" } } })
+      )
+    ).toBe(true);
+    // A path that is only denied is kept too, and older names for Default mode count.
+    expect(
+      eligible(owned("never", { profile: restricted(root, { ...cwd, access: "deny" }) }))
+    ).toBe(true);
+    expect(eligible(owned("never", { mode: "code" }))).toBe(true);
+
+    // A turn could wait on an approval.
+    for (const approval of ["on-request", "untrusted", "on-failure", { granular: {} }]) {
+      expect(eligible(owned(approval, { profileId: ":danger-full-access" }))).toBe(false);
+    }
+    // Or on the user's answer, in Plan mode.
+    expect(eligibility(owned("never", { mode: "plan" }))).toMatchObject({
+      eligible: false,
+      reason: expect.stringContaining('"plan"'),
+    });
+    // The older workspace-write lists paths, which a resume drops for the daemon's default.
+    expect(eligibility(owned("never", { profile: restricted(root, cwd) }))).toMatchObject({
+      eligible: false,
+      reason: expect.stringContaining("workspace-write"),
+    });
+    expect(
+      eligible(
+        owned("never", {
+          profile: restricted({ path: { type: "glob_pattern", pattern: "*" }, access: "read" }),
+        })
+      )
+    ).toBe(false);
+    // A profile from the owner's config falls back to the default if it stops compiling.
+    expect(eligible(owned("never", { profileId: "my-profile" }))).toBe(false);
+    // With no snapshot of its own, a resume applies the daemon's default.
+    expect(eligible({ approval: "never", snapshot: undefined })).toBe(false);
+    expect(eligible({ approval: undefined, snapshot: undefined })).toBe(false);
+    // Kinds it doesn't know.
+    expect(eligible(owned("never", { profile: { type: "external", network: "restricted" } }))).toBe(
+      false
+    );
+    expect(
+      eligible(owned("never", { profile: { type: "managed", file_system: { type: "new-kind" } } }))
+    ).toBe(false);
+  });
+
+  const context = (approval: string) => ({
+    type: "turn_context",
+    payload: { approval_policy: approval },
+  });
+  const latest = (file: string, chunkSize?: number) =>
+    Effect.runPromise(latestSettings(file, "t-1", chunkSize));
+
+  test("approval comes from the latest record of either kind, permissions from the thread's own latest snapshot", async () => {
+    const said = {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [
+          { type: "input_text", text: 'a "turn_context" with "approval_policy":"on-request"' },
+        ],
+      },
+    };
+    const file = rolloutOf([
+      snapshot("t-1", "on-request", { profileId: ":workspace" }),
+      snapshot("t-1", "never", { profileId: ":danger-full-access" }),
+      // History copied from another thread, as a fork carries, isn't this thread's.
+      snapshot("t-parent", "never", { profileId: ":read-only" }),
+      context("never"),
+      said,
+      "{ a line still being written",
+    ]);
+    expect(await latest(file)).toEqual({
+      approval: "never",
+      snapshot: {
+        profileId: ":danger-full-access",
+        profile: { type: "disabled" },
+        mode: "default",
+      },
+    });
+    const newer = rolloutOf([snapshot("t-1", "never"), context("on-request")]);
+    expect((await latest(newer)).approval).toBe("on-request");
+    // Only another thread's snapshot: none of its own.
+    const copied = await latest(rolloutOf([snapshot("t-parent", "never"), context("never")]));
+    expect(copied).toEqual({ approval: "never", snapshot: undefined });
+  });
+
+  test("a rollout is read backwards in chunks, across lines that span them", async () => {
+    const long = { type: "response_item", payload: { text: "x".repeat(5_000) } };
+    const file = rolloutOf([
+      snapshot("t-1", "never"),
+      long,
+      long,
+      { type: "event_msg", payload: { type: "task_complete" } },
+    ]);
+    for (const chunkSize of [7, 64, 4_096, 1 << 20]) {
+      expect((await latest(file, chunkSize)).snapshot?.mode).toBe("default");
+    }
+    expect(await latest(rolloutOf([{ type: "session_meta", payload: {} }]), 7)).toEqual({
+      approval: undefined,
+      snapshot: undefined,
+    });
+  });
+
+  test("a rollout that is missing, or of a history mode it doesn't know, makes a thread ineligible, not a failure", async () => {
+    const check = (stored: Stored) => Effect.runPromise(readEligibility("t-1", stored));
+    expect(
+      await check({ path: join(tempDir(), "missing.jsonl"), historyMode: "legacy" })
+    ).toMatchObject({
+      eligible: false,
+      reason: expect.stringContaining("can't be read"),
+    });
+    expect(await check({ path: undefined, historyMode: "legacy" })).toMatchObject({
+      eligible: false,
+    });
+    const good = rolloutOf([snapshot("t-1", "never")]);
+    expect(await check({ path: good, historyMode: "legacy" })).toEqual({ eligible: true });
+    expect(await check({ path: good, historyMode: "paginated" })).toEqual({ eligible: true });
+    expect(await check({ path: good, historyMode: "segmented" })).toMatchObject({
+      eligible: false,
+      reason: expect.stringContaining("segmented"),
+    });
+    expect(await check({ path: good, historyMode: undefined })).toMatchObject({ eligible: false });
+  });
+});
+
+describe("codex daemon borrow", () => {
+  /** A Unix socket path short enough for macOS's limit, whatever the temp directory. */
+  const socketPath = () => join(mkdtempSync("/tmp/ab-"), "d.sock");
+
+  /**
+   * A stand-in daemon on a Unix socket: WebSocket JSON-RPC at `/rpc`. It
+   * records requests and answers each as `answer` says; "silent" sends nothing.
+   */
+  const standIn = (
+    answer: (
+      method: string,
+      count: number
+    ) => { result: unknown } | { error: { message: string } } | "silent",
+    socket = socketPath()
+  ) => {
+    const requests: Array<{ method: string; params?: unknown }> = [];
+    const counts = new Map<string, number>();
+    const state = { open: 0 };
+    const server = Bun.serve({
+      unix: socket,
+      fetch: (request, server) =>
+        new URL(request.url).pathname === "/rpc" && server.upgrade(request)
+          ? undefined
+          : new Response("not found", { status: 404 }),
+      websocket: {
+        open: () => {
+          state.open += 1;
+        },
+        close: () => {
+          state.open -= 1;
+        },
+        message: (ws, data) => {
+          const message = JSON.parse(String(data)) as {
+            id?: number;
+            method: string;
+            params?: unknown;
+          };
+          requests.push({ method: message.method, params: message.params });
+          if (message.id === undefined) return;
+          const count = (counts.get(message.method) ?? 0) + 1;
+          counts.set(message.method, count);
+          const reply =
+            message.method === "initialize" ? { result: {} } : answer(message.method, count);
+          if (reply !== "silent")
+            ws.send(JSON.stringify({ jsonrpc: "2.0", id: message.id, ...reply }));
+        },
+      },
+    });
+    return { socket, requests, state, stop: () => server.stop(true) };
+  };
+  const ok = (method: string) => ({
+    result: method === "thread/unsubscribe" ? { status: "unsubscribed" } : { thread: {} },
+  });
+  const refuse = (message: string) => ({ error: { message } });
+  const notStarted = Effect.fail(
+    new CodexError({ method: "app-server daemon start", message: "not expected" })
+  );
+
+  const borrow = (
+    socket: string,
+    start: Effect.Effect<void, CodexError> = notStarted,
+    timeout = Duration.seconds(2)
+  ) => Effect.runPromise(Effect.result(daemonBorrower({ socket, start, timeout }).borrow("t-1")));
+
+  test("a borrow resumes with a 5 s release, unsubscribes and disconnects, asking nothing else", async () => {
+    const daemon = standIn(ok);
+    const result = await borrow(daemon.socket);
+    expect(result._tag === "Success" && result.success).toBe("loaded");
+    expect(daemon.requests.map((r) => r.method)).toEqual([
+      "initialize",
+      "initialized",
+      "thread/resume",
+      "thread/unsubscribe",
+    ]);
+    expect(daemon.requests[0]?.params).toMatchObject({ capabilities: null });
+    expect(daemon.requests[2]?.params).toEqual({
+      threadId: "t-1",
+      excludeTurns: true,
+      config: { thread_unload_delay_secs: 5 },
+    });
+    for (let tries = 0; daemon.state.open > 0 && tries < 100; tries++) await Bun.sleep(10);
+    expect(daemon.state.open).toBe(0);
+    daemon.stop();
+  });
+
+  test("a thread another process holds is left to it", async () => {
+    const daemon = standIn(() => refuse("thread t-1 already has an active writer"));
+    const result = await borrow(daemon.socket);
+    expect(result._tag === "Success" && result.success).toBe("held");
+    expect(daemon.requests.map((r) => r.method)).not.toContain("thread/unsubscribe");
+    daemon.stop();
+  });
+
+  test("a thread being released is asked for once more, a second later", async () => {
+    const closing = refuse("thread t-1 is closing; retry thread/resume after the thread is closed");
+    const daemon = standIn((method, count) =>
+      method === "thread/resume" && count === 1 ? closing : ok(method)
+    );
+    const started = Date.now();
+    const result = await borrow(daemon.socket);
+    expect(result._tag === "Success" && result.success).toBe("loaded");
+    expect(Date.now() - started).toBeGreaterThanOrEqual(1_000);
+    expect(daemon.requests.filter((r) => r.method === "thread/resume").length).toBe(2);
+    daemon.stop();
+
+    const still = standIn(() => closing);
+    const again = await borrow(still.socket);
+    expect(again._tag === "Failure" && again.failure.message).toContain("is closing");
+    still.stop();
+  });
+
+  test("any other refusal fails with Codex's message", async () => {
+    const daemon = standIn(() => refuse("no rollout found for thread id t-1"));
+    const result = await borrow(daemon.socket);
+    expect(result._tag === "Failure" && result.failure.message).toContain("no rollout found");
+    daemon.stop();
+  });
+
+  test("a missing daemon is started, then borrowed; one that won't start fails the borrow", async () => {
+    const socket = socketPath();
+    let starts = 0;
+    let daemon: ReturnType<typeof standIn> | undefined;
+    const start = Effect.sync(() => {
+      starts += 1;
+      daemon = standIn(ok, socket);
+    });
+    const result = await borrow(socket, start);
+    expect(result._tag === "Success" && result.success).toBe("loaded");
+    expect(starts).toBe(1);
+    daemon?.stop();
+
+    const failing = await borrow(
+      socketPath(),
+      Effect.fail(
+        new CodexError({
+          method: "app-server daemon start",
+          message: "exited with 1: no managed package",
+        })
+      )
+    );
+    expect(failing._tag === "Failure" && failing.failure.message).toContain("no managed package");
+  });
+
+  test("a daemon that never answers is cut off at the deadline", async () => {
+    const daemon = standIn(() => "silent");
+    const started = Date.now();
+    const result = await borrow(daemon.socket, notStarted, Duration.millis(300));
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(result._tag === "Failure" && result.failure.message).toContain("no answer within");
+    daemon.stop();
+  });
+
+  /** A stand-in `codex` that records its arguments, then behaves as `mode` says. */
+  const fakeCli = (mode: "starts" | "fails" | "hangs") => {
+    const dir = tempDir();
+    const bin = join(dir, "codex");
+    const log = join(dir, "args");
+    writeFileSync(
+      bin,
+      `#!${process.execPath}
+await Bun.write(${JSON.stringify(log)}, JSON.stringify(process.argv.slice(2)));
+if (${JSON.stringify(mode)} === "fails") { console.error("error: no managed daemon package is installed"); process.exit(3); }
+if (${JSON.stringify(mode)} === "hangs") await Bun.sleep(60_000);
+`
+    );
+    chmodSync(bin, 0o755);
+    return { bin, args: () => JSON.parse(readFileSync(log, "utf8")) as Array<string> };
+  };
+
+  test("starting the daemon runs the CLI's daemon start, and reports why it failed", async () => {
+    const starts = fakeCli("starts");
+    expect((await Effect.runPromise(Effect.result(startDaemon(starts.bin))))._tag).toBe("Success");
+    expect(starts.args()).toEqual(["app-server", "daemon", "start"]);
+
+    const fails = await Effect.runPromise(Effect.result(startDaemon(fakeCli("fails").bin)));
+    expect(fails._tag === "Failure" && fails.failure.message).toContain(
+      "exited with 3: error: no managed daemon package"
+    );
+
+    const started = Date.now();
+    const hangs = await Effect.runPromise(
+      Effect.result(startDaemon(fakeCli("hangs").bin, Duration.millis(300)))
+    );
+    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(hangs._tag === "Failure" && hangs.failure.message).toContain("no answer within");
   });
 });
 

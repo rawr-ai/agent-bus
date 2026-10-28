@@ -19,7 +19,7 @@ What was installed on 2026-10-27, read on both machines with the read-only comma
 | Claude desktop app | 3.6556.2 | 3.6556.2 | `CFBundleShortVersionString` in `/Applications/Claude.app/Contents/Info.plist` |
 | Claude Code bundled in the desktop app | 2.1.308 | 2.1.308 | The version directory under `~/Library/Application Support/Claude/claude-code/` that running sessions use (`ps`) |
 
-The two machines don't match exactly: the other machine's daemon is a release ahead of its CLIs. Codex doesn't update a running daemon, so a daemon can differ from the CLI that started it.
+The two machines don't match exactly: the other machine's daemon is a release ahead of its CLIs. A managed daemon runs its own update loop, on by default, and restarts on a new version (read in code, 0.164), so a daemon can be ahead of the CLI that started it.
 
 ## Configuration the owner chose
 

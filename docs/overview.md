@@ -70,9 +70,10 @@ What is still open, unverified or accepted as a limit. What has been verified is
 
 | Item | Status |
 | --- | --- |
-| `codex exec` threads get a nudge only if opened in an app. The desktop's wake link could run it for threads loaded nowhere, at the cost of desktop ownership ([Codex hosting](architecture/codex-hosting.md#the-threadswake-link)) | **Open decision** for the owner ([codex-wake](frames/codex-wake.md), item 7) |
 | How long the desktop holds a thread its wake link woke | **Measured** past 34 min; likely until the app restarts or the thread is opened and left (inferred, [Codex hosting](architecture/codex-hosting.md#the-threadswake-link)) |
 | That a change to `thread_unload_delay_secs` takes effect without restarting the daemon | **Read in code, not tested** |
+| Which threads the daemon borrows depends on Codex's rollout format, read for each thread's stored permissions, since no Codex call reports them | **Accepted dependency** ([load-on-mail](frames/load-on-mail.md)): a format change makes threads ineligible, with a warning, which leaves them as they were before borrowing |
+| A thread borrowed while the desktop had let it go shows "open in another app" in the desktop until 5 s after it goes idle; whether the desktop's Retry fires by itself is unverified | **Accepted limit** ([load-on-mail](frames/load-on-mail.md#known-limits)) |
 | Another machine's desktop running a nudge; a desktop subagent's add being refused like the daemon's; a daemon-thread nudge where the daemon (0.165.0) is newer than the bundled CLI (0.164) | **Unverified** |
 | The desktop's installed Claude Code (2.1.308) behaving as the probed 2.1.310 did in stream-json mode | **Extrapolated** |
 | The queue methods (`thread/queue/*`) are experimental in the Codex app-server protocol | **Accepted risk:** `serve` uses the desktop's bundled CLI, so protocol and app move together; a change shows as logged errors, and the mail waits unread for the thread's next read |

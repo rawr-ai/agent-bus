@@ -87,9 +87,9 @@ The CLI prints each result as JSON and exits with status 5 when a tool returns `
 A wake only tells a session that mail is waiting; its own read delivers the mail ([why](docs/architecture/delivery.md#waking-is-separate-from-delivery)).
 
 - **Claude Code** sessions with the agent-bus plugin are woken by its hook, `agent-bus claude-wake`, which Claude Code runs in the background (`asyncRewake`) at session start and every turn end. It waits in `bus_wake` until the session's addresses have new mail, then wakes the session, in the desktop app and the terminal.
-- **Codex** threads join with their thread id. `serve` puts one nudge in the thread's own queue, through a short-lived `codex app-server` of its own, and whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs it as a turn. `serve` never loads a thread itself, so a thread never has a second writer.
+- **Codex** threads join with their thread id. `serve` puts one nudge in the thread's own queue, through a short-lived `codex app-server` of its own, and whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs it as a turn. For a thread loaded nowhere, `serve` asks the machine's daemon to borrow it: the daemon runs the nudge and lets the thread go 5 s after it goes idle. The writer lock refuses the borrow while another process holds the thread, so a thread never has a second writer. Only threads stored with approval `never` and permissions a resume keeps are borrowed.
 
-[Delivery](docs/architecture/delivery.md#how-each-kind-of-session-receives-mail) says which kinds of session are woken and when, and gives the policies; [Codex hosting](docs/architecture/codex-hosting.md) covers the app-servers, which threads run where, and what a TUI or SSH thread needs for its nudge to run.
+[Delivery](docs/architecture/delivery.md#how-each-kind-of-session-receives-mail) says which kinds of session are woken and when, and gives the policies; [Codex hosting](docs/architecture/codex-hosting.md) covers the app-servers, which threads run where, and what waking needs from each machine.
 
 ## Setup and other machines
 
