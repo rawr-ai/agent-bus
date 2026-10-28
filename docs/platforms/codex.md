@@ -1,6 +1,6 @@
 # Codex
 
-How Codex runs threads: the facts agent-bus rests on. What agent-bus does with them is in [Codex hosting](../architecture/codex-hosting.md) and [delivery](../architecture/delivery.md#codex-threads). Unless a statement names another version, these findings were made on Codex 0.164.0-alpha.11.1 and desktop 26.1021.31345. Each is marked with its basis, as [platforms](README.md#how-claims-are-marked) defines, and the [findings table](README.md#version-sensitive-findings) lists them with their versions.
+How Codex runs threads: the facts agent-bus rests on. What agent-bus does with them, and why, is in [delivery](../architecture/delivery.md); what it may do to a thread is in [connections](../architecture/connections.md). Unless a statement names another version, these findings were made on Codex 0.164.0-alpha.11.1 and desktop 26.1021.31345. Each is marked with its basis, as [platforms](README.md#how-claims-are-marked) defines, and the [findings table](README.md#version-sensitive-findings) lists them with their versions.
 
 ## The app-servers on a machine
 
@@ -14,6 +14,16 @@ A Codex thread runs in an app-server: the process that holds its state, runs its
 | Others | A private `codex app-server` on stdio; the OpenAI tunnel client (on demand) | stdio | Whatever their client starts |
 
 Verified live from the process lists on both machines, except the tunnel client's, which comes from the earlier [codex-wake](../frames/codex-wake.md) investigation and wasn't rechecked. `codex queue` is a client, not a server of its own: it adds through the running daemon, refuses `--no-daemon`, and starts an embedded server only when no daemon is running (read in `tui/src/session_queue_commands.rs`). The daemon may run a different version from the CLI: on the other machine it is 0.165.0 beside 0.164 CLIs, since the managed daemon updates itself ([below](#the-daemon)).
+
+## The bundled CLI and private app-servers
+
+- **The desktop app bundles a Codex CLI** at `/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex`. It is what the desktop runs as its own app-server, so it is the same build as the app-server that reads the desktop's queue (verified live from the process lists on both machines; the versions are in the [installed versions](README.md#installed-versions)).
+- **A private app-server loads nothing by itself.** A `codex app-server` started on stdio for the purpose answered `thread/queue/list`, `add` and `delete` on a thread nobody had loaded, each in well under 0.1 s, and never loaded the thread (verified live, 0.164.0-alpha.11.1, [queue-wake](../frames/queue-wake.md#what-it-rests-on)). `thread/read` works the same way (verified live, [load-on-mail](../frames/load-on-mail.md#decisions)).
+- **So a short-lived app-server never meets the writer lock.** The lock is taken when an app-server loads a thread ([below](#one-writer-per-thread)), and list, add, delete and read don't load it. They therefore work while the desktop or the daemon holds the thread, and while nobody does (the lock is verified live; that these calls never take it is read in code and consistent with the runs above).
+- **The queue methods are experimental,** and the CLI that makes the calls must speak the protocol of the app-server it reaches. The versions on the two machines differ: the other machine's daemon is 0.165.0 beside a bundled CLI of 0.164.0-alpha.11.1, and queue posts and resumes with no client worked on that pair (verified live 2026-10-28, [below](#a-resume-with-no-client)).
+- **A queue is per machine.** `queue_1.sqlite` is in the `~/.codex` of the machine that stores the thread, so only a client of the same user and Codex home, on that machine, reaches it. For a desktop SSH project that machine is the SSH host ([below](#across-machines-ssh-projects)).
+- **A launchd job has no `codex` on its `PATH`** (verified live), so a process that runs under launchd needs the CLI's path.
+- **A queued item that runs on a thread already loaded restarts the holder's idle clock,** so it can prolong that hold by up to the holder's delay (verified live, the second edge case [below](#how-long-a-thread-stays-loaded)).
 
 ## What Codex keeps where
 
@@ -38,6 +48,8 @@ A thread has one writer: the app-server holding its lock (verified live with two
 - Two turns never run at once: the rollout is one clean sequence.
 - After a crash, the lock file stays but nothing holds it, and another app-server can resume the thread at once. Each app-server's first acquisition sweeps such stale files (verified live).
 
+- **A client can attach to a thread the daemon holds** with `codex resume --remote unix:// <thread id>`, with no restart (reported in [codex-wake](../frames/codex-wake.md#operations-the-owners-machines); not rechecked).
+
 What a person sees (read in code): the TUI shows a read-only view, "This thread is open elsewhere". The desktop shows "This is open in another app", with **Retry** and **Fork chat**.
 
 
@@ -48,6 +60,7 @@ A thread's lock lasts as long as some app-server keeps it loaded. Read in Codex 
 **The setting.** `thread_unload_delay_secs`, at the top level of `config.toml` (not in profiles), in whole seconds: 1800 by default, and 0 unloads at once. An app-server unloads a thread at whichever is later of "no subscribers since" and "idle since", plus the delay. Closing a connection drops its subscriptions, so a TUI or SSH proxy exiting starts the clock.
 - **Per thread:** `thread/start` and `thread/resume` accept it in their `config`. Verified live: a thread started with 5 s on a 20 s server was released after 5.1 s, and a resume with 2 s after 2.0 s.
 - **Per server:** `-c` sets it for a whole app-server. But the daemon ignores `-c` for it: `daemon start` drops `-c`, and `daemon restart -c` keeps only boolean `features.*` (read in `cli/src/main.rs`, `backend/pid.rs`). So the daemon takes it only from `config.toml`, or per request.
+- **A client attached to the thread overrides the override.** The per-load value is ignored while a client is attached; the thread keeps the global delay after that client leaves. If the client had already left and the thread was idle, a resume rebuilt the thread and it went about 11 s after the client left instead of about 300 s (verified live 2026-10-27, [load-on-mail](../frames/load-on-mail.md#what-it-rests-on)).
 - **When an edit applies:** config is rebuilt from disk at each thread load, so an edit should apply to the next load without a restart (read in code, not tested).
 - **No release on demand:** `thread/unsubscribe` still waits for the delay, and 0.164 has no `thread/close` or `thread/unload`.
 
@@ -74,7 +87,7 @@ Each thread has a queue of input in `queue_1.sqlite`, reached through the experi
 - **An owner's edit keeps the ids.** `update` replaces an item's input under the same `id` and `clientUserMessageId` (read in code).
 - **`delete {threadId, queuedSubmissionId}` answers `{deleted}`,** with no condition on the item's content, and like `add` needs no loaded thread (read in code). The writer's dispatch reads an item, starts its turn, then deletes the row, under a lock local to its own app-server, so a delete from another server can land after the turn started and still answer `deleted: true`; `deleted: false` means the row was already gone (read in `ext/queue/src/service.rs`, inferred for the race).
 - **An unknown thread,** or a new one with no rollout yet, fails with "no rollout found"; an archived one with "session is archived" (verified live).
-- **A spawned subagent's queue refuses the add:** "direct app-server input is not allowed for unloaded spawned sub-agents" (verified live on the daemon; for desktop subagents, inferred from the same check).
+- **A spawned subagent's queue refuses the add:** "direct app-server input is not allowed for unloaded spawned sub-agents" (verified live on the daemon; for desktop subagents, inferred from the same check). The daemon's `turn/start` refuses a subagent with "direct app-server input is not allowed for multi-agent v2 sub-agents" (verified live, [codex-wake](../frames/codex-wake.md)).
 
 **How fast a queued item runs** (verified live, healthy path; this is the one place these numbers are kept):
 
@@ -118,6 +131,18 @@ A thread is desktop-capable when **the desktop app itself answers the thread's a
 - `CODEX_ELECTRON_DESKTOP_FEATURE_OVERRIDES` works only in development builds (read in code).
 
 **Full access is a different thing.** The sandbox and approval mode are parameters of each thread's `thread/start`, on any host, and grant no desktop features ([approvals for MCP tools](#approvals-for-mcp-tools)).
+
+## The desktop's IPC router
+
+Besides its app-server, the desktop app runs a local router that its windows use to coordinate. Read in the desktop bundle (`app.asar`, desktop 26.1021.31345; minified names change between builds, so search by string literal). Nothing was connected to it: the [spike](../frames/desktop-wake-spike.md#known-from-the-code-desktop-26102131345-read-not-run) that planned to was superseded before its first live gate.
+- **What it is.** A unix socket at `$CODEX_HOME/ipc/ipc.sock`, with a legacy fallback `$TMPDIR/codex-ipc/ipc-<uid>.sock` (the legacy directory exists on the bus host). The app's own client code unlinks a stale socket and listens itself when it can't connect.
+- **Who can reach it.** The directory is mode 0700 and the socket 0600, and there is no peer check, so any process of the same user can connect.
+- **What a client sees.** Framing is a 4-byte little-endian length and then JSON (256 MB cap). `initialize {clientType}` returns a `clientId`. The router then announces the new client to every window (`client-status-changed`) and sends it every broadcast, including `thread-stream-state-changed` for all threads. It doesn't check who sends a broadcast.
+- **What a client can ask.** Requests are versioned and the version must match exactly: `thread-owner-discovery` v1 `{hostId: "local", conversationId}`, start-turn v2 and steer v1, each one higher when `hostId` is set. A version mismatch during discovery comes back as `canHandle: false`, and then as `no-client-found`, the same as "no owner".
+- **Ownership.** The owner of a thread is a renderer window streaming it (`ownsThread`), not the app-server. A request goes from the router to client discovery to that window's follower handler to its app-server. Replies carry `handledByClientId`.
+- **Errors.** No owner: `no-client-found`, `client-not-found`. Outcome unknown: `request-timeout` (10 s by default, `timeoutMs` overrides it) and `connection-closed`. Unsupported: `no-handler-for-request`, `request-version-mismatch`. An owner can throw, for example "Conversation … is not being streamed".
+- **Input.** `responseItems` need the owner's `supportsUntrustedAppInput`, so only plain input is safe. `clientUserMessageId` can serve as a dedupe key, `inheritThreadSettings` governs the model and permissions, and a `thread-queued-followups` mechanism exists.
+- **The app-tools pipe is a separate route** to the same owner handler: it needs native peer authorization, so it adds no reach ([above](#what-desktop-capable-means)).
 
 ## Routes that create a thread
 
@@ -197,15 +222,34 @@ What happens when a client resumes a thread loaded nowhere, unsubscribes and dis
 - **A daemon thread with a client attached** resumes at once, since it is already loaded. The client stays subscribed and sees the turn, and the thread stays loaded until the client leaves.
 - **The turn may call any tool the thread has.** Some turns called `bus_join` before reading their mail, though the queued item didn't ask them to.
 
+## The gap after a thread is released
+
+A thread's writer lock is released when its app-server unloads it, and until some app-server resumes it the thread is loaded nowhere. In that gap any app-server on the machine can resume it, and the first to do so becomes the writer. Delivery's choice of a 5 s release rather than 0 rests on this section. Read in Codex 0.164.0-alpha.11.1, and verified live where marked.
+- **Whoever resumes first holds the thread for its own delay.** When the desktop's own app-server shut down (the app restarted), the daemon resumed a desktop thread four seconds later and became its writer for the full unload delay. The restarted desktop's app-server was then refused, and its window showed "open in another app" and took no input (observed in operation on 2026-10-26, [codex-wake](../frames/codex-wake.md#problem); not rerun).
+- **A resume answers by who holds the thread** (verified live 2026-10-27, [load-on-mail](../frames/load-on-mail.md#what-it-rests-on), on throwaway threads):
+
+| The thread is | The resume's answer |
+| --- | --- |
+| Loaded nowhere | It succeeds, and the lock is taken about 0.4 s after the request |
+| Held by another app-server | Refused in 7 ms: "already has an active writer" |
+| Being released at that moment | "thread … is closing; retry thread/resume after the thread is closed" (once in 30 tries; a retry 52 ms later succeeded) |
+| Unknown, or archived | "no rollout found", or "session is archived" |
+
+- **A per-resume delay shortens the hold.** A `thread/resume` that carries `thread_unload_delay_secs` in its `config` let the thread go 5.0–5.3 s after its queued turn ended, and another server could resume it at once ([above](#how-long-a-thread-stays-loaded) for the per-thread override and its limit while a client is attached). A resumed thread kept its model, effort, working directory and approval policy (verified live).
+- **Why not 0.** Unloading and queue dispatch fire on the same idle event, so with a delay of 0 they would race: the thread could be unloaded before its queued item was dispatched (read in code, as recorded in load-on-mail; the race wasn't tried live). A short, non-zero delay keeps the thread long enough for its queue to run, and still frees it within seconds.
+- **Two items queued before one resume** each ran once, in order, as their own turns (verified live).
+
 ## The daemon
 
-- **Starting.** `codex app-server daemon start` runs the managed package in `~/.codex/packages/app-server-daemon/`, installing it from the invoking CLI only if none is present. The daemon runs in a session of its own, so it outlives whatever started it, and it raises its own soft open-file limit to 4096 (read in code, 0.164). `codex app-server daemon version` reports the managed path and versions (verified live).
-- **Updating.** A started daemon runs an update loop, on by default, but only for a stable standalone release, or while an installer's latest-release marker is pending (`app-server-daemon/src/lib.rs`). The bus host's managed package is a `local-…` build, so it likely never updates (inferred). A new version restarts it, which reloads its threads under the global unload delay, so a daemon can be ahead of the CLI that started it (read in code, 0.164; seen on the other machine).
+- **Starting.** `codex app-server daemon start` runs the managed package in `~/.codex/packages/app-server-daemon/`, installing it from the invoking CLI only if none is present. The daemon runs in a session of its own, so it outlives whatever started it, and it raises its own soft open-file limit to 4096 (read in code, 0.164). `codex app-server daemon version` reports the managed path and versions (verified live). The package's binary is `~/.codex/packages/app-server-daemon/current/bin/codex`, and a CLI with no package manifest can't install it. `daemon bootstrap` installs no login item or launchd job, so nothing starts the daemon at boot (read in code, 0.164).
+- **Open-file limits.** The managed daemon raises its own soft open-file limit to 4096 (read in code, 0.164); this wasn't observed live, since macOS shows another process's limit only to root. Whether it leaves a higher inherited limit alone is unknown. A daemon started from a shell has that shell's soft limit, and the daemons on both machines ran out of descriptors as threads loaded ("Too many open files") until they were restarted from a login shell with `ulimit -S -n 10240` (observed in operation on 2026-10-26, [codex-wake](../frames/codex-wake.md#operations-the-owners-machines); not rerun). The SSH-started daemon below doesn't raise its limit (inferred). `codex app-server daemon restart` refuses a daemon it didn't start itself, which needs `kill -TERM` and then `daemon start` instead (reported in codex-wake). The procedures are in the [runbooks](../runbooks/operate.md).
+- **Updating.** A started daemon runs an update loop, on by default, but only for a stable standalone release, or while an installer's latest-release marker is pending (`app-server-daemon/src/lib.rs`). The bus host's managed package is a `local-…` build, so it likely never updates (inferred). A new version restarts it, which reloads its threads under the global unload delay, so a daemon can be ahead of the CLI that started it (read in code, 0.164; seen on the other machine). The reverse was seen too: a daemon on 0.163.0-alpha.10.2 beside a 0.164.0-alpha.11.1 CLI (observed 2026-10-26, codex-wake).
 - **SSH projects start one too.** On the bus host, after the daemon was stopped, a new one was running within 5 s, twice, under an incoming SSH session from another machine's desktop SSH project: the desktop's bundled CLI as `codex -c features.code_mode_host=true app-server --listen unix://` (verified live 2026-10-28). `codex app-server proxy` itself only connects to the socket and fails if nothing listens (`cli/src/main.rs`, `stdio-to-uds/src/lib.rs`), so the desktop's SSH connection must start the server before running it (inferred).
 - **That one isn't the managed daemon.** It runs without `--managed-daemon`, so it neither raises its file limit nor runs the update loop (inferred from `app-server/src/lib.rs`).
 - **Stopping.** `codex app-server daemon stop` stops a daemon the managed lifecycle started. It left the SSH-started one running (verified live).
 - **The managed update loop restarts only a running daemon** (`app-server-daemon/src/update_loop.rs`, `try_restart_if_running`, read in 0.164.0-alpha.11.1). It survives `daemon stop`, and doesn't start the daemon again. On the other machine (0.165.0), with no SSH client starting one, a managed daemon was listening 2 s after a stop, once mail reached a thread there: `serve` started it (verified live 2026-10-28; who started it is inferred from these rules and its `--managed-daemon` command line).
 - **The daemon keeps the login it started with.** After `~/.codex/auth.json` changed to another user of the same workspace, the running daemon still reported the earlier user and that user's exhausted weekly limit, and the turns it ran failed with "Your workspace is out of credits", while a new process's turns succeeded. A restarted daemon used the current login (verified live 2026-10-28, bus host, 0.164.0-alpha.11.1).
+- **A daemon can wedge.** Its socket still accepts a connection, but requests get no answer within their deadline (observed in operation, with no cause or basis recorded; it needs restarting by hand, see [recover](../runbooks/recover.md)).
 
 ## `codex exec`
 
@@ -218,8 +262,43 @@ What happens when a client resumes a thread loaded nowhere, unsubscribes and dis
 
 The queue service's automatic dispatch runs nothing while a thread's status is `Interrupted`, and ignores the idle event an interrupt causes (read in `ext/queue/src/service.rs`, 0.164.0-alpha.11.1). The status comes back with the thread: after a turn was interrupted (by the user's Stop, or by a `codex exec` run exiting mid-turn), a later resume loaded the thread, wrote its settings record and ran nothing, while the queued item kept waiting (verified live 2026-10-28, bus host daemon). Automatic delivery resumes only after new input starts a turn. An explicit `thread/queue/start` on a server that has the thread loaded isn't subject to this check (read in code), so it would start the item.
 
+## Persisted status events
+
+A resume restores a thread's status from the latest status event in its own rollout (read in `core/src/agent/status.rs` and `core/src/session/mod.rs`, Codex 0.164.0-alpha.11.1; the list is checked against the rollout reader in `src/rollout.ts`). Only three are written (`rollout/src/policy.rs`):
+- **`task_started`,** when a turn begins;
+- **`task_complete`,** when it ends, which may carry an error;
+- **`turn_aborted`,** with a `reason`.
+
+`error` and `shutdown_complete` are transient and never written. What the latest one means for the queue:
+- **`turn_aborted` with reason `interrupted` or `budget_limited`** restores `Interrupted`, and the queue then runs nothing ([above](#an-interrupted-thread-runs-no-queued-input)).
+- **A last `task_started`** (a crash mid-turn) restores no `Interrupted` status, and the queue dispatches.
+- **Other abort reasons** map to `Errored`, which dispatches too.
+- **A thread that has never run a turn** has no event and is not interrupted.
+- **A fork by reference** (its `session_meta` has `history_base`) resumes with its lineage's history up to the fork point (`thread-store/src/local/model_context.rs`), so a fork with no event of its own takes its status from an ancestor's.
+
+## Hooks
+
+- **A thread's hooks are built once, when it is loaded.** Codex builds them at session construction (`Hooks::new`, `core/src/session/session.rs`) and nothing reloads them: a loaded thread keeps calling a hook's command after `hooks.json` changes, until its app-server restarts (read in code, Codex 0.164; [simplification-pass](../frames/simplification-pass.md#what-it-rests-on)). Consistent with that, a daemon thread loaded before a hook was removed ended its turns with no failure recorded once the command had become a no-op (verified live 2026-10-27, [simplification-pass](../frames/simplification-pass.md#qualification-2026-10-27)).
+- **A failing hook never blocks a turn.** A `Stop` hook that exits 1 is recorded as a failure and the turn ends; only exit 2 with stderr, or `decision: block`, continues a turn (read in `hooks/src/events/stop.rs`, Codex 0.164). A `Stop` hook never starts a turn on an idle thread (verified live, [research](../research/mcp-native-messaging.md#mechanisms-by-client-and-session-state)).
+- **A hook's trust record lives in `~/.codex/config.toml`** (`hooks.state`, keyed by `hooks.json`, event and position) and outlasts the hook. It carries a hash and was still there on both machines after the hook was removed (verified live, simplification-pass).
+
+## Thread ids and `CODEX_THREAD_ID`
+
+`CODEX_THREAD_ID` is the id a Codex thread's address belongs to. Verified in qualification on 2026-10-26 (Codex 0.164, [address-ownership](../frames/address-ownership.md#verified-and-unverified)):
+- **Where it is set:** in the shells a Codex thread runs, including a desktop Local thread's, where it equals the thread id.
+- **A subagent has its own,** distinct from its parent's. Codex documents that a subagent's hooks carry the parent's `session_id`.
+- **A child process inherits both runtimes' ids.** A `codex exec` thread started from a Claude shell has its own `CODEX_THREAD_ID` and also the Claude session's id. A process that reads the wrong variable acts as the parent, as a subagent does.
+- **Whether it reaches an MCP server's environment** wasn't checked.
+- **A thread keeps the tool list it connected with.** One whose list predated a new `session` parameter could still pass it as an extra argument, with no reconnect (verified live).
+
+## What a Codex plugin can carry
+
+Codex 0.164 plugins can carry skills as `skills/<name>/SKILL.md` and an `.mcp.json` with `mcpServers` (read in code, in the source's plugin tests, as recorded in [docs-consolidation](../frames/docs-consolidation.md#what-it-rests-on)). No plugin was installed or loaded here. A long skill body appears to be truncated when it is shown to the model (inferred; unverified, and to be verified live in the docs-consolidation work). How Codex loads a plugin's skills into a running thread is unverified.
+
 ## Approvals for MCP tools
 
 Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe: read-only, or neither destructive nor open-world, with an unset hint counting as destructive and open-world (verified live and read in `core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval`, Codex 0.164).
 - **This is the default, `auto`, approval mode.** A server's `default_tools_approval_mode`, or a tool's `approval_mode`, in `[mcp_servers.<name>]` can be `prompt`, which asks for every call, `writes`, which asks for every call not marked read-only, or `approve`, which allows every call, destructive or not (read in `codex-mcp/src/mcp/mod.rs` and `server.rs`).
 - **Strict auto-review** skips the annotation exemption (read in `maybe_request_mcp_tool_approval`).
+- **A call that asks for approval with no client attached waits.** A resumed turn waited 150 s, the time watched, holding the lock, with no timeout in the code; a client that subscribed later saw the replayed request and could answer it. Under `never`, the call failed at once and the turn finished (verified live 2026-10-27, [load-on-mail](../frames/load-on-mail.md#what-it-rests-on)).
+- **Annotated tools need no approval on a sandboxed thread.** Two read-only or non-destructive closed-world tools, called on a sandboxed daemon thread that approves on request, asked for none (verified live, same source).

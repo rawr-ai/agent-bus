@@ -6,7 +6,7 @@ A Claude Code session on the bus is woken when mail arrives for an address it ow
 
 ## The problem
 
-Today a Claude session runs `agent-bus wait --address <address>` as a background command, one per address. The command reads the mail, prints it and exits, and its exit wakes the session. The model must then start it again. If it forgets, delivery stops without any sign ([overview](../overview.md#questions-for-a-simplification-pass), question 8).
+Today a Claude session runs `agent-bus wait --address <address>` as a background command, one per address. The command reads the mail, prints it and exits, and its exit wakes the session. The model must then start it again. If it forgets, delivery stops without any sign ([retired mechanisms](README.md#retired-mechanisms)).
 
 The idea taken into framing was a Claude Code plugin whose `monitors` entry runs a streaming `agent-bus watch`, so that the host, not the model, keeps the wake armed. Plugin monitors turned out never to start where the owner works, in the desktop app. Hooks with `asyncRewake` do what the monitor was meant to do, in both the desktop app and the terminal.
 

@@ -4,7 +4,7 @@ A pub/sub message bus that lets Claude and Codex sessions talk to each other. Se
 
 Built on Bun and Effect 4. Each machine runs one bus process, `agent-bus serve`, which serves the bus tools over MCP (streamable HTTP, `effect/ai`'s `McpServer`) on loopback and wakes that machine's Codex sessions. Storage is a Fluree ledger on the bus's own transaction server, behind a `Ledger` service; the unit tests use a JSONL file instead.
 
-The [overview](docs/overview.md) maps the system and links to the architecture: [topology](docs/architecture/topology.md) (machines, processes and stores), [Codex hosting](docs/architecture/codex-hosting.md) (what the bus runs on Codex) and [delivery](docs/architecture/delivery.md) (how each kind of session is woken). Platform facts, with their versions, are in [platforms](docs/platforms/README.md): [Codex](docs/platforms/codex.md), [Claude Code](docs/platforms/claude-code.md) and [Fluree](docs/platforms/fluree.md).
+The [overview](docs/overview.md) maps the system and links to the architecture: [topology](docs/architecture/topology.md) (machines, processes and stores), [messaging](docs/architecture/messaging.md) (addresses, ownership and the ledger) and [delivery](docs/architecture/delivery.md) (how each kind of session is woken). Platform facts, with their versions, are in [platforms](docs/platforms/README.md): [Codex](docs/platforms/codex.md), [Claude Code](docs/platforms/claude-code.md) and [Fluree](docs/platforms/fluree.md).
 
 ## Commands
 
@@ -90,7 +90,7 @@ A wake only tells a session that mail is waiting; its own read delivers the mail
 - **Claude Code** sessions with the agent-bus plugin are woken by its hook, `agent-bus claude-wake`, which Claude Code runs in the background (`asyncRewake`) at session start and every turn end. It waits in `bus_wake` until the session's addresses have new mail, then wakes the session, in the desktop app and the terminal.
 - **Codex** threads join with their thread id. `serve` puts one nudge in the thread's own queue, through a short-lived `codex app-server` of its own, and whichever app-server has the thread loaded (the desktop app's, or the daemon's) runs it as a turn. For a thread loaded nowhere, `serve` asks the machine's daemon to borrow it: the daemon runs the nudge and lets the thread go 5 s after it goes idle. The writer lock refuses the borrow while another process holds the thread, so a thread never has a second writer. Only threads stored with approval `never` and permissions a resume keeps are borrowed.
 
-[Delivery](docs/architecture/delivery.md#how-each-kind-of-session-receives-mail) says which kinds of session are woken and when, and gives the policies; [Codex hosting](docs/architecture/codex-hosting.md) covers the app-servers, which threads run where, and what waking needs from each machine.
+[Delivery](docs/architecture/delivery.md#how-each-kind-of-session-receives-mail) says which kinds of session are woken and when, and gives the policies; [platforms: Codex](docs/platforms/codex.md) covers the app-servers and which threads run where, and [install](docs/runbooks/install.md) what waking needs from each machine.
 
 ## Setup and other machines
 

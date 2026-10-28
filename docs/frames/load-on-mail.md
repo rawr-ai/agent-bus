@@ -31,7 +31,7 @@ A borrow can land in the same gap: when the desktop has let a thread go, the dae
 
 ## What it rests on
 
-The platform facts are in [Codex hosting](../architecture/codex-hosting.md) and the investigation behind it.
+The platform facts are in [platforms: Codex](../platforms/codex.md) and the investigation behind it.
 
 - **One program, one loader.** Every Codex server is the same program, `codex app-server`, and any of them can load any thread stored in that machine's `~/.codex`. A writer lock per thread allows one loader at a time, and loading a thread drains its queue. (Live, Codex 0.164.0-alpha.11.1.)
 - **Only the desktop's own server has desktop features.** Neither the daemon nor any server we start can get them. (Live and in code, desktop 26.1021.31345.)

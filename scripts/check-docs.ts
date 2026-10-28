@@ -25,33 +25,12 @@
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { join, posix, resolve } from "node:path";
 
-// Pages still awaiting reshaping. Phase 2 of the docs-consolidation frame empties it.
-export const SHAPE_ALLOWLIST: ReadonlyArray<string> = [
-  "docs/architecture/topology.md",
-  "docs/architecture/delivery.md",
-  "docs/architecture/connections.md",
-  "docs/architecture/codex-hosting.md",
-];
+// Pages exempt from the shape check while they are being reshaped. Keep it empty.
+export const SHAPE_ALLOWLIST: ReadonlyArray<string> = [];
 
-// Today's links from current pages into frames or research, as "<file> -> <target>".
-// Phase 2 of the docs-consolidation frame empties it.
-export const FRAME_LINK_ALLOWLIST: ReadonlyArray<string> = [
-  "docs/architecture/codex-hosting.md -> docs/frames/codex-wake.md",
-  "docs/architecture/codex-hosting.md -> docs/frames/desktop-wake-spike.md",
-  "docs/architecture/codex-hosting.md -> docs/frames/load-on-mail.md",
-  "docs/architecture/delivery.md -> docs/frames/claude-wake.md",
-  "docs/architecture/delivery.md -> docs/frames/load-on-mail.md",
-  "docs/architecture/delivery.md -> docs/frames/nudge-hygiene.md",
-  "docs/architecture/delivery.md -> docs/frames/one-codex-route.md",
-  "docs/architecture/delivery.md -> docs/frames/queue-wake.md",
-  "docs/overview.md -> docs/frames/address-ownership.md",
-  "docs/overview.md -> docs/frames/claude-wake.md",
-  "docs/overview.md -> docs/frames/finish-swap.md",
-  "docs/overview.md -> docs/frames/load-on-mail.md",
-  "docs/overview.md -> docs/frames/one-codex-route.md",
-  "docs/overview.md -> docs/frames/queue-wake.md",
-  "docs/overview.md -> docs/frames/simplification-pass.md",
-];
+// Links from current pages into frames or research allowed outside History, as
+// "<file> -> <target>". Keep it empty: cite a frame from the History footer.
+export const FRAME_LINK_ALLOWLIST: ReadonlyArray<string> = [];
 
 const ARCHITECTURE_SECTIONS = ["What it does", "Rules", "Why", "Limits", "Rests on", "History"];
 const OVERVIEW = "docs/overview.md";
