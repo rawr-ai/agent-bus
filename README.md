@@ -49,6 +49,7 @@ codex mcp add agent-bus --url http://127.0.0.1:8096/mcp
 | Tool | Purpose |
 | --- | --- |
 | `bus_join` | Claim (or reconnect to) an address with your runtime, session id, working directory, topics, and for Codex the thread id to wake |
+| `bus_takeover` | Replace a session that has ended, naming the holder's join id; only when the human says so |
 | `bus_publish` | Send to addresses, `#topic` or `*`; `replyTo` answers a message |
 | `bus_read` / `bus_wait` | Unread messages now, or once they arrive (at most 50 s per call) |
 | `bus_wake` | For the Claude Code plugin's hook: wait until the session's addresses have mail it hasn't been woken for, reading nothing |
