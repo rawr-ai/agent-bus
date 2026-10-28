@@ -768,6 +768,12 @@ describe("codex delivery", () => {
       items.set(threadId, [...queued(threadId), item]);
       return item;
     };
+    /** An item in place of the one with this id, whatever Codex might do to it. */
+    const replace = (threadId: string, id: string | undefined, item: Queued) =>
+      items.set(
+        threadId,
+        queued(threadId).map((each) => (each.id === id ? item : each))
+      );
     /** The owner edits an item, which keeps its ids. */
     const edit = (threadId: string, id: string | undefined, text: string) =>
       items.set(
@@ -822,7 +828,7 @@ describe("codex delivery", () => {
     });
     /** Whichever app-server has the thread loaded runs its next waiting item. */
     const runNext = (threadId: string) => items.set(threadId, queued(threadId).slice(1));
-    return { openQueue, waiting, queued, put, edit, runNext, queueState };
+    return { openQueue, waiting, queued, put, edit, replace, runNext, queueState };
   };
 
   /**
@@ -1117,6 +1123,35 @@ describe("codex delivery", () => {
         expect(queueState.removed).toEqual([]);
         expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
         expect(holds.get("codex/a")?.posted).toBeUndefined();
+      })
+    ));
+
+  test("removal needs both of our ids and our text: an item matching only some of them is left", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, put, queued, replace, runNext, queueState, deliver, send } =
+          yield* setup;
+        // Our id, our text, another client id.
+        yield* deliver;
+        const ours = queued("t-1")[0];
+        replace("t-1", ours?.id, {
+          id: ours?.id,
+          clientUserMessageId: "other",
+          text: ours?.text ?? "",
+        });
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(queueState.removed).toEqual([]);
+        runNext("t-1");
+        // Ours has run; the owner queues our text word for word, with ids of its own.
+        yield* send("two");
+        yield* deliver;
+        runNext("t-1");
+        put("t-1", formatNudge("codex/a"));
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(queueState.removed).toEqual([]);
+        expect(waiting("t-1")).toEqual([formatNudge("codex/a")]);
       })
     ));
 
