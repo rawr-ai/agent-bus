@@ -7,8 +7,9 @@
 2. **Fewer empty turns after a mid-turn read.** When a thread reads its mail some other way while our nudge waits (a `bus_read` or `bus_wait` in a running turn), `serve` takes that nudge back out of the queue if it can.
 3. **No pointless borrows of interrupted threads.** A thread whose last turn was interrupted isn't borrowed, since Codex won't run its queue. The log says why, once per join.
 4. **The checks still open:** `serve` starting the daemon itself, live; and the 15- and 60-minute reconciles.
+5. **A sandboxed thread can join without approval.** Takeover moves out of `bus_join` into its own tool, so `bus_join` no longer says it is destructive.
 
-Nothing here changes which threads can be woken, or adds a way to start or steer a turn. Decision 2 adds one new write, removing a nudge of our own, which needs the owner's approval before build (see [Policy](#policy-for-the-owner)).
+Nothing here changes which threads can be woken, or adds a way to start or steer a turn. Decision 2 adds one new write, removing a nudge of our own, which the owner approved (see [Policy](#policy-for-the-owner)).
 
 ## The problem
 
@@ -32,6 +33,10 @@ Each of these was seen live on 2026-10-28 (Codex 0.164.0-alpha.11.1 on the bus h
   - Each reconcile then borrows the thread, loads it, writes a settings record, runs nothing and lets it go.
   - The log claims the daemon "loaded its thread to run it".
   - The third-reconcile warning gives no reason.
+
+**Joins outside full access.**
+- Codex 0.164 asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access, the server is set to approve, or the tool says it is read-only, or neither destructive nor open-world (`core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval`; `codex-mcp/src/mcp/mod.rs`).
+- agent-bus's tools say so, except `bus_join`, which says it is destructive because its optional `takeover` replaces another session's hold ([connections](../connections.md#approval-in-codex)). So a read-only thread under `never` can read and answer its mail, but can't join or rejoin itself. Seen while setting up this release's persistent reviewers: a read-only Codex reviewer would have needed the coordinator to join it.
 
 **Open checks.**
 - `serve` starting the daemon never ran live. On the bus host, a desktop SSH project from another machine restarted the daemon within 5 s of each stop.
@@ -103,10 +108,19 @@ Read in the Codex 0.164.0-alpha.11.1 source unless marked.
 - **Elsewhere:**
   - `docs/connections.md`: what `serve` may do to Codex threads;
   - the MCP instructions in `src/mcp.ts`: the removal, and don't rejoin when nudged;
-  - [platforms: Codex](../platforms/codex.md): queue ids, delete and editing;
+  - [platforms: Codex](../platforms/codex.md): queue ids, delete and editing, and the MCP approval rule with its config override;
+  - decision 6: `docs/connections.md#approval-in-codex`, the README's takeover paragraph, `docs/overview.md`, and the MCP instructions;
   - the frame: results.
 
+**6. Takeover is its own tool.**
+- **The split.** `bus_join` loses its `takeover` parameter and says it is neither destructive nor open-world, like `bus_publish`. A new `bus_takeover` takes the same inputs plus the holder's join id (required), and says it is destructive. Its behaviour is today's join with `takeover`, unchanged: the same lock, the same check of the current join id, unread mail carried over, the previous owner refused from then on.
+- **The refusal** for a held address names `bus_takeover` and the join id, in place of "rejoin with takeover".
+- **The CLI** keeps `agent-bus join --takeover`: a shell isn't asked for MCP approval.
+- **What it changes.** A sandboxed Codex thread under `never` can join and rejoin itself; a takeover still needs approval or full access, so replacing another session stays the human's call. Claude Code reads the same hints for its own permission prompts, so the same holds there.
+
 ## Policy for the owner
+
+**Chosen: (a)**, by the owner on 2026-10-28.
 
 Decision 2 is the first time `serve` would remove anything from a thread's queue. It removes only an item it added or recorded, with matching ids and identical text. The one exposure is an owner editing that nudge in the milliseconds between the list and the delete. The choice:
 - **(a) Take decision 2 as written** (recommended): it saves an empty turn after most mid-turn reads, for a race that needs an edit of the bus's own nudge in a window of milliseconds.
@@ -143,6 +157,10 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
   - mail arriving between the empty read and the delete is woken on the next cycle;
   - a partial read leaves the nudge;
   - a posted record survives a failed rollout read or a failed borrow, and is removed after a later read.
+- **Takeover:**
+  - `bus_join` has no `takeover` input and isn't marked destructive; `bus_takeover` is, and requires the join id;
+  - a takeover through `bus_takeover` behaves as today's (unread carried over, the old owner refused); a stale join id is refused;
+  - the held-address refusal names `bus_takeover`.
 - **Eligibility:**
   - a last `turn_aborted` with `interrupted` or `budget_limited` is ineligible;
   - other abort reasons, a `task_complete` carrying an error, a later `task_started`, or a last `task_started` from a crash are not;
@@ -156,6 +174,7 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
 4. `serve` starts the daemon on the other machine (decision 4, with the owner's go-ahead).
 5. The 5-, 15- and 60-minute reconciles, and the warning that names the reason.
 6. The Director, observed: no empty turn after its mid-turn reads.
+7. A read-only Codex thread under approval `never` joins itself with `bus_join`, and is refused `bus_takeover`.
 
 ## Reviews
 
