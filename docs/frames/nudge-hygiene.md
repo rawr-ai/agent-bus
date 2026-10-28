@@ -5,7 +5,7 @@
 [load-on-mail](load-on-mail.md) wakes Codex threads with mail, including threads loaded nowhere. Its qualification found three ways the wake costs more than it should, or achieves nothing. This release closes them, and finishes two checks that qualification couldn't make.
 1. **No empty turn after a rejoin.** A woken thread that calls `bus_join` before reading doesn't get a second nudge.
 2. **Fewer empty turns after a mid-turn read.** When a thread reads its mail some other way while our nudge waits (a `bus_read` or `bus_wait` in a running turn), `serve` takes that nudge back out of the queue if it can.
-3. **No pointless borrows of interrupted threads.** A thread whose last turn was interrupted isn't borrowed, since Codex won't run its queue. The log says why, once per join.
+3. **No pointless borrows of interrupted threads.** A thread whose last turn was interrupted isn't borrowed, since Codex won't run its queue. The log says why, once per run of joins and reason.
 4. **The checks still open:** `serve` starting the daemon itself, live; and the 15- and 60-minute reconciles.
 5. **A sandboxed thread can join without approval.** Takeover moves out of `bus_join` into its own tool, so `bus_join` no longer says it is destructive.
 
@@ -87,7 +87,7 @@ Read in the Codex 0.164.0-alpha.11.1 source unless marked.
 - **No status event in its own file:**
   - A thread that has never run a turn is not interrupted.
   - A fork by reference (its `session_meta` has `history_base`) is ineligible: "it hasn't run a turn since it was forked, so its status comes from another thread's history". Following the lineage isn't worth it for a thread that has never run.
-- **The nudge stays posted.** It runs once new input starts a turn, which is when Codex resumes the queue. The warning is logged once per join, and the third-reconcile warning names the reason.
+- **The nudge stays posted.** It runs once new input starts a turn, which is when Codex resumes the queue. The warning is logged once per run of joins and reason, and the third-reconcile warning names the reason.
 - **Not `thread/queue/start`,** though it bypasses the interrupted check. It would have the bus start a turn the owner just stopped, which crosses delivery policy 7. Stop is the owner's signal.
 
 **4. Finish load-on-mail's open checks.**
@@ -144,7 +144,8 @@ Decision 2 is the first time `serve` would remove anything from a thread's queue
 - **Retraction depends on experimental queue methods,** like the post itself.
 - **An interrupted thread's mail waits** for the owner's next input. The nudge stays queued for it, and the log says why.
 - **After an ordinary rejoin,** a nudge that was consumed and cut off (the `exec` case) is re-posted only at the next reconcile, not at once.
-- **Only a nudge this `serve` added is removed.** One found waiting (an add whose answer timed out, or one from before a `serve` restart or this release's deploy) still covers the mail but runs once, empty, after a mid-turn read (Fable).
+- **Only a nudge this `serve` added in the current run of joins is removed.** One found waiting (an add whose answer timed out, one from an earlier run, after a replay or a leave, or one from before a `serve` restart or this release's deploy) still covers the mail but runs once, empty, after a mid-turn read (Fable, Opus).
+- **Removal holds the address's lock** for up to 6 s while a short-lived app-server lists and deletes, on the first cycle after the read, so a `bus_read` or `bus_wait` by the same thread can wait that long (Opus). The post already did the same.
 
 ## Qualification
 
@@ -203,3 +204,10 @@ Astra (max) and Fable reviewed the first draft, both against the 0.164 source. A
 - **A rejoin without topics dropped subscriptions** (Astra must-fix): it keeps them now (decision 1). Its other half, that `bus_join` must be marked destructive while it can change topics at all, is rejected with the reason in decision 6.
 - **Permission claims** (both): Codex's conditions are stated; the Claude Code equivalence is removed (decision 6).
 - **The CLI's `--takeover`, the refusal text, the takeover precondition, the reversal of one-codex-route, the stale memory, and the limits on found nudges** (Astra and Fable optional).
+
+**Code review** (2026-10-28) by Sol and Opus as persistent reviewers on the bus, of `2dfbb5e..dece53c`. Opus: ship, no P1 or P2; seven P3s, all accepted:
+- back-off and failures could carry from an earlier join within one cycle: they now belong to the join;
+- a peer in back-off wasn't checked for removal, so a read inside the back-off waited up to 5 minutes: back-off now holds off posting only;
+- the warning is per run and reason: a different reason is logged again;
+- docs: the limit on found nudges includes an earlier run's; removal's hold on the lock; the `codex exec` row;
+- tests: an older client passing `takeover` to `bus_join`, a failed rollout read, removal outcomes not warning, and a rejoin while a borrow is in flight.

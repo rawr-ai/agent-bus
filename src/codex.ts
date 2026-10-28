@@ -561,8 +561,8 @@ interface Hold {
    * only on the reconcile schedule, until the owner reads or newer mail arrives.
    */
   readonly covered?: Covered | undefined;
-  /** The log has said why this thread can't be borrowed. */
-  readonly warned?: boolean | undefined;
+  /** Why the log last said this thread can't be borrowed; a different reason is said again. */
+  readonly warned?: string | undefined;
   /**
    * The nudge this deliverer last added, as Codex answered the add, kept apart
    * from `covered`: an add that landed is known even if the borrow afterwards
@@ -626,10 +626,13 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       });
     }
   }
+  // Back-off holds off posting, not removing a nudge whose mail has been read.
   const ready = targets.filter((peer) => {
     const hold = holds.get(peer.address);
     return (
-      hold === undefined || hold.joinId !== peer.joinId || (!hold.refused && hold.until <= now)
+      hold === undefined ||
+      hold.joinId !== peer.joinId ||
+      (!hold.refused && (hold.until <= now || hold.posted !== undefined))
     );
   });
 
@@ -647,9 +650,10 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       holds.set(peer.address, {
         joinId: attempted.joinId,
         run: runOf(attempted),
+        // A subagent refusal and the back-off belong to the join.
         refused: known?.joinId === attempted.joinId && known.refused,
-        failures: known?.failures ?? 0,
-        until: known?.until ?? 0,
+        failures: known?.joinId === attempted.joinId ? known.failures : 0,
+        until: known?.joinId === attempted.joinId ? known.until : 0,
         covered: known?.covered,
         warned: known?.warned,
         posted: known?.posted,
@@ -665,6 +669,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         if (threadId === undefined || deliveryTargets([subscriber], host).length === 0) {
           return undefined;
         }
+        if ((current()?.until ?? 0) > now) return undefined;
         const covered = current()?.covered;
         const again = covered?.unread === unread;
         if (again && now < covered.at + Duration.toMillis(reconcileDelay(covered.reconciles))) {
@@ -741,11 +746,11 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       const woken = outcome.success;
       if (woken === undefined) continue;
       const at = yield* Clock.currentTimeMillis;
-      const warned = current()?.warned === true;
       const ineligible = woken.eligibility.eligible ? undefined : woken.eligibility.reason;
+      const warned = ineligible !== undefined && current()?.warned === ineligible;
       hold({
         covered: { unread: woken.unread, at, reconciles: woken.reconciles },
-        warned: warned || ineligible !== undefined,
+        warned: ineligible,
       });
       const posted = woken.added ? "queued a nudge" : "a nudge was already waiting";
       const doing = woken.reconciles > 0 ? "Still waking" : "Waking";

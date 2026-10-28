@@ -215,6 +215,8 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     const joinId = /holder "([^"]+)"/.exec(said)?.[1];
     expect(joinId).toBeDefined();
     const other = { ...joining(owner), session: "other" };
+    // A client with an older tool list passing takeover to bus_join is refused, not taken over.
+    await refused("bus_join", { ...other, takeover: joinId }, /bus_takeover/);
     await refused("bus_takeover", { ...other, holder: "stale" }, /held by another session/);
     expect(await succeed("bus_takeover", { ...other, holder: joinId })).toEqual({
       address: owner,

@@ -752,6 +752,8 @@ describe("codex delivery", () => {
       listing: false,
       removed: [] as Array<string>,
       rollout: fullAccess as (threadId: string) => Stored,
+      /** `thread/read` alone fails. */
+      readFails: false,
     };
     let added = 0;
     const queued = (threadId: string) => items.get(threadId) ?? [];
@@ -811,7 +813,8 @@ describe("codex delivery", () => {
         queueState.removed.push(id);
         return Effect.succeed(before.some((item) => item.id === id));
       },
-      rollout: (threadId) => Effect.succeed(queueState.rollout(threadId)),
+      rollout: (threadId) =>
+        queueState.readFails ? fail("thread/read") : Effect.succeed(queueState.rollout(threadId)),
     };
     const openQueue = Effect.sync(() => {
       queueState.opened += 1;
@@ -1183,18 +1186,55 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a nudge whose borrow failed is still known, and removed once the mail is read", () =>
+  test("a nudge whose borrow or rollout read failed is still known, and removed once the mail is read, back-off or not", () =>
     run(
       Effect.gen(function* () {
-        const { bus, waiting, daemonState, holds, deliver } = yield* setup;
+        const { bus, waiting, daemonState, queueState, holds, deliver, send } = yield* setup;
         daemonState.answer = "fails";
         yield* deliver;
         expect(holds.get("codex/a")?.failures).toBe(1);
         expect(holds.get("codex/a")?.posted).toBeDefined();
+        // Read mid-turn, inside the back-off: removed at once, and nothing posted meanwhile.
         yield* bus.take("codex/a", "t-1");
-        yield* TestClock.adjust("30 seconds");
         yield* deliver;
         expect(waiting("t-1")).toEqual([]);
+        yield* send("two");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        yield* TestClock.adjust("30 seconds");
+        daemonState.answer = "loaded";
+        queueState.readFails = true;
+        yield* deliver;
+        expect(waiting("t-1").length).toBe(1);
+        // A second failure in a row: the back-off doubles.
+        expect(holds.get("codex/a")?.failures).toBe(2);
+        expect(holds.get("codex/a")?.posted).toBeDefined();
+        yield* bus.take("codex/a", "t-1");
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        // Removal outcomes are not warnings.
+        expect(logs.filter((line) => line.startsWith("Warn") && line.includes("remove"))).toEqual(
+          []
+        );
+      })
+    ));
+
+  test("a thread that rejoins while its borrow is in flight isn't nudged again", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, runNext, daemonState, deliver, join: rejoin } = yield* setup;
+        daemonState.gate = yield* Deferred.make<void>();
+        const borrowing = yield* Effect.forkChild(deliver);
+        while (daemonState.borrows.length === 0) yield* Effect.promise(() => Bun.sleep(5));
+        // The borrowed turn runs the nudge and rejoins before the borrow answers.
+        runNext("t-1");
+        yield* rejoin;
+        yield* Deferred.succeed(daemonState.gate, undefined);
+        yield* Fiber.join(borrowing);
+        daemonState.gate = undefined;
+        yield* deliver;
+        expect(waiting("t-1")).toEqual([]);
+        expect(daemonState.borrows).toEqual(["t-1"]);
       })
     ));
 
@@ -1349,7 +1389,7 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a thread that can't be borrowed still gets its nudge, and says why once", () =>
+  test("a thread that can't be borrowed still gets its nudge, and says why once per reason", () =>
     run(
       Effect.gen(function* () {
         const {
@@ -1375,10 +1415,10 @@ describe("codex delivery", () => {
         yield* deliver;
         expect(waiting("t-1").length).toBe(1);
         expect(daemonState.borrows).toEqual([]);
-        expect(holds.get("codex/a")?.warned).toBe(true);
+        expect(holds.get("codex/a")?.warned).toContain("on-request");
         expect(warnings()).toEqual([expect.stringContaining('approval policy is "on-request"')]);
 
-        // Nor is one whose rollout can't be found; the log has already said why.
+        // Nor is one whose rollout can't be found, a new reason, which is said.
         queueState.rollout = () => ({
           path: join(tempDir(), "missing.jsonl"),
           historyMode: "legacy",
@@ -1386,19 +1426,19 @@ describe("codex delivery", () => {
         yield* send("three");
         yield* deliver;
         expect(daemonState.borrows).toEqual([]);
-        expect(warnings().length).toBe(1);
+        expect(warnings().length).toBe(2);
+        expect(warnings()[1]).toContain("can't be read (it doesn't exist)");
 
         // The thread rejoining as it runs isn't told again; a join after a leave is.
         yield* rejoin;
         yield* send("four");
         yield* deliver;
-        expect(warnings().length).toBe(1);
+        expect(warnings().length).toBe(2);
         yield* bus.leave("codex/a", "t-1");
         yield* rejoin;
         yield* send("five");
         yield* deliver;
-        expect(warnings().length).toBe(2);
-        expect(warnings()[1]).toContain("can't be read (it doesn't exist)");
+        expect(warnings().length).toBe(3);
       })
     ));
 
