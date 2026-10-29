@@ -92,7 +92,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |
 | `fluree-key.json` | Bus host: `~/.agent-bus/fluree-key.json`, mode 0600 | The installer | The key the Fluree server trusts tokens from |
 | The launcher | Each machine: `~/.local/bin/agent-bus`, a link to the checkout's `src/bin.ts` | The installer | What the Claude Code plugin's hook runs |
-| The plugin | Each machine: Claude Code's plugin cache | `claude plugin install` | Only the manifest, `plugin/.claude-plugin/plugin.json` |
+| The plugin | Each machine: Claude Code's plugin cache | `claude plugin install` | The manifest, `plugin/.claude-plugin/plugin.json`, and the `agent-bus` skill, `plugin/skills/agent-bus/` |
 | `serve`'s memory | Each machine | `serve` | Two locks per address (one for reads and deliveries, one for ownership and sends); which sessions' hooks have called (`hooked`); each address's last call and open waits; the marks of what each session was last woken for, and each session's current wake wait; and, for Codex peers, the back-off, refused joins, covered mail, logged reason and recorded nudge. Lost on restart, which costs at most one extra wake per address |
 | Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only lists, adds to and deletes its own nudges from the queue, and reads a thread's record | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
 

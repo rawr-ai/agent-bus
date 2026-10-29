@@ -69,7 +69,7 @@ The terminal CLI and the desktop app's bundled copy are separate installs.
 
 3. **Let sessions load the hook again.** Claude Code loads a session's hooks when the session starts ([platforms: Claude Code](../platforms/claude-code.md#plugins)), so a session started before the upgrade keeps the hook it began with. Restart long-running sessions you rely on being woken. The load-at-start rule is verified live in the platform page; after an upgrade, *Unverified*
 
-4. **Check the plugin cache.** Claude Code keeps a copy of the plugin under `~/.claude/plugins/cache/agent-bus/agent-bus/<commit>`. After an upgrade, `claude plugin list` should still show `agent-bus@agent-bus` enabled. If the manifest changed, update it as [After a change to the plugin](#after-a-change-to-the-plugin) says. The cache holds one directory, named for the installed commit: *Checked read-only 2026-10-28*. After an upgrade, *Unverified*
+4. **Check the plugin cache.** Claude Code keeps a copy of the plugin under `~/.claude/plugins/cache/agent-bus/agent-bus/<commit>`. After an upgrade, `claude plugin list` should still show `agent-bus@agent-bus` enabled. If the plugin changed (its hook manifest or the skill), update it as [After a change to the plugin](#after-a-change-to-the-plugin) says. To see whether the cache holds the skill, run install's [cache check](install.md#install-the-claude-plugin). The cache holds one directory, named for the installed commit: *Checked read-only 2026-10-28*. After an upgrade, *Unverified*
 
 ## After upgrading Fluree
 
@@ -100,7 +100,7 @@ Follow the new version's own documentation first: it is installed with the CLI, 
 
 ## After a change to the plugin
 
-The agent-bus plugin is a manifest that Claude Code copies into its cache, so a change under `plugin/` or `.claude-plugin/` reaches sessions only through an update and a restart of each session. Deploy `serve` first ([deploy](deploy.md)), so the hook finds `bus_wake`.
+The agent-bus plugin (its hook manifest and the `agent-bus` skill) is copied into Claude Code's cache, so a change under `plugin/` or `.claude-plugin/` reaches sessions only through an update and a restart of each session. Deploy `serve` first ([deploy](deploy.md)), so the hook finds `bus_wake`.
 
 ```sh
 claude plugin marketplace update agent-bus

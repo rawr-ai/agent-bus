@@ -22,10 +22,12 @@ Place content by its kind first, then by the concern or task it serves; never by
 | procedure an operator follows | `docs/runbooks/<task>.md` | inside reference pages, beyond a link |
 | guidance for agents using the bus | the skill; a single call's contract goes in that tool's description | the MCP instructions, beyond their minimum protocol |
 | plan, measurement, qualification or review of a release | that release's frame | current pages, except a verified fact or limit promoted to its owner |
+| limit of a script, flag or procedure | that runbook's `If it fails`, and `interfaces.md` when it is a flag or setting | an architecture page's Rules |
+| fact about another tool or the field | the README's dated comparison table | the research note, which stays frozen |
 
 - **A change usually has several facets:** the contract (`interfaces.md` and the tool description), the rule (its architecture page), agent guidance (the skill), the platform claim (platforms) and the procedure (a runbook). Update each home, not just the first.
 - **Versions appear only in `docs/platforms/`,** except a binding requirement where it binds, and a frame's record of what its experiments ran on. A current page states constants from code and links to the platform page for anything measured.
-- **A new page is for a new concern or task** that no page covers. When a page grows, improve its internal structure first.
+- **A new page is for a new concern, task or platform** that no page covers. When a page grows, improve its internal structure first. A fourth runtime, for example, gets a platform page, a section in delivery, one in the skill's runtimes reference, and a task in launch-agents.
 - **Use the existing vocabulary:** address, session, join, run of joins, nudge, borrow, reconcile each keep one name.
 
 ### Page shapes

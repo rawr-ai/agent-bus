@@ -58,7 +58,7 @@ This is the one table of who is woken; other pages link here. "Within seconds" i
 
 ### Claude Code sessions
 
-The agent-bus plugin (`plugin/`) is one manifest with one hook. It runs `agent-bus claude-wake` in the background (`asyncRewake`) at three arming points: `SessionStart` (startup, resume, `/clear` and compaction), `Stop` (every turn's end) and `StopFailure` (a turn ended by an API error).
+The agent-bus plugin (`plugin/`) has one hook, beside the agent skill. It runs `agent-bus claude-wake` in the background (`asyncRewake`) at three arming points: `SessionStart` (startup, resume, `/clear` and compaction), `Stop` (every turn's end) and `StopFailure` (a turn ended by an API error).
 
 ```mermaid
 sequenceDiagram

@@ -247,29 +247,45 @@ So for a routine restart, drain first (step 3). A wedged or failing daemon can't
 
 3. Drain it. For each of those threads, ask whoever works in it whether a turn is running, and wait until it has ended. List any pending queue items of the thread with the read-only listing in [recover](recover.md#a-codex-thread-isnt-woken), step 2, so you know what will wait. *Unverified: no way was found to read a turn's state from outside; the running daemon was not touched.*
 
-4. Stop the daemon. If it is managed:
+4. Stop competing starters first. A desktop SSH project that reconnects starts an unmanaged daemon within about 5 s of a stop, with that connection's limit ([platforms: Codex](../platforms/codex.md#the-daemon)). List the proxies that reach this daemon, ask whoever owns each SSH project to close it, and wait for them to go.
 
    ```sh
-   codex app-server daemon stop
+   ps -axo pid,ppid,command | grep '[a]pp-server proxy'
    ```
 
-   Otherwise stop it by pid:
+   Expect one line per SSH project or terminal client connected. *Checked read-only 2026-10-28* (the listing); *Unverified* that closing the projects prevents the restart.
+
+5. Stop the daemon, and wait, with a deadline, until the old process and its socket listener have gone. A daemon that is still answering makes the next `daemon start` report that one is already running, and the old process can then exit with no replacement (read in Codex's pinned source). If it is managed, stop it with `codex app-server daemon stop`; otherwise:
 
    ```sh
-   kill -TERM <daemon pid>
+   old=<daemon pid>
+   sock=$(readlink ~/.codex/app-server-control/app-server-control.sock)
+   kill -TERM $old
+   for i in $(seq 1 30); do kill -0 $old 2>/dev/null || break; sleep 1; done
+   kill -0 $old 2>/dev/null && echo "still running"
+   lsof -nU 2>/dev/null | grep "$sock"
    ```
 
-   `daemon stop` leaves an SSH-started daemon running. After a stop, a desktop SSH project that reconnects starts a new one within about 5 s, with that connection's limit, not a raised one. *Unverified: the running daemon is in use.*
+   Expect no "still running" and no output from `lsof`. `daemon stop` leaves an SSH-started daemon running, so use `kill`. If it is still running after 30 s, escalate with `kill -KILL $old`. That ends it without letting it finish: whatever it had not yet written is lost, such as the last events of running turns, and its socket file is left behind (a stale socket refuses connections, which `serve` reads as "no daemon"). *Unverified* for the stop: the running daemon is in use. The `readlink` and `lsof` forms ran read-only on it (*Checked read-only 2026-10-28*).
 
-5. Start it from a shell with the limit raised. The subshell keeps the raised limit to itself.
+6. Start it from a shell with the limit raised. The subshell keeps the raised limit to itself. If it reports a daemon already running, the old one has not gone: go back to step 5.
 
    ```sh
    (ulimit -S -n 10240 && codex app-server daemon start)
    ```
 
-   Expect a child shell's soft limit to go from 2048 to 10240. *Rehearsed 2026-10-28* for the limit; the daemon start is *Unverified*: the running daemon is in use.
+   Expect a child shell's soft limit to go from 2048 to 10240 (*Rehearsed 2026-10-28* for the limit). The daemon start is *Unverified*: the running daemon is in use.
 
-6. Check that the limit took. macOS shows another process's limit only to root, so count the daemon's open descriptors against 10240, and watch its log for `Too many open files`.
+7. Verify that a new daemon is running, and that you started it. The pid must differ from `$old`. A daemon you started with `daemon start` has `--managed-daemon` in its command line; one without it is an SSH project's, with a low limit, which won the race: stop it and repeat from step 4. The daemon runs in a session of its own, so its parent is `launchd` and says nothing about who launched it; the command line does.
+
+   ```sh
+   ps -axo pid,lstart,command | grep '[a]pp-server'
+   codex app-server daemon version
+   ```
+
+   *Checked read-only 2026-10-28* for the listing and the parent being `launchd`; *Unverified* for the result of a restart.
+
+8. Check the limit. No unprivileged command shows another process's open-file limit on macOS: `launchctl procinfo <pid>` refuses without root (*Checked 2026-10-28*), and what it prints with root is *Unverified*. So the limit itself is *Unverified*. A count of the daemon's open descriptors is only utilisation, how close it is to the limit, and a low count proves nothing. Watch for the failure itself.
 
    ```sh
    lsof -p <daemon pid> | wc -l
@@ -278,7 +294,7 @@ So for a routine restart, drain first (step 3). A wedged or failing daemon can't
 
    *Unverified: the running daemon was not touched.*
 
-7. Verify and reopen. Send a message to a Codex test address, or wait for the next reconcile, and look for `Waking <address>` in `serve`'s log. Then open each thread that was mid-turn: look at its last turn, and give it new input if it was cut off, since an interrupted thread runs no queued input. *Unverified: needs a Codex session.*
+9. Verify and reopen. Send a message to a Codex test address, or wait for the next reconcile, and look for `Waking <address>` in `serve`'s log. Then open each thread that was mid-turn: look at its last turn, and give it new input if it was cut off, since an interrupted thread runs no queued input. *Unverified: needs a Codex session.*
 
 What not to do:
 - **Don't add a launchd job for the daemon.** Keep Codex's own `start` and `stop`. `daemon bootstrap` installs no login item and hasn't been qualified for restarts after a reboot. Nothing starts the daemon at boot: the CLI, SSH proxies and `serve` start it on first use.
@@ -325,6 +341,8 @@ A bus of your own lets you call tools, join addresses and break things without t
 
 **A LaunchAgent instance**, for rehearsing restarts, installs and failures. The installer takes five overrides, so an instance runs beside the real bus. Check that the label ends in `-rehearsal-<x>` before every `launchctl` command, and use only `rehearsal/…` addresses.
 
+Do the whole rehearsal in a separate shell session, or in a subshell, so the five variables don't outlive it: left exported, they would point later CLI calls at a dead port, and a later installer run would recreate the rehearsal install. If you set them in your own shell, run `unset AGENT_BUS_DIR AGENT_BUS_FLUREE_PORT AGENT_BUS_PORT AGENT_BUS_LABEL AGENT_BUS_LAUNCHER` at cleanup.
+
 1. Install it. The label is a prefix: the instance has `<label>` and `<label>.fluree`. It runs the code of the checkout you ran the installer from.
 
    ```sh
@@ -335,7 +353,7 @@ A bus of your own lets you call tools, join addresses and break things without t
 
    Expect both jobs running, both ports answering and the running bus untouched. *Rehearsed 2026-10-28.*
 
-2. Use its own `agent-bus` link, and the same exported variables, for every other command in this runbook, with the label and ports changed.
+2. Use its own `agent-bus` link, in the same session, for every other command in this runbook, with the label and ports changed.
 
    ```sh
    /tmp/bus-check/bin/agent-bus join --address rehearsal/one --runtime other --session one
@@ -352,7 +370,7 @@ A bus of your own lets you call tools, join addresses and break things without t
    mv ~/Library/LaunchAgents/ai.rawr.agent-bus-rehearsal-x*.plist /tmp/bus-check ~/.Trash/
    ```
 
-   Expect both ports to stop answering and the files gone. *Rehearsed 2026-10-28.*
+   Expect both ports to stop answering and the files gone. Then end the session, or unset the five variables as above. *Rehearsed 2026-10-28* (the rehearsal ran in a session of its own).
 
 An isolated `serve` still reads your real `~/.codex`. Don't join a Codex address on it: it would post nudges into your real threads.
 

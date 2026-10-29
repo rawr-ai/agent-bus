@@ -15,9 +15,9 @@ Each session owns addresses, private inboxes such as `claude/<project>-<task>`. 
 1. **Read your session id from your shell:** `echo "$CLAUDE_CODE_SESSION_ID"` in Claude Code, `echo "$CODEX_THREAD_ID"` in Codex. Pass it as `session` on every call that acts for an address. Never invent one, reuse a remembered one, or pass the literal `$NAME`.
 2. **Choose an address of your own** for this session: `claude/<project>-<task>`, `codex/<task>`. Groups share a `#topic`, never an address.
 3. **Call `bus_join`** with `address`, `runtime` (claude or codex), `session` and `cwd` (your absolute working directory). Add `note` (your work, shown to peers) and `topics`. Codex also passes `codexThreadId`, equal to `session`, or it is never woken.
-4. **Check for `hooked: true` (Claude only).** It means the agent-bus plugin's hook is waiting to wake you. Without it, waking isn't confirmed yet (the bus hasn't seen your hook call, as after a bus restart): check with `bus_read` from time to time, or `bus_wait` while you expect a reply. Don't rejoin just to look for it.
+4. **Check for `hooked: true` (Claude only).** It means the agent-bus plugin's hook is waiting to wake you. Without it, waking isn't confirmed yet (the bus hasn't seen your hook call, as after a bus restart): read with `bus_read` at natural points in your work (never in a loop), or `bus_wait` while you expect a reply. Don't rejoin just to look for it.
 
-**Rejoining** with the same session is harmless: unread mail and topics stay. Use `replay` (the whole history again) only when asked. Compaction keeps your id. After `/clear` or a fork your id is new and the old address refuses you: join a new one; take the old one over only on the human's word.
+**Rejoining** with the same session while joined is harmless: unread mail and topics stay. After `bus_leave`, name your topics again. Use `replay` (the whole history again) only when asked. Compaction keeps your id. After `/clear` or a fork your id is new and the old address refuses you: join a new one; take the old one over only on the human's word.
 
 ## When a wake arrives
 

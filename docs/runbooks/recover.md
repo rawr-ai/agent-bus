@@ -351,7 +351,7 @@ A wedged daemon's socket still accepts a connection, but its requests get no ans
 
    *Checked read-only 2026-10-28.*
 
-3. Restart it by hand, with the open-file limit raised ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)). A wedged daemon can't be drained, so the restart interrupts whatever it is running: turns that have started are lost, and pending nudges wait. Follow operate's last step to reopen the affected threads. *Unverified: there was no wedged daemon, and the running one is in use.*
+3. Restart it by hand, with the open-file limit raised ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)). A wedged daemon may not exit on `SIGTERM`: operate's steps wait with a deadline and then escalate. A wedged daemon can't be drained, so the restart interrupts whatever it is running: turns that have started are lost, and pending nudges wait. Follow operate's last step to reopen the affected threads. *Unverified: there was no wedged daemon, and the running one is in use.*
 
 4. Verify: the next cycle logs `Waking <address>` and no `no answer`. *Unverified, for the same reason.*
 

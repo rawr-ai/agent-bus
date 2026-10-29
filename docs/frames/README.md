@@ -4,6 +4,10 @@ A frame is a release record: the plan, the evidence, the decisions and the quali
 
 ## Index
 
+Two chains reverse each other, so read them from the end:
+- **Codex wake:** codex-wake, desktop-wake-spike, queue-wake, one-codex-route, simplification-pass, load-on-mail, nudge-hygiene. load-on-mail reverses one-codex-route's "serve never loads a thread". The routing between them (queue nudge for every thread) still stands.
+- **Claude wake:** claude-wake, finish-swap. finish-swap changes how the plugin is installed and removes `wait`. The hook design stands.
+
 Oldest first. "Superseded by" says what later changed; the frame itself keeps its original text.
 
 | Frame | Date | What it decided | Superseded by | Current owner |
@@ -19,10 +23,6 @@ Oldest first. "Superseded by" says what later changed; the frame itself keeps it
 | [load-on-mail](load-on-mail.md) | 2026-10-27 | After posting a nudge, `serve` asks the daemon to load the thread for a short borrow, only if its stored settings can't block, and reconciles on a schedule until the mail is read. | partly: [nudge-hygiene](nudge-hygiene.md) (adds the interrupted-thread rule and wake state per run of joins) | [delivery](../architecture/delivery.md), [Codex](../platforms/codex.md), [launch-agents](../runbooks/launch-agents.md), [operate](../runbooks/operate.md) |
 | [nudge-hygiene](nudge-hygiene.md) | 2026-10-28 | A same-thread rejoin posts no second nudge, `serve` removes its own nudge once the mail is read, interrupted threads aren't borrowed, and takeover is `bus_takeover`. | — | [delivery](../architecture/delivery.md), [messaging](../architecture/messaging.md), [interfaces](../architecture/interfaces.md) |
 | [docs-consolidation](docs-consolidation.md) | 2026-10-28 | Docs have three layers with fixed homes (reference, entry points and runbooks, the agent skill), a placement rule says where a new fact goes, `check-docs` and a coverage test hold them to it, and frames stay frozen and indexed here. | — | [overview](../overview.md), [AGENTS.md](../../AGENTS.md), [interfaces](../architecture/interfaces.md), [the runbooks](../runbooks/install.md) |
-
-Two chains reverse each other, so read them from the end:
-- **Codex wake:** codex-wake, desktop-wake-spike, queue-wake, one-codex-route, simplification-pass, load-on-mail, nudge-hygiene. load-on-mail reverses one-codex-route's "serve never loads a thread". The routing between them (queue nudge for every thread) still stands.
-- **Claude wake:** claude-wake, finish-swap. finish-swap changes how the plugin is installed and removes `wait`. The hook design stands.
 
 ## Retired mechanisms
 

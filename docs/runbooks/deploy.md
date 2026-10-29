@@ -115,57 +115,79 @@ Expected: `ok`; a last log line `Listening on http://127.0.0.1:8096` stamped jus
 
 ## Check the bus end to end
 
-Run before a deploy, after it and after a rollback. It is self-contained: every run uses its own test addresses and a fresh stand-in for a Claude hook, every wait ends after 30 seconds, and it leaves the bus and its temporary directory clean on every exit. It prints `PASS` and exits 0, or prints `FAIL:` with the reason and exits 1.
+Run before a deploy, after it and after a rollback. It is self-contained: every run uses its own test addresses and a fresh stand-in for a Claude hook. Every call ends after 5 seconds, every wait after 30, and the whole check after 90 seconds (it can run about 10 seconds past that, finishing a call and its cleanup). It reports after it has cleaned up: `PASS` and exit 0, or `FAIL:` with the reason and exit 1. If the bus can't be reached to leave the test addresses, it says which are still joined, keeps its temporary directory, and prints the command that leaves them later: run the same block with `LEAVE_RUN=<number> ` in front of `sh`.
 
-The stand-in is the plugin's hook command, `agent-bus claude-wake`, fed the input Claude Code gives a hook. It shows that a hook can reach `serve`, that `serve` marks it `hooked`, and that mail wakes it. The CLI can't read, so the read goes through the MCP endpoint with `curl`.
+The stand-in is the plugin's hook command, `agent-bus claude-wake`, fed the input Claude Code gives a hook. It shows that a hook can reach `serve`, that `serve` marks it `hooked`, and that mail wakes it. The CLI can't read, so every call except the hook goes through the MCP endpoint with `curl`, which also bounds each call.
 
 ```sh
 sh <<'EOF'
 port=${AGENT_BUS_PORT:-8096}
 url=http://127.0.0.1:$port/mcp
-run=$(date +%s)$$
+deadline=$(( $(date +%s) + 90 ))
+run=${LEAVE_RUN:-$(date +%s)$$}
 recv=deploy-check/r$run send=deploy-check/s$run
 work=$(mktemp -d)
-hook= sid=
-rpc() { curl -s --max-time 10 -X POST "$url" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "mcp-session-id: $sid" -d "$1"; }
+hook= sid= msg= problems= jr=0 js=0
+rpc() { curl -s --max-time 5 -X POST "$url" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -H "mcp-session-id: $sid" -d "$1"; }
 call() { rpc "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"$1\",\"arguments\":$2}}"; }
-cleanup() {
-  [ -n "$hook" ] && kill "$hook" 2>/dev/null
-  if [ -n "$sid" ]; then
-    call bus_leave "{\"address\":\"$send\",\"session\":\"$run-s\"}" >/dev/null
-    call bus_leave "{\"address\":\"$recv\",\"session\":\"$run-r\"}" >/dev/null
-  fi
-  mv "$work" ~/.Trash/deploy-check-$run
+open_session() {
+  sid=$(curl -s --max-time 5 -i -X POST "$url" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-check","version":"1"}}}' | awk 'tolower($1)=="mcp-session-id:"{print $2}' | tr -d '\r')
+  [ -z "$sid" ] || rpc '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
 }
-trap cleanup EXIT
-fail() { echo "FAIL: $1"; exit 1; }
-
-i=0; until curl -fs --max-time 2 http://127.0.0.1:$port/health >/dev/null; do
-  i=$((i+1)); [ $i -lt 30 ] || fail "serve does not answer on port $port"; sleep 1; done
-echo "serve answers"
-sid=$(curl -s --max-time 10 -i -X POST "$url" -H 'content-type: application/json' -H 'accept: application/json, text/event-stream' -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"deploy-check","version":"1"}}}' | awk 'tolower($1)=="mcp-session-id:"{print $2}' | tr -d '\r')
-[ -n "$sid" ] || fail "no MCP session"
-rpc '{"jsonrpc":"2.0","method":"notifications/initialized"}' >/dev/null
-join="{\"address\":\"$recv\",\"runtime\":\"claude\",\"session\":\"$run-r\",\"cwd\":\"/tmp\"}"
-call bus_join "$join" | grep -q cursor || fail "join was refused"
-echo "{\"session_id\":\"$run-r\"}" | agent-bus claude-wake >"$work/hook.out" 2>"$work/hook.err" &
-hook=$!
-i=0; until call bus_join "$join" | grep -q '"hooked":true'; do
-  i=$((i+1)); [ $i -lt 30 ] || fail "the hook never called serve (hooked stayed unset)"; sleep 1; done
-echo "hooked: true"
-agent-bus join --address $send --runtime other --session $run-s >/dev/null || fail "sender join failed"
-agent-bus publish --from $send --session $run-s --to $recv --body "deploy check" >/dev/null || fail "publish failed"
-i=0; while kill -0 "$hook" 2>/dev/null; do
-  i=$((i+1)); [ $i -lt 30 ] || fail "the hook did not wake"; sleep 1; done
-wait "$hook"; [ $? -eq 2 ] || fail "the hook exited with the wrong status"
-echo "woken: $(cut -c1-60 "$work/hook.err")"
-call bus_read "{\"address\":\"$recv\",\"session\":\"$run-r\"}" | grep -q '"body":"deploy check"' || fail "the message was not read"
-echo "read: deploy check"
-echo PASS
+late() { [ "$(date +%s)" -ge "$deadline" ]; }
+# until_ok REASON COMMAND...: retry for up to 30 s, and never past the 90 s deadline
+until_ok() {
+  reason=$1; shift; n=0
+  while ! "$@"; do
+    n=$((n+1)); if [ $n -ge 30 ] || late; then msg=$reason; return 1; fi; sleep 1
+  done
+}
+healthy() { curl -fs --max-time 2 "http://127.0.0.1:$port/health" >/dev/null; }
+hooked() { call bus_join "$join" | grep -q '"hooked":true'; }
+hook_ended() { ! kill -0 "$hook" 2>/dev/null; }
+leave() { # leave ADDRESS SESSION
+  [ -n "$sid" ] || open_session
+  [ -n "$sid" ] || return 1
+  call bus_leave "{\"address\":\"$1\",\"session\":\"$2\"}" | grep -q '"isError":false\|has not joined'
+}
+body() {
+  until_ok "serve does not answer on port $port" healthy || return 1
+  open_session; [ -n "$sid" ] || { msg="no MCP session"; return 1; }
+  join="{\"address\":\"$recv\",\"runtime\":\"claude\",\"session\":\"$run-r\",\"cwd\":\"/tmp\"}"
+  call bus_join "$join" | grep -q cursor || { msg="join was refused"; return 1; }
+  jr=1
+  echo "{\"session_id\":\"$run-r\"}" | agent-bus claude-wake >"$work/hook.out" 2>"$work/hook.err" &
+  hook=$!
+  until_ok "the hook never called serve (hooked stayed unset)" hooked || return 1
+  call bus_join "{\"address\":\"$send\",\"runtime\":\"other\",\"session\":\"$run-s\",\"cwd\":\"/tmp\"}" | grep -q cursor || { msg="sender join failed"; return 1; }
+  js=1
+  call bus_publish "{\"from\":\"$send\",\"session\":\"$run-s\",\"to\":[\"$recv\"],\"body\":\"deploy check\"}" | grep -q '"isError":false' || { msg="publish failed"; return 1; }
+  until_ok "the hook did not wake" hook_ended || return 1
+  wait "$hook"; [ $? -eq 2 ] || { msg="the hook exited with the wrong status"; return 1; }
+  call bus_read "{\"address\":\"$recv\",\"session\":\"$run-r\"}" | grep -q '"body":"deploy check"' || { msg="the message was not read"; return 1; }
+}
+cleanup() {
+  [ -z "$hook" ] || kill "$hook" 2>/dev/null
+  if [ -n "${LEAVE_RUN:-}" ]; then jr=1 js=1; fi
+  if [ $jr = 1 ]; then leave $recv $run-r || problems="$problems $recv"; fi
+  if [ $js = 1 ]; then leave $send $run-s || problems="$problems $send"; fi
+  if [ -n "$problems" ]; then
+    echo "Still joined:$problems"
+    echo "Leave them later with: LEAVE_RUN=$run sh <<'EOF' ... EOF (this same block)"
+    echo "Temporary files kept in $work"
+  else
+    mv "$work" ~/.Trash/deploy-check-$run || echo "Could not move $work to the Trash"
+  fi
+}
+status=PASS
+if [ -z "${LEAVE_RUN:-}" ]; then body || status=FAIL; fi
+cleanup
+if [ $status = PASS ] && [ -z "$problems" ]; then echo PASS; exit 0; fi
+echo "FAIL: ${msg:-cleanup incomplete}"; exit 1
 EOF
 ```
 
-Expected: `serve answers`, `hooked: true`, `woken: [agent-bus] New messages for "deploy-check/r…`, `read: deploy check`, `PASS`, in a few seconds. Afterwards `agent-bus peers` lists neither test address. *Rehearsed 2026-10-28*, three runs in a row, and once with `serve` stopped (`FAIL: serve does not answer on port …` after 30 s, exit 1).
+Expected: `PASS` and exit status 0, in a few seconds. Afterwards `agent-bus peers` lists neither test address. *Rehearsed 2026-10-28*, on repeated runs and with `serve` stopped (`FAIL: serve does not answer on port …` after 30 s, exit 1). Rehearsed with `serve` frozen mid-run (`kill -STOP`): `FAIL: the hook never called serve …` after 95 s, with the joined address named and the leave command printed; after `kill -CONT`, `LEAVE_RUN=<number>` left it and printed `PASS`.
 
 That a hook already waiting before the restart calls `serve` again by itself (it retries every five seconds) was seen once, with an earlier form of this check: `hooked` was true 6 s after the restart. *Unverified* in a real Claude session: from a joined session, call `bus_join` again with its own address and session after the restart, and expect `hooked: true` within about ten seconds.
 
@@ -181,12 +203,60 @@ claude plugin list
 
 Expected: `claude plugin list` shows `agent-bus@agent-bus` enabled at a new version. Sessions get the change when they next start, or with `/reload-plugins`. A change to `src/` alone needs none of this. *Unverified*: it would change the owner's installed plugin.
 
+Then check that the installed copy holds what the checkout's `plugin/` holds, the hooks manifest and the agent skill, in the newest cache directory (read-only):
+
+```sh
+cache=~/.claude/plugins/cache/agent-bus/agent-bus
+newest=$cache/$(ls -t "$cache" | head -1)
+ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$newest/skills/agent-bus/references"
+```
+
+Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; and the directory's name is the `Version` that `claude plugin list` shows. A cache made before the skill shipped has only the manifest, and `ls` then says `No such file or directory` for the skill: update the plugin. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache, made before the skill shipped, correctly lacked it (*Checked read-only 2026-10-28*).
+
+## Recover a diverged primary checkout
+
+Use this when step 1 finds a dirty tree or another branch, or step 4 refuses with `Not possible to fast-forward`. The checkout's `HEAD` is then work that isn't on `main`: never use it as the commit to restore. Restore a commit that was deployed.
+
+1. **Keep the work,** on a branch, so nothing is lost. Uncommitted changes go on a stash first.
+
+   ```sh
+   git stash push -u
+   git branch rescue/primary-$(date +%Y%m%d-%H%M) HEAD
+   ```
+
+   Expected: the branch exists (`git branch --list 'rescue/*'`). Move it into a worktree for review later; the primary checkout stays on `main`. (`git stash push -u` says `No local changes to save` when the tree is clean.) *Rehearsed 2026-10-28*
+
+2. **Find the last deployed commit.** Candidates, most reliable first:
+   - the last commit the checkout shared with `main`, which is where its last fast-forward ended: `git merge-base HEAD origin/main`;
+   - the target of the last `merge origin/main: Fast-forward` line in `git reflog`;
+   - the commit `serve` was started from: the checkout's state at `serve`'s start time (`ps -o lstart=` in [the restart check](#check-that-serve-restarted)), read from the reflog's dates (`git reflog --date=iso`).
+
+   ```sh
+   base=$(git merge-base HEAD origin/main)
+   git log --oneline -1 "$base"
+   git reflog --date=iso -n 10
+   ```
+
+   Expected: `$base` is the commit the reflog shows the checkout fast-forwarded to, or cloned at, before the divergent commits. If the three disagree, pick the older and let step 4 deploy the rest. *Rehearsed 2026-10-28*
+
+3. **Restore it, restart, and verify.**
+
+   ```sh
+   git reset --hard "$base"
+   bun install
+   launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus
+   ```
+
+   Then run [the restart check](#check-that-serve-restarted) and [the end-to-end check](#check-the-bus-end-to-end). If `serve` was running the divergent commits, this also puts it back on deployed code; `agent-bus --version` and the checks show it. *Rehearsed 2026-10-28*
+
+4. **Start the deploy again from step 1.** It records this restored commit as `previous`, and step 4 can now fast-forward. *Rehearsed 2026-10-28*
+
 ## If it fails
 
 | Symptom | Check | Fix |
 | --- | --- | --- |
-| Step 1: `status` prints files, or the branch isn't `main` | `git status`, `git log origin/main..HEAD` | The rule was broken. Move the work to a worktree branch, restore the primary checkout to `main`, and start again. Don't deploy over uncommitted work |
-| Step 4: `Not possible to fast-forward` | `git log --oneline origin/main..HEAD` | The primary checkout has a commit that isn't on `main`. Same fix: put it in a worktree branch, then `git reset --hard "$previous"` and retry |
+| Step 1: `status` prints files, or the branch isn't `main` | `git status`, `git log origin/main..HEAD` | The rule was broken. Keep the work (`git stash push -u`, or a branch for commits), then [recover the checkout](#recover-a-diverged-primary-checkout) and start again. Don't deploy over uncommitted work |
+| Step 4: `Not possible to fast-forward` | `git log --oneline origin/main..HEAD` | The primary checkout has a commit that isn't on `main`, so `$previous` is that diverged commit and can't be the recovery target. Follow [Recover a diverged primary checkout](#recover-a-diverged-primary-checkout), then start again from step 1 |
 | `serve` doesn't come back after step 8: the restart check prints nothing | `launchctl print gui/$(id -u)/ai.rawr.agent-bus \| grep -E 'state =\|last exit'` and `tail -n 20 ~/.agent-bus/agent-bus.log` | With a syntax error in `src/`: health refused the connection; `state = spawn scheduled`, `last exit code = 1`; the log ended in the Bun error with the file and line; `agent-bus --version` printed the same error, so the hooks failed too. Roll back (step 10). Hooks that fail retry for ten minutes, then wait for their next arming point. *Rehearsed 2026-10-28* |
 | The restart check's log line is old, or the pid and start time are old | `ps -o lstart= -p <pid>` | The restart didn't happen. Repeat step 8 |
 | The end-to-end check prints `FAIL: the hook never called serve` | `tail -n 30 ~/.agent-bus/agent-bus.log` | A `serve` older than `bus_wake` makes hooks retry until a deploy replaces it. Check that step 4 deployed what you meant, restart, and rerun. See [recover](recover.md) |

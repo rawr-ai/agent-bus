@@ -175,8 +175,18 @@ claude plugin list
 
 Expected: a marketplace `agent-bus` whose source is the checkout, and `agent-bus@agent-bus` with `Status: ✔ enabled`. Sessions get the plugin when they next start, or with `/reload-plugins` (that it loads the hook into a running session wasn't probed: [platforms: Claude Code](../platforms/claude-code.md#plugins)). The list commands: *Checked read-only 2026-10-28*. `marketplace add` and `install` change the owner's Claude configuration, so they were not run; their syntax is from `claude plugin --help`: *Unverified*
 
+Check that the installed copy holds the skill as well as the manifest, in the newest cache directory (read-only):
+
+```sh
+cache=~/.claude/plugins/cache/agent-bus/agent-bus
+newest=$cache/$(ls -t "$cache" | head -1)
+ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$newest/skills/agent-bus/references"
+```
+
+Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory's name is the `Version` that `claude plugin list` shows. A plugin installed before the skill shipped has only the manifest, and `ls` says `No such file or directory` for the skill until the plugin is updated. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache was made before the skill shipped and correctly lacked it (*Checked read-only 2026-10-28*).
+
 What to know about it:
-- **The plugin is only a manifest** (`plugin/.claude-plugin/plugin.json`), which Claude Code copies into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)).
+- **The plugin is a hooks manifest and the agent skill:** `plugin/.claude-plugin/plugin.json` (the three hooks) and `plugin/skills/agent-bus/` (`SKILL.md` and `references/`, with `queries.md` and `runtimes.md`). Claude Code copies all of it into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)). The hook runs the checkout, but the skill is read from the cache, so a change to the skill needs a plugin update.
 - **Its hook runs the checkout,** through `~/.local/bin/agent-bus claude-wake`. A deploy therefore reaches the hook at once, with no plugin update ([delivery](../architecture/delivery.md#claude-code-sessions)).
 - **The hook finds `bun`** in `~/.local/bin`, then `~/.bun/bin`, then on Claude Code's `PATH`, because hooks inherit Claude Code's environment, not your shell's.
 - **It needs the same `AGENT_BUS_PORT` as `serve`,** or neither set.
@@ -191,7 +201,7 @@ claude plugin marketplace update agent-bus
 claude plugin update agent-bus@agent-bus
 ```
 
-Then sessions get the change when they next start, or with `/reload-plugins`: `claude plugin update --help` says a restart is required to apply it. *Unverified*: it would change the owner's installed plugin.
+Then repeat the cache check above: the new directory must hold `skills/agent-bus/SKILL.md` and `references/`. Sessions get the change when they next start, or with `/reload-plugins`: `claude plugin update --help` says a restart is required to apply it. *Unverified*: it would change the owner's installed plugin.
 
 ## Add another machine
 
