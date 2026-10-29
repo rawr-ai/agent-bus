@@ -179,11 +179,11 @@ Check that the installed copy holds the skill as well as the manifest, in the ne
 
 ```sh
 cache=~/.claude/plugins/cache/agent-bus/agent-bus
-newest=$cache/$(ls -t "$cache" | head -1)
+newest=$cache/$(claude plugin list | awk '/agent-bus@agent-bus/{f=1} f&&/Version:/{print $2; exit}')
 ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$newest/skills/agent-bus/references"
 ```
 
-Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory's name is the `Version` that `claude plugin list` shows. A plugin installed before the skill shipped has only the manifest, and `ls` says `No such file or directory` for the skill until the plugin is updated. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache was made before the skill shipped and correctly lacked it (*Checked read-only 2026-10-28*).
+Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory is the one named by the `Version` that `claude plugin list` shows. Don't pick the newest directory by time: an update writes an `.orphaned_at` marker into the old one, which makes it the newest. A plugin installed before the skill shipped has only the manifest, and `ls` says `No such file or directory` for the skill until the plugin is updated. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache was made before the skill shipped and correctly lacked it (*Checked read-only 2026-10-28*).
 
 What to know about it:
 - **The plugin is a hooks manifest and the agent skill:** `plugin/.claude-plugin/plugin.json` (the three hooks) and `plugin/skills/agent-bus/` (`SKILL.md` and `references/`, with `queries.md` and `runtimes.md`). Claude Code copies all of it into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)). The hook runs the checkout, but the skill is read from the cache, so a change to the skill needs a plugin update.

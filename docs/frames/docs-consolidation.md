@@ -258,7 +258,16 @@ Each phase ends with a review loop: the writers' result goes to two reviewers on
 - **Rehearsal:** changing operations ran on disposable instances with their own labels, ports and state, beside the live bus, which kept its processes throughout. Steps that need the other machine, a real session or the real daemon are marked unverified.
 - **Found on the way, now on their owner pages:** Fluree refuses a subject-less token on the event stream only when events auth is required; a new durable ledger's text search can fail with HTTP 500 in its first second; Codex lists a skill's name and description and cuts an explicitly mentioned skill at 8,000 bytes; the launchd `serve` would have loaded a `.env` (fixed). The early-search gap seen once on an authenticated server was not reproduced in about 30 runs.
 - **Left for later:** whether `owned()` should check the runtime outside join; a CLI `read`; a queue-method retest script; token rotation; dated, rotated `serve` logs.
-- **To do at close, after the owner's review:** fast-forward main and deploy by following `deploy.md` and `operate.md` literally, recording where they fell short; update the installed plugin and load the skill in a throwaway session from its cached copy; trim repo memory against the new pages.
+- **Close-out (2026-10-29), after the owner's review.** Deployed by following `deploy.md` step by step:
+  - the end-to-end check passed before the deploy; `main` was fast-forwarded on the remote to 43fd2fd, and the primary checkout fast-forwarded to it; `bun run check` passed there (209 tests);
+  - step 5 listed the installer and the plugin, so step 8 reran the installer, which rewrote the plists (`serve` now runs with `--no-env-file`) and restarted Fluree and `serve`; the restart check and the end-to-end check passed, and `agent-bus --version` printed 0.2.0;
+  - the plugin was updated (e030289b7fe0 to 43fd2fdb9961), and a throwaway `claude -p` session loaded the `agent-bus` skill.
+- **Where the runbooks fell short, now fixed:**
+  - step 3 assumed a pull request; this repository fast-forwards `main` with a push of the reviewed branch, which the step now allows;
+  - the cache check picked the newest cache directory by time, which was the old one: an update writes an `.orphaned_at` marker into it. It now uses the version `claude plugin list` shows;
+  - the variables step 1 sets live in one shell; a deploy run through separate shells has to carry `previous` itself (here, in a file).
+- **Not as the frame expected:** the skill loaded from the checkout's `plugin/skills/agent-bus`, not from the cache copy. Claude Code 2.1.311 lists this local-folder marketplace's plugin as read from its source, though the update also made a cache copy holding the skill (recorded on [platforms: Claude Code](../platforms/claude-code.md#plugins)). So a skill change reaches new sessions from the checkout, and the update remains the documented way to register it.
+- **Repo memory:** entries now point at the pages that own their facts (the moved connections page, deploy, messaging, the platform pages); the plugin decision mentions the skill; two traps were added: `Schema.Number` drops a tool parameter's description and bounds, and the installer must run with all five overrides outside a real install.
 
 ## Moved into current docs
 
@@ -266,9 +275,9 @@ Each phase ends with a review loop: the writers' result goes to two reviewers on
 | --- | --- | --- |
 | Contract | `interfaces.md` and the tool schemas, held together by `test/docs-coverage.test.ts` | Yes |
 | Rule | the owner architecture pages' numbered Rules; the placement rule and page shapes in AGENTS.md | Yes |
-| Agent guidance | the `agent-bus` skill and the MCP instructions | Yes; loading from the installed plugin at close |
+| Agent guidance | the `agent-bus` skill and the MCP instructions | Yes; loaded by a throwaway session after the plugin update |
 | Platform claim | `docs/platforms/`, with the recheck column | Yes |
-| Procedure | `docs/runbooks/` | Yes; the deploy at close records where the runbooks fell short |
+| Procedure | `docs/runbooks/` | Yes; the deploy followed them, and their shortfalls are fixed |
 
 ## Not doing
 

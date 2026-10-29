@@ -17,19 +17,19 @@ mem:constraint-01m5y26y2g6hjydmb652z0sb3w a mem:Constraint ;
     mem:createdAt "2026-10-27T06:54:21.776907Z"^^xsd:dateTime .
 
 mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
-    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/, a single manifest): an asyncRewake hook on SessionStart, Stop and StopFailure runs ~/.local/bin/agent-bus claude-wake, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
+    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/: one hook manifest, beside the agent-bus skill): an asyncRewake hook on SessionStart, Stop and StopFailure runs ~/.local/bin/agent-bus claude-wake, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
     mem:tag "claude" ;
     mem:tag "hooks" ;
     mem:tag "plugin" ;
     mem:tag "wake" ;
     mem:scope mem:repo ;
-    mem:artifactRef ".claude-plugin/plugin.json" ;
-    mem:artifactRef "docs/frames/claude-wake.md" ;
+    mem:artifactRef "docs/architecture/delivery.md" ;
+    mem:artifactRef "plugin/.claude-plugin/plugin.json" ;
     mem:artifactRef "src/Bus.ts" ;
     mem:artifactRef "src/claude.ts" ;
     mem:branch "claude-host-wake" ;
     mem:createdAt "2026-10-27T06:54:21.716683Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T23:36:03.921722+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:19.803056+00:00"^^xsd:dateTime ;
     mem:rationale "The host re-arms the wake at session start and every turn end, so the model starts nothing, in the desktop app (stream-json mode) and the terminal alike." ;
     mem:alternatives "a plugin monitor running a streaming watch (never starts in stream-json mode; desktop sessions run that way),serve posting into the session inbox socket (held for sessions that bypass permissions; the desktop drops held messages after five minutes),channels (terminal only)" .
 
@@ -40,9 +40,10 @@ mem:fact-01m5y26y48w2rk3e0yh14fszrs a mem:Fact ;
     mem:tag "monitors" ;
     mem:tag "trap" ;
     mem:scope mem:repo ;
-    mem:artifactRef "docs/frames/claude-wake.md" ;
+    mem:artifactRef "docs/platforms/claude-code.md" ;
     mem:branch "claude-host-wake" ;
-    mem:createdAt "2026-10-27T06:54:21.832877Z"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T06:54:21.832877Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.229835+00:00"^^xsd:dateTime .
 
 mem:fact-01m5y26y5y9r72px418615x6tq a mem:Fact ;
     mem:content "Effect 4.0.6 McpServer returns a declared tool failure that is an Error with a message as plain text (the message alone), not its encoded JSON, so a client can't tell a LedgerError from a NotOwner by type. The Claude wake hook therefore checks the session itself and retries every failed bus_wake call for up to ten minutes." ;
@@ -63,9 +64,11 @@ mem:constraint-01m5x9h52psxmgtkmg6pxw27q8 a mem:Constraint ;
     mem:tag "ownership" ;
     mem:scope mem:repo ;
     mem:severity "should" ;
-    mem:artifactRef "README.md" ;
+    mem:artifactRef "docs/architecture/messaging.md" ;
+    mem:artifactRef "docs/runbooks/launch-agents.md" ;
     mem:branch "main" ;
-    mem:createdAt "2026-10-26T23:43:02.230648Z"^^xsd:dateTime .
+    mem:createdAt "2026-10-26T23:43:02.230648Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.116461+00:00"^^xsd:dateTime .
 
 mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
     mem:content "thread/queue/add does not deduplicate on clientUserMessageId: adding twice queues two items, and the desktop runs both. List the thread's queue before adding. The thread/queue/* methods are experimental (initialize with experimentalApi); use the desktop's bundled CLI so they match the app that runs the items." ;
@@ -86,11 +89,11 @@ mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
     mem:tag "worktree" ;
     mem:scope mem:repo ;
     mem:severity "must" ;
-    mem:artifactRef "README.md" ;
+    mem:artifactRef "docs/runbooks/deploy.md" ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:32:00.198214Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T23:36:03.963355+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.153294+00:00"^^xsd:dateTime ;
     mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
 
 mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
@@ -121,11 +124,12 @@ mem:constraint-01m5xxtabswcyy08b31skk6s4z a mem:Constraint ;
     mem:tag "takeover" ;
     mem:scope mem:repo ;
     mem:severity "must" ;
-    mem:artifactRef "docs/connections.md" ;
+    mem:artifactRef "docs/architecture/interfaces.md" ;
+    mem:artifactRef "docs/platforms/codex.md" ;
     mem:artifactRef "src/mcp.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T05:37:34.073037Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-28T18:11:13.621178+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.032167+00:00"^^xsd:dateTime ;
     mem:rationale "Codex's requires_mcp_tool_approval requires approval when destructiveHint is true, or when a tool isn't read-only and destructiveHint or openWorldHint is unset or true; only policy never with full disk write access, or a server approval mode of approve, skips that. Found live when a read-only-sandbox thread ran its nudge and bus_read was refused; the Stop hook masked it by delivering at turn end." .
 
 mem:constraint-01m5zvh3rypm1qrxpmr95bc8y8 a mem:Constraint ;
@@ -140,6 +144,20 @@ mem:constraint-01m5zvh3rypm1qrxpmr95bc8y8 a mem:Constraint ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T23:36:04.126583+00:00"^^xsd:dateTime .
+
+mem:constraint-01m62kk2wvxhmka4gq0fk694x7 a mem:Constraint ;
+    mem:content "Run scripts/install-launch-agents.sh outside a real install only with all five overrides set (AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL, AGENT_BUS_LAUNCHER), in a subshell: without them it rewrites the live LaunchAgents and the ~/.local/bin/agent-bus link and restarts the live bus. An installer from a revision before the overrides ignores them." ;
+    mem:tag "installer" ;
+    mem:tag "launchd" ;
+    mem:tag "operations" ;
+    mem:tag "rehearsal" ;
+    mem:scope mem:repo ;
+    mem:severity "must" ;
+    mem:artifactRef "docs/runbooks/deploy.md" ;
+    mem:artifactRef "docs/runbooks/operate.md" ;
+    mem:artifactRef "scripts/install-launch-agents.sh" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-29T01:15:03.451116+00:00"^^xsd:dateTime .
 
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
@@ -161,11 +179,12 @@ mem:decision-01m5x1zt9exbx6s973sqkt00kh a mem:Decision ;
     mem:tag "hooks" ;
     mem:tag "wake" ;
     mem:scope mem:repo ;
-    mem:artifactRef "docs/connections.md" ;
+    mem:artifactRef "docs/architecture/connections.md" ;
+    mem:artifactRef "docs/architecture/delivery.md" ;
     mem:artifactRef "src/codex.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-26T21:31:14.094317Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T06:31:43.296056Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.079360+00:00"^^xsd:dateTime ;
     mem:rationale "Moving desktop threads onto the daemon loses desktop features the owner needs: SSH projects lose browser and computer use, automations and the artifact viewer, and probably Handoff and the thread tools; the CODEX_APP_SERVER_WS_URL override skips the app's provisioning too." ;
     mem:alternatives "a desktop SSH project to the same machine,launching the app with CODEX_APP_SERVER_WS_URL,deep links (they only prefill the composer)" .
 
@@ -317,9 +336,10 @@ mem:fact-01m5xn3chn8n8q5wktct3xxn4s a mem:Fact ;
     mem:tag "queue" ;
     mem:tag "rollout" ;
     mem:scope mem:repo ;
-    mem:artifactRef "docs/frames/queue-wake.md" ;
+    mem:artifactRef "docs/platforms/codex.md" ;
     mem:branch "main" ;
-    mem:createdAt "2026-10-27T03:05:14.037431Z"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T03:05:14.037431Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.267954+00:00"^^xsd:dateTime .
 
 mem:fact-01m5xnf9zqad6yt71b5exbs2dc a mem:Fact ;
     mem:content "The Codex app-server daemon runs a queued item (thread/queue/add from another process) as a turn for any thread it has loaded, with or without a client attached, within seconds when idle; an item added mid-turn runs as its own turn after the current one. A thread nothing has loaded keeps the item until an app-server resumes it, which runs it at once. A spawned subagent's queue refuses the add ('direct app-server input is not allowed for unloaded spawned sub-agents'). Verified on Codex 0.164." ;
@@ -328,10 +348,10 @@ mem:fact-01m5xnf9zqad6yt71b5exbs2dc a mem:Fact ;
     mem:tag "queue" ;
     mem:tag "wake" ;
     mem:scope mem:repo ;
-    mem:artifactRef "docs/frames/queue-wake.md" ;
+    mem:artifactRef "docs/platforms/codex.md" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:11:44.631668Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-27T05:37:34.030825Z"^^xsd:dateTime .
+    mem:updatedAt "2026-10-29T01:15:03.306515+00:00"^^xsd:dateTime .
 
 mem:fact-01m5xp8sc3dxn0nzd394qprgrr a mem:Fact ;
     mem:content "Effect 4.0.6 McpServer as official tooling sees it: any Origin is refused (403) unless in allowedOrigins, so the MCP conformance dns-rebinding check fails on a localhost Origin by design; an MCP-Protocol-Version header differing from the negotiated version gets 400 (-32020), though the spec requires 400 only for invalid or unsupported versions, failing conformance server-sse-multiple-streams; stateful versions always advertise completions, logging and tools.listChanged; tools carry default annotations (destructiveHint true, readOnlyHint false) unless set. Most conformance server scenarios need the reference server's fixture tools." ;
@@ -350,9 +370,11 @@ mem:fact-01m5y0xfrbrcwbym2ws681paww a mem:Fact ;
     mem:tag "codex" ;
     mem:tag "hooks" ;
     mem:scope mem:repo ;
+    mem:artifactRef "docs/platforms/codex.md" ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
-    mem:createdAt "2026-10-27T06:31:43.627731Z"^^xsd:dateTime .
+    mem:createdAt "2026-10-27T06:31:43.627731Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-10-29T01:15:03.351151+00:00"^^xsd:dateTime .
 
 mem:fact-01m60d3nbs2fz6yv2hyvwgf417 a mem:Fact ;
     mem:content "Codex runs no queued input for a thread whose status is Interrupted, and a resume restores that status from the last persisted status event (task_started, task_complete or turn_aborted; turn_aborted interrupted or budget_limited means Interrupted), so a borrow would load such a thread and run nothing (0.164, ext/queue/src/service.rs, core/src/agent/status.rs; seen live). serve doesn't borrow it: the nudge stays queued and runs after the thread's next input. A turn is interrupted by the user's Stop, a quit mid-turn, or a codex exec run exiting mid-turn." ;
@@ -377,6 +399,18 @@ mem:fact-01m61vb18k0gk4cjf683q87gzn a mem:Fact ;
     mem:artifactRef "docs/platforms/codex.md" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-28T18:11:13.811302+00:00"^^xsd:dateTime .
+
+mem:fact-01m62kk2v4gtv2cdthc99c5nsd a mem:Fact ;
+    mem:content "In Effect 4.0.6, a tool parameter declared as Schema.Number reaches MCP clients as anyOf [number, \"NaN\"/\"Infinity\" strings], with its description and bounds dropped. Declare numbers as Schema.Int or Schema.Finite with checks; test/mcp-official.test.ts fails on any input property without a description." ;
+    mem:tag "effect" ;
+    mem:tag "mcp" ;
+    mem:tag "schema" ;
+    mem:tag "tools" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "src/mcp.ts" ;
+    mem:artifactRef "test/mcp-official.test.ts" ;
+    mem:branch "main" ;
+    mem:createdAt "2026-10-29T01:15:03.396258+00:00"^^xsd:dateTime .
 
 mem:fact-01m5xp8mhr201tna2derhkerve a mem:Fact ;
     mem:content "The official MCP SDK Client (@modelcontextprotocol/sdk 1.x) validates a tool's structuredContent only when that client's own listTools() cached the tool's output schema, and never for a tool without one; a tool whose success schema is void lists no outputSchema and returns empty text. So wire tests call listTools first and also assert structuredContent equals the JSON in the first text block. SDK 1.x always offers its latest protocol (2025-11-25) at initialize with no option to choose; it cannot speak the stateless 2026-07-28." ;

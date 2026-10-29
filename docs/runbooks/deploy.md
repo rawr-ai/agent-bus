@@ -40,7 +40,7 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
 
 2. **Run [the end-to-end check](#check-the-bus-end-to-end) on the version that runs now,** so that a later failure is the deploy's.
 
-3. **Merge the change into `main` on the remote,** by merging its pull request. Nothing is deployed yet.
+3. **Merge the change into `main` on the remote,** by merging its pull request, or by a fast-forward push of the reviewed branch (`git push origin <branch>:main`, which refuses anything but a fast-forward). Nothing is deployed yet. *Done 2026-10-29 by a fast-forward push.*
 
 4. **Fast-forward the primary checkout to `main`:**
 
@@ -201,17 +201,17 @@ claude plugin update agent-bus@agent-bus
 claude plugin list
 ```
 
-Expected: `claude plugin list` shows `agent-bus@agent-bus` enabled at a new version. Sessions get the change when they next start, or with `/reload-plugins`. A change to `src/` alone needs none of this. *Unverified*: it would change the owner's installed plugin.
+Expected: `claude plugin list` shows `agent-bus@agent-bus` enabled at a new version. Sessions get the change when they next start, or with `/reload-plugins`. A change to `src/` alone needs none of this. *Done 2026-10-29* at the docs-consolidation deploy: the update printed `updated from … to …`, and the list showed the new version enabled.
 
 Then check that the installed copy holds what the checkout's `plugin/` holds, the hooks manifest and the agent skill, in the newest cache directory (read-only):
 
 ```sh
 cache=~/.claude/plugins/cache/agent-bus/agent-bus
-newest=$cache/$(ls -t "$cache" | head -1)
+newest=$cache/$(claude plugin list | awk '/agent-bus@agent-bus/{f=1} f&&/Version:/{print $2; exit}')
 ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$newest/skills/agent-bus/references"
 ```
 
-Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; and the directory's name is the `Version` that `claude plugin list` shows. A cache made before the skill shipped has only the manifest, and `ls` then says `No such file or directory` for the skill: update the plugin. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache, made before the skill shipped, correctly lacked it (*Checked read-only 2026-10-28*).
+Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory is the one named by the `Version` that `claude plugin list` shows. Don't pick the newest directory by time: an update writes an `.orphaned_at` marker into the old one, which makes it the newest. A cache made before the skill shipped has only the manifest, and `ls` then says `No such file or directory` for the skill: update the plugin. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache, made before the skill shipped, correctly lacked it (*Checked read-only 2026-10-28*).
 
 ## Recover a diverged primary checkout
 
