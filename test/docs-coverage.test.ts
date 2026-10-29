@@ -1,8 +1,11 @@
 // Guards the pages that restate the code against drift: docs/architecture/interfaces.md,
 // the timing table in docs/architecture/delivery.md, and the agent-bus skill. It compares
 // names, shapes, numbers and quoted text with what the code registers and says, so a tool,
-// a parameter, a refusal or a constant that changes without its page fails here. It cannot
-// judge whether a description is right, only that what it names exists and agrees.
+// a parameter, a bound, a quoted refusal or a timing constant that changes without its page
+// fails here. Of the refusals only the ownership checks of src/Bus.ts are checked the other
+// way (each needs a row in interfaces.md); a new message elsewhere in the code is not noticed.
+// The test cannot judge whether a description is right, only that what it names exists and
+// agrees.
 //
 // Conventions the pages keep for it:
 // - a tool's section in interfaces.md is a `#### \`bus_x\`` heading with a "Parameter" table;
@@ -67,12 +70,14 @@ const tools = await listTools();
 const toolNamed = (name: string) => tools.find((tool) => tool.name === name);
 type Schema = {
   type?: string;
+  items?: Schema;
   enum?: ReadonlyArray<unknown>;
   minimum?: number;
   maximum?: number;
 };
 const parametersOf = (tool: Tool) => (tool.inputSchema.properties ?? {}) as Record<string, Schema>;
 const resultFieldsOf = (tool: Tool) => Object.keys(tool.outputSchema?.properties ?? {});
+const parameterNames = new Set(tools.flatMap((tool) => Object.keys(parametersOf(tool))));
 
 /**
  * Where refusals are worded, with each `${NAME}` that names a string or number constant of
@@ -94,6 +99,7 @@ const SOURCES = (() => {
     text.replaceAll(/\$\{([A-Z_]+)\}/g, (whole, name: string) => constants.get(name) ?? whole)
   );
 })();
+const SOURCE_LINES = SOURCES.flatMap((source) => source.split("\n"));
 
 // --- Markdown ---------------------------------------------------------------------------
 
@@ -195,14 +201,39 @@ const parameterRows = (name: string): ReadonlyArray<ParameterRow> => [
   ...(INHERITS[name] === undefined ? [] : parameterRows(INHERITS[name] ?? "")),
 ];
 
-/** Whether a type cell says what the schema says: its kind or enum values, and its bounds. */
+const KINDS = ["string", "number", "integer", "boolean", "array", "object"];
+const numbersIn = (text: string) => (text.match(/-?\d+(?:\.\d+)?/g) ?? []).sort();
+
+/**
+ * What a type cell gets wrong against the schema, comparing whole tokens: the kind words (an
+ * array's item kind too, as in "string array"), or an enum's backticked values; and the
+ * numbers, which must be exactly the schema's bounds.
+ */
 const typeProblems = (schema: Schema, cell: string) => {
-  const kinds = schema.enum === undefined ? [schema.type ?? ""] : schema.enum.map(String);
+  const prose = cell.replaceAll(/`[^`]*`/g, " ");
+  const words: Array<string> = prose.match(/[A-Za-z]+/g) ?? [];
   // The schema's integer bound for "any safe integer" isn't a bound the page states.
-  const bounds = [schema.minimum, schema.maximum].filter(
-    (bound): bound is number => bound !== undefined && Math.abs(bound) < Number.MAX_SAFE_INTEGER
-  );
-  return [...kinds, ...bounds.map(String)].filter((word) => !cell.includes(word));
+  const bounds = [schema.minimum, schema.maximum]
+    .filter((b): b is number => b !== undefined && Math.abs(b) < Number.MAX_SAFE_INTEGER)
+    .map(String)
+    .sort();
+  const [stated, expected]: [Array<string>, Array<string>] =
+    schema.enum === undefined
+      ? [
+          KINDS.filter((kind) => words.includes(kind)),
+          schema.type === "array" ? [schema.items?.type ?? "", "array"] : [schema.type ?? ""],
+        ]
+      : [ticked(cell), schema.enum.map(String)];
+  return [
+    ...(stated.sort().join() === expected.sort().join()
+      ? []
+      : [`the type cell says ${stated.join(", ")}; the schema ${expected.join(", ")}`]),
+    ...(numbersIn(prose).join() === bounds.join()
+      ? []
+      : [
+          `the type cell's numbers are ${numbersIn(prose).join(", ")}; the schema's ${bounds.join(", ")}`,
+        ]),
+  ];
 };
 
 /** The first table under a heading of interfaces.md. */
@@ -260,9 +291,7 @@ describe("interfaces.md covers the toolkit", () => {
         const said = required.startsWith("yes");
         const agrees = said === mustHave || (said && required.includes("optional in the schema"));
         return [
-          ...typeProblems(schema, type).map(
-            (word) => `${tool.name}.${name}: the type cell lacks "${word}"`
-          ),
+          ...typeProblems(schema, type).map((problem) => `${tool.name}.${name}: ${problem}`),
           ...(agrees ? [] : [`${tool.name}.${name}: "${required}" contradicts the schema`]),
         ];
       })
@@ -283,21 +312,56 @@ describe("interfaces.md covers the toolkit", () => {
   });
 });
 
-describe("tool names in the pages are real", () => {
-  const skill = (dir: string): ReadonlyArray<string> =>
-    readdirSync(join(root, dir), { withFileTypes: true }).flatMap((entry) =>
-      entry.isDirectory()
-        ? skill(`${dir}/${entry.name}`)
-        : entry.name.endsWith(".md")
-          ? [`${dir}/${entry.name}`]
-          : []
-    );
-  const SKILL_FILES = skill("plugin/skills/agent-bus");
+/** Every Markdown file of the skill, found by walking its folder. */
+const skillFiles = (dir: string): Array<string> =>
+  readdirSync(join(root, dir), { withFileTypes: true }).flatMap((entry) =>
+    entry.isDirectory()
+      ? skillFiles(`${dir}/${entry.name}`)
+      : entry.name.endsWith(".md")
+        ? [`${dir}/${entry.name}`]
+        : []
+  );
+const SKILL_FILES = skillFiles("plugin/skills/agent-bus");
 
+describe("tool names in the pages are real", () => {
   test.each(["docs/architecture/interfaces.md", ...SKILL_FILES])("%s", (path) => {
-    const written = [...read(path).matchAll(/`(bus_[a-z]+)`/g)].map(([, name = ""]) => name);
+    // The host's own prefix for the server's tools: mcp__agent-bus__bus_read is bus_read.
+    const text = read(path).replaceAll("mcp__agent-bus__", "");
+    const written = [...text.matchAll(/(?<![A-Za-z0-9_])bus_[A-Za-z0-9_]+/g)].map(
+      ([name = ""]) => name
+    );
     expect(written.length).toBeGreaterThan(0);
     expect(written.filter((name) => toolNamed(name) === undefined)).toEqual([]);
+  });
+});
+
+/**
+ * Backticked tokens of the skill that are one plain word and aren't a parameter of any tool.
+ * The skill keeps backticks for parameters, full tool names, `hooked: true`, commands, SPARQL
+ * and placeholders, so a lone word in backticks is checked as a parameter name unless listed.
+ */
+const NOT_PARAMETERS = [
+  // `agent-bus` CLI subcommands.
+  "publish",
+  "peers",
+  // SPARQL keywords and functions.
+  "SELECT",
+  "LIMIT",
+  "OFFSET",
+  "FROM",
+  "SERVICE",
+  "DESCRIBE",
+  "CONSTRUCT",
+  "ASK",
+  "CONTAINS",
+];
+
+describe("parameter names in the skill are real", () => {
+  test.each(SKILL_FILES)("%s", (path) => {
+    const words = ticked(read(path)).filter((span) => /^[A-Za-z][A-Za-z0-9]*$/.test(span));
+    expect(
+      words.filter((word) => !parameterNames.has(word) && !NOT_PARAMETERS.includes(word))
+    ).toEqual([]);
   });
 });
 
@@ -306,7 +370,8 @@ describe("tool names in the pages are real", () => {
 /**
  * The text a refusals row quotes: from its first double quote to its last, so quotes inside
  * it survive. Each `<placeholder>` or ellipsis splits it into fragments, which must occur
- * in the code, where the same place is a `${…}` interpolation or a shortened tail.
+ * in the code in that order on one line, where the same place is a `${…}` interpolation or
+ * a shortened tail. A row can't be satisfied by splicing two messages.
  */
 const fragmentsOf = (cell: string) => {
   const first = cell.indexOf('"');
@@ -318,6 +383,10 @@ const fragmentsOf = (cell: string) => {
     .map((fragment) => fragment.trim())
     .filter((fragment) => fragment !== "");
 };
+const escaped = (text: string) => text.replaceAll(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/** Whether a line of code has the fragments in order. */
+const wordedBy = (fragments: ReadonlyArray<string>, line: string) =>
+  new RegExp(fragments.map(escaped).join(".*?")).test(line);
 
 /** Rows that describe a refusal without quoting one: the wording isn't ours to check. */
 const UNQUOTED = [
@@ -327,47 +396,81 @@ const UNQUOTED = [
   "A store error, or no answer",
 ];
 
+/** The first-column cells of the tables under a Refusals or Errors heading of a page. */
+const refusalRows = (path: string) =>
+  sectionsTitled(read(path), ["Refusals", "Errors"])
+    .flatMap(({ lines }) => tablesOf(lines))
+    .flatMap((table) => table.rows.map((row) => row[0] ?? ""));
+
 describe("refusals quote the code", () => {
-  const pages = [
-    "docs/architecture/interfaces.md",
-    "plugin/skills/agent-bus/SKILL.md",
-    "plugin/skills/agent-bus/references/queries.md",
-  ];
+  const pages: Array<string> = ["docs/architecture/interfaces.md", ...SKILL_FILES];
+
+  test("interfaces.md, SKILL.md and queries.md have refusal tables", () => {
+    const withRows = pages.filter((path) => refusalRows(path).length > 0);
+    expect(withRows).toEqual(
+      expect.arrayContaining([
+        "docs/architecture/interfaces.md",
+        "plugin/skills/agent-bus/SKILL.md",
+        "plugin/skills/agent-bus/references/queries.md",
+      ])
+    );
+    expect(refusalRows(pages[0] ?? "").length).toBeGreaterThan(10);
+  });
 
   test.each(pages)("%s", (path) => {
-    const rows = sectionsTitled(read(path), ["Refusals", "Errors"])
-      .flatMap(({ lines }) => tablesOf(lines))
-      .flatMap((table) => table.rows.map((row) => row[0] ?? ""));
-    expect(rows.length).toBeGreaterThan(3);
-    const missing = rows.flatMap((cell) => {
+    const missing = refusalRows(path).flatMap((cell) => {
       const fragments = fragmentsOf(cell);
       if (fragments === undefined) {
         return UNQUOTED.some((start) => cell.startsWith(start))
           ? []
           : [`${cell}: quotes no wording`];
       }
-      return fragments
-        .filter((fragment) => !SOURCES.some((source) => source.includes(fragment)))
-        .map((fragment) => `${fragment}: not in the code`);
+      return SOURCE_LINES.some((line) => wordedBy(fragments, line))
+        ? []
+        : [`${fragments.join(" … ")}: not worded so in one place in the code`];
     });
     expect(missing).toEqual([]);
+  });
+
+  // The ownership checks are src/Bus.ts's `message: "…"` literals and `sessionHelp`.
+  test("every ownership refusal in src/Bus.ts has a row in interfaces.md", () => {
+    const lines = read("src/Bus.ts").split("\n");
+    const help = lines[lines.findIndex((line) => line.startsWith("const sessionHelp =")) + 1] ?? "";
+    const literals = [help, ...lines.filter((line) => /^\s*message: ["`]/.test(line))].map((line) =>
+      line.replaceAll('\\"', '"')
+    );
+    expect(literals.length).toBeGreaterThan(3);
+    const rows = refusalRows("docs/architecture/interfaces.md").flatMap((cell) => {
+      const fragments = fragmentsOf(cell);
+      return fragments === undefined ? [] : [fragments];
+    });
+    expect(literals.filter((line) => !rows.some((fragments) => wordedBy(fragments, line)))).toEqual(
+      []
+    );
   });
 });
 
 // --- delivery.md: timeouts and schedules -----------------------------------------------
 
-const UNITS: Record<string, number> = { ms: 0.001, s: 1, min: 60, KiB: 1024, MiB: 1024 * 1024 };
+const SCALE: Record<string, number> = { ms: 0.001, s: 1, min: 60, KiB: 1024, MiB: 1024 * 1024 };
+const TIME_UNITS = ["ms", "s", "min"];
 
-/** A value cell as numbers in seconds or bytes. A unit applies to the bare numbers before it: "5, 15, 60 min". */
+/**
+ * A value cell as parts in seconds or bytes, each with its unit. A unit applies to the bare
+ * numbers before it: "5, 15, 60 min".
+ */
 const quantities = (cell: string) => {
-  let scale = 1;
+  let unit: string | undefined;
   return cell
     .split(",")
     .reverse()
     .map((part) => {
-      const [, amount = "", unit] = /^([\d.]+)\s*([A-Za-z]+)?$/.exec(part.trim()) ?? [];
-      scale = unit === undefined ? scale : (UNITS[unit] ?? Number.NaN);
-      return Number(amount) * scale;
+      const [, amount = "", own] = /^([\d.]+)\s*([A-Za-z]+)?$/.exec(part.trim()) ?? [];
+      unit = own ?? unit;
+      return {
+        unit,
+        value: Number(amount) * (unit === undefined ? 1 : (SCALE[unit] ?? Number.NaN)),
+      };
     })
     .reverse();
 };
@@ -379,6 +482,12 @@ const exported = (value: unknown): ReadonlyArray<number> =>
     : Duration.isDuration(value)
       ? [Duration.toMillis(value) / 1000]
       : [Number(value)];
+
+/** Whether a constant is a time: a Duration, or a count of seconds by its name. */
+const isTime = (name: string) => {
+  const value = Timing[name as keyof typeof Timing] as unknown;
+  return name.endsWith("_SECONDS") || [value].flat().some((item) => Duration.isDuration(item));
+};
 
 describe("delivery.md's timeouts and schedules", () => {
   const [table] = tablesOf(
@@ -401,24 +510,35 @@ describe("delivery.md's timeouts and schedules", () => {
     expect(rows.filter(({ names }) => names.length === 0).map(({ value }) => value)).toEqual([]);
   });
 
-  test("each row states the value in code", () => {
+  test("each row states the value in code, with a time unit exactly for a time", () => {
     const wrong = rows.flatMap(({ names, value }) => {
       const stated = quantities(value);
       // One constant may be a list ("5, 15, 60 min"); several constants take one value each.
       const actual = names.flatMap((name) => exported(Timing[name as keyof typeof Timing]));
+      const unitless = stated.flatMap(({ unit }, at) => {
+        const name = names.length === 1 ? names[0] : names[at];
+        const timed = unit !== undefined && TIME_UNITS.includes(unit);
+        return name !== undefined && timed !== isTime(name) ? [name] : [];
+      });
       const same =
         stated.length === actual.length &&
-        stated.every((amount, at) => Math.abs(amount - (actual[at] ?? Number.NaN)) < 1e-9);
-      return same ? [] : [`${names.join(", ")}: the table says ${value}, the code ${actual}`];
+        stated.every(({ value }, at) => Math.abs(value - (actual[at] ?? Number.NaN)) < 1e-9);
+      return [
+        ...(same ? [] : [`${names.join(", ")}: the table says ${value}, the code ${actual}`]),
+        ...unitless.map((name) => `${name}: ${value} has the wrong kind of unit`),
+      ];
     });
     expect(wrong).toEqual([]);
   });
 
-  test("each row's files use the constant", () => {
+  test("each row's files use every constant of the row, and aren't src/timing.ts", () => {
     const unused = rows.flatMap(({ names, files }) =>
-      files
-        .filter((file) => !names.some((name) => read(file).includes(name)))
-        .map((file) => `${names.join(", ")} is not in ${file}`)
+      files.flatMap((file) => [
+        ...(file === "src/timing.ts" ? [`${names.join(", ")}: src/timing.ts defines it`] : []),
+        ...names
+          .filter((name) => !new RegExp(`\\b${name}\\b`).test(read(file)))
+          .map((name) => `${name} is not in ${file}`),
+      ])
     );
     expect(unused).toEqual([]);
   });

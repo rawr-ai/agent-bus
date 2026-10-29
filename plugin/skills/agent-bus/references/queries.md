@@ -6,7 +6,7 @@ Each recipe below was run against a disposable bus. Replace the `<…>` placehol
 
 ## bus_history
 
-Arguments: `query` (words), `participant` (one address, `#topic` or `*`), `limit` (default 50). It returns `messages`, oldest first and newest last, with each message's `id`, `ts`, `from`, `to`, `subject`, `body`, `replyTo` and where it was sent from.
+Arguments: `query` (words), `participant` (one address, `#topic` or `*`), `limit` (default 50). It returns the messages oldest first and newest last, each with its id, time, sender, recipients, subject, body, the id it replies to, and where it was sent from.
 
 | To find | Arguments |
 | --- | --- |
@@ -29,9 +29,9 @@ One SPARQL 1.1 `SELECT`, passed as `query`. The prefixes `bus:`, `xsd:`, `rdf:` 
 - `bus:to`, one value per recipient: an address, `#topic` or `*`;
 - `bus:replyTo`, a link to the answered message's node, not its id string;
 - where it was written: `bus:host`, `bus:cwd`, `bus:repo` (the repository's top-level path) and `bus:branch`;
-- on presence entries, `bus:runtime` and `bus:status` (`joined` or `left`).
+- on presence entries, `bus:runtime` and `bus:status` (joined or left).
 
-**The result.** `rows`, one object per solution keyed by variable name (`"?from"`), with `schema` and the commit `t` they reflect. A `bus:ts` value comes back as an object with `@value` and `@type`. Results are cut off at 32 KB with `hasMore: true`, and a query gets 10 seconds, so always add `LIMIT`.
+**The result.** Rows, one object per solution keyed by variable name (`"?from"`), with their schema and the commit they reflect. A `bus:ts` value comes back as an object with `@value` and `@type`. Results are cut off at 32 KB with `hasMore: true`, and a query gets 10 seconds, so always add `LIMIT`.
 
 ### Count messages per sender
 
