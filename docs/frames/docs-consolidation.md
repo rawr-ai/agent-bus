@@ -245,6 +245,31 @@ Each phase ends with a review loop: the writers' result goes to two reviewers on
 | 4. The skill | `plugin/skills/agent-bus/` with its references; the MCP instructions as a complete minimum protocol; every tool parameter described; the wake-text decision; the coverage test with exported constants; the refresh procedure in `upgrade.md`; align the two version strings in code (0.2.0, 0.1.0); verify how Codex loads a plugin's skill, and the skill-length truncation, recorded in platforms | Sol and Opus (code), Fable (the skill's prose), then a contract review of the affected pages | `check` and the coverage test pass. A throwaway Claude session loads the skill from the installed plugin's cached copy after a plugin update, not from the checkout. Deploying `serve` waits for the owner's go-ahead |
 | 5. Close | trim repo memory against the new pages; final overview map and frames index; full check; deploy by following `deploy.md` and `operate.md` literally, recording where they fell short; this frame's results and "Moved into current docs" checklist | Astra, Fable (whole read) | the owner reviews, then main fast-forwards; `serve` restarts only if phase 4 changed code |
 
+## Results (2026-10-29)
+
+| Phase | Commits | What landed | Reviews |
+| --- | --- | --- | --- |
+| 1. Skeleton and checks | e53cbcf | `connections.md` moved into `architecture/`; stubs for messaging, interfaces and six runbooks; the placement rule and page shapes in AGENTS.md; `frames/README.md` with the retired table; `scripts/check-docs.ts` in `bun run check`, with its own tests | Sol: revise, six findings, all applied (the parser missed multi-line and reference links) |
+| 2. Reference | f988d09, d2fe05d | Five architecture pages in the fixed shape; codex-hosting folded and removed; delivery's wake-state diagram and timing table; the platform pages gain the facts that lived only in frames and a recheck column; both allowlists emptied | Opus: revise, 14 accuracy findings; Fable: accept with trims; Sol: revise, one weakened fact and four facts with two homes. All applied |
+| 3. Entry points | 160e37b, b7560da | The README (55 lines, from 133); six runbooks, each step marked rehearsed, checked read-only or unverified; installer overrides for a disposable instance | Astra: revise (rollback not repeatable, an old installer could escape a rehearsal, a daemon restart can lose started turns, `codex exec` holds a thread); Fable and Sol: revise. All applied |
+| 4. The skill | 475a30c, 7b245fb | `plugin/skills/agent-bus/` (SKILL.md under Codex's 8,000-byte cut); the MCP instructions as the minimum protocol (495 → about 230 words); every parameter described, with bounds; Claude's wake text says don't rejoin and retry once; `src/timing.ts` and `src/version.ts`; the coverage test; five bug fixes | Opus: accept; Sol: revise (the coverage test passed several wrong pages); Fable: revise lightly. All applied |
+
+- **Measured:** 22 Markdown files and 2,971 lines before; 34 files after, with 3,659 lines of current pages, the skill, the README and AGENTS.md, and the frames unchanged except for links. `bun run check` runs 209 tests and the docs check.
+- **Rehearsal:** changing operations ran on disposable instances with their own labels, ports and state, beside the live bus, which kept its processes throughout. Steps that need the other machine, a real session or the real daemon are marked unverified.
+- **Found on the way, now on their owner pages:** Fluree refuses a subject-less token on the event stream only when events auth is required; a new durable ledger's text search can fail with HTTP 500 in its first second; Codex lists a skill's name and description and cuts an explicitly mentioned skill at 8,000 bytes; the launchd `serve` would have loaded a `.env` (fixed). The early-search gap seen once on an authenticated server was not reproduced in about 30 runs.
+- **Left for later:** whether `owned()` should check the runtime outside join; a CLI `read`; a queue-method retest script; token rotation; dated, rotated `serve` logs.
+- **To do at close, after the owner's review:** fast-forward main and deploy by following `deploy.md` and `operate.md` literally, recording where they fell short; update the installed plugin and load the skill in a throwaway session from its cached copy; trim repo memory against the new pages.
+
+## Moved into current docs
+
+| Facet | Where it now lives | Done |
+| --- | --- | --- |
+| Contract | `interfaces.md` and the tool schemas, held together by `test/docs-coverage.test.ts` | Yes |
+| Rule | the owner architecture pages' numbered Rules; the placement rule and page shapes in AGENTS.md | Yes |
+| Agent guidance | the `agent-bus` skill and the MCP instructions | Yes; loading from the installed plugin at close |
+| Platform claim | `docs/platforms/`, with the recheck column | Yes |
+| Procedure | `docs/runbooks/` | Yes; the deploy at close records where the runbooks fell short |
+
 ## Not doing
 
 - **Bundling the MCP server into the plugin, and a Codex plugin manifest and install.** They need their own release: Claude Code renames a plugin's MCP tools (`mcp__plugin_…`), which would change every tool name agents and permission rules use, and how Codex loads a plugin's skills should be verified live first. Phase 4 puts the skill where the Claude plugin picks it up.
