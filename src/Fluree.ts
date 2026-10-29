@@ -4,6 +4,7 @@ import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { Ledger, type SearchInput, type Slice } from "./Ledger.ts";
 import { BUS, validateSelect } from "./sparql.ts";
+import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
 export interface FlureeConfig {
   /** Transaction server origin, e.g. http://127.0.0.1:8095 */
@@ -15,10 +16,8 @@ export interface FlureeConfig {
 }
 
 const context = { bus: BUS, xsd: "http://www.w3.org/2001/XMLSchema#" };
-const RECONNECT_INTERVAL = "5 seconds";
 /** Commits read per query, so no response is large enough to be cut short. */
 const READ_WINDOW = 500;
-const POLL_INTERVAL = "15 seconds";
 /** Agent JSON: a compact, self-describing result envelope that Fluree truncates to a byte budget. */
 const AGENT_JSON = "application/vnd.fluree.agent+json";
 const QUERY_MAX_BYTES = 32_768;
@@ -203,7 +202,7 @@ export const layerFluree = (config: FlureeConfig) =>
         const head = yield* end;
         if (from > head) {
           return yield* new LedgerError({
-            message: `Cursor t=${from} is ahead of ${config.ledger} (t=${head}); the ledger was replaced. Rejoin to reset the cursor.`,
+            message: `Cursor t=${from} is ahead of ${config.ledger} (t=${head}): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again.`,
           });
         }
         const entries = [];

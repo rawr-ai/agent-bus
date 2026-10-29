@@ -12,7 +12,7 @@ const PREFIXES = {
   f: "https://ns.flur.ee/db#",
 };
 
-const MAX_QUERY_LENGTH = 32_768;
+export const MAX_QUERY_LENGTH = 32_768;
 
 const invalid = (message: string) => new LedgerError({ message });
 

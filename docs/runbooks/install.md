@@ -36,7 +36,7 @@ ls /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/
 echo "$PATH" | tr ':' '\n' | grep -x "$HOME/.local/bin"
 ```
 
-Expected: the Bun version in `packageManager` in `package.json`; a Fluree version (bus host only); a path for each CLI you will use; the bundled Codex path; and `~/.local/bin` echoed back. Fix anything missing first: with no `fluree`, the installer exits with status 1 and prints nothing ([If it fails](#if-it-fails)). *Checked read-only 2026-10-28*
+Expected: the Bun version in `packageManager` in `package.json`; a Fluree version (bus host only); a path for each CLI you will use; the bundled Codex path; and `~/.local/bin` echoed back. Fix anything missing first: with no `fluree`, the installer prints `fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun` and exits with status 1 ([If it fails](#if-it-fails)). *Checked read-only 2026-10-28*; the installer's message *Rehearsed 2026-10-28*
 
 ## Install on the bus host
 
@@ -83,7 +83,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    | The token | `~/.agent-bus/fluree-token`, mode 0600 | The bearer token for Fluree's data and admin APIs. It has no subject and lasts 520 weeks ([connections](../architecture/connections.md#limits)) |
    | `config.json` | `~/.agent-bus/config.json` | `{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`, written only if absent. `serve` won't start without it |
    | The Fluree project and storage | `~/.agent-bus/fluree/` | The ledger lives here |
-   | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; loaded at once |
+   | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; loaded at once. `serve` runs as `bun --no-env-file src/bin.ts serve`, so a `.env` file in the state directory (its working directory) isn't loaded; a plist written by an earlier installer lacks the flag until the installer is rerun (read in the script, *Unverified* on a loaded job) |
 
    Expected: the link points into your checkout, the key and token show `-rw-------`, `config.json` names port 8095, and both plists are listed. Both servers listen on loopback only. *Rehearsed 2026-10-28*
 
@@ -243,7 +243,7 @@ The other machine's non-interactive SSH `PATH` lacks `bun`, so a command run ove
 
 | What you see | What it means and what to do |
 | --- | --- |
-| The installer exits with status 1 and prints nothing | `fluree` isn't on `PATH` (bus host). Check with `command -v fluree`, fix the `PATH`, rerun. *Rehearsed 2026-10-28*. The silence is a fault in the script, which should say so. |
+| `fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun`, exit status 1 | `fluree` isn't on `PATH` (bus host). Check with `command -v fluree`, fix the `PATH`, rerun. *Rehearsed 2026-10-28* |
 | `… exists and is not a link; move it aside and rerun` | A real file sits at `~/.local/bin/agent-bus`. Move it aside, rerun. *Rehearsed 2026-10-28* |
 | `… does not run` | The link's target can't run under a launchd-style `PATH`. Check that `bun` is in `~/.bun/bin` or `~/.local/bin` and that `bun install` finished |
 | `The Fluree server at … does not enforce the bus token` | Another server holds the Fluree port. Find it with `lsof -nP -iTCP:8095 -sTCP:LISTEN`, stop it by its pid, rerun. *Rehearsed 2026-10-28* |

@@ -15,8 +15,7 @@ import * as Fluree from "./Fluree.ts";
 import * as Ledger from "./Ledger.ts";
 import * as Mcp from "./mcp.ts";
 import * as Serve from "./serve.ts";
-
-const VERSION = "0.2.0";
+import { VERSION } from "./version.ts";
 
 const busDir = process.env.AGENT_BUS_DIR ?? join(homedir(), ".agent-bus");
 const port = Number(process.env.AGENT_BUS_PORT ?? 8096);

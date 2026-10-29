@@ -139,6 +139,19 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     });
   });
 
+  test("describes every tool parameter", async () => {
+    const { tools } = await connect();
+    const undescribed = tools.flatMap(({ name, inputSchema }) =>
+      Object.entries(inputSchema.properties ?? {})
+        .filter(
+          ([, property]) =>
+            String((property as { description?: unknown }).description ?? "").trim() === ""
+        )
+        .map(([parameter]) => `${name}.${parameter}`)
+    );
+    expect(undescribed).toEqual([]);
+  });
+
   test("lists the bus tools, with output schemas from 2025-06-18", async () => {
     const { tools } = await connect();
     const required = {

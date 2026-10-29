@@ -393,7 +393,7 @@ The refusal reads `<address> is held by another session (runtime …; on …; jo
 
 ## A cursor is ahead of the ledger
 
-A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>); the ledger was replaced. Rejoin to reset the cursor.`, and `serve`'s log has `Not waking <address> this pass: Cursor …` for a Claude address. Cursors are kept per incarnation of the ledger ([messaging](../architecture/messaging.md#rules), rule 11), so a plain replacement starts every address over, and this error shows only when the ledger went back in its own history (restored from an earlier copy) or a cursor file was edited.
+A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again.`, and `serve`'s log has `Not waking <address> this pass: Cursor …` for a Claude address. Cursors are kept per incarnation of the ledger ([messaging](../architecture/messaging.md#rules), rule 11), so a plain replacement starts every address over, and this error shows only when the ledger went back in its own history (restored from an earlier copy) or a cursor file was edited. An agent that meets it tells the human and doesn't rejoin: a plain rejoin changes nothing, and a rejoin with `replay` re-delivers every message ever sent to the address, which is the human's choice.
 
 1. Look at the cursor.
 
@@ -416,7 +416,7 @@ A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>); the ledger w
      agent-bus join --address <address> --runtime <runtime> --replay
      ```
 
-   A plain rejoin does not reset the cursor, though the message says so. *Rehearsed 2026-10-28.*
+   A plain rejoin does not reset the cursor. *Rehearsed 2026-10-28.*
 
 3. Verify: the owner's `bus_read` returns and the `Not waking` warnings stop. *Rehearsed 2026-10-28.*
 

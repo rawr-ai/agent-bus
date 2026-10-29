@@ -5,6 +5,23 @@ import { Bus, type Pending } from "./Bus.ts";
 import { machine, type Subscriber } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { readEligibility, type Stored } from "./rollout.ts";
+import {
+  APP_SERVER_EXIT_GRACE,
+  BORROW_TIMEOUT,
+  CLOSING_RETRY,
+  FIRST_RETRY,
+  LAST_RETRY,
+  MAX_PAGES,
+  NUDGE_TIMEOUT,
+  QUEUE_PAGE_SIZE,
+  QUEUE_TIMEOUT,
+  RECONCILE,
+  RECONCILES_BEFORE_WARNING,
+  RELEASE_SECONDS,
+  START_TIMEOUT,
+  UNSUBSCRIBE_TIMEOUT,
+} from "./timing.ts";
+import { VERSION } from "./version.ts";
 
 export class CodexError extends Schema.TaggedError<CodexError>()("CodexError", {
   method: Schema.String,
@@ -91,7 +108,7 @@ const rpc = (write: (text: string) => void, timeout: Duration.Duration) => {
   const initialize = (experimentalApi: boolean) =>
     Effect.gen(function* () {
       yield* request("initialize", {
-        clientInfo: { name: "agent-bus", title: "agent-bus", version: "0.1.0" },
+        clientInfo: { name: "agent-bus", title: "agent-bus", version: VERSION },
         capabilities: experimentalApi ? { experimentalApi } : null,
       });
       yield* Effect.try({
@@ -126,7 +143,10 @@ const appServer = (codex: string, timeout: Duration.Duration) =>
             // Already gone.
           }
           // It exits when its input ends; one that doesn't is killed.
-          const exited = await Promise.race([child.exited.then(() => true), Bun.sleep(500)]);
+          const exited = await Promise.race([
+            child.exited.then(() => true),
+            Bun.sleep(Duration.toMillis(APP_SERVER_EXIT_GRACE)),
+          ]);
           if (exited !== true) child.kill("SIGKILL");
           await child.exited;
         })
@@ -245,17 +265,6 @@ export type Borrowed = "loaded" | "held";
 export interface Daemon {
   readonly borrow: (threadId: string) => Effect.Effect<Borrowed, CodexError>;
 }
-
-/** How long the daemon keeps a borrowed thread loaded once it is idle and unsubscribed. */
-const RELEASE_SECONDS = 5;
-/** A load's deadline, so a wedged daemon can't hold up the other peers. */
-const BORROW_TIMEOUT = Duration.seconds(15);
-/** The extra time a borrow has when it must start the daemon first. */
-const START_TIMEOUT = Duration.seconds(10);
-/** The daemon is releasing the thread; it is gone within milliseconds. */
-const CLOSING_RETRY = Duration.seconds(1);
-/** Unsubscribing only hastens the release, so it isn't waited on long. */
-const UNSUBSCRIBE_TIMEOUT = Duration.seconds(2);
 
 const notListening = (error: CodexError) =>
   error.method === "connect" && error.message === NOT_LISTENING;
@@ -413,18 +422,6 @@ const queuedItem = (item: unknown): Queued => {
 export const defaultCodex =
   "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex";
 
-/** More pages than a queue of a person's own making would fill. */
-const MAX_PAGES = 20;
-
-/** Each app-server request's deadline. */
-const QUEUE_TIMEOUT = Duration.seconds(2);
-
-/**
- * The deadline for a whole nudge (start, list, add), which holds the
- * address's lock: an owner's read waits behind it, well inside the CLI's 30 s call.
- */
-const NUDGE_TIMEOUT = Duration.seconds(6);
-
 /**
  * Thread queues through an app-server of serve's own (`thread/queue/*`, which
  * the protocol marks experimental). Listing, adding, removing and reading load the
@@ -443,17 +440,19 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
           const items: Array<Queued> = [];
           const seen = new Set<string>();
           let cursor: string | null = null;
+          let pages = 0;
           do {
-            if (seen.size >= MAX_PAGES || (cursor !== null && seen.has(cursor))) {
+            if (pages >= MAX_PAGES || (cursor !== null && seen.has(cursor))) {
               return yield* new CodexError({
                 method: "thread/queue/list",
-                message: `the listing didn't end after ${seen.size + 1} pages`,
+                message: `the listing didn't end after ${pages} pages`,
               });
             }
             if (cursor !== null) seen.add(cursor);
             const page: typeof QueuedItems.Type = yield* server
-              .request("thread/queue/list", { threadId, limit: 100, cursor })
+              .request("thread/queue/list", { threadId, limit: QUEUE_PAGE_SIZE, cursor })
               .pipe(Effect.flatMap(decodeQueued));
+            pages += 1;
             items.push(...page.data.map(queuedItem));
             cursor = page.nextCursor ?? null;
           } while (cursor !== null);
@@ -505,18 +504,8 @@ export const deliveryTargets = (peers: ReadonlyArray<Subscriber>, host: string) 
       machine(peer.host) === machine(host)
   );
 
-const FIRST_RETRY = Duration.seconds(30);
-const LAST_RETRY = Duration.minutes(5);
-
-/**
- * How long after an attempt covered some unread mail it is attempted again
- * while that mail stays unread: 5 minutes, then 15, then every hour.
- */
-const RECONCILE = [Duration.minutes(5), Duration.minutes(15), Duration.minutes(60)] as const;
 const reconcileDelay = (reconciles: number) =>
   RECONCILE[Math.min(reconciles, RECONCILE.length - 1)] ?? Duration.minutes(60);
-/** After this many reconciles of the same unread mail, the log says the thread isn't reading it. */
-const RECONCILES_BEFORE_WARNING = 3;
 
 /** Unread mail an attempt covered, and when. */
 interface Covered {

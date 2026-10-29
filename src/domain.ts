@@ -6,10 +6,16 @@ export type Runtime = typeof Runtime.Type;
 
 /** Where an entry was written from. `repo` and `branch` are optional metadata for queries. */
 export class Origin extends Schema.Class<Origin>("Origin")({
-  host: Schema.String,
-  cwd: Schema.optionalKey(Schema.String),
-  repo: Schema.optionalKey(Schema.String),
-  branch: Schema.optionalKey(Schema.String),
+  host: Schema.String.annotate({ description: "The machine it was written on." }),
+  cwd: Schema.optionalKey(
+    Schema.String.annotate({ description: "The writer's working directory." })
+  ),
+  repo: Schema.optionalKey(
+    Schema.String.annotate({ description: "The Git repository at cwd, by its top-level path." })
+  ),
+  branch: Schema.optionalKey(
+    Schema.String.annotate({ description: "The branch checked out there." })
+  ),
 }) {}
 
 /**
@@ -40,14 +46,20 @@ export class Presence extends Schema.Class<Presence>("Presence")({
  * subscribers, or `*` for every peer.
  */
 export class Message extends Schema.Class<Message>("Message")({
-  id: Schema.String,
-  ts: Schema.String,
-  from: Schema.String,
-  to: Schema.Array(Schema.String),
-  kind: Schema.Literals(["message", "presence"]),
-  subject: Schema.optionalKey(Schema.String),
-  body: Schema.String,
-  replyTo: Schema.optionalKey(Schema.String),
+  id: Schema.String.annotate({ description: "The message's id, which replies name in replyTo." }),
+  ts: Schema.String.annotate({ description: "When it was sent (ISO 8601)." }),
+  from: Schema.String.annotate({ description: "The sender's address." }),
+  to: Schema.Array(Schema.String).annotate({
+    description: "Its recipients: addresses, #topic or *.",
+  }),
+  kind: Schema.Literals(["message", "presence"]).annotate({
+    description: "message, or presence for a join or leave announcement.",
+  }),
+  subject: Schema.optionalKey(Schema.String.annotate({ description: "Its subject line." })),
+  body: Schema.String.annotate({ description: "The message text." }),
+  replyTo: Schema.optionalKey(
+    Schema.String.annotate({ description: "The id of the message it answers." })
+  ),
   origin: Schema.optionalKey(Origin),
   presence: Schema.optionalKey(Presence),
 }) {}

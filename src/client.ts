@@ -2,13 +2,13 @@ import { Effect, Schema } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { type Runtime, validSession } from "./domain.ts";
 import { Peers } from "./mcp.ts";
+import { CALL_TIMEOUT_SECONDS } from "./timing.ts";
+import { VERSION } from "./version.ts";
 
 /** A failed call to the machine's bus process. */
 export class BusCallError extends Schema.TaggedError<BusCallError>()("BusCallError", {
   message: Schema.String,
 }) {}
-
-const CALL_TIMEOUT_SECONDS = 30;
 
 /** Drops undefined fields, which tool arguments omit rather than send. */
 export const defined = <T extends Record<string, unknown>>(fields: T) =>
@@ -39,7 +39,7 @@ export const sessionFor = (
         new BusCallError({
           message:
             explicit === undefined
-              ? `No usable session id for a ${runtime} session: pass --session, or run where $${variable} is set.`
+              ? `No usable session id for runtime ${runtime}: pass --session, or run where $${variable} is set.`
               : "--session is empty or an unexpanded placeholder.",
         })
       );
@@ -68,7 +68,7 @@ export const call =
       Effect.provide(
         McpClient.layerHttp({
           name: "agent-bus-cli",
-          version: "0.2.0",
+          version: VERSION,
           url,
           protocol: McpProtocol.v2026_07_28,
         })

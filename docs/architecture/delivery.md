@@ -80,7 +80,7 @@ sequenceDiagram
   Host->>Hook: the turn ends, and Stop starts the next hook
 ```
 
-- **What the hook does.** It calls `bus_wake` with the session id from its input, again and again while each call times out empty. `serve` holds a call until an address the session holds as `claude`, joined from this machine, has unread mail other than what it last woke the session for. The hook then prints one fixed line per address, telling the session to read its mail with `bus_read`, and exits 2. The woken turn's end starts the next hook, so the session runs nothing itself.
+- **What the hook does.** It calls `bus_wake` with the session id from its input, again and again while each call times out empty. `serve` holds a call until an address the session holds as `claude`, joined from this machine, has unread mail other than what it last woke the session for. The hook then prints one fixed line per address (`formatWake` in `src/claude.ts`) and exits 2. The line tells the session to read its mail with `bus_read` as that address, without calling `bus_join` first; to carry on, without replying or rejoining, when the read returns nothing or is refused as not joined or belonging to another session; and, when the read fails, to try once more, then say so and carry on. It says not to rejoin because a woken session may have lost its join from its context (after a compaction or a resume), and after `/clear` a rejoin would be refused, the old session id holding the address. The woken turn's end starts the next hook, so the session runs nothing itself.
 - **The woken mark.** For each address, `serve` keeps in memory the join and the span of unread mail, first to newest, that it last woke the session for. New mail or a partial read changes the span and wakes the session again; mail left unread doesn't (rule 5). A rejoin or a takeover changes the join, and a `serve` restart forgets the mark, which costs at most one extra wake per address. A mark moves only with a result that is returned; a call that ends without returning puts its marks back.
 - **One hook per session.** A newer `bus_wake` call from the same session ends the older one, and a hook whose session has gone stops (rule 15). A session that holds no address costs one short call at each arming point.
 - **`hooked`.** Once `serve` has seen a session's hook, that session's Claude joins return `hooked: true`. `serve` keeps this in memory, so after a restart it returns once the hook calls again.
@@ -172,18 +172,27 @@ stateDiagram-v2
 
 ### Timeouts and schedules
 
-Every timeout, retry, delay and schedule that the deliverer and the Claude wake use, by its name in code. "Inline" marks a value written in place, with no name of its own.
+Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wake, `serve` and the CLI's calls, by its name in `src/timing.ts`, which exports them all. The store's own query and read bounds stay beside the store code ([interfaces](interfaces.md#configuration-and-environment)). `test/docs-coverage.test.ts` fails when a constant has no row, a row names none, or a value differs from the code.
 
-| Constant | Value | In | What it bounds |
+| Constant | Value | Used in | What it bounds |
 | --- | --- | --- | --- |
 | `POLL_INTERVAL` | 15 s | `src/Fluree.ts` | The tick merged into the ledger's change stream. Each tick runs a delivery cycle and a pass of every waiting `bus_wake`. It is what notices a read, which moves a cursor file, not the ledger |
 | `RECONNECT_INTERVAL` | 5 s | `src/Fluree.ts` | The pause before reconnecting Fluree's event stream; each reconnection wakes readers once |
+| `MAX_WAIT_SECONDS` | 50 s | `src/mcp.ts` | How long one `bus_wake` call waits, and the longest `bus_wait` |
+| `DEFAULT_HISTORY_LIMIT` | 50 | `src/mcp.ts` | `bus_history`'s default number of messages |
+| `IDLE_TIMEOUT_SECONDS` | 65 s | `src/serve.ts` | The HTTP server's `idleTimeout`, `MAX_WAIT_SECONDS` + 15, so a long `bus_wake` or `bus_wait` isn't closed. Bun's default is 10 s |
+| `CALL_TIMEOUT_SECONDS` | 30 s | `src/client.ts` | The deadline of one CLI call to `serve` |
+| `WAKE_CALL_TIMEOUT_SECONDS` | 55 s | `src/claude.ts` | The hook's deadline for one `bus_wake` call: `MAX_WAIT_SECONDS` + 5 |
+| `WAKE_RETRY` | 5 s | `src/claude.ts` | The pause between the hook's failing calls |
+| `WAKE_FAILING_FOR` | 10 min | `src/claude.ts` | How long the hook keeps retrying failing calls before it gives up until the next arming point |
 | `QUEUE_TIMEOUT` | 2 s | `src/codex.ts` | Each request to `serve`'s own app-server: `initialize`, each list page, `add`, `delete` and `thread/read` |
 | `NUDGE_TIMEOUT` | 6 s | `src/codex.ts` | A whole post (start, list, add, `thread/read`) or a whole removal, under the address's lock |
-| inline | 500 ms | `src/codex.ts` (`appServer`) | How long `serve`'s app-server has to exit after its input ends, before it is killed |
-| `MAX_PAGES` | 20 | `src/codex.ts` | Further queue pages listed after the first, so at most 21 requests; a listing that hasn't ended by then, or repeats a cursor, fails. Each page asks for 100 items (inline) |
+| `APP_SERVER_EXIT_GRACE` | 500 ms | `src/codex.ts` | How long `serve`'s app-server has to exit after its input ends, before it is killed |
+| `MAX_PAGES` | 20 | `src/codex.ts` | The most pages one queue listing reads, so at most 20 requests; a listing that hasn't ended by then, or repeats a cursor, fails |
+| `QUEUE_PAGE_SIZE` | 100 | `src/codex.ts` | The items each queue page asks for |
 | `READ_TIMEOUT` | 5 s | `src/rollout.ts` | Reading a rollout for eligibility, outside the lock. A slower read is not eligible |
-| `MAX_FIRST_LINE` | 8 MiB | `src/rollout.ts` | The longest first record read; a longer one is not eligible. Files are read in 64 KiB chunks (inline, `latestSettings`) |
+| `MAX_FIRST_LINE` | 8 MiB | `src/rollout.ts` | The longest first record read; a longer one is not eligible |
+| `ROLLOUT_CHUNK` | 64 KiB | `src/rollout.ts` | The bytes read at a time, backwards from a rollout's end |
 | `BORROW_TIMEOUT` | 15 s | `src/codex.ts` | Connecting to the daemon, each request on that connection, and the resume with its one retry |
 | `START_TIMEOUT` | 10 s | `src/codex.ts` | `codex app-server daemon start`. Added to `BORROW_TIMEOUT`, it is also the whole borrow's deadline: 25 s |
 | `CLOSING_RETRY` | 1 s | `src/codex.ts` | The pause before asking again, once, for a thread that "is closing" |
@@ -192,12 +201,8 @@ Every timeout, retry, delay and schedule that the deliverer and the Claude wake 
 | `FIRST_RETRY`, `LAST_RETRY` | 30 s, 5 min | `src/codex.ts` | The back-off after a failed attempt: 30 s, doubling with each consecutive failure up to 5 min, counted from the failure |
 | `RECONCILE` | 5, 15, 60 min | `src/codex.ts` | The pause after each attempt at the same unread span. The last value repeats, so it is hourly after the third |
 | `RECONCILES_BEFORE_WARNING` | 3 | `src/codex.ts` | The reconcile at which the log warns that the thread isn't reading its mail |
-| `MAX_WAIT_SECONDS` | 50 s | `src/mcp.ts` | How long one `bus_wake` call waits, and the longest `bus_wait` |
-| inline | 55 s | `src/claude.ts` | The hook's deadline for one `bus_wake` call: `MAX_WAIT_SECONDS + 5` |
-| `RETRY` | 5 s | `src/claude.ts` | The pause between the hook's failing calls |
-| `FAILING_FOR` | 10 min | `src/claude.ts` | How long the hook keeps retrying failing calls before it gives up until the next arming point |
-| inline | 65 s | `src/serve.ts` | The HTTP server's `idleTimeout`, `MAX_WAIT_SECONDS + 15`, so a long `bus_wake` or `bus_wait` isn't closed |
-| inline | 30 days | `plugin/.claude-plugin/plugin.json` | The hook's `timeout` (2592000 s), after which Claude Code kills it |
+
+One value is set outside code: the hook's `timeout` in `plugin/.claude-plugin/plugin.json`, 2592000 s (30 days), after which Claude Code kills it.
 
 ## Rules
 

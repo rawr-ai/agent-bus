@@ -46,6 +46,7 @@ import {
 } from "../src/rollout.ts";
 import * as Serve from "../src/serve.ts";
 import { validateSelect } from "../src/sparql.ts";
+import { MAX_PAGES } from "../src/timing.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
@@ -606,6 +607,8 @@ describe.if(flureeBin !== null)("fluree ledger", () => {
           const head = yield* ledger.end;
           const error = yield* Effect.flip(ledger.read(head + 5));
           expect(error.message).toContain("ahead of");
+          // A plain rejoin keeps the cursor; only a replay resets it.
+          expect(error.message).toContain("a rejoin with replay restarts it at 0");
         }),
         fluree().layer
       )
@@ -1685,7 +1688,7 @@ describe("codex app-server queue", () => {
    * each request it receives, and answers as `mode` says.
    */
   const fakeCodex = (
-    mode: "answers" | "pages" | "loops" | "asks" | "refuses" | "silent" | "stubborn"
+    mode: "answers" | "pages" | "loops" | "endless" | "asks" | "refuses" | "silent" | "stubborn"
   ) => {
     const dir = tempDir();
     const bin = join(dir, "codex");
@@ -1710,6 +1713,7 @@ for await (const line of console) {
   else if (mode === "refuses") reply(message.id, { error: { code: -32603, message: "no rollout found for thread id " + message.params.threadId } });
   else if (mode === "pages" && message.method === "thread/queue/list") reply(message.id, { result: message.params.cursor === "p2" ? { data: [{ id: "q2", input: [{ type: "text", text: "second page", text_elements: [] }] }], nextCursor: null } : { data: [{ id: "q1", input: [{ type: "text", text: "first page", text_elements: [] }] }], nextCursor: "p2" } });
   else if (mode === "loops" && message.method === "thread/queue/list") reply(message.id, { result: { data: [], nextCursor: "again" } });
+  else if (mode === "endless" && message.method === "thread/queue/list") reply(message.id, { result: { data: [], nextCursor: "p" + message.id } });
   else if (mode === "asks" && message.method === "thread/queue/list") {
     // A request of the server's own that happens to reuse the pending id is not the reply.
     process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: message.id, method: "item/requestApproval", params: {} }) + "\\n");
@@ -1794,6 +1798,16 @@ for await (const line of console) {
   test("a listing that never ends fails rather than holding the lock to the deadline", async () => {
     const result = await withQueue(fakeCodex("loops").bin, (queue) => queue.list("t-1"));
     expect(result._tag === "Failure" && result.failure.message).toContain("didn't end");
+  });
+
+  test("a listing reads at most MAX_PAGES pages", async () => {
+    const codex = fakeCodex("endless");
+    const result = await withQueue(codex.bin, (queue) => queue.list("t-1"));
+    expect(result._tag === "Failure" && result.failure.message).toBe(
+      `the listing didn't end after ${MAX_PAGES} pages`
+    );
+    const lists = codex.requests().filter(({ method }) => method === "thread/queue/list");
+    expect(lists).toHaveLength(MAX_PAGES);
   });
 
   test("a request from the app-server that reuses a pending id is not taken for the reply", async () => {
@@ -2723,8 +2737,10 @@ describe("one session per address", () => {
         const missing = yield* Effect.flip(Client.sessionFor("codex", undefined, claudeShell));
         expect(missing._tag).toBe("BusCallError");
         const placeholder = { AGENT_BUS_SESSION: "${AGENT_BUS_SESSION}" };
-        expect((yield* Effect.flip(Client.sessionFor("other", undefined, placeholder)))._tag).toBe(
-          "BusCallError"
+        const other = yield* Effect.flip(Client.sessionFor("other", undefined, placeholder));
+        expect(other._tag).toBe("BusCallError");
+        expect(other.message).toBe(
+          "No usable session id for runtime other: pass --session, or run where $AGENT_BUS_SESSION is set."
         );
       })
     ));

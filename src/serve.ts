@@ -3,6 +3,7 @@ import { Effect, Layer } from "effect";
 import { HttpRouter, HttpServer, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { runDeliverer } from "./codex.ts";
 import * as Mcp from "./mcp.ts";
+import { IDLE_TIMEOUT_SECONDS } from "./timing.ts";
 
 /**
  * Rejects requests whose Host is not this loopback server, so a web page that
@@ -37,7 +38,7 @@ export const layerHttp = (options: { readonly port: number; readonly version: st
         hostname: "127.0.0.1",
         port: options.port,
         // Long enough for the longest bus_wait; Bun's default closes idle requests after 10 s.
-        idleTimeout: Mcp.MAX_WAIT_SECONDS + 15,
+        idleTimeout: IDLE_TIMEOUT_SECONDS,
       })
     )
   );

@@ -137,7 +137,10 @@ wait_for() {
 }
 
 if [ -z "$remote" ]; then
-  fluree_bin=$(command -v fluree)
+  fluree_bin=$(command -v fluree) || {
+    echo "fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun" >&2
+    exit 1
+  }
   mkdir -p "$fluree_dir"
   # Durable mode needs a Fluree project for its configuration; storage lives beside it.
   [ -d "$fluree_dir/.fluree" ] || (cd "$fluree_dir" && "$fluree_bin" init >/dev/null)
@@ -195,8 +198,10 @@ if [ ! -f "$bus_dir/config.json" ]; then
   echo "bus store: $ledger at $url"
 fi
 
+# --no-env-file, as bin.ts's shebang has: Bun would otherwise load a .env from the working
+# directory ($bus_dir) into serve's environment.
 write_agent "$prefix" "$bus_dir/agent-bus.log" \
-  "$bun_bin" "$repo_dir/src/bin.ts" serve
+  "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" serve
 wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
 
 echo "Register the bus with each agent runtime on this machine:"

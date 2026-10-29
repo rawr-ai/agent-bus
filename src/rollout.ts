@@ -1,4 +1,5 @@
 import { Duration, Effect } from "effect";
+import { MAX_FIRST_LINE, READ_TIMEOUT, ROLLOUT_CHUNK } from "./timing.ts";
 
 /**
  * Whether the bus may have the Codex daemon load a thread to run its nudge,
@@ -117,8 +118,6 @@ const sessionOf = (line: string): Settings["session"] => {
 class Unreadable extends Error {}
 
 const NEWLINE = 0x0a;
-/** The first record holds the base instructions; one longer than this isn't read. */
-const MAX_FIRST_LINE = 8 * 1024 * 1024;
 
 const concat = (parts: ReadonlyArray<Uint8Array>) => {
   const bytes = new Uint8Array(parts.reduce((length, part) => length + part.length, 0));
@@ -137,7 +136,7 @@ const concat = (parts: ReadonlyArray<Uint8Array>) => {
  * has the latest status event and the thread's own snapshot, or at an approval
  * policy that makes it ineligible anyway. A failure says only what kind it was.
  */
-export const latestSettings = (path: string, threadId: string, chunkSize = 64 * 1024) =>
+export const latestSettings = (path: string, threadId: string, chunkSize = ROLLOUT_CHUNK) =>
   Effect.tryPromise({
     try: async (signal): Promise<Settings> => {
       const file = Bun.file(path);
@@ -318,9 +317,6 @@ export interface Stored {
  * snapshot after every compaction, so its latest one is in that span (Codex 0.164, `thread-store/src/local/model_context.rs`).
  */
 const HISTORY_MODES = new Set(["legacy", "paginated"]);
-
-/** How long reading a rollout may take; it holds up the other peers' turns in the cycle. */
-const READ_TIMEOUT = Duration.seconds(5);
 
 /** Whether a thread may be borrowed, from its rollout. Anything unreadable makes it not. */
 export const readEligibility = (
