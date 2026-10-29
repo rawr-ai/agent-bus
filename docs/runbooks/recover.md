@@ -5,10 +5,10 @@ Use this when the bus misbehaves: each symptom, how to check it, the fix and how
 ## Before you start
 
 - **Look before you fix.** Run the three health checks in [operate](operate.md#check-that-the-bus-is-healthy) and read the end of `~/.agent-bus/agent-bus.log`. Most symptoms below name a log line.
-- **Nothing here deletes ledger data.** The fixes restart processes, rewrite a file the installer wrote, or move a cursor file aside. A mail that wasn't woken for stays in the ledger and in `bus_history`.
+- **Nothing here deletes ledger data.** The fixes restart processes, rewrite a file the installer wrote, or move a cursor file aside. Mail that wasn't woken for stays in the ledger and in `bus_history`.
 - **Two fixes are the human's call, not the agent's:** taking over an address held by another session, and moving a cursor.
 - **Never archive or delete a Codex thread to release it.**
-- **Each step ends with how it was checked:** *Rehearsed* (run on a disposable instance, with the result expected and observed), *Checked read-only* (a read-only command run against the running bus) or *Unverified* (with why). All dates are 2026-10-28. Commands use the default labels, ports and `~/.agent-bus`; `<address>` and `<thread id>` are yours.
+- **Each step's expected result ends with its mark** ([runbook shape](../../AGENTS.md#page-shapes)): *Rehearsed 2026-10-28* on a disposable instance, *Checked read-only 2026-10-28* on the running bus, or *Unverified*. Commands use the default labels, ports and `~/.agent-bus`; `<address>` and `<thread id>` are yours.
 
 ## Find your symptom
 
@@ -28,24 +28,22 @@ Use this when the bus misbehaves: each symptom, how to check it, the fix and how
 
 ## serve won't start
 
-Check what launchd and the log say, then follow the row that matches.
+Read what launchd and the log say, then follow the row that matches.
 
-1. Read the job and the log.
+```sh
+launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E '^[[:space:]](state|pid|runs|program|last (exit|terminating))'
+tail -n 20 ~/.agent-bus/agent-bus.log
+```
 
-   ```sh
-   launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E '^[[:space:]](state|pid|runs|program|last (exit|terminating))'
-   tail -n 20 ~/.agent-bus/agent-bus.log
-   ```
+| You see | Cause |
+| --- | --- |
+| `last exit code = 1` and `Failed to start server. Is port 8096 in use?` | [The port is held](#the-port-is-held) |
+| `last exit code = 1` and `has no Fluree ledger`, or `SchemaError` | [The config file is bad](#the-config-file-is-bad) |
+| `last exit code = 1` and `Transport error (GET …/exists/…)` | [Fluree is down or unreachable](#fluree-is-down-or-unreachable) |
+| `last exit code = 1` and `Fluree 401` | [Fluree won't start, or the token isn't enforced](#fluree-wont-start-or-the-token-isnt-enforced) (a missing token) |
+| `last exit code = 78: EX_CONFIG`, a `program` that doesn't exist, and nothing in the log | [bun is missing from the plist](#bun-is-missing-from-the-plist) |
 
-   | You see | Cause |
-   | --- | --- |
-   | `last exit code = 1` and `Failed to start server. Is port 8096 in use?` | [The port is held](#the-port-is-held) |
-   | `last exit code = 1` and `has no Fluree ledger`, or `SchemaError` | [The config file is bad](#the-config-file-is-bad) |
-   | `last exit code = 1` and `Transport error (GET …/exists/…)` | [Fluree is down or unreachable](#fluree-is-down-or-unreachable) |
-   | `last exit code = 1` and `Fluree 401` | [Fluree won't start, or the token isn't enforced](#fluree-wont-start-or-the-token-isnt-enforced) (a missing token) |
-   | `last exit code = 78: EX_CONFIG`, a `program` that doesn't exist, and nothing in the log | [bun is missing from the plist](#bun-is-missing-from-the-plist) |
-
-   While the cause stands, the job stays in `state = spawn scheduled` and launchd tries again every 10 s. *Rehearsed: expected each of those five states and log lines; observed all five.*
+While the cause stands, the job stays in `state = spawn scheduled` and launchd tries again every 10 s. Each of these five states was produced on a disposable instance: *Rehearsed 2026-10-28.*
 
 ### The port is held
 
@@ -55,23 +53,16 @@ Check what launchd and the log say, then follow the row that matches.
    lsof -nP -iTCP:8096 -sTCP:LISTEN
    ```
 
-   *Rehearsed: expected the holder's command and pid; observed them.*
+   Expect the holder's command and pid. *Rehearsed 2026-10-28.*
 
-2. Stop it by its pid, unless it is something you need. A `serve` started by hand is one example. If you need the other program, stop it or give `serve` another port by rerunning the installer with `AGENT_BUS_PORT` set (not rehearsed): sessions' MCP registration and the Claude hook must then use the same port ([interfaces](../architecture/interfaces.md#configuration-and-environment)).
+2. Stop it by its pid, unless you need it. A `serve` started by hand is one example. If you need the other program, give `serve` another port by rerunning the installer with `AGENT_BUS_PORT` set: sessions' MCP registration and the Claude hook must then use the same port ([interfaces](../architecture/interfaces.md#configuration-and-environment)).
 
    ```sh
    kill <pid>
-   ```
-
-   *Rehearsed: expected `serve` to start within the 10 s throttle once the holder ended; observed `ok` after 1 s.*
-
-3. Verify.
-
-   ```sh
    curl -fsS http://127.0.0.1:8096/health
    ```
 
-   *Rehearsed: expected `ok`; observed `ok`, with `state = running`.*
+   Expect `serve` to start within the 10 s throttle, and `ok`. *Rehearsed 2026-10-28* (healed in 1 s). The other port is *Unverified*.
 
 ### The config file is bad
 
@@ -89,61 +80,46 @@ Check what launchd and the log say, then follow the row that matches.
    cat ~/.agent-bus/config.json
    ```
 
-   *Rehearsed: expected the three bad forms (missing `fluree` entry, invalid JSON, a URL nothing listens on) to each exit `serve` with status 1 and a log line; observed that.*
+   Three bad forms (no `fluree` entry, invalid JSON, a URL nothing listens on) each exit `serve` with status 1 and a log line. *Rehearsed 2026-10-28.*
 
 2. Fix it by hand to the form above, or move it aside and let the installer write it again. The installer writes it only when it is absent and keeps everything else.
 
    ```sh
    mv ~/.agent-bus/config.json ~/.agent-bus/config.json.bad
    bun run install:launch-agents
-   ```
-
-   *Rehearsed: expected the installer to write the file and `serve` to start; observed both.*
-
-3. Verify.
-
-   ```sh
    curl -fsS http://127.0.0.1:8096/health
    ```
 
-   *Rehearsed: expected `ok`; observed `ok`.*
+   Expect the file rewritten and `ok`. *Rehearsed 2026-10-28.*
 
 ### bun is missing from the plist
 
-The plist holds the absolute path of the `bun` that was found when the installer ran (`command -v bun`, else `~/.bun/bin/bun`). If that file has moved or been removed, launchd can't start the job, and there is nothing in the log. The hook is different: it runs `~/.local/bin/agent-bus`, whose first line needs `bun` on the `PATH` that Claude Code gives it, and the plugin puts `~/.local/bin` and `~/.bun/bin` first.
+The plist holds the absolute path of the `bun` found when the installer ran. If that file has gone, launchd can't start the job, and the log stays empty. The hook is different: it runs `~/.local/bin/agent-bus`, which needs `bun` on the `PATH` Claude Code gives it, and the plugin puts `~/.local/bin` and `~/.bun/bin` first.
 
 1. Check the plist's `bun` and the hook's launcher.
 
    ```sh
-   launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep program
    ls -l "$(launchctl print gui/$(id -u)/ai.rawr.agent-bus | awk '/program =/{print $3}')"
    cd / && env -i HOME="$HOME" PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin" ~/.local/bin/agent-bus --help >/dev/null; echo "launcher exit $?"
    ```
 
-   Exit 0 means the hook finds `bun`. With `bun` missing from the `PATH` it prints `env: bun: No such file or directory`. *Rehearsed: expected `EX_CONFIG` for a plist naming a missing `bun`, and that message for a launcher without `bun` on its `PATH`; observed both.* *Checked read-only on the running bus: expected exit 0; observed 0.*
+   Expect the `ls` to find the file, and exit 0 from the launcher. With `bun` missing from the plist, `serve` shows `EX_CONFIG`; with `bun` missing from the launcher's `PATH`, it prints `env: bun: No such file or directory`. *Rehearsed 2026-10-28* for both failures; *Checked read-only 2026-10-28* for exit 0.
 
-2. Rerun the installer from a shell where `command -v bun` finds the real `bun`. It rewrites the plists and restarts both jobs.
+2. Rerun the installer from a shell where `command -v bun` finds the real `bun`. It rewrites the plists and restarts both jobs. If `bun` lives somewhere the hook can't see, link it first: `ln -s "$(command -v bun)" ~/.local/bin/bun`.
 
    ```sh
    command -v bun
    bun run install:launch-agents
-   ```
-
-   If `bun` lives somewhere the hook can't see, link it into `~/.local/bin` first: `ln -s "$(command -v bun)" ~/.local/bin/bun`. *Rehearsed for the installer: expected `serve` running with the right `program`; observed that. Unverified for the link.*
-
-3. Verify.
-
-   ```sh
    curl -fsS http://127.0.0.1:8096/health
    ```
 
-   *Rehearsed: expected `ok`; observed `ok`.*
+   Expect `ok`. *Rehearsed 2026-10-28*; the link is *Unverified*.
 
 ## Fluree is down or unreachable
 
-`serve` stays up when Fluree doesn't answer, and its `/health` stays `ok`. Calls fail with `Transport error (POST …/v1/fluree/query)`, and the log warns every few seconds. Nothing is lost: the ledger is on disk, and a mail that arrives later is read after Fluree is back.
+`serve` stays up when Fluree doesn't answer, and its `/health` stays `ok`. Calls fail with `Transport error (POST …/v1/fluree/query)`, and the log warns every few seconds. Nothing is lost: the ledger is on disk.
 
-1. Check Fluree, and the log.
+1. Check Fluree, its job and the log.
 
    ```sh
    curl -fsS http://127.0.0.1:8095/health
@@ -151,7 +127,7 @@ The plist holds the absolute path of the `bun` that was found when the installer
    grep -E '^\[[0-9:.]+\] (WARN|ERROR)' ~/.agent-bus/agent-bus.log | tail -n 5
    ```
 
-   *Rehearsed: expected a refused connection, then `Delivery cycle failed … Transport error` and `Fluree events disconnected … Transport error` about every 5 s; observed both.*
+   Expect a refused connection, then `Delivery cycle failed … Transport error` and `Fluree events disconnected … Transport error` about every 5 s. *Rehearsed 2026-10-28.*
 
 2. Start Fluree. On the bus host, if its job is unloaded or stopped:
 
@@ -159,7 +135,7 @@ The plist holds the absolute path of the `bun` that was found when the installer
    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist
    ```
 
-   If it is loaded but not running, or crash-looping, read its log and go to [Fluree won't start](#fluree-wont-start-or-the-token-isnt-enforced). On another machine, the tunnel is the cause: [the tunnel is down](#the-tunnel-is-down). `serve` needs no restart. *Rehearsed: expected `serve` to recover by itself; observed that, with the peers intact.*
+   If it is loaded but not running, or crash-looping, go to [Fluree won't start](#fluree-wont-start-or-the-token-isnt-enforced). On another machine the tunnel is the cause: [the tunnel is down](#the-tunnel-is-down). `serve` needs no restart. *Rehearsed 2026-10-28.*
 
 3. Verify.
 
@@ -168,13 +144,13 @@ The plist holds the absolute path of the `bun` that was found when the installer
    agent-bus peers
    ```
 
-   *Rehearsed: expected the health answer, the peers and no new warnings; observed all three.*
+   Expect the health answer, the peers and no new warnings. *Rehearsed 2026-10-28.*
 
-After an outage longer than 10 minutes, Claude hooks that kept retrying have given up: a Claude session wakes again only after its next arming point ([a Claude session isn't woken](#a-claude-session-isnt-woken)).
+After an outage longer than 10 minutes, Claude hooks that kept retrying have given up: those sessions wake again only after their next arming point ([a Claude session isn't woken](#a-claude-session-isnt-woken)).
 
 ## Fluree won't start, or the token isn't enforced
 
-The installer starts Fluree with data and admin authentication required, and checks that the server on the port answers 401 without the token and 200 with it. If another server holds the port, the installer stops with "does not enforce the bus token", and `serve` would talk to the wrong server.
+The installer starts Fluree with data and admin authentication required, and checks that the server on the port answers 401 without the token and 200 with it. If another server holds the port, it stops with "does not enforce the bus token".
 
 1. Read the job and its log.
 
@@ -183,7 +159,7 @@ The installer starts Fluree with data and admin authentication required, and che
    tail -n 5 ~/.agent-bus/fluree.log
    ```
 
-   `Address already in use (os error 48)` means the port is held. `EX_CONFIG` with an empty log means the `fluree` named in the plist has gone (the same as [bun](#bun-is-missing-from-the-plist)). *Rehearsed for the held port: expected the error and `spawn scheduled`; observed both. Unverified for a missing `fluree`.*
+   `Address already in use (os error 48)` means the port is held (*Rehearsed 2026-10-28*). `EX_CONFIG` with an empty log means the `fluree` named in the plist has gone, as with [bun](#bun-is-missing-from-the-plist) (*Unverified*).
 
 2. Test whether the server on the port enforces the token. The token goes to `curl` through its standard input, so it isn't in the process list.
 
@@ -193,28 +169,26 @@ The installer starts Fluree with data and admin authentication required, and che
    printf 'Authorization: Bearer %s\n' "$(cat ~/.agent-bus/fluree-token)" | curl -s -o /dev/null -w '%{http_code}\n' -H @- "$url"
    ```
 
-   Expect `401`, then `200`. Two `200`s mean the server isn't the bus's. `401` twice means the token isn't accepted. *Rehearsed: expected 401 then 200 on the bus's Fluree, and 200 twice on an unauthenticated server holding the port; observed all three.* *Checked read-only on the running bus: expected 401 then 200; observed that.*
+   Expect `401`, then `200`. Two `200`s mean the server isn't the bus's; two `401`s mean the token isn't accepted. *Rehearsed 2026-10-28* for all three outcomes; *Checked read-only 2026-10-28* for 401 then 200.
 
-3. Fix by cause.
-   - **The port is held:** find the process (`lsof -nP -iTCP:8095 -sTCP:LISTEN`), stop it by pid, and rerun the installer.
-   - **The token is missing or invalid:** rerun the installer. It creates a new token with the existing key, restarts both jobs, and `serve` picks it up.
-   - **The key is gone:** rerun the installer. It creates a new key and a new token, and starts Fluree trusting the new key. The old tokens stop working, including the copy on another machine: rerun the installer there with `--remote <ssh host of the bus host>` to copy the new one. The ledger isn't affected.
+3. Fix by cause, then rerun the installer.
+   - **The port is held:** find the process (`lsof -nP -iTCP:8095 -sTCP:LISTEN`) and stop it by pid.
+   - **The token is missing or invalid:** the installer creates a new one with the existing key.
+   - **The key is gone:** the installer creates a new key and token and starts Fluree trusting the new key. Old tokens stop working, including the copy on another machine: rerun the installer there with `--remote <ssh host of the bus host>`. The ledger isn't affected.
 
    ```sh
    bun run install:launch-agents
    ```
 
-   *Rehearsed: expected the installer to refuse while a server without authentication held the port, and, once it was stopped, to finish; observed that. For a lost token and for a lost key: expected 401 then 200 with the new token, the old token refused where the key changed, and the peers kept; observed all of it. Unverified for `--remote`: it needs the other machine.*
+   Expect the installer to refuse while an unauthenticated server holds the port, and to finish once it is stopped. *Rehearsed 2026-10-28* for the held port, a lost token and a lost key (the new token accepted, the old one refused, the peers kept); `--remote` is *Unverified*: needs the other machine.
 
-4. Verify with the test in step 2, then `agent-bus peers`.
-
-   *Rehearsed: expected 401, 200 and the peers; observed all three.*
+4. Verify with the test in step 2, then `agent-bus peers`. *Rehearsed 2026-10-28.*
 
 ## The tunnel is down
 
-This is on another machine. Its `serve` needs the bus host's Fluree on `127.0.0.1:8095`, which an SSH tunnel provides. The installer runs the tunnel with `ExitOnForwardFailure` and a 15 s keep-alive that drops a dead connection after about 45 s, and launchd restarts it. Every step here is unverified, because it needs the other machine and no SSH was made to it. The commands are the installer's own, read in `scripts/install-launch-agents.sh`.
+On another machine, `serve` reaches the bus host's Fluree on `127.0.0.1:8095` through an SSH tunnel. The installer runs it with `ExitOnForwardFailure` and a 15 s keep-alive that drops a dead connection after about 45 s, and launchd restarts it. *Unverified, every step: it needs the other machine, and no SSH was made to it. The commands are the installer's own.*
 
-1. Check the tunnel job and its log, and whether the port answers.
+1. Check the tunnel job, its log, and whether the port answers.
 
    ```sh
    launchctl print gui/$(id -u)/ai.rawr.agent-bus.tunnel | grep -E '^[[:space:]](state|pid|runs|last (exit|terminating))'
@@ -222,44 +196,24 @@ This is on another machine. Its `serve` needs the bus host's Fluree on `127.0.0.
    curl -fsS http://127.0.0.1:8095/health
    ```
 
-   *Unverified: needs the other machine.*
-
-2. Check that SSH works as the tunnel runs it: with no prompts. A changed host key, a refused key and an unreachable host all show here.
+2. Check that SSH works as the tunnel runs it, with no prompts. A changed host key, a refused key and an unreachable host all show here. Then check that nothing else holds the local port, since the tunnel exits if it can't bind it.
 
    ```sh
    ssh -o BatchMode=yes <ssh host of the bus host> true
-   ```
-
-   *Unverified: needs the other machine.*
-
-3. Check that nothing else holds the local port, since the tunnel exits if it can't bind it.
-
-   ```sh
    lsof -nP -iTCP:8095 -sTCP:LISTEN
    ```
 
-   *Unverified: needs the other machine.*
-
-4. Restart the tunnel, or rerun the installer with `--remote` if the plist is wrong.
+3. Restart the tunnel, or rerun the installer with `--remote` if the plist is wrong, and verify: the port answers with Fluree's health and `serve`'s warnings stop.
 
    ```sh
    launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus.tunnel
-   ```
-
-   *Unverified: needs the other machine.*
-
-5. Verify. The port answers with Fluree's health, and `serve`'s warnings stop.
-
-   ```sh
    curl -fsS http://127.0.0.1:8095/health
    agent-bus peers
    ```
 
-   *Unverified: needs the other machine.*
-
 ## A Claude session isn't woken
 
-A Claude session is woken by the plugin's hook, which waits in `bus_wake` and exits 2 with a line when mail arrives. [Delivery](../architecture/delivery.md#when-a-claude-session-isnt-armed) lists every way a session can be unarmed. Mail that wasn't woken for stays unread and readable with `bus_read`.
+The plugin's hook waits in `bus_wake` and exits 2 with a line when mail arrives. [Delivery](../architecture/delivery.md#when-a-claude-session-isnt-armed) lists every way a session can be unarmed. Mail that wasn't woken for stays unread and readable with `bus_read`.
 
 1. Check that the plugin is installed and enabled, and that the session is one that can be woken: a desktop or terminal session, not `claude -p`.
 
@@ -267,11 +221,9 @@ A Claude session is woken by the plugin's hook, which waits in `bus_wake` and ex
    claude plugin list
    ```
 
-   Expect `agent-bus@agent-bus` with `Status: ✔ enabled`. *Checked read-only on this machine: expected it enabled; observed that.*
+   Expect `agent-bus@agent-bus` with `Status: ✔ enabled`. *Checked read-only 2026-10-28.*
 
-2. Check that its hook has called `serve`. Ask the session to call `bus_join` again with the same address: a rejoin by its owner keeps its unread mail. The result carries `hooked: true` once `serve` has seen the session's hook since `serve` started; without it, the hook isn't waiting.
-
-   *Rehearsed on an isolated bus with a simulated hook: expected a join before any hook had called to return no `hooked`, and a join while the hook waited to return `hooked: true`; observed both. Unverified with a real session, which needs one.*
+2. Check that its hook has called `serve`. Ask the session to call `bus_join` again with the same address: a rejoin by its owner keeps its unread mail. The result carries `hooked: true` once `serve` has seen the session's hook since `serve` started; without it, the hook isn't waiting. *Rehearsed 2026-10-28* with a simulated hook (no `hooked` before the hook called, `hooked: true` while it waited); *Unverified* with a real session.
 
 3. Check that the hook can run at all.
 
@@ -279,7 +231,7 @@ A Claude session is woken by the plugin's hook, which waits in `bus_wake` and ex
    cd / && env -i HOME="$HOME" PATH="$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin" ~/.local/bin/agent-bus --help >/dev/null; echo "launcher exit $?"
    ```
 
-   *Checked read-only on the running bus (2026-10-28): expected exit 0; observed 0.*
+   Expect exit 0. *Checked read-only 2026-10-28.*
 
 4. To see what the hook does, run it by hand on an isolated bus ([operate](operate.md#run-an-isolated-bus-for-checks)) with a made-up session id. **Never run it with a real session's id on the running bus:** its call replaces that session's own waiting hook.
 
@@ -291,50 +243,39 @@ A Claude session is woken by the plugin's hook, which waits in `bus_wake` and ex
    wait $hook; echo "hook exit $?"
    ```
 
-   Expect the line `[agent-bus] New messages for "rehearsal/hook". Read them with …` on stderr and exit 2. A hook for a session that owns no address returns at once with exit 0. *Rehearsed: expected exit 2 with that line, and exit 0 and no output for an id that owns nothing; observed both.*
+   Expect the line `[agent-bus] New messages for "rehearsal/hook". Read them with …` on stderr and exit 2. A hook for a session that owns no address returns at once with exit 0. *Rehearsed 2026-10-28.*
 
 5. Fix by cause.
-   - **No plugin, or an old one:** install or update it, then start the session again or run `/reload-plugins` ([install](install.md)).
-
-     ```sh
-     claude plugin marketplace update agent-bus
-     claude plugin update agent-bus@agent-bus
-     ```
-
-   - **An interrupted turn, an outage over 10 minutes, 30 days idle, or `/clear`:** the hook is gone or waits under the old id. Give the session any prompt: its turn's end arms a new hook. After `/clear` the new id holds nothing until it joins again.
-   - **`serve` restarted:** it forgot which hooks had called and what it woke for. The session may get one extra wake, and `hooked` returns when the hook calls again.
-   - **A different port:** the hook inherits Claude Code's environment, so `AGENT_BUS_PORT` must be the same as `serve`'s, or neither set.
+   - **No plugin, or an old one:** install or update it ([install](install.md)): `claude plugin marketplace update agent-bus`, then `claude plugin update agent-bus@agent-bus`. Start the session again or run `/reload-plugins`.
+   - **Unarmed** (an interrupted turn, an outage over 10 minutes, 30 days idle, `/clear`): give the session any prompt. Its turn's end arms a new hook. After `/clear` the new id holds nothing until it joins again.
+   - **A different port:** the hook inherits Claude Code's environment, so `AGENT_BUS_PORT` must equal `serve`'s, or neither be set.
    - **`serve` older than the hook:** the hook's calls fail with "The bus has no bus_wake tool". Deploy `serve` ([deploy](deploy.md)).
-   - **The address isn't the session's:** a refusal that says "belongs to another session" means it was taken over, or its id changed after `/clear` or a fork. Join an address of its own.
+   - **Not the session's address:** "belongs to another session" means it was taken over, or its id changed after `/clear` or a fork. Join an address of its own.
 
-   *Unverified: each needs a real Claude session. The causes are from delivery's limits and the platform page; the hook's checks above were rehearsed.*
+   *Unverified: each needs a real Claude session. The causes are from delivery's limits and the platform page.*
 
-6. Verify. Send the session a message from another address and watch for the wake.
-
-   *Unverified: needs a real session.*
+6. Verify: send the session a message from another address and watch for the wake. *Unverified: needs a real session.*
 
 ## A Codex thread isn't woken
 
 `serve` wakes a Codex thread in two acts: it puts a nudge in the thread's queue, then asks the daemon to borrow the thread so that something runs it ([delivery](../architecture/delivery.md#codex-threads)). The log says which act stopped.
 
-1. Read the log lines for the address.
+1. Read the log lines for the address, and pick the row.
 
    ```sh
    grep '<address>' ~/.agent-bus/agent-bus.log | tail -n 20
    ```
 
-   Choose the row that matches; [operate](operate.md#what-the-lines-of-serve-mean) explains every line.
-
    | You see | Means | Do |
    | --- | --- | --- |
    | Nothing for the address, though mail arrived | It isn't a delivery target: not joined as `codex` with its own `codexThreadId`, or joined from another machine | Rejoin ([launch agents](launch-agents.md#start-a-codex-thread-the-bus-can-wake)). `agent-bus peers` shows the runtime and machine |
-   | `Waking …: another Codex process holds its thread` | The desktop or another app-server has the thread loaded and runs the nudge on its own poll, within about 10 s when idle, after the current turn when busy | Wait. If it never runs, step 3 |
-   | `Not borrowing …: <reason>` | The thread can't be borrowed, so its nudge waits until the thread is next loaded | The [reasons](#why-a-thread-isnt-borrowed) below |
-   | `Could not wake …: <method>: <reason>. Next attempt in …` | A Codex step failed | The [failures](#why-a-wake-fails) below |
-   | `hasn't read its mail after 3 attempts …` | The nudge was run or is waiting, and the thread still hasn't read | Open the thread and look: step 4 |
+   | `Waking …: another Codex process holds its thread` | An app-server holds the thread and should run the nudge on its own poll (within about 10 s when idle, after the current turn when busy) | Wait, then step 3 |
+   | `Not borrowing …: <reason>` | The thread can't be borrowed, so its nudge waits until the thread is next loaded | The [reasons](#why-a-thread-isnt-borrowed) |
+   | `Could not wake …: <method>: <reason>. Next attempt in …` | A Codex step failed | The [failures](#why-a-wake-fails) |
+   | `hasn't read its mail after 3 attempts …` | The nudge ran or waits, and the thread still hasn't read | Step 4 |
    | `Not waking …: its Codex thread takes no direct input` | A subagent joined | [Launch agents](launch-agents.md#delegates-subagents-and-one-shot-runs) |
 
-   *Checked read-only on the running bus: expected the first three kinds of line for the running threads; observed them (the wording of older lines differs). The other rows are read in code.*
+   *Checked read-only 2026-10-28* for the first three kinds of line (older lines are worded differently); *Unverified* for the rest, which are read in code.
 
 2. See what waits in the thread's queue, without changing anything. This asks a short-lived Codex app-server of your own to list the queue, as `serve` does; it loads no thread.
 
@@ -347,28 +288,27 @@ A Claude session is woken by the plugin's hook, which waits in `bus_wake` and ex
      sleep 3 ) | "$codex_cli" app-server | grep '"id":2'
    ```
 
-   Each item's text starts `[agent-bus] New messages for "<address>"` when it is a bus nudge. No items means no nudge is waiting. A thread that doesn't exist answers with an error, "no rollout found". The queue lives in `~/.codex/queue_1.sqlite`; reading that file with `sqlite3 -readonly` also works, but its layout is Codex's own. *Checked read-only on this machine (2026-10-28): expected the queue's items for a thread with a nudge waiting, and "no rollout found" for an unknown id; observed both, and the queue files unchanged.*
+   Expect each waiting item, whose text starts `[agent-bus] New messages for "<address>"` when it is a bus nudge; no items means nothing waits. An unknown thread answers "no rollout found". Reading `~/.codex/queue_1.sqlite` with `sqlite3 -readonly` also works, but its layout is Codex's own. *Checked read-only 2026-10-28* (the queue files were unchanged).
 
-3. If a nudge waits and nothing runs it, the thread is loaded nowhere or its last turn was interrupted.
-   - **Loaded nowhere.** A queued item on an unloaded thread runs within a second of the next load by any app-server. Open the thread: in the desktop for a Local thread, or `codex resume <thread id>` in a terminal. *Unverified: it needs a real thread.*
-   - **Interrupted** (`its last turn was interrupted`). Codex runs no queued input after an interrupted turn until new input starts a turn ([platforms: Codex](../platforms/codex.md#an-interrupted-thread-runs-no-queued-input)). Type anything in the thread. *Unverified: it needs a real thread.*
+3. If a nudge waits and nothing runs it, find who holds the thread, or whether it is interrupted.
+   - **A running `codex exec` holds it.** An `exec` run holds the thread's writer lock but doesn't dispatch queued input, so a borrow answers "held" and nobody runs the nudge. It is neither unloaded nor necessarily interrupted. Wait for the run to finish; the next borrow or reconcile after that handles it (5 minutes after the last attempt, then 15 and 60). Look for the run with `ps -axo pid,command | grep '[c]odex exec'`. If it exits mid-turn, the thread is left interrupted: the next case. *Unverified: no `exec` run was started. The case is read in `src/codex.ts` and the platform page.*
+   - **Interrupted** (`its last turn was interrupted`). Codex runs no queued input after an interrupted turn until new input starts a turn ([platforms: Codex](../platforms/codex.md#an-interrupted-thread-runs-no-queued-input)). Type anything in the thread. *Unverified: needs a real thread.*
+   - **Loaded nowhere, and not interrupted.** A queued item runs within a second of the next load by any app-server. Open the thread: in the desktop for a Local thread, or `codex resume <thread id>` in a terminal. *Unverified: needs a real thread.*
    - **Held by the desktop** (the thread shows "open in another app" in a second window). Open each thread from one place: the desktop and the daemon both read `~/.codex`, but only one can be a thread's writer.
-   - **Held by the daemon, and you want to see it.** Attach to it from a terminal: `codex resume --remote unix:// <thread id>`. It needs no restart. In the desktop, use Retry once the run ends, not Fork, which splits the thread. *Unverified: the flag is accepted by `codex resume --help` but was not run on a real thread.*
+   - **Held by the daemon, and you want to see it.** Attach from a terminal, with no restart: `codex resume --remote unix:// <thread id>`. In the desktop, use Retry once the run ends, not Fork, which splits the thread. *Unverified: `codex resume --help` accepts the flag, but it wasn't run on a real thread.*
 
 4. If the thread's turns run but it doesn't read, open it and look at the turn. A turn that fails with "Your workspace is out of credits" is [the earlier login](#borrowed-turns-run-as-an-earlier-user).
 
-5. Verify. The queue no longer holds the nudge, `Waking …` lines for the address stop, and the thread has read its mail.
-
-   *Unverified: needs a real thread.*
+5. Verify: the queue no longer holds the nudge, the `Waking …` lines for the address stop, and the thread has read its mail. *Unverified: needs a real thread.*
 
 ### Why a thread isn't borrowed
 
-`Not borrowing …: <reason>` is logged once per run of joins, and again when the reason changes. The reasons are read in `src/rollout.ts`; [delivery rule 9](../architecture/delivery.md#rules) says why each exists. An ineligible thread still gets its nudge, and runs it when it is next loaded. It is a choice about waking an unloaded thread, not an error.
+`Not borrowing …: <reason>` is logged once per run of joins, and again when the reason changes. [Delivery rule 9](../architecture/delivery.md#rules) says why each exists. An ineligible thread still gets its nudge and runs it when it is next loaded: this is a choice about waking an unloaded thread, not an error. *Unverified, this table: the reasons are read in `src/rollout.ts`.*
 
 | Reason (start of the text) | What to do |
 | --- | --- |
 | `its approval policy is "<policy>"` | Start the thread with approval policy `never` ([launch agents](launch-agents.md#start-a-codex-thread-the-bus-can-wake)) |
-| `its collaboration mode is …` | Switch the thread back to Default mode: Plan mode can wait for an answer |
+| `its collaboration mode is …` | Switch the thread back to Default mode |
 | `a client registered tools for it` | None: the thread is run by its client |
 | `its permission profile "<id>" comes from the owner's config`, `it denies paths that …`, or `its sandbox lists specific paths (the older workspace-write setting)` | Start the thread with full access or a built-in profile with no denials |
 | `its rollout has no settings snapshot of its own`, `its rollout has no settings record`, or `it hasn't run a turn since it was forked` | Run a turn in the thread |
@@ -379,12 +319,11 @@ A Claude session is woken by the plugin's hook, which waits in `bus_wake` and ex
 
 ### Why a wake fails
 
-`Could not wake <address>: <method>: <reason>. Next attempt in <delay>.` The delay starts at 30 s and doubles to 5 minutes; mail stays unread meanwhile. The reasons are read in `src/codex.ts`.
+`Could not wake <address>: <method>: <reason>. Next attempt in <delay>.` The delay starts at 30 s and doubles to 5 minutes; mail stays unread meanwhile. *Unverified, this table: the reasons are read in `src/codex.ts`.*
 
 | Method and reason | Means | What to do |
 | --- | --- | --- |
-| `thread/resume: no answer within 15s`, or `borrow: no answer within 25s` | The daemon accepted the connection and didn't answer | [The Codex daemon is wedged](#the-codex-daemon-is-wedged) |
-| `borrow: not tried, since an earlier borrow this cycle got …` | Another peer's borrow timed out first, so this cycle skipped the rest | The same |
+| `thread/resume: no answer within 15s`, `borrow: no answer within 25s`, or `borrow: not tried, since an earlier borrow this cycle got …` | The daemon accepted the connection and didn't answer, and the cycle skipped the rest | [The Codex daemon is wedged](#the-codex-daemon-is-wedged) |
 | `connect: the daemon refused the connection`, or `the control socket refused a connection (<code>)` | Something listens on the daemon's socket and refuses | Read the daemon's log, and restart it ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)) |
 | `app-server daemon start: exited with <n>: …`, or `no answer within 10s` | `serve` found no daemon and couldn't start one | Run `codex app-server daemon start` yourself and read its error |
 | `app-server: …`, or `initialize: …` | The Codex CLI named by `serve --codex` (by default the desktop's bundled one) won't start | Check that the file exists and runs ([install](install.md)) |
@@ -393,7 +332,7 @@ A Claude session is woken by the plugin's hook, which waits in `bus_wake` and ex
 
 ## The Codex daemon is wedged
 
-A wedged daemon's socket still accepts a connection, but its requests get no answer. Every borrow waits for its deadline and backs off, and the other threads are skipped for that cycle. It is a known limit of the daemon ([delivery](../architecture/delivery.md#for-codex-threads)), seen in operation with no recorded cause.
+A wedged daemon's socket still accepts a connection, but its requests get no answer. Every borrow waits for its deadline and backs off, and the other threads are skipped for that cycle. It is a known limit ([delivery](../architecture/delivery.md#for-codex-threads)), seen in operation with no recorded cause.
 
 1. Confirm it from the log: several addresses with `no answer within 15s` or `borrow: not tried`.
 
@@ -401,7 +340,7 @@ A wedged daemon's socket still accepts a connection, but its requests get no ans
    grep -E 'no answer within|not tried' ~/.agent-bus/agent-bus.log | tail -n 10
    ```
 
-   *Checked read-only on the running bus (2026-10-28): expected no such lines, as the daemon is not wedged; observed none. The wording is read in code, not seen.*
+   Expect none while the daemon is healthy. *Checked read-only 2026-10-28* for that; the wording during a wedge is *Unverified* (read in code).
 
 2. Check that the daemon process is alive and what it last logged.
 
@@ -410,31 +349,29 @@ A wedged daemon's socket still accepts a connection, but its requests get no ans
    tail -n 20 ~/.codex/app-server-control/app-server.log
    ```
 
-   *Checked read-only on this machine (2026-10-28): expected the daemon's process and recent log lines; observed both.*
+   *Checked read-only 2026-10-28.*
 
-3. Restart it by hand, with the open-file limit raised ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)). That drops every thread it holds; their nudges wait until `serve` borrows them again. *Unverified: there was no wedged daemon to test on, and the running one is in use.*
+3. Restart it by hand, with the open-file limit raised ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)). A wedged daemon can't be drained, so the restart interrupts whatever it is running: turns that have started are lost, and pending nudges wait. Follow operate's last step to reopen the affected threads. *Unverified: there was no wedged daemon, and the running one is in use.*
 
-4. Verify. The next cycle logs `Waking <address>` and no `no answer`. *Unverified: the same reason.*
+4. Verify: the next cycle logs `Waking <address>` and no `no answer`. *Unverified, for the same reason.*
 
 ### Borrowed turns run as an earlier user
 
-The daemon keeps the Codex login it started with ([platforms: Codex](../platforms/codex.md#the-daemon)). After the owner changes the login, borrowed turns run as the earlier user, and fail if that user's limit is used up: the turns saw "Your workspace is out of credits". Restart the daemon ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)). After the restart in the source's test, every check passed. *Unverified: it needs a login change.*
+The daemon keeps the Codex login it started with ([platforms: Codex](../platforms/codex.md#the-daemon)). After the owner changes the login, borrowed turns run as the earlier user, and fail if that user's limit is used up: the turns saw "Your workspace is out of credits". Restart the daemon, draining it first ([operate](operate.md#the-codex-daemon-file-limit-and-restarts)); in the source's test every check then passed. *Unverified: needs a login change.*
 
 ## Held by another session
 
-The refusal reads `<address> is held by another session (runtime …; on …; joined …; note …; last call …; a wait open now / no wait open on this machine) …` and ends with the holder's join id. An address is one session's inbox ([messaging](../architecture/messaging.md#rules), rules 3 and 4).
+The refusal reads `<address> is held by another session (runtime …; on …; joined …; note …; last call …; …) …` and ends with the holder's join id ([messaging](../architecture/messaging.md#rules), rules 3 and 4).
 
-1. Read the facts in the refusal. A recent `last call`, or a wait open now, means the holder is alive. Don't take it over.
+1. Read the facts. A recent `last call`, or a wait open now, means the holder is alive: don't take it over.
 
-2. The usual fix is another address, specific to the new session.
+2. The usual fix is another address, specific to the new session. A Codex thread also passes `--codex-thread "$CODEX_THREAD_ID"` ([launch agents](launch-agents.md#start-a-codex-thread-the-bus-can-wake)).
 
    ```sh
    agent-bus join --address <a new address> --runtime <claude|codex|other>
    ```
 
-   A Codex thread also passes `--codex-thread "$CODEX_THREAD_ID"` ([launch agents](launch-agents.md#start-a-codex-thread-the-bus-can-wake)).
-
-   *Rehearsed: expected a second session joining the held address to be refused with those facts and its join id; observed that.*
+   *Rehearsed 2026-10-28* for the refusal with those facts and the join id.
 
 3. Take the address over only if the holder has ended **and the human says to**. Use the join id from the latest refusal: it changes each time the holder joins.
 
@@ -442,9 +379,9 @@ The refusal reads `<address> is held by another session (runtime …; on …; jo
    agent-bus join --address <address> --runtime <runtime> --takeover <holder's join id>
    ```
 
-   Unread mail carries over. The former holder is refused from then on. A takeover from another machine uses that machine's cursor ([messaging limits](../architecture/messaging.md#limits)). *Rehearsed: expected the takeover to join, and the former holder's next send to be refused with "belongs to another session"; observed both.*
+   Unread mail carries over, and the former holder is refused from then on ("belongs to another session"). A takeover from another machine uses that machine's cursor ([messaging limits](../architecture/messaging.md#limits)). *Rehearsed 2026-10-28.*
 
-4. After `/clear` or a fork, Claude Code has a new session id, and the old address is still held by the old one. Join a new address; don't take over. A message "belongs to another session; nothing was changed" is this case, or a takeover.
+4. After `/clear` or a fork, Claude Code has a new session id and the old address is still held by the old one. Join a new address; don't take over.
 
 5. Verify.
 
@@ -452,43 +389,40 @@ The refusal reads `<address> is held by another session (runtime …; on …; jo
    agent-bus peers
    ```
 
-   *Rehearsed: expected the address listed once; observed that.*
+   Expect the address listed once. *Rehearsed 2026-10-28.*
 
 ## A cursor is ahead of the ledger
 
-A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>); the ledger was replaced. Rejoin to reset the cursor.`, and `serve`'s log has `Not waking <address> this pass: Cursor …` for a Claude address. A cursor is the last commit `t` an address has read. Cursors are kept per incarnation of the ledger, so a plain replacement of the ledger starts every address over in a directory of its own, and this error shows only when the ledger went back in its own history (restored from an earlier copy) or a cursor file was edited.
+A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>); the ledger was replaced. Rejoin to reset the cursor.`, and `serve`'s log has `Not waking <address> this pass: Cursor …` for a Claude address. Cursors are kept per incarnation of the ledger ([messaging](../architecture/messaging.md#rules), rule 11), so a plain replacement starts every address over, and this error shows only when the ledger went back in its own history (restored from an earlier copy) or a cursor file was edited.
 
-1. Look at the cursor and the ledger's end.
+1. Look at the cursor.
 
    ```sh
-   ls ~/.agent-bus/fluree-cursors/*/*/
    cat ~/.agent-bus/fluree-cursors/*/*/<address, with / written as %2F>.json
    ```
 
-   The message names both numbers. *Rehearsed: expected `{"cursor":9999}` and the error; observed both.*
+   Expect `{"cursor":<n>}` with the `n` in the message. *Rehearsed 2026-10-28.*
 
 2. Choose with the human what the address should see.
-   - **Start at the present** (mail since the ledger's end isn't delivered): move the cursor file aside, then have the owner rejoin. *Rehearsed: expected the read to say the address "has not joined the bus", and the rejoin to set the cursor to the ledger's end; observed both.*
+   - **Start at the present** (mail since the ledger's end isn't delivered): move the cursor file aside, then have the owner rejoin. The read says the address "has not joined the bus" until the rejoin, which sets the cursor to the ledger's end. *Rehearsed 2026-10-28.*
 
      ```sh
      mv ~/.agent-bus/fluree-cursors/*/*/<address, with / written as %2F>.json ~/.Trash/
      ```
 
-   - **Read everything again** (every message ever sent to the address, including mail already read): the owner rejoins with `replay`. *Rehearsed: expected the cursor to go to 0; observed that.*
+   - **Read everything again** (every message ever sent to the address, including mail already read): the owner rejoins with `replay`, which sets the cursor to 0. *Rehearsed 2026-10-28.*
 
      ```sh
      agent-bus join --address <address> --runtime <runtime> --replay
      ```
 
-   A plain rejoin does not reset it, though the message says so. *Rehearsed: expected a plain rejoin to leave the cursor at 9999; observed that.*
+   A plain rejoin does not reset the cursor, though the message says so. *Rehearsed 2026-10-28.*
 
-3. Verify. The owner's `bus_read` returns, and the `Not waking` warnings stop.
-
-   *Rehearsed: expected the read to return and the warning to stop; observed both.*
+3. Verify: the owner's `bus_read` returns and the `Not waking` warnings stop. *Rehearsed 2026-10-28.*
 
 ## `bun` not found over SSH on the other machine
 
-The other machine's non-interactive SSH `PATH` lacks `bun`, so a remote command that needs it can fail to find it. The source records this as a limit, not as an observed error message.
+The other machine's non-interactive SSH `PATH` lacks `bun`, so a remote command that needs it can fail to find it. The source records this as a limit, not as an observed error message. *Unverified, every step: it needs the other machine, and no SSH was made to it.*
 
 1. Check how `bun` is found over SSH.
 
@@ -496,11 +430,7 @@ The other machine's non-interactive SSH `PATH` lacks `bun`, so a remote command 
    ssh <ssh host of the other machine> 'command -v bun'
    ```
 
-2. Call it by its path (`~/.bun/bin/bun`), or put `~/.bun/bin` on the `PATH` of its non-interactive shell.
-
-3. Verify with the command that failed.
-
-*Unverified: it needs the other machine, and no SSH was made to it.*
+2. Call it by its path (`~/.bun/bin/bun`), or put `~/.bun/bin` on the `PATH` of its non-interactive shell, and run the command that failed.
 
 ## If it fails
 

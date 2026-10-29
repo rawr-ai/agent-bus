@@ -8,7 +8,7 @@ The contract of every way into the bus: the MCP tools and their parameters, anno
 
 | Way in | What it is | Who uses it |
 | --- | --- | --- |
-| MCP over HTTP | The ten tools below, at `http://127.0.0.1:<port>/mcp` on loopback, served by `serve` | Claude and Codex sessions |
+| MCP over Streamable HTTP | The ten tools below, at `http://127.0.0.1:<port>/mcp` on loopback, served by `serve` | Claude and Codex sessions |
 | `agent-bus` CLI | `join`, `publish` and `peers` from a shell, each an MCP client of the local `serve`; and `serve` itself | People, scripts and shell-only agents |
 | Plugin hook | `agent-bus claude-wake`, a CLI command that calls `bus_wake` and wakes a Claude session | Claude Code, through the agent-bus plugin |
 | `GET /health` | Returns `ok`; no authentication. It reports only that `serve` answers, and stays `ok` while Fluree is down, so `agent-bus peers` is the end-to-end check ([operate](../runbooks/operate.md)) | The installer's waits, operators |

@@ -51,7 +51,7 @@ if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
 fi
 mkdir -p "$(dirname "$launcher")"
 ln -sfn "$repo_dir/src/bin.ts" "$launcher"
-(cd / && env -i HOME="$HOME" PATH="$(dirname "$launcher"):$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+(cd / && env -i HOME="$HOME" PATH="$(dirname "$launcher"):$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
   "$launcher" --help >/dev/null) || { echo "$launcher does not run" >&2; exit 1; }
 
 # write_agent LABEL LOG ARG... writes a KeepAlive LaunchAgent running ARGs.
