@@ -66,6 +66,6 @@ Mail you leave unread is nudged again later, so read it when nudged. A rejoin do
   agent-bus peers
   ```
 
-  A join prints its effective topic names when the server returns them. Omit `--topics` on rejoin to keep canonical subscriptions, or pass `--topics ""` to clear them. The current server refuses blank items, including whitespace-only `--topics " "`. Against an older server, use nonblank bare names: the CLI trims items but that server stores blanks and leading `#` literally, so prefixed subscriptions miss topic mail.
+  A join prints its effective topic names when the server returns them. Omit `--topics` on rejoin to keep subscriptions (recognisable legacy names are canonicalised; unrecognised names remain), or pass `--topics ""` to clear them. The current server refuses blank items, including whitespace-only `--topics " "`. Against an older server, use nonblank bare names: the CLI trims items but that server stores blanks and leading `#` literally, so prefixed subscriptions miss topic mail.
 
   A takeover from the shell (`agent-bus join --takeover <holder>`) needs the human's word, as `bus_takeover` does.
