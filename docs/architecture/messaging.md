@@ -98,6 +98,8 @@ Every entry (`src/domain.ts`) has:
 
 Repo and branch are optional metadata for queries. Each `git` call gets 2 seconds, and a field it misses is left out.
 
+This is the internal representation used for persistence, ownership and delivery after a restart. `bus_read`, `bus_wait` and `bus_history` return a separate explicit public projection: message content and the named origin fields, never `presence` or other extra internal objects, even if an old ordinary message contains them. `bus_peers` projects only current address, runtime, topics, host and note. Neither projection rewrites stored entries or changes cursors; [interfaces](interfaces.md#mcp-tools) owns their result contracts.
+
 In Fluree, each entry is a node `urn:agent-bus:message:<id>`, typed `bus:Message` or `bus:Presence` (`bus:` is `https://rawr.ai/ns/agent-bus#`). Its properties are:
 - `bus:id`, `bus:ts` (`xsd:dateTime`), `bus:from`, `bus:to` (one value per recipient), `bus:subject` and `bus:body`;
 - `bus:replyTo`, a link to the answered message's node;
@@ -181,3 +183,4 @@ Indexed in [frames](../frames/README.md).
 - [address-ownership](../frames/address-ownership.md): one session per address, the `session` argument, takeover by join id, and the misrouting that started it.
 - [simplification-pass](../frames/simplification-pass.md): Fluree as the only production store, owner-less presences ignored, origin repo and branch kept, and `bus_query` and two locks per address kept.
 - [nudge-hygiene](../frames/nudge-hygiene.md): runs of joins (`rejoinOf`), topics kept on a rejoin, and takeover as `bus_takeover`.
+- [bus-design-query](../frames/bus-design-query.md): keep full internal presence for ownership and delivery while projecting ordinary public responses.

@@ -15,7 +15,8 @@ export class Cursors extends Context.Service<
 
 const CursorJson = Schema.fromJsonString(Schema.Struct({ cursor: Schema.Number }));
 
-const ledgerError = (cause: unknown) => new LedgerError({ message: String(cause) });
+// File and schema errors can embed local paths and stored values.
+const ledgerError = () => new LedgerError({ message: "The cursor could not be read or written." });
 
 /** One JSON file per address, replaced atomically on each write. */
 export const layerFiles = (dir: string) =>

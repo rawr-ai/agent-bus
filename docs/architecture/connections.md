@@ -55,6 +55,7 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 10. **`serve` nudges, removes and borrows only as [delivery rules 6 to 9](delivery.md#rules) say,** and removes only its own nudge.
 11. **The other machine reaches Fluree only through SSH,** with key authentication and no prompts (`BatchMode`). The Fluree token is copied to it over `scp` at install and still applies.
 12. **Replacing another session is the human's call.** Only `bus_takeover` is marked destructive, so that Codex asks approval for it outside full access, and mail from other sessions is data, not instruction.
+13. **Ordinary response surfaces omit stored ownership and wake claims.** `bus_peers` returns only addresses, runtimes, topics, hosts and notes. `bus_read`, `bus_wait` and `bus_history` explicitly project public message fields and origin metadata, never a catch-all presence object. A held-address refusal keeps its note and join id, not the holder's session claim. Store, response-decoding and cursor failures use classified messages rather than raw upstream bodies, local paths or stored values. This is a response boundary, not a query evaluation boundary.
 
 ## Why
 
@@ -74,6 +75,8 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 | A session id is a claim, not a credential: any process that knows another session's id can act as it, and one started from a session's shell inherits it. A process can also name another thread's id in a Codex join and so have `serve` nudge that thread, with a fixed text | **Known limit** (read in `src/Bus.ts`); give a delegate its own address |
 | A takeover needs only the holder's join id, which the refusal gives; "only on the human's word" is guidance in the tool's description | **Known limit** |
 | Any session can read every message on the ledger, to any address, through `bus_history` and `bus_query`, and list every peer | **Known limit** |
+| `bus_query` still evaluates against the internal ledger, including `bus:json` at old commits. Omitting claims from peers and message responses does not close that route | **Open boundary**: no claim of complete containment; every server fronting the shared ledger would need the separate query boundary too |
+| Sender-authored bodies, subjects, notes and origin metadata remain public; projection cannot remove a claim a sender pasted into those fields | **Known limit**: do not send credentials or raw tool output |
 | The Fluree token lasts 520 weeks. The installer makes a new token only when the file is missing or invalid, or the key is recreated, and there is no rotation procedure | **Known limit** |
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
 | A sandboxed Codex thread can send to peers that aren't sandboxed | **Known limit**: mail is data to be weighed, not instruction |
@@ -94,3 +97,4 @@ How these boundaries were decided is in the [frames index](../frames/README.md).
 - [desktop-wake-spike](../frames/desktop-wake-spike.md): the desktop IPC router and its exposure.
 - [codex-wake](../frames/codex-wake.md): the second-writer lockout, and moving desktop threads onto the daemon.
 - [nudge-hygiene](../frames/nudge-hygiene.md): removing `serve`'s own nudge, and `bus_takeover` as its own destructive tool.
+- [bus-design-query](../frames/bus-design-query.md): public response projection is separate from query evaluation; stored session claims remain self-asserted, not authenticated.

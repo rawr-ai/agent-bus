@@ -3249,7 +3249,7 @@ describe("one session per address", () => {
       })
     ));
 
-  test("ownership and unread mail survive a restart of the bus", async () => {
+  test("ownership, private wake claims and unread mail survive a restart of the bus", async () => {
     const dir = tempDir();
     const file = join(dir, "ledger.jsonl");
     const layer = () =>
@@ -3258,12 +3258,20 @@ describe("one session per address", () => {
       Effect.provide(
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
-          yield* bus.join({ address: "claude/a", runtime: "claude", session: "s1", cwd });
+          yield* bus.join({
+            address: "codex/a",
+            runtime: "codex",
+            session: "synthetic-private-owner",
+            codexThreadId: "synthetic-private-owner",
+            topics: ["restart"],
+            note: "public restart note",
+            cwd,
+          });
           yield* bus.join({ address: "claude/b", runtime: "claude", session: "sb", cwd });
           yield* bus.publish({
             from: "claude/b",
             session: "sb",
-            to: ["claude/a"],
+            to: ["codex/a"],
             body: "waiting",
           });
         }),
@@ -3274,8 +3282,17 @@ describe("one session per address", () => {
       Effect.provide(
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
-          expect((yield* Effect.flip(bus.take("claude/a", "s2")))._tag).toBe("NotOwner");
-          expect(bodies(yield* bus.take("claude/a", "s1"))).toEqual(["waiting"]);
+          const holder = (yield* bus.peers).find((peer) => peer.address === "codex/a");
+          expect(holder?.presence).toMatchObject({
+            session: "synthetic-private-owner",
+            codexThreadId: "synthetic-private-owner",
+            topics: ["restart"],
+            note: "public restart note",
+          });
+          expect((yield* Effect.flip(bus.take("codex/a", "s2")))._tag).toBe("NotOwner");
+          expect(bodies(yield* bus.take("codex/a", "synthetic-private-owner"))).toEqual([
+            "waiting",
+          ]);
         }),
         layer()
       )
