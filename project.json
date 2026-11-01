@@ -1,0 +1,110 @@
+{
+  "$schema": "./node_modules/nx/schemas/project-schema.json",
+  "name": "agent-bus",
+  "root": ".",
+  "targets": {
+    "typecheck": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "toolchain",
+        "{workspaceRoot}/tsconfig*.json",
+        "{workspaceRoot}/viewer/tsconfig*.json",
+        "{workspaceRoot}/src/**/*.ts",
+        "{workspaceRoot}/test/**/*.ts",
+        "{workspaceRoot}/tests/**/*.ts",
+        "{workspaceRoot}/scripts/**/*.ts",
+        "{workspaceRoot}/viewer/**/*.ts",
+        "{workspaceRoot}/viewer/**/*.tsx",
+        "{workspaceRoot}/stories/**/*.tsx",
+        "{workspaceRoot}/.storybook/**/*.ts",
+        "{workspaceRoot}/.storybook/**/*.tsx"
+      ],
+      "outputs": [],
+      "options": { "command": "bun --no-env-file run typecheck", "env": { "FORCE_COLOR": "0" } }
+    },
+    "lint": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": ["default", "{workspaceRoot}/biome.json", "{workspaceRoot}/.editorconfig"],
+      "outputs": [],
+      "options": { "command": "bun --no-env-file run lint", "env": { "FORCE_COLOR": "0" } }
+    },
+    "test-viewer-unit": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "toolchain",
+        "{workspaceRoot}/viewer/shared/**/*.ts",
+        "{workspaceRoot}/viewer/src/features/conversations/model.ts",
+        "{workspaceRoot}/viewer/src/markdown-policy.ts",
+        "{workspaceRoot}/viewer/src/observation-resource.ts",
+        "{workspaceRoot}/test/viewer-public.test.ts",
+        "{workspaceRoot}/test/viewer-conversations.test.ts",
+        "{workspaceRoot}/test/viewer-markdown-policy.test.ts",
+        "{workspaceRoot}/test/viewer-observation-resource.test.ts",
+        "{workspaceRoot}/tsconfig.json"
+      ],
+      "outputs": [],
+      "options": {
+        "command": "bun --no-env-file run test:viewer:unit",
+        "env": { "FORCE_COLOR": "0" }
+      }
+    },
+    "viewer-build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "toolchain",
+        "{workspaceRoot}/viewer/**/*",
+        "{workspaceRoot}/scripts/build-viewer.ts",
+        "{workspaceRoot}/tsconfig.json"
+      ],
+      "outputs": ["{workspaceRoot}/dist/viewer"],
+      "parallelism": false,
+      "options": { "command": "bun --no-env-file run viewer:build", "env": { "FORCE_COLOR": "0" } }
+    },
+    "storybook-build": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "toolchain",
+        "ui",
+        "{workspaceRoot}/stories/**/*",
+        "{workspaceRoot}/.storybook/**/*",
+        "{workspaceRoot}/vite.config.*",
+        "{workspaceRoot}/postcss.config.*",
+        "{workspaceRoot}/tsconfig*.json"
+      ],
+      "outputs": ["{workspaceRoot}/dist/storybook"],
+      "parallelism": false,
+      "options": {
+        "command": "bun --no-env-file run storybook:build",
+        "env": { "FORCE_COLOR": "0" }
+      }
+    },
+    "test-viewer-server": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "options": {
+        "command": "bun --no-env-file test test/viewer-server.test.ts",
+        "env": { "FORCE_COLOR": "0" }
+      }
+    },
+    "storybook-plays": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "dependsOn": ["storybook-build"],
+      "options": {
+        "command": "bun --no-env-file run test:storybook",
+        "env": { "FORCE_COLOR": "0" }
+      }
+    },
+    "browser-fixture": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "dependsOn": ["viewer-build"],
+      "options": { "command": "bun --no-env-file run test:browser", "env": { "FORCE_COLOR": "0" } }
+    }
+  }
+}

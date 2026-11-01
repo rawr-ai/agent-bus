@@ -14,6 +14,8 @@
       "!.repos/**",
       "!.agents/**",
       "!.fluree/**",
+      "!.nx/**",
+      "!.claude/skills/**",
       "!.claude/settings.local.json"
     ]
   },

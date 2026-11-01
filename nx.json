@@ -1,0 +1,30 @@
+{
+  "$schema": "./node_modules/nx/schemas/nx-schema.json",
+  "analytics": false,
+  "neverConnectToCloud": true,
+  "useDaemonProcess": false,
+  "defaultBase": "main",
+  "namedInputs": {
+    "toolchain": [
+      "{workspaceRoot}/package.json",
+      "{workspaceRoot}/bun.lock",
+      "{workspaceRoot}/bunfig.toml",
+      "{workspaceRoot}/nx.json",
+      "{workspaceRoot}/project.json",
+      "{workspaceRoot}/scripts/local-tool.ts",
+      "{workspaceRoot}/scripts/tool-environment.ts",
+      "{workspaceRoot}/scripts/task-identity.ts",
+      { "runtime": "bun --no-env-file scripts/task-identity.ts" }
+    ],
+    "ui": ["{workspaceRoot}/viewer/src/**/*", "{workspaceRoot}/viewer/shared/**/*"],
+    "default": [
+      "{projectRoot}/**/*",
+      "!{projectRoot}/dist/**/*",
+      "!{projectRoot}/.nx/**/*",
+      "!{projectRoot}/.repos/**/*",
+      "!{projectRoot}/.agents/**/*",
+      "!{projectRoot}/.fluree/**/*",
+      "toolchain"
+    ]
+  }
+}
