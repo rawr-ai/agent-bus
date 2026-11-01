@@ -60,7 +60,7 @@ Verified in source at the opening revision:
 - `replyTo` links messages but neither routes nor establishes acceptance or completion.
 - Presence entries record joins and leaves and are excluded from mail. Topic membership is evaluated when reading, not frozen when a message is sent.
 - [mcp.ts](../../src/mcp.ts) exposes a Codex thread identifier in peer results; public queries can reach the private serialized presence in `bus:json`.
-- [sparql.ts](../../src/sparql.ts) restricts queries to one regenerated local SELECT. It does not establish a public-data view. Output-key redaction alone cannot stop derived values or predicates from disclosing private inputs.
+- [sparql.ts](https://github.com/rawr-ai/agent-bus/blob/a914a87d84d31be96f3c1b55e3df66ed8b8594f4/src/sparql.ts) restricts queries to one regenerated local SELECT. It does not establish a public-data view. Output-key redaction alone cannot stop derived values or predicates from disclosing private inputs.
 
 ### Storage and delivery
 

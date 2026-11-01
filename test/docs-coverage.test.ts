@@ -85,8 +85,8 @@ const parameterNames = new Set(tools.flatMap((tool) => Object.keys(parametersOf(
  * interpolation stays as written, for a `<placeholder>` or ellipsis in the page to stand for.
  */
 const SOURCES = (() => {
-  const files = ["Bus", "mcp", "Ledger", "sparql", "Fluree", "Cursors", "client", "bin"].map(
-    (file) => read(`src/${file}.ts`).replaceAll('\\"', '"')
+  const files = ["Bus", "mcp", "Ledger", "Fluree", "Cursors", "client", "bin"].map((file) =>
+    read(`src/${file}.ts`).replaceAll('\\"', '"')
   );
   const constants = new Map(
     files.flatMap((text) =>
@@ -337,23 +337,13 @@ describe("tool names in the pages are real", () => {
 
 /**
  * Backticked tokens of the skill that are one plain word and aren't a parameter of any tool.
- * The skill keeps backticks for parameters, full tool names, `hooked: true`, commands, SPARQL
+ * The skill keeps backticks for parameters, full tool names, `hooked: true`, commands
  * and placeholders, so a lone word in backticks is checked as a parameter name unless listed.
  */
 const NOT_PARAMETERS = [
   // `agent-bus` CLI subcommands.
   "publish",
   "peers",
-  // SPARQL keywords and functions.
-  "SELECT",
-  "LIMIT",
-  "OFFSET",
-  "FROM",
-  "SERVICE",
-  "DESCRIBE",
-  "CONSTRUCT",
-  "ASK",
-  "CONTAINS",
 ];
 
 describe("parameter names in the skill are real", () => {

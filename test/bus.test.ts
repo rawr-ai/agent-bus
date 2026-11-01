@@ -45,7 +45,6 @@ import {
   type Stored,
 } from "../src/rollout.ts";
 import * as Serve from "../src/serve.ts";
-import { validateSelect } from "../src/sparql.ts";
 import { MAX_PAGES } from "../src/timing.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import { legacyTopicServer } from "./legacy-topic-server.ts";
@@ -2542,34 +2541,6 @@ if (${JSON.stringify(mode)} === "hangs") await Bun.sleep(60_000);
     );
     expect(Date.now() - started).toBeLessThan(2_000);
     expect(hangs._tag === "Failure" && hangs.failure.message).toContain("no answer within");
-  });
-});
-
-describe("sparql validation", () => {
-  const check = (query: string) => Effect.runPromise(Effect.result(validateSelect(query)));
-
-  test("accepts a SELECT with the bus prefixes predeclared, and drops caller comments", async () => {
-    const result = await check(
-      '# PRAGMA union-default-graph: true\nSELECT ?b WHERE { ?m a bus:Message ; bus:body ?b . BIND(f:fulltext(?b, "x") AS ?s) } LIMIT 1'
-    );
-    expect(result._tag).toBe("Success");
-    if (result._tag === "Success") {
-      expect(result.success).toContain("PREFIX bus: <https://rawr.ai/ns/agent-bus#>");
-      expect(result.success).not.toContain("PRAGMA");
-    }
-  });
-
-  test.each([
-    ["an update", "INSERT DATA { <urn:a> <urn:b> 1 }"],
-    ["CONSTRUCT", "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }"],
-    ["FROM", "SELECT * FROM <other:main> WHERE { ?s ?p ?o }"],
-    ["FROM NAMED", "SELECT * FROM NAMED <other:main> WHERE { GRAPH ?g { ?s ?p ?o } }"],
-    ["SERVICE", "SELECT * WHERE { SERVICE <other:main> { ?s ?p ?o } }"],
-    ["SERVICE in a subquery", "SELECT * WHERE { { SELECT ?s WHERE { SERVICE ?l { ?s ?p ?o } } } }"],
-    ["invalid syntax", "SELECT WHERE"],
-    ["an empty query", "  "],
-  ])("rejects %s", async (_name, query) => {
-    expect((await check(query))._tag).toBe("Failure");
   });
 });
 

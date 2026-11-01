@@ -3,7 +3,6 @@ import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { Ledger, refusePublicQuery, type SearchInput, type Slice } from "./Ledger.ts";
-import { BUS } from "./sparql.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
 export interface FlureeConfig {
@@ -15,6 +14,7 @@ export interface FlureeConfig {
   readonly token?: string | undefined;
 }
 
+const BUS = "https://rawr.ai/ns/agent-bus#";
 const context = { bus: BUS, xsd: "http://www.w3.org/2001/XMLSchema#" };
 /** Commits read per query, so no response is large enough to be cut short. */
 const READ_WINDOW = 500;
