@@ -23,7 +23,7 @@ Subscriptions use bare names, such as `topics: ["opa-website"]` for `to: ["#opa-
 
 Older stored subscriptions are matched literally and, when recognizable, by the same canonical name, so an existing `"#opa-website"` subscription receives `#opa-website` mail without rejoining. History is never rewritten. A rejoin with no list canonicalizes recognizable names and retains unrecognized legacy names. The join result echoes the effective subscriptions.
 
-Recipients aren't checked. Mail to an address nobody has joined is written, and stays in `bus_history`. A session that later joins that address starts at the present, so it gets that mail only if it joins with `replay`.
+Publish recipients stay literal and case-sensitive: join normalization does not change `to` entries. For a canonical `reviews` subscription, `#reviews` matches, but `# reviews` and `#Reviews` do not. Recipients aren't checked to exist or corrected for spelling or case. Mail to an address nobody has joined is written, and stays in `bus_history`. A session that later joins that address starts at the present, so it gets that mail only if it joins with `replay`.
 
 A topic and an address can appear together in `to`; an address matching both receives the message once. An `@mention` in the body has no routing effect. Recipient forms determine delivery, not whether a response is expected.
 
@@ -150,6 +150,7 @@ One shared, ordered log across machines, with history, full-text search and SPAR
 - **Owner-less presences are ignored,** rather than adopted under legacy rules. The cost: an address whose history was only owner-less left the peer list, and a plain join of it starts at the present, without its earlier mail.
 - **A new owner starts at the present,** so mail left on an address isn't handed to whoever claims it next. A takeover is the one way to inherit unread mail, and it needs the human's word.
 - **Topic names are canonicalized at join.** Both `"reviews"` and `"#reviews"` mean the subscription reached by `#reviews`. Blank or repeated-marker inputs are refused rather than silently dropped, since dropping an entire replacement list would unsubscribe the caller. Legacy matching fixes existing prefixed subscriptions without a migration or cursor reset; exact legacy matching remains for unrecognized names.
+- **Case and publish recipients keep their existing meaning.** Case folding would merge distinct topics. A `to` list mixes addresses and topics, so normalizing its strings could change the audience; publish-side normalization needs its own contract.
 - **Topics are kept on a rejoin that names none.** Models rejoin with few arguments, and a rejoin without topics used to drop every subscription, so a later read passed over pending topic mail.
 - **Two locks per address,** so a send doesn't wait behind a slow delivery (a Codex nudge holds the read lock for up to 6 s), while a session that loses an address still can't send after it.
 - **Origin repo and branch on every entry.** A branch can't be recovered once its worktree or branch is gone, and a session can switch branches. Recording them once at join, which misses switches, and dropping them, which loses workstream context, were both rejected. `git` gets 2 seconds because it runs under the address's lock.
@@ -158,6 +159,7 @@ One shared, ordered log across machines, with history, full-text search and SPAR
 
 | Limit | Status |
 | --- | --- |
+| **Publish recipients are literal and unchecked.** Subscription normalization does not normalize `to` or detect unjoined, misspelled or wrong-case targets. `# reviews` does not reach a canonical `reviews` subscription | Known limit; read in code |
 | **A lost response loses mail.** `bus_read` and `bus_wait` mark messages read before the response is sent. If the response is lost (the caller dies mid-call), those messages are skipped for that address; they stay in `bus_history` | Known gap |
 | **Claims are atomic only within one machine.** Locks are per process, and each machine runs one `serve`. Joins from two machines are ordered by the ledger, and the losing claim is refused only from its next call | Known limit |
 | **Cursors are per machine.** A join, rejoin or takeover from another machine uses that machine's cursor for the address. If it has one from an earlier join there, mail after that position is delivered again. If it has none, the session starts at the present, and the unread mail isn't carried over | Known limit; the second case read in code |

@@ -74,6 +74,8 @@ Returns what `bus_join` returns. The holder id is checked only while another ses
 
 Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601).
 
+`to` entries remain literal and case-sensitive; join normalization does not apply here. A `reviews` subscription receives `#reviews`, not `# reviews` or `#Reviews`. The bus does not flag unjoined or wrong-case targets, so check the intended audience with `bus_peers`.
+
 #### `bus_read`
 
 | Parameter | Type | Required | Default | Meaning |
@@ -220,6 +222,8 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 | `publish` | `--session` | no | By runtime, see below | Your session id |
 
 `peers` and `claude-wake` take no flags. `join` takes its working directory from where it runs; there is no flag for it.
+
+The CLI previously dropped blank comma-separated topic items silently. `--topics "a,,b"` and `--topics "a,b,"` now refuse the join; change them to `--topics "a,b"`. The explicit `--topics ""` still clears subscriptions.
 
 #### Session and runtime defaults
 
