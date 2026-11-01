@@ -120,11 +120,13 @@ const historyAnnouncer: AnnouncerOptions<HistoryObservation> = {
   name: "History",
   noun: ["message", "messages"],
   identities: (value) => value.messages.map((message) => message.id),
+  omitted: (value) => value.omitted,
 };
 const peersAnnouncer: AnnouncerOptions<PeersObservation> = {
   name: "Current peers",
   noun: ["peer", "peers"],
   identities: (value) => value.peers.map((peer) => peer.address),
+  omitted: (value) => value.omitted,
   reportDepartures: true,
 };
 /** One polite region per resource; the visible observation lines are not live regions. */

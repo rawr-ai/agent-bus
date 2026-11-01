@@ -8,6 +8,7 @@ import type {
   PublicPeer,
 } from "../viewer/shared/public";
 import { App } from "../viewer/src/App";
+import { formatTime } from "../viewer/src/Text";
 
 /** A rejection shaped like the oRPC client's: only the HTTP status is read. */
 class StatusError extends Error {
@@ -79,9 +80,9 @@ const historyOf = (
   observedAt = "2026-01-01T12:00:00Z",
   omitted = 0
 ): HistoryObservation => ({ observedAt, criteria: { limit: 200 }, omitted, messages });
-const peersOf = (addresses: string[]): PeersObservation => ({
+const peersOf = (addresses: string[], omitted = 0): PeersObservation => ({
   observedAt: "2026-01-01T12:00:01Z",
-  omitted: 0,
+  omitted,
   peers: addresses.map((address): PublicPeer => ({ address, runtime: "other", topics: [] })),
 });
 
@@ -108,26 +109,37 @@ const observationLines = (root: HTMLElement) =>
 export const EmptyAndAllOmitted: Story = {
   beforeEach: () => {
     script.history = historyOf([]);
-    script.peers = peersOf([]);
+    script.peers = peersOf([], 1);
   },
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const live = announcements(canvasElement);
     await waitFor(() => expect(live.history).toHaveTextContent("History observed: 0 messages."));
-    await waitFor(() => expect(live.peers).toHaveTextContent("Current peers observed: 0 peers."));
+    // A first observation whose every record is omitted says so, not just "0 peers".
+    await waitFor(() =>
+      expect(live.peers).toHaveTextContent("Current peers observed: 0 peers, 1 record omitted.")
+    );
     await expect(canvasElement.querySelectorAll(".observation[role]")).toHaveLength(0);
     await expect(canvas.getByText("No matching messages in this observation.")).toBeVisible();
-    const spoken = live.history.firstElementChild;
     script.history = historyOf([], "2026-01-01T12:01:00Z", 2);
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
     await expect(
       await canvas.findByText("No displayable messages in this observation.")
     ).toBeVisible();
     await expect(canvas.getAllByText("2 records omitted")[0]).toBeVisible();
-    // Still no displayable records: nothing new to announce.
+    // The displayed records are unchanged, but the omitted count changed: that is announced.
+    await waitFor(() => expect(live.history).toHaveTextContent("History: 2 records omitted."));
+    // A refresh that observes the same records and omissions stays quiet.
+    const spoken = live.history.firstElementChild;
+    script.history = historyOf([], "2026-01-01T12:02:00Z", 2);
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
+    const observed = `Observed ${formatTime("2026-01-01T12:02:00Z")}`;
+    await waitFor(() =>
+      expect(observationLines(canvasElement).some((line) => line.startsWith(observed))).toBe(true)
+    );
     await expect(live.history.firstElementChild).toBe(spoken);
     await userEvent.click(canvas.getByRole("button", { name: "Current peers" }));
-    await expect(canvas.getByText("No currently joined peers in this observation.")).toBeVisible();
+    await expect(canvas.getByText("No displayable peers in this observation.")).toBeVisible();
   },
 };
 

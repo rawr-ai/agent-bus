@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import { createAnnouncer } from "../viewer/src/announcements.ts";
 import type { ObservationSnapshot } from "../viewer/src/observation-resource.ts";
 
-type Value = { readonly ids: ReadonlyArray<string> };
+type Value = { readonly ids: ReadonlyArray<string>; readonly omitted: number };
 const snapshot = (
   state: Partial<Omit<ObservationSnapshot<string, Value>, "observation">> & {
     readonly observation?: ObservationSnapshot<string, Value>["observation"];
@@ -14,16 +14,17 @@ const snapshot = (
   loading: state.loading ?? false,
   error: state.error ?? null,
 });
-const observed = (ids: ReadonlyArray<string>, key = "latest") => ({
+const observed = (ids: ReadonlyArray<string>, key = "latest", omitted = 0) => ({
   input: key,
   key,
-  value: { ids },
+  value: { ids, omitted },
 });
 const history = () =>
   createAnnouncer<string, Value>({
     name: "History",
     noun: ["message", "messages"],
     identities: (value) => value.ids,
+    omitted: (value) => value.omitted,
   });
 
 test("periodic refresh is silent unless records arrive", () => {
@@ -81,6 +82,7 @@ test("current peers also report departures", () => {
     name: "Current peers",
     noun: ["peer", "peers"],
     identities: (value) => value.ids,
+    omitted: (value) => value.omitted,
     reportDepartures: true,
   });
   expect(announce(snapshot({ observation: observed([]) }))).toBe(
@@ -94,5 +96,48 @@ test("current peers also report departures", () => {
   );
   expect(announce(snapshot({ observation: observed(["c"]) }))).toBe(
     "Current peers: 1 peer no longer listed."
+  );
+});
+
+test("omitted records are announced first, and again only when their count changes", () => {
+  const announce = history();
+  // An observation whose every record is omitted is not announced as an empty one.
+  expect(announce(snapshot({ observation: observed([], "latest", 2) }))).toBe(
+    "History observed: 0 messages, 2 records omitted."
+  );
+  expect(announce(snapshot({ observation: observed([], "latest", 2) }))).toBeNull();
+  expect(announce(snapshot({ observation: observed([], "latest", 3) }))).toBe(
+    "History: 3 records omitted."
+  );
+  expect(announce(snapshot({ observation: observed(["a"], "latest", 1) }))).toBe(
+    "History: 1 new message, 1 record omitted."
+  );
+  expect(announce(snapshot({ observation: observed(["a"], "latest", 1) }))).toBeNull();
+  expect(announce(snapshot({ observation: observed(["a"]) }))).toBe("History: no records omitted.");
+  expect(announce(snapshot({ key: "query", observation: observed(["b"], "query", 4) }))).toBe(
+    "History observed for the applied criteria: 1 message, 4 records omitted."
+  );
+  expect(announce(snapshot({ observation: observed(["b"], "query", 4), error: "timeout" }))).toBe(
+    "History refresh timed out; showing the last observation."
+  );
+  expect(announce(snapshot({ observation: observed(["b"], "query", 5) }))).toBe(
+    "History observed again: 5 records omitted."
+  );
+});
+
+test("current peers announce omitted records too", () => {
+  const announce = createAnnouncer<string, Value>({
+    name: "Current peers",
+    noun: ["peer", "peers"],
+    identities: (value) => value.ids,
+    omitted: (value) => value.omitted,
+    reportDepartures: true,
+  });
+  expect(announce(snapshot({ observation: observed(["a"], "latest", 1) }))).toBe(
+    "Current peers observed: 1 peer, 1 record omitted."
+  );
+  expect(announce(snapshot({ observation: observed(["a"], "latest", 1) }))).toBeNull();
+  expect(announce(snapshot({ observation: observed([], "latest", 2) }))).toBe(
+    "Current peers: 1 peer no longer listed, 2 records omitted."
   );
 });
