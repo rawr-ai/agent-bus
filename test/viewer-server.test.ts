@@ -6,6 +6,7 @@ import { createViewer } from "../viewer/server/host.ts";
 import { ViewerPortInUse } from "../viewer/server/port.ts";
 import { MAX_MESSAGE_BYTES } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
+import { failureFromStatus } from "../viewer/src/observation-resource.ts";
 
 const marker = "private-fixture-value-never-disclosed";
 const message = {
@@ -312,7 +313,10 @@ test("a failed discovery is not kept, and a missing tool is discovered again", a
   const fixture = setup();
   try {
     fixture.mode("outage");
-    await expect(fixture.client.history({ limit: 50 })).rejects.toMatchObject({ status: 503 });
+    const outage = fixture.client.history({ limit: 50 });
+    await expect(outage).rejects.toMatchObject({ status: 503 });
+    // The browser labels this rejection as unavailability, not a timeout.
+    expect(await outage.catch(failureFromStatus)).toBe("unavailable");
     fixture.mode("no-peers-tool");
     expect((await fixture.client.history({ limit: 50 })).messages).toHaveLength(1);
     await expect(fixture.client.peers({})).rejects.toMatchObject({ status: 503 });
@@ -336,7 +340,10 @@ test("whole-operation deadline and real client cancellation close upstream work"
   const fixture = setup(100);
   fixture.mode("hang");
   try {
-    await expect(fixture.client.history({ limit: 50 })).rejects.toMatchObject({ status: 504 });
+    const deadline = fixture.client.history({ limit: 50 });
+    await expect(deadline).rejects.toMatchObject({ status: 504 });
+    // The browser labels this rejection as a timeout, not as unavailability.
+    expect(await deadline.catch(failureFromStatus)).toBe("timeout");
     const controller = new AbortController();
     const pending = fixture.client
       .history({ limit: 50 }, { signal: controller.signal })

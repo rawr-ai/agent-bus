@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ViewerClient } from "../shared/client-types";
 import { DEFAULT_HISTORY_LIMIT } from "../shared/limits";
 import type { HistoryInput, HistoryObservation, PeersObservation } from "../shared/public";
+import type { AnnouncerOptions } from "./announcements";
 import { ConversationMessage } from "./features/conversations/ConversationMessage";
 import {
   buildConversationIndex,
@@ -16,7 +17,7 @@ import { AutoRefreshToggle } from "./features/investigation/AutoRefreshToggle";
 import { InvestigationControls } from "./features/investigation/InvestigationControls";
 import { PeerList } from "./features/peers/PeerList";
 import { canonicalHistoryInput, historyInputKey, isHistoryInvestigation } from "./history-criteria";
-import { createObservationResource } from "./observation-resource";
+import { createObservationResource, failureFromStatus } from "./observation-resource";
 import {
   EMPTY_READING_SNAPSHOT,
   type ReadingIntent,
@@ -26,7 +27,12 @@ import {
 } from "./reading-unit";
 import { formatTime, Text } from "./Text";
 import { ThemeToggle } from "./ThemeToggle";
-import { useAutomaticRefresh, useObservation } from "./use-observation";
+import {
+  type Announcement,
+  useAnnouncement,
+  useAutomaticRefresh,
+  useObservation,
+} from "./use-observation";
 import "./style.css";
 import "./conversation.css";
 
@@ -110,6 +116,25 @@ function CriteriaScope({ criteria }: { criteria: HistoryInput }) {
     </p>
   );
 }
+const historyAnnouncer: AnnouncerOptions<HistoryObservation> = {
+  name: "History",
+  noun: ["message", "messages"],
+  identities: (value) => value.messages.map((message) => message.id),
+};
+const peersAnnouncer: AnnouncerOptions<PeersObservation> = {
+  name: "Current peers",
+  noun: ["peer", "peers"],
+  identities: (value) => value.peers.map((peer) => peer.address),
+  reportDepartures: true,
+};
+/** One polite region per resource; the visible observation lines are not live regions. */
+function LiveAnnouncement({ value }: { value: Announcement | null }) {
+  return (
+    <p className="visually-hidden" role="status" aria-atomic="true">
+      {value && <span key={value.sequence}>{value.text}</span>}
+    </p>
+  );
+}
 function Observation({
   loading,
   error,
@@ -135,7 +160,7 @@ function Observation({
         ? `Observed ${formatTime(observedAt)}`
         : "Not yet observed";
   return (
-    <div className={`observation${error ? " observation-error" : ""}`} role="status">
+    <div className={`observation${error ? " observation-error" : ""}`}>
       <span>{status}</span>
       {Boolean(omitted) && (
         <span className="omitted">
@@ -152,17 +177,21 @@ export function App({ client }: { client: ViewerClient }) {
         input: { limit: DEFAULT_HISTORY_LIMIT },
         keyOf: historyInputKey,
         load: (input, signal) => client.history(input, { signal }),
+        classifyFailure: failureFromStatus,
       }),
       peers: createObservationResource<Record<string, never>, PeersObservation>({
         input: {},
         keyOf: () => "peers",
         load: (input, signal) => client.peers(input, { signal }),
+        classifyFailure: failureFromStatus,
       }),
     }),
     [client]
   );
   const history = useObservation(resources.history);
   const peers = useObservation(resources.peers);
+  const historyAnnouncement = useAnnouncement(resources.history, historyAnnouncer);
+  const peersAnnouncement = useAnnouncement(resources.peers, peersAnnouncer);
   const automaticRead = useCallback(() => {
     resources.history.refresh({ replacePending: false });
     resources.peers.refresh({ replacePending: false });
@@ -323,6 +352,8 @@ export function App({ client }: { client: ViewerClient }) {
           />
         </div>
       </header>
+      <LiveAnnouncement value={historyAnnouncement} />
+      <LiveAnnouncement value={peersAnnouncement} />
       <main className={`context-workspace page-${nav.page}`}>
         <section className="context-rail" aria-labelledby="contexts-heading">
           <div className="rail-title">
