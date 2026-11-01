@@ -43,7 +43,7 @@ A release that designs and qualifies something writes a frame, which ends with a
 
 - Effect work follows the `effect-ts` skill where it is installed (`.agents/skills`, local and untracked); research the vendored source in `.repos/effect` (pinned to the installed version by `scripts/prepare-effect.sh`). This repo uses stable Effect 4.0.6, where the skill's beta names have moved: `effect/unstable/ai` and `effect/unstable/cli` are `effect/ai` and `effect/cli`, `Schema.TaggedErrorClass` is `Schema.TaggedError`, and CLI flags are `Flag.String`, `Flag.Boolean`, `Flag.Int`, `Flag.Literals`. Trust the vendored source over the skill when they differ.
 - Runtime, tests and packaging follow the `bun` skill where installed. Prefer Bun-native APIs (`Bun.file`, `Bun.spawn`, `WebSocket` over `ws+unix://`) at the edges and Effect services everywhere else.
-- The only HTTP API is the MCP endpoint, served by `effect/ai`'s `McpServer.layerHttp`; the CLI reaches it with `McpClient`. oRPC is not used. If another HTTP API is added, follow the `orpc` and `effect-orpc` skills where installed, and confirm the provider profile before writing code.
+- The core HTTP API is the MCP endpoint, served by `effect/ai`'s `McpServer.layerHttp`; the CLI reaches it with `McpClient`. The optional separate `viewer/` exposes two fixed native oRPC procedures backed by an explicit application-owned Effect runtime boundary, not an Effect-oRPC provider package. Its trust and observation rules are in [viewer](docs/architecture/viewer.md). For HTTP API work, follow the `orpc` and `effect-orpc` ownership gates where installed; confirm the exact native lane and any actual provider profile before writing code rather than assuming bridge compatibility.
 
 ## Git and Graphite
 
