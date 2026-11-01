@@ -1,5 +1,12 @@
-import { Context, type Effect, type Stream } from "effect";
-import type { LedgerError, Message } from "./domain.ts";
+import { Context, Effect, type Stream } from "effect";
+import { LedgerError, type Message } from "./domain.ts";
+
+export const PUBLIC_QUERY_REFUSAL =
+  "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers.";
+
+/** No parsing, store access or input interpolation until the public query boundary is qualified. */
+export const refusePublicQuery = () =>
+  Effect.fail(new LedgerError({ message: PUBLIC_QUERY_REFUSAL }));
 
 /** A decoded entry and the cursor just past it. */
 export interface Entry {
@@ -42,7 +49,7 @@ export class Ledger extends Context.Service<
     readonly presence: Effect.Effect<ReadonlyArray<Message>, LedgerError>;
     /** Messages matching the search, newest last. */
     readonly search: (input: SearchInput) => Effect.Effect<ReadonlyArray<Message>, LedgerError>;
-    /** Runs a read-only SPARQL SELECT over the ledger at commit `t`, or the head. */
+    /** Retained for compatibility; always refuses without parsing or accessing the store. */
     readonly select: (query: string, t?: number) => Effect.Effect<unknown, LedgerError>;
   }
 >()("agent-bus/Ledger") {}

@@ -1,6 +1,6 @@
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
 import { LedgerError, type Message, MessageJson } from "../src/domain.ts";
-import { type Entry, Ledger, type SearchInput } from "../src/Ledger.ts";
+import { type Entry, Ledger, refusePublicQuery, type SearchInput } from "../src/Ledger.ts";
 
 const NEWLINE = 0x0a;
 const POLL_INTERVAL = "2 seconds";
@@ -104,11 +104,15 @@ export const layerJsonl = (file: string) =>
         return matches.slice(-input.limit);
       });
 
-      const select = () =>
-        Effect.fail(
-          new LedgerError({ message: "SPARQL queries need the Fluree store; this bus uses JSONL." })
-        );
-
-      return Ledger.of({ instance: "jsonl", append, read, end, changes, presence, search, select });
+      return Ledger.of({
+        instance: "jsonl",
+        append,
+        read,
+        end,
+        changes,
+        presence,
+        search,
+        select: refusePublicQuery,
+      });
     })
   );

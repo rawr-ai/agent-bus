@@ -172,6 +172,17 @@ for (const backend of backends) {
     Effect.runPromise(Effect.provide(effect, backend.make().layer));
 
   describe.if(backend.enabled)(`delivery (${backend.name})`, () => {
+    test("the retained select capability always refuses", () =>
+      run(
+        Effect.gen(function* () {
+          const ledger = yield* Ledger.Ledger;
+          const error = yield* Effect.flip(ledger.select("SELECT * WHERE { ?s ?p ?o }"));
+          expect(error.message).toBe(
+            "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers."
+          );
+        })
+      ));
+
     test("routes direct, topic and broadcast messages, never back to the sender", () =>
       run(
         Effect.gen(function* () {

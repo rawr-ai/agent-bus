@@ -2,8 +2,8 @@ import { Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
-import { Ledger, type SearchInput, type Slice } from "./Ledger.ts";
-import { BUS, validateSelect } from "./sparql.ts";
+import { Ledger, refusePublicQuery, type SearchInput, type Slice } from "./Ledger.ts";
+import { BUS } from "./sparql.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
 export interface FlureeConfig {
@@ -18,15 +18,6 @@ export interface FlureeConfig {
 const context = { bus: BUS, xsd: "http://www.w3.org/2001/XMLSchema#" };
 /** Commits read per query, so no response is large enough to be cut short. */
 const READ_WINDOW = 500;
-/** Agent JSON: a compact, self-describing result envelope that Fluree truncates to a byte budget. */
-const AGENT_JSON = "application/vnd.fluree.agent+json";
-const QUERY_MAX_BYTES = 32_768;
-/**
- * Queries are bounded by this deadline and the byte budget. A fuel limit would
- * not help: in Fluree 4.2.4 it switches on fuel tracking, which replaces Agent
- * JSON with an unbudgeted SPARQL JSON result.
- */
-const QUERY_TIMEOUT = "10 seconds";
 
 /** Messages are immutable, so each one is a subject named by its id. */
 const messageIri = (id: string) => `urn:agent-bus:message:${id}`;
@@ -292,38 +283,6 @@ export const layerFluree = (config: FlureeConfig) =>
         return messages.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
       });
 
-      // The ledger and time are pinned in the path, so a validated query cannot reach other data.
-      const select = Effect.fn("Ledger.select")(function* (text: string, t?: number) {
-        const sparql = yield* validateSelect(text);
-        const head = yield* end;
-        const at = t ?? head;
-        // Fluree waits for a future t to arrive, so only existing commits are accepted.
-        if (!Number.isInteger(at) || at < 1 || at > head) {
-          return yield* new LedgerError({ message: `t must be a commit from 1 to ${head}.` });
-        }
-        return yield* send(
-          HttpClientRequest.post(
-            `${api}/query/${encodeURIComponent(`${config.ledger}@t:${at}`)}`
-          ).pipe(
-            HttpClientRequest.setHeaders({
-              accept: AGENT_JSON,
-              "fluree-max-bytes": `${QUERY_MAX_BYTES}`,
-            }),
-            HttpClientRequest.bodyText(sparql, "application/sparql-query")
-          )
-        ).pipe(
-          Effect.timeoutOrElse({
-            duration: QUERY_TIMEOUT,
-            orElse: () =>
-              Effect.fail(
-                new LedgerError({
-                  message: `The query did not finish within ${QUERY_TIMEOUT}; narrow it or add a LIMIT.`,
-                })
-              ),
-          })
-        );
-      });
-
       // Each (re)connection wakes readers once, since commits may have landed while disconnected.
       const events = HttpClientResponse.stream(
         // The event stream needs no token (it only carries change notices), so none is sent.
@@ -344,6 +303,15 @@ export const layerFluree = (config: FlureeConfig) =>
         strategy: "sliding",
       });
 
-      return Ledger.of({ instance, append, read, end, changes, presence, search, select });
+      return Ledger.of({
+        instance,
+        append,
+        read,
+        end,
+        changes,
+        presence,
+        search,
+        select: refusePublicQuery,
+      });
     })
   );

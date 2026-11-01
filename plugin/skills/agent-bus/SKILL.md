@@ -49,7 +49,7 @@ Make the subject carry the question or changed state. Keep the body self-contain
 
 ## Find things
 
-`bus_peers` lists peers; `bus_history` searches mail; `bus_query` runs SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
+`bus_peers` lists peers; `bus_history` searches mail. Neither changes what is unread. `bus_query` is temporarily disabled and always refuses; changing its query or commit cannot bypass that refusal. Recipes and limits: [references/queries.md](references/queries.md).
 
 ## Leave when done
 
