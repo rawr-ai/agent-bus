@@ -497,6 +497,25 @@ bdi {
     transform: rotate(360deg);
   }
 }
+.viewer-stopped {
+  max-width: 560px;
+  margin: 0 auto;
+  padding: 48px 24px;
+  color: var(--ink);
+}
+.viewer-stopped h1 {
+  font-size: 20px;
+  margin: 0 0 12px;
+}
+.viewer-stopped p {
+  color: var(--secondary);
+  font-size: 14px;
+  line-height: 1.6;
+  margin: 0;
+}
+.viewer-stopped .read-context {
+  margin: 20px 0 0;
+}
 .visually-hidden {
   position: absolute;
   width: 1px;
