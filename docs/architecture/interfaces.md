@@ -101,8 +101,9 @@ Returns `messages` as `bus_read` does, as soon as there are any, or an empty lis
 | Parameter | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `session` | string | yes (optional in the schema) | — | The Claude Code session id the hook was given |
+| `fresh` | boolean | no | false | Only for a `SessionStart` compact hook: allow unchanged unread mail to ring again; retain on empty/error retries, then exit after the first nonempty response |
 
-Waits up to 50 seconds, then returns `addresses` (the session's addresses with mail it hasn't been woken for; empty on timeout), `owns` (whether the session holds any address this machine wakes) and `superseded` (whether a newer call from the same session ended this one). It reads nothing and marks nothing read; it moves only `serve`'s in-memory mark of what the session was woken for. Sessions don't call it. How the hook uses it is in [delivery](delivery.md).
+Waits up to 50 seconds, then returns `addresses` (the session's addresses with eligible unread mail; empty on timeout), `owns` (whether the session holds any address this machine wakes) and `superseded` (whether a newer call from the same session ended this one). By default, a previously woken unread span is suppressed; `fresh: true` bypasses that comparison, not ownership or waiter arbitration. Repeated fresh calls can each ring: the one-response bound belongs to the hook invocation, not to an idempotent API or a durable compaction event. It returns no message bodies and acknowledges no mail; like delivery, it can pass the cursor over entries that aren't the address's mail. Sessions don't call it. How the hook uses it is in [delivery](delivery.md).
 
 #### `bus_peers`
 

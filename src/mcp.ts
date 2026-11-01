@@ -85,7 +85,8 @@ export const Left = Schema.Struct({
 });
 export const Woken = Schema.Struct({
   addresses: Schema.Array(Schema.String).annotate({
-    description: "Your addresses with mail you haven't been woken for; empty on timeout.",
+    description:
+      "Your addresses with eligible unread mail; fresh includes previously woken mail. Empty on timeout.",
   }),
   owns: Schema.Boolean.annotate({
     description: "Whether your session holds any address this machine wakes.",
@@ -248,8 +249,16 @@ const Wait = Tool.make("bus_wait", {
 
 // Not read-only: it moves the mark of what the session was woken for.
 const Wake = Tool.make("bus_wake", {
-  description: `For agent-bus's Claude Code hook, which wakes the session; sessions don't call this. Waits up to ${MAX_WAIT_SECONDS} seconds until an address your session owns has mail it hasn't been woken for, and returns those addresses. Reads nothing and marks nothing read; a newer call from the same session ends this one.`,
-  parameters: Schema.Struct({ session: Session }),
+  description: `For agent-bus's Claude Code hook, which wakes the session; sessions don't call this. Waits up to ${MAX_WAIT_SECONDS} seconds until an address your session owns has mail it hasn't been woken for, and returns those addresses. A compact hook uses fresh to ring unchanged unread mail again and exits after its first nonempty response. Returns no message bodies and acknowledges no mail; a newer call from the same session ends this one.`,
+  parameters: Schema.Struct({
+    session: Session,
+    fresh: Schema.optionalKey(
+      Schema.Boolean.annotate({
+        description:
+          "For a SessionStart compact hook only: bypass unchanged-unread suppression. Keep true on empty/error retries, then exit after the first nonempty response. Repeated fresh calls can each ring; omit for other hooks.",
+      })
+    ),
+  }),
   success: Woken,
   failure: Failure,
 }).annotateMerge(Local);
@@ -341,7 +350,7 @@ const BusHandlers = BusToolkit.toLayer(
         bus
           .wait(address, session, timeoutSeconds ?? MAX_WAIT_SECONDS)
           .pipe(Effect.map(publicMessages)),
-      bus_wake: ({ session }) => bus.wake(session, MAX_WAIT_SECONDS),
+      bus_wake: ({ session, fresh }) => bus.wake(session, MAX_WAIT_SECONDS, fresh),
       bus_peers: () =>
         bus.peers.pipe(
           Effect.map((peers) => ({

@@ -4,9 +4,13 @@ import { validSession } from "./domain.ts";
 import { Woken } from "./mcp.ts";
 import { WAKE_CALL_TIMEOUT_SECONDS, WAKE_FAILING_FOR, WAKE_RETRY } from "./timing.ts";
 
-/** The field of a Claude Code hook's input that the wake uses. */
+/** The session and lifecycle fields of a Claude Code hook's input that the wake uses. */
 const HookInput = Schema.fromJsonString(
-  Schema.Struct({ session_id: Schema.optionalKey(Schema.String) })
+  Schema.Struct({
+    session_id: Schema.optionalKey(Schema.String),
+    hook_event_name: Schema.optionalKey(Schema.String),
+    source: Schema.optionalKey(Schema.String),
+  })
 );
 
 /**
@@ -17,7 +21,7 @@ const HookInput = Schema.fromJsonString(
  * not to rejoin; after `/clear` a rejoin would be refused, the old id holding
  * the address. A wake may land mid-turn, so it carries on rather than ending
  * a turn, and says when its read fails: the same unread mail doesn't wake it
- * again.
+ * again until the unread span changes or the session compacts.
  */
 export const formatWake = (address: string) =>
   `[agent-bus] New messages for ${JSON.stringify(address)}. Read them with the agent-bus bus_read tool, as that address with your $CLAUDE_CODE_SESSION_ID as session, and handle them; don't call bus_join first. If bus_read returns no messages, or says the address isn't joined or belongs to another session, carry on without replying and without rejoining. If it fails, try once more; if it fails again, say so and carry on.`;
@@ -57,16 +61,18 @@ export const claudeWake = (
   alive: () => boolean = parentAlive()
 ) =>
   Effect.gen(function* () {
-    const session = yield* Schema.decodeUnknownEffect(HookInput)(input).pipe(
-      Effect.map((hook) => hook.session_id),
+    const hook = yield* Schema.decodeUnknownEffect(HookInput)(input).pipe(
       Effect.orElseSucceed(() => undefined)
     );
+    const session = hook?.session_id;
     if (!validSession(session)) return Option.none<string>();
+    // Compaction can discard a ring from context. Empty/error retries have emitted nothing;
+    // this hook exits after its first nonempty response, while ordinary hooks stay suppressed.
+    const fresh = hook?.hook_event_name === "SessionStart" && hook.source === "compact";
+    const args = { session, ...(fresh ? { fresh: true } : {}) };
     let failingSince: number | undefined;
     while (alive()) {
-      const result = yield* Effect.result(
-        call("bus_wake", Woken, { session }, WAKE_CALL_TIMEOUT_SECONDS)
-      );
+      const result = yield* Effect.result(call("bus_wake", Woken, args, WAKE_CALL_TIMEOUT_SECONDS));
       if (result._tag === "Success") {
         failingSince = undefined;
         const { addresses, owns, superseded } = result.success;
