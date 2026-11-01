@@ -44,7 +44,7 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
 
 2. **Run [the end-to-end check](#check-the-bus-end-to-end) on the version that runs now,** so that a later failure is the deploy's.
 
-3. **Merge the intended PR sequence into `main` through Graphite.** In the development worktree, inspect `gt merge --dry-run`, then run `gt merge` from the top of the intended sequence. Verify each PR is merged on GitHub before continuing; a merge job starting is not completion. Return to the primary checkout without running `gt sync`. If the PRs were already merged, only verify their state. Nothing is deployed yet. *Unverified: this Graphite merge path has not been rehearsed for this repository.*
+3. **Merge the intended PR sequence into `main` through Graphite.** In the development worktree, inspect `gt merge --dry-run`, then run `gt merge` from the top of the intended sequence. Verify each PR is merged on GitHub before continuing; a merge job starting is not completion. Return to the primary checkout without running `gt sync`. If the PRs were already merged, only verify their state. Nothing is deployed yet. *Observed live 2026-11-01:* PR #3 and the PR #4-6 sequence actually merged through `gt merge`; completion was verified, not inferred from merge-job acceptance.
 
 4. **Pin and review the target from remote `main`:**
 
@@ -61,7 +61,7 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
    git rev-parse HEAD
    ```
 
-   Expected: the merge prints `Fast-forward` and the changed files (or `Already up to date`), and `HEAD` equals `$candidate`. `--ff-only` refuses divergent history with `Not possible to fast-forward` (exit status 128): recover the primary checkout ([If it fails](#if-it-fails)). Pinning prevents a later fetch from silently changing the selected target. *Rehearsed 2026-10-28 for activation; Rehearsed 2026-11-01 on disposable Git repositories for pinned selection after another fetch and refusal of divergence.*
+   Expected: the merge prints `Fast-forward` and the changed files (or `Already up to date`), and `HEAD` equals `$candidate`. `--ff-only` refuses divergent history with `Not possible to fast-forward` (exit status 128): recover the primary checkout ([If it fails](#if-it-fails)). Pinning prevents a later fetch from silently changing the selected target. *Rehearsed 2026-10-28 for activation; Rehearsed 2026-11-01 on disposable Git repositories for pinned selection after another fetch and refusal of divergence. Checked read-only 2026-11-01:* both primary checkouts were pinned to `0202499`.
 
 5. **See what else the deploy changed:**
 
@@ -85,7 +85,7 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
    bun run check
    ```
 
-   Expected: `0 fail` and `check-docs: … ok` (180 tests passed in the rehearsal). If it fails, roll back (step 10) before restarting anything.
+   Expected: `0 fail` and `check-docs: … ok`. If it fails, roll back (step 10) before restarting anything. *Observed live 2026-11-01:* both primary checkouts at `0202499` passed the full check with 259 tests, 2,164 assertions and 40 checked documentation pages each. That source tree equals the previously tested `cfa3e69` tree.
 
 8. **Restart `serve`:**
 
@@ -93,7 +93,7 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
    launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus
    ```
 
-   Expected: no output, and `serve` serving again within about a second. `kickstart -k` kills the running job and starts it at once, even inside the 10-second throttle ([operate](operate.md#restart-serve-fluree-or-the-tunnel)). If step 5 listed the installer, run `bun run install:launch-agents` instead: it also restarts Fluree and rewrites the plists, so the bus pauses a few seconds longer ([install](install.md#rerun-the-installer)).
+   Expected: no output, and `serve` serving again within about a second. `kickstart -k` kills the running job and starts it at once, even inside the 10-second throttle ([operate](operate.md#restart-serve-fluree-or-the-tunnel)). If step 5 listed the installer, run `bun run install:launch-agents` instead: it also restarts Fluree and rewrites the plists, so the bus pauses a few seconds longer ([install](install.md#rerun-the-installer)). *Observed live 2026-11-01:* both installed `serve` processes were restarted after the pinned activation and full checks.
 
 9. **Check that `serve` restarted:** [the restart check](#check-that-serve-restarted), then [the end-to-end check](#check-the-bus-end-to-end). If either fails, go to step 10.
 
@@ -142,7 +142,7 @@ try {
 '
 ```
 
-Expected: `PASS: fixed public-query refusal` on every machine, then the existing end-to-end message check passes. The HTTP refusal contract is *Rehearsed 2026-11-01* on disposable fixtures by `test/public-query.test.ts`; this operator command and all-server deployment are *Unverified* on installed services. Record which exact reviewed commit each restarted process runs before claiming containment.
+Expected: `PASS: fixed public-query refusal` on every machine, then the existing end-to-end message check passes. The HTTP refusal contract is *Rehearsed 2026-11-01* on disposable fixtures by `test/public-query.test.ts`. *Checked read-only 2026-11-01:* this exact operator command returned `PASS: fixed public-query refusal` from both installed endpoints after both `serve` processes restarted at `0202499`; the end-to-end check below also passed on each. Record which exact reviewed commit each restarted process runs before claiming containment.
 
 If one endpoint still returns rows or any different error, treat rollout as incomplete. Keep that affected `serve` stopped until a reviewed repair is ready; a rollback that restores the old SELECT implementation reopens the route, even if another machine remains patched. Stopping `serve` interrupts that machine's delivery and hooks, but preserves the ledger and cursors. After any refusal-preserving rollback, rerun this check and the ordinary end-to-end check on each affected machine. A successful query requires a separately reviewed replacement under [connections rule 6](../architecture/connections.md#rules), not an operator bypass.
 
@@ -234,6 +234,8 @@ EOF
 ```
 
 Expected: `PASS` and exit status 0, in a few seconds. Afterwards `agent-bus peers` lists neither test address. *Rehearsed 2026-10-28*, on repeated runs and with `serve` stopped (`FAIL: serve does not answer on port …` after 30 s, exit 1). Rehearsed with `serve` frozen mid-run (`kill -STOP`): `FAIL: the hook never called serve …` after 95 s, with the joined address named and the leave command printed; after `kill -CONT`, `LEAVE_RUN=<number>` left it and printed `PASS`.
+
+*Observed live 2026-11-01:* this canonical end-to-end command returned `PASS` on both installed endpoints after their activation and restart at `0202499`. It exercises the stand-in hook described above, not a real Claude session.
 
 That a hook already waiting before the restart calls `serve` again by itself (it retries every five seconds) was seen once, with an earlier form of this check: `hooked` was true 6 s after the restart. *Unverified* in a real Claude session: from a joined session, call `bus_join` again with its own address and session after the restart, and expect `hooked: true` within about ten seconds.
 

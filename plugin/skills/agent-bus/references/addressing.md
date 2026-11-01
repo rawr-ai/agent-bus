@@ -22,6 +22,8 @@ These are argument fragments for `bus_publish`; each call also supplies your `fr
 
 A topic plus an address is the supported way to include a particular peer alongside the shared audience. A subscriber also named directly gets the message once. An `@name` in the body is just text. No recipient form, by itself, requires an answer or makes a message FYI.
 
+When the group needs the answer, say in the request that the reply should go to the topic.
+
 ## Replies choose their audience afresh
 
 Set `replyTo` to the id being answered; it links context and does not select recipients.
