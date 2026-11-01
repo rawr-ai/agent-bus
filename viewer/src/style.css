@@ -83,7 +83,7 @@ bdi {
 }
 .brand-context {
   font-size: 13px;
-  color: #73817c;
+  color: var(--muted);
   font-weight: 500;
 }
 .refresh-all {
@@ -486,7 +486,6 @@ bdi {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
-.mobile-nav,
 .back-button {
   display: none;
 }
@@ -535,31 +534,6 @@ bdi {
   .refresh-all svg {
     width: 16px;
     height: 16px;
-  }
-  .mobile-nav {
-    height: 48px;
-    flex: none;
-    display: flex;
-    align-items: stretch;
-    gap: 24px;
-    padding: 0 16px;
-    background: var(--paper);
-    border-bottom: 1px solid var(--border);
-    overflow: auto;
-  }
-  .mobile-nav button {
-    background: none;
-    border: 0;
-    border-bottom: 2px solid transparent;
-    color: #84928a;
-    font-size: 12px;
-    font-weight: 650;
-    padding: 0;
-    flex: none;
-  }
-  .mobile-nav button[aria-current="page"] {
-    color: var(--teal-text);
-    border-color: #338b7b;
   }
   .workspace {
     display: block;

@@ -322,6 +322,7 @@ export function App({ client }: { client: ViewerClient }) {
   const readMessages = unit?.messages;
   const retainedSelection = unit !== null && reading.retained;
   const previousReadingCriteria = unit !== null && historyInputKey(unit.criteria) !== history.key;
+  const allActive = nav.context.kind === "all" && !nav.chronology;
   const readingState = retainedSelection
     ? "Outside current observation"
     : readMessages !== undefined && previousReadingCriteria
@@ -378,7 +379,8 @@ export function App({ client }: { client: ViewerClient }) {
           <div className="context-scroll">
             <button
               type="button"
-              className={`context-item${nav.context.kind === "all" && !nav.chronology ? " active" : ""}`}
+              className={`context-item${allActive ? " active" : ""}`}
+              aria-current={allActive ? "true" : undefined}
               onClick={() => selectContext({ kind: "all" })}
             >
               All messages
@@ -386,6 +388,7 @@ export function App({ client }: { client: ViewerClient }) {
             <button
               type="button"
               className={`context-item${nav.chronology ? " active" : ""}`}
+              aria-current={nav.chronology ? "true" : undefined}
               onClick={() => {
                 navigate({ ...nav, chronology: true, message: null, page: "conversations" });
                 requestAnimationFrame(() => listHeading.current?.focus());
@@ -401,18 +404,23 @@ export function App({ client }: { client: ViewerClient }) {
                     <h2>
                       {kind === "topic" ? "Topics" : kind === "address" ? "Addresses" : "Broadcast"}
                     </h2>
-                    {items.map((context) => (
-                      <button
-                        type="button"
-                        key={contextKey(context)}
-                        className={`context-item${!nav.chronology && contextKey(context) === contextKey(nav.context) ? " active" : ""}`}
-                        onClick={() => {
-                          selectContext(context);
-                        }}
-                      >
-                        <Text value={contextLabel(context)} />
-                      </button>
-                    ))}
+                    {items.map((context) => {
+                      const active =
+                        !nav.chronology && contextKey(context) === contextKey(nav.context);
+                      return (
+                        <button
+                          type="button"
+                          key={contextKey(context)}
+                          className={`context-item${active ? " active" : ""}`}
+                          aria-current={active ? "true" : undefined}
+                          onClick={() => {
+                            selectContext(context);
+                          }}
+                        >
+                          <Text value={contextLabel(context)} />
+                        </button>
+                      );
+                    })}
                   </div>
                 )
               );
@@ -501,7 +509,8 @@ export function App({ client }: { client: ViewerClient }) {
                     item && (
                       <button
                         type="button"
-                        className="conversation-row"
+                        className={`conversation-row${message.id === nav.message ? " selected" : ""}`}
+                        aria-current={message.id === nav.message ? "true" : undefined}
                         key={message.id}
                         onClick={() => selectGroup(item, message.id)}
                       >
@@ -531,6 +540,7 @@ export function App({ client }: { client: ViewerClient }) {
                       type="button"
                       ref={active ? selectedRow : undefined}
                       className={`conversation-row${active ? " selected" : ""}`}
+                      aria-current={active ? "true" : undefined}
                       key={item.anchorMessageId}
                       onClick={() => selectGroup(item)}
                     >

@@ -1,6 +1,6 @@
 import { MAX_PARTICIPANT_LENGTH } from "../../../shared/limits";
 import type { PeersObservation } from "../../../shared/public";
-import { Audience, Text } from "../../Text";
+import { Audience, safeText, Text } from "../../Text";
 
 export function PeerList({
   data,
@@ -32,6 +32,7 @@ export function PeerList({
               <button
                 type="button"
                 className="text-action"
+                aria-label={`Investigate exact address ${safeText(peer.address)}`}
                 onClick={() => onInvestigate(peer.address)}
               >
                 Investigate exact address
