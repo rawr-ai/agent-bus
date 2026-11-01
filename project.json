@@ -110,15 +110,15 @@
       "cache": false,
       "dependsOn": ["viewer-build"],
       "options": { "command": "bun --no-env-file run test:browser", "env": { "FORCE_COLOR": "0" } }
-    }
-  },
-  "browser-investigation": {
-    "executor": "nx:run-commands",
-    "cache": false,
-    "dependsOn": ["viewer-build"],
-    "options": {
-      "command": "bun --no-env-file run test:browser:investigation",
-      "env": { "FORCE_COLOR": "0" }
+    },
+    "browser-investigation": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "dependsOn": ["viewer-build"],
+      "options": {
+        "command": "bun --no-env-file run test:browser:investigation",
+        "env": { "FORCE_COLOR": "0" }
+      }
     }
   }
 }
