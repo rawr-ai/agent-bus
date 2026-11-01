@@ -1,0 +1,16 @@
+sender_role,recipient_role,recipient_incidences
+Coordinator,Worker A,379
+Coordinator,Other participants,188
+Coordinator,Worker B,137
+Coordinator,Topic audience,1
+Worker A,Coordinator,240
+Worker A,Other participants,3
+Worker A,Worker B,28
+Other participants,Coordinator,148
+Other participants,Worker A,21
+Other participants,Other participants,86
+Other participants,Worker B,3
+Other participants,Topic audience,1
+Worker B,Coordinator,81
+Worker B,Worker A,33
+Worker B,Other participants,3

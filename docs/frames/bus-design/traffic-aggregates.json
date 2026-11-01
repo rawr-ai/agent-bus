@@ -1,0 +1,137 @@
+{
+  "raw_rows": 1253,
+  "retained_messages": 1129,
+  "excluded_messages": 124,
+  "source_sha256": "4c811125df5a24cc433c7f707c6bd3fdad11aba5fb34a87c6b9a37d07769bab4",
+  "snapshot_t_provenance_only": 1546,
+  "start_utc": "2026-10-26T07:06:44.67Z",
+  "end_utc": "2026-11-01T03:06:01.542Z",
+  "recipient_incidences": 1352,
+  "named_address_incidences": 1350,
+  "recipient_arity": {
+    "1": 950,
+    "2": 147,
+    "3": 20,
+    "4": 12
+  },
+  "sender_count": 23,
+  "named_address_count": 24,
+  "root_component_sizes": [
+    28, 20, 20, 17, 15, 15, 14, 12, 12, 12, 11, 11, 11, 11, 10, 10, 10, 10, 10, 9, 9, 9, 9, 9, 9, 8,
+    8, 8, 8, 8, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 5, 5, 5, 5,
+    5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4, 4,
+    4, 4, 4, 4, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3,
+    3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 3, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2,
+    2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1,
+    1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1
+  ],
+  "nodes": [
+    {
+      "role": "Coordinator",
+      "authored_messages": 564,
+      "explicit_recipient_incidences": 469
+    },
+    {
+      "role": "Worker A",
+      "authored_messages": 253,
+      "explicit_recipient_incidences": 433
+    },
+    {
+      "role": "Worker B",
+      "authored_messages": 91,
+      "explicit_recipient_incidences": 168
+    },
+    {
+      "role": "Other participants",
+      "authored_messages": 221,
+      "explicit_recipient_incidences": 280
+    },
+    {
+      "role": "Topic audience",
+      "authored_messages": 0,
+      "explicit_recipient_incidences": 2
+    }
+  ],
+  "edges": [
+    {
+      "sender_role": "Coordinator",
+      "recipient_role": "Worker A",
+      "recipient_incidences": 379
+    },
+    {
+      "sender_role": "Coordinator",
+      "recipient_role": "Other participants",
+      "recipient_incidences": 188
+    },
+    {
+      "sender_role": "Coordinator",
+      "recipient_role": "Worker B",
+      "recipient_incidences": 137
+    },
+    {
+      "sender_role": "Coordinator",
+      "recipient_role": "Topic audience",
+      "recipient_incidences": 1
+    },
+    {
+      "sender_role": "Worker A",
+      "recipient_role": "Coordinator",
+      "recipient_incidences": 240
+    },
+    {
+      "sender_role": "Worker A",
+      "recipient_role": "Other participants",
+      "recipient_incidences": 3
+    },
+    {
+      "sender_role": "Worker A",
+      "recipient_role": "Worker B",
+      "recipient_incidences": 28
+    },
+    {
+      "sender_role": "Other participants",
+      "recipient_role": "Coordinator",
+      "recipient_incidences": 148
+    },
+    {
+      "sender_role": "Other participants",
+      "recipient_role": "Worker A",
+      "recipient_incidences": 21
+    },
+    {
+      "sender_role": "Other participants",
+      "recipient_role": "Other participants",
+      "recipient_incidences": 86
+    },
+    {
+      "sender_role": "Other participants",
+      "recipient_role": "Worker B",
+      "recipient_incidences": 3
+    },
+    {
+      "sender_role": "Other participants",
+      "recipient_role": "Topic audience",
+      "recipient_incidences": 1
+    },
+    {
+      "sender_role": "Worker B",
+      "recipient_role": "Coordinator",
+      "recipient_incidences": 81
+    },
+    {
+      "sender_role": "Worker B",
+      "recipient_role": "Worker A",
+      "recipient_incidences": 33
+    },
+    {
+      "sender_role": "Worker B",
+      "recipient_role": "Other participants",
+      "recipient_incidences": 3
+    }
+  ]
+}
