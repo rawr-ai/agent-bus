@@ -2,7 +2,7 @@
 // TypeScript SDK, so a spec deviation shared by Effect's client and server still fails.
 import { afterAll, afterEach, beforeAll, describe, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,9 +13,12 @@ import {
   isInitializeRequest,
   type JSONRPCMessage,
 } from "@modelcontextprotocol/sdk/types.js";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
+import { Message, Origin, Presence } from "../src/domain.ts";
+import { Ledger } from "../src/Ledger.ts";
+import { Messages } from "../src/mcp.ts";
 import * as Serve from "../src/serve.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
@@ -28,7 +31,7 @@ probe.stop(true);
 const url = new URL(`http://127.0.0.1:${port}/mcp`);
 const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
-    Layer.provide(
+    Layer.provideMerge(
       Bus.layer.pipe(
         Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
@@ -72,6 +75,40 @@ const text = (result: CallToolResult) => {
   const [first] = result.content;
   return first?.type === "text" ? first.text : "";
 };
+
+// An exact allowlist is the oracle, not another projection derived from the schema.
+const publicMessage = {
+  id: "projection-message",
+  ts: "2026-01-01T00:00:00.000Z",
+  from: "other/sender",
+  to: ["other/reader"],
+  kind: "message" as const,
+  body: "ordinary public body",
+  subject: "public subject",
+  replyTo: "earlier-message",
+  origin: { host: "fixture-host", cwd: "/workspace", repo: "/workspace", branch: "fixture" },
+};
+const privateMarker = "synthetic-private-claim";
+const privatePresence = new Presence({
+  runtime: "codex",
+  status: "joined",
+  topics: [],
+  session: privateMarker,
+  codexThreadId: privateMarker,
+  rejoinOf: "synthetic-private-run",
+});
+
+test("the public message schema excludes presence and unknown objects at every level", () => {
+  const message = new Message({
+    ...publicMessage,
+    origin: Object.assign(new Origin(publicMessage.origin), { internal: { privateMarker } }),
+    presence: privatePresence,
+  });
+  Object.assign(message, { internal: { privateMarker } });
+  expect(Schema.encodeSync(Messages)({ messages: [message] })).toEqual({
+    messages: [publicMessage],
+  });
+});
 
 // The stateful versions serve advertises. The SDK can't speak the stateless 2026-07-28,
 // which bus.test.ts covers with Effect's own client.
@@ -214,6 +251,60 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     }
   });
 
+  test("peers and ordinary messages omit stored claims in both output encodings", async () => {
+    const { succeed, tools } = await connect();
+    const reader = `${version}/projection-reader`;
+    const claim = `${privateMarker}-${version}`;
+    await succeed("bus_join", {
+      ...joining(reader),
+      runtime: "codex",
+      session: claim,
+      codexThreadId: claim,
+      topics: ["projection"],
+      note: "public coordination note",
+    });
+    const { peers } = await succeed("bus_peers", {});
+    expect(peers.find((peer: { address: string }) => peer.address === reader)).toEqual({
+      address: reader,
+      runtime: "codex",
+      topics: ["projection"],
+      host: hostname(),
+      note: "public coordination note",
+    });
+    for (const name of ["bus_read", "bus_wait", "bus_history", "bus_peers"]) {
+      const schema = JSON.stringify(tools.find((tool) => tool.name === name)?.outputSchema);
+      if (structured) {
+        for (const field of ["presence", "session", "codexThreadId", "rejoinOf"]) {
+          expect(schema).not.toContain(`"${field}":`);
+        }
+      }
+    }
+    for (const name of ["bus_read", "bus_wait"]) {
+      const expected = { ...publicMessage, id: Bun.randomUUIDv7(), to: [reader] };
+      // This is legal in the legacy internal representation despite kind: message.
+      const stored = new Message({
+        ...expected,
+        origin: new Origin(expected.origin),
+        presence: privatePresence,
+      });
+      await server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.append(stored)));
+      const result = await succeed(name, { address: reader, session: claim, timeoutSeconds: 0 });
+      expect(result).toEqual({ messages: [expected] });
+      expect(JSON.stringify(result)).not.toContain(privateMarker);
+      const history = await succeed("bus_history", { participant: reader, limit: 1 });
+      expect(history).toEqual({ messages: [expected] });
+    }
+    // Projection must not rewrite the stored internal representation.
+    const internal = await server.runPromise(
+      Effect.flatMap(Ledger, (ledger) => ledger.search({ participant: reader, limit: 1 }))
+    );
+    expect(internal[0]?.presence).toEqual(privatePresence);
+    expect(await succeed("bus_read", { address: reader, session: claim })).toEqual({
+      messages: [],
+    });
+    await succeed("bus_leave", { address: reader, session: claim });
+  });
+
   test("topic joins echo their effective subscriptions and malformed replacements are tool refusals", async () => {
     const { succeed, refused } = await connect();
     const reader = `${version}/topic-reader`;
@@ -242,10 +333,32 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     });
   });
 
+  test("a malformed cursor fails safely without overwriting its stored value", async () => {
+    const { succeed, refused } = await connect();
+    const address = `${version}/invalid-cursor`;
+    await succeed("bus_join", joining(address));
+    const path = join(dir, "cursors", `${encodeURIComponent(address)}.json`);
+    const original = await Bun.file(path).text();
+    const malformed = JSON.stringify({ cursor: privateMarker });
+    try {
+      await Bun.write(path, malformed);
+      await refused(
+        "bus_read",
+        { address, session: sid(address) },
+        /^The cursor could not be read or written\.$/
+      );
+      expect(await Bun.file(path).text()).toBe(malformed);
+    } finally {
+      await Bun.write(path, original);
+    }
+    expect(await succeed("bus_read", { address, session: sid(address) })).toEqual({ messages: [] });
+    await succeed("bus_leave", { address, session: sid(address) });
+  });
+
   test("refusals are tool errors that say why, not protocol errors", async () => {
     const { call, succeed, refused } = await connect();
     const owner = `${version}/owner`;
-    await succeed("bus_join", joining(owner));
+    await succeed("bus_join", { ...joining(owner), note: "public holder note" });
     await refused("bus_read", { address: owner }, /own session id as `session`/);
     await refused("bus_read", { address: owner, session: "x" }, /belongs to another session/);
 
@@ -254,12 +367,18 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(held.isError).toBe(true);
     const said = text(held);
     expect(said).toContain("bus_takeover");
+    expect(said).toContain('note "public holder note"');
+    expect(said).not.toContain(sid(owner));
     const joinId = /holder "([^"]+)"/.exec(said)?.[1];
     expect(joinId).toBeDefined();
     const other = { ...joining(owner), session: "other" };
     // A client with an older tool list passing takeover to bus_join is refused, not taken over.
     await refused("bus_join", { ...other, takeover: joinId }, /bus_takeover/);
-    await refused("bus_takeover", { ...other, holder: "stale" }, /held by another session/);
+    const stale = await call("bus_takeover", { ...other, holder: "stale" });
+    expect(stale.isError).toBe(true);
+    expect(text(stale)).toContain("held by another session");
+    expect(text(stale)).toContain('note "public holder note"');
+    expect(JSON.stringify(stale)).not.toContain(sid(owner));
     expect(await succeed("bus_takeover", { ...other, holder: joinId })).toEqual({
       address: owner,
       topics: [],

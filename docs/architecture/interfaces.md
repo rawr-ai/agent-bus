@@ -84,7 +84,7 @@ Returns the new message's `id` (for replies to name) and `ts` (when it was sent,
 | `session` | string | yes (optional in the schema) | — | As for `bus_join` |
 | `limit` | integer ≥ 1 | no | all unread | The most messages to return, oldest first; the rest stay unread. `0` is refused |
 
-Returns `messages`, possibly empty. Each message has `id`, `ts`, `from`, `to`, `kind` (`message`, or `presence` for a join or leave announcement), `body` and, when set, `subject`, `replyTo` and `origin` (`host`, and when known `cwd`, `repo` and `branch`: where it was written). It marks what it returns read before the response is sent.
+Returns `messages`, possibly empty. Each message has `id`, `ts`, `from`, `to`, `kind`, `body` and, when set, `subject`, `replyTo` and `origin` (`host`, and when known `cwd`, `repo` and `branch`: where it was written). These are explicit public fields, not the stored entry: nested `presence`, session claims, wake state and extra internal objects are omitted, including on legacy ordinary messages. Presence entries are not delivered as mail. It marks what it returns read before the response is sent. MCP text and structured content carry the same projected object.
 
 #### `bus_wait`
 
@@ -106,7 +106,7 @@ Waits up to 50 seconds, then returns `addresses` (the session's addresses with m
 
 #### `bus_peers`
 
-No parameters. Returns `peers`: for each joined peer, `address`, `runtime` (the one it joined as), `topics` (the ones it receives `#topic` messages for) and, when present, `host` (the machine it joined from), `codexThreadId` and `note` (what it said it is working on). Joins written without an owning session are ignored.
+No parameters. Returns `peers`: for each joined peer, `address`, `runtime` (the one it joined as), `topics` (the ones it receives `#topic` messages for) and, when present, `host` (the machine it joined from) and `note` (what it said it is working on). Stored `session`, `codexThreadId` and wake state are not returned. Joins written without an owning session are ignored. This is current state, with no `t` input or output, not historical membership.
 
 #### `bus_history`
 
@@ -116,7 +116,7 @@ No parameters. Returns `peers`: for each joined peer, `address`, `runtime` (the 
 | `participant` | string | no | none | Only messages sent by this, or naming it among their recipients exactly: an address, `#topic` or `*` |
 | `limit` | integer ≥ 1 | no | 50 (`DEFAULT_HISTORY_LIMIT`) | The most messages to return; `0` is refused. Without `query` these are the newest; with it, the best matches |
 
-Returns `messages` in time order, newest last. It changes nothing, including what is unread. Presence entries aren't searched.
+Returns `messages` with the same public fields as `bus_read`, in time order, newest last. It changes nothing, including what is unread. Presence entries aren't searched.
 
 #### `bus_query`
 
@@ -174,7 +174,12 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | "FROM and SERVICE are not allowed: queries read the bus ledger, at `t` when given." | `bus_query` with `FROM`, `FROM NAMED` or `SERVICE` anywhere in the tree | Remove it; pass `t` to read an earlier commit |
 | "t must be a commit from 1 to `<head>`." | `bus_query` with a `t` that isn't an existing commit | Omit `t`, or use a commit in range |
 | "The query did not finish within 10 seconds; narrow it or add a LIMIT." | `bus_query` runs past its deadline | Narrow it or add `LIMIT` |
-| "Fluree `<status>`: …" (the first 500 characters of the server's reply), or the transport error when Fluree can't be reached | Any ledger call the store rejects or can't complete, such as a query Fluree won't run, a bad token or the store being down | For `bus_query`, fix the query. Otherwise tell the human and retry later; the store is theirs to recover ([recover](../runbooks/recover.md)) |
+| "Fluree request failed (HTTP `<status>`)." | A ledger request gets an HTTP error | The status is retained, never the upstream body. For `bus_query`, check the query; otherwise tell the human and retry later ([recover](../runbooks/recover.md)) |
+| "Fluree could not complete the request." | A transport failure | Tell the human and retry later; raw transport details are not returned |
+| "Fluree returned an invalid response." | A JSON or store response-schema failure | Tell the human; upstream values are not returned |
+| "Fluree returned an invalid query response." | A query response is not an object | Tell the human; upstream values are not returned |
+| "The ledger entry could not be encoded." | A stored entry fails encoding | Tell the human; the entry's contents are not echoed |
+| "The cursor could not be read or written." | A cursor file or schema operation fails | Tell the human; the path and stored values are not echoed |
 | A schema message that names the bound | An argument breaks the tool's schema: `cwd` not starting with `/`, `timeoutSeconds` outside 0 to 50, a `limit` below 1 or not an integer (so `0` is refused), a `t` that isn't an integer, a missing required field | Correct the argument. Before protocol revision 2025-11-25 this is a protocol error, not a tool error. A model may send `limit: 0` meaning "all"; omitting `limit` is what returns all |
 
 The CLI adds messages of its own, each printed alone with exit status 1:
@@ -324,6 +329,7 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 
 Frames are indexed in [frames/README](../frames/README.md).
 
+- [bus-design-query](../frames/bus-design-query.md): independent public message and peer projection, with upstream error bodies omitted; query evaluation is a separate boundary.
 - [address-ownership](../frames/address-ownership.md): the `session` argument on every call, the refusals, and the CLI's session defaults.
 - [claude-wake](../frames/claude-wake.md): `bus_wake` and the `claude-wake` command.
 - [one-codex-route](../frames/one-codex-route.md): the tool annotations, and one `serve` per machine.

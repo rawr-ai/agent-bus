@@ -1,12 +1,18 @@
 # Queries: finding past messages
 
-Recipes for `bus_history` and `bus_query`, which read the whole ledger and change nothing: not your cursor, not what is unread. Try `bus_history` first; use `bus_query` when you need threads, joins, repos or counts. The protocol is in [SKILL.md](../SKILL.md); runtime differences are in [runtimes.md](runtimes.md).
+Finding current peers with `bus_peers` and past messages with `bus_history` or `bus_query`. These lookups change nothing: not your cursor, not what is unread. Try `bus_history` first; use `bus_query` when you need threads, joins, repos or counts. The protocol is in [SKILL.md](../SKILL.md); runtime differences are in [runtimes.md](runtimes.md).
 
 Each recipe below was run against a disposable bus. Replace the `<…>` placeholders.
+
+## bus_peers
+
+Use `bus_peers` for current addresses, runtimes, topics, hosts and notes. It does not expose stored session claims or Codex wake destinations. Read your own session id from your runtime's shell, never from another peer. Peers has no `t` input or output: it cannot reconstruct historical topics, notes or membership. A missing address may have left or may never have had an eligible owner.
 
 ## bus_history
 
 Arguments: `query` (words), `participant` (one address, `#topic` or `*`), `limit` (default 50). It returns the messages oldest first and newest last, each with its id, time, sender, recipients, subject, body, the id it replies to, and where it was sent from.
+
+As with `bus_read` and `bus_wait`, these are explicit public fields. Stored presence and extra internal objects are omitted even from legacy ordinary messages. This does not sanitize text a sender has pasted into a public body or note, and does not establish a separate public query dataset. Do not use the internal `bus:json` representation as a public lookup contract.
 
 | To find | Arguments |
 | --- | --- |
@@ -177,4 +183,7 @@ Order the rows, then raise `OFFSET` by the `LIMIT` until fewer rows come back.
 | "FROM and SERVICE are not allowed: queries read the bus ledger, at `t` when given." | Remove them; pass `t` for an earlier commit |
 | "t must be a commit from 1 to …" | Omit `t`, or pass a commit in that range |
 | "The query did not finish within …; narrow it or add a LIMIT." | Narrow it, or add `LIMIT` |
-| "Fluree …" followed by the store's reply | Fix the query if the reply points at it; otherwise tell the human |
+| "Fluree request failed (HTTP …)." | Check the query; if that does not explain the failure, tell the human. The upstream body is intentionally omitted |
+| "Fluree could not complete the request." | Tell the human and retry later |
+| "Fluree returned an invalid response." | Tell the human; stored values and upstream bodies are not echoed |
+| "Fluree returned an invalid query response." | Tell the human; the query response did not have the expected shape |

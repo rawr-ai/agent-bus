@@ -1,7 +1,15 @@
 import { Context, Effect, Layer, Schema } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus } from "./Bus.ts";
-import { InvalidTopics, LedgerError, Message, NotJoined, NotOwner, Runtime } from "./domain.ts";
+import {
+  InvalidTopics,
+  LedgerError,
+  Message,
+  NotJoined,
+  NotOwner,
+  Origin,
+  Runtime,
+} from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { MAX_QUERY_LENGTH } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
@@ -9,7 +17,48 @@ import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
 const Failure = Schema.Union([LedgerError, NotJoined, NotOwner, InvalidTopics]);
 // Numbers are Finite or Int: Schema.Number's JSON Schema also admits "NaN" and "Infinity"
 // strings, and drops the description and bounds clients are shown.
-export const Messages = Schema.Struct({ messages: Schema.Array(Message) });
+// Public fields are an allowlist, including origin: future internal fields stay internal.
+const PublicOrigin = Schema.Struct({
+  host: Origin.fields.host,
+  cwd: Origin.fields.cwd,
+  repo: Origin.fields.repo,
+  branch: Origin.fields.branch,
+});
+const PublicMessage = Schema.Struct({
+  id: Message.fields.id,
+  ts: Message.fields.ts,
+  from: Message.fields.from,
+  to: Message.fields.to,
+  kind: Message.fields.kind,
+  subject: Message.fields.subject,
+  body: Message.fields.body,
+  replyTo: Message.fields.replyTo,
+  origin: Schema.optionalKey(PublicOrigin),
+});
+export const Messages = Schema.Struct({ messages: Schema.Array(PublicMessage) });
+
+const publicMessages = (messages: ReadonlyArray<Message>): typeof Messages.Type => ({
+  messages: messages.map((message) => ({
+    id: message.id,
+    ts: message.ts,
+    from: message.from,
+    to: message.to,
+    kind: message.kind,
+    body: message.body,
+    ...(message.subject === undefined ? {} : { subject: message.subject }),
+    ...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
+    ...(message.origin === undefined
+      ? {}
+      : {
+          origin: {
+            host: message.origin.host,
+            ...(message.origin.cwd === undefined ? {} : { cwd: message.origin.cwd }),
+            ...(message.origin.repo === undefined ? {} : { repo: message.origin.repo }),
+            ...(message.origin.branch === undefined ? {} : { branch: message.origin.branch }),
+          },
+        }),
+  })),
+});
 export const Joined = Schema.Struct({
   address: Schema.String.annotate({ description: "The address you joined." }),
   // Older servers did not echo topics; the CLI uses this schema to decode their results too.
@@ -56,9 +105,6 @@ export const Peers = Schema.Struct({
       }),
       host: Schema.optionalKey(
         Schema.String.annotate({ description: "The machine it joined from." })
-      ),
-      codexThreadId: Schema.optionalKey(
-        Schema.String.annotate({ description: "A Codex peer's thread id." })
       ),
       note: Schema.optionalKey(
         Schema.String.annotate({ description: "What it said it is working on." })
@@ -170,7 +216,8 @@ const Publish = Tool.make("bus_publish", {
 }).annotateMerge(Local);
 
 const Read = Tool.make("bus_read", {
-  description: "Return your unread messages and mark them read. Returns immediately.",
+  description:
+    "Return your unread messages and mark them read. Returns immediately. Messages include public content and origin metadata, never stored presence or session claims.",
   parameters: Schema.Struct({
     address: Address,
     session: Session,
@@ -186,7 +233,7 @@ const Read = Tool.make("bus_read", {
 }).annotateMerge(Local);
 
 const Wait = Tool.make("bus_wait", {
-  description: `Wait for your next unread messages (marking them read), up to timeoutSeconds (default and maximum ${MAX_WAIT_SECONDS}). Use while you expect a reply; returns an empty list on timeout.`,
+  description: `Wait for your next unread messages (marking them read), up to timeoutSeconds (default and maximum ${MAX_WAIT_SECONDS}). Use while you expect a reply; returns an empty list on timeout. Returns the same public message fields as bus_read, without stored presence or session claims.`,
   parameters: Schema.Struct({
     address: Address,
     session: Session,
@@ -210,14 +257,14 @@ const Wake = Tool.make("bus_wake", {
 
 const ListPeers = Tool.make("bus_peers", {
   description:
-    "List the peers currently joined to the bus, with their runtimes, topics, machines and notes.",
+    "List the peers currently joined to the bus, with their addresses, runtimes, topics, machines and notes. Stored session claims and wake destinations are not returned.",
   success: Peers,
   failure: Failure,
 }).annotateMerge(Lookup);
 
 const History = Tool.make("bus_history", {
   description:
-    "Search past messages, newest last. Filter by text and/or a participant address. Does not change what is unread.",
+    "Search past messages, newest last. Filter by text and/or a participant address. Does not change what is unread. Returns the same public message fields as bus_read, without stored presence or session claims.",
   parameters: Schema.Struct({
     query: Schema.optionalKey(
       Schema.String.annotate({
@@ -280,7 +327,9 @@ const BusToolkit = Toolkit.make(
 
 const decodeRecord = Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown));
 const toLedgerError = (error: LedgerError | Schema.SchemaError) =>
-  error._tag === "LedgerError" ? error : new LedgerError({ message: error.message });
+  error._tag === "LedgerError"
+    ? error
+    : new LedgerError({ message: "Fluree returned an invalid query response." });
 
 const BusHandlers = BusToolkit.toLayer(
   Effect.gen(function* () {
@@ -295,11 +344,11 @@ const BusHandlers = BusToolkit.toLayer(
           .publish({ ...params, session: params.session })
           .pipe(Effect.map(({ id, ts }) => ({ id, ts }))),
       bus_read: ({ address, session, limit }) =>
-        bus.take(address, session, limit).pipe(Effect.map((messages) => ({ messages }))),
+        bus.take(address, session, limit).pipe(Effect.map(publicMessages)),
       bus_wait: ({ address, session, timeoutSeconds }) =>
         bus
           .wait(address, session, timeoutSeconds ?? MAX_WAIT_SECONDS)
-          .pipe(Effect.map((messages) => ({ messages }))),
+          .pipe(Effect.map(publicMessages)),
       bus_wake: ({ session }) => bus.wake(session, MAX_WAIT_SECONDS),
       bus_peers: () =>
         bus.peers.pipe(
@@ -309,9 +358,6 @@ const BusHandlers = BusToolkit.toLayer(
               runtime: presence.runtime,
               topics: presence.topics,
               ...(host === undefined ? {} : { host }),
-              ...(presence.codexThreadId === undefined
-                ? {}
-                : { codexThreadId: presence.codexThreadId }),
               ...(presence.note === undefined ? {} : { note: presence.note }),
             })),
           }))
@@ -319,7 +365,7 @@ const BusHandlers = BusToolkit.toLayer(
       bus_history: ({ query, participant, limit }) =>
         bus
           .history({ query, participant, limit: limit ?? DEFAULT_HISTORY_LIMIT })
-          .pipe(Effect.map((messages) => ({ messages }))),
+          .pipe(Effect.map(publicMessages)),
       bus_query: ({ query, t }) =>
         ledger.select(query, t).pipe(Effect.flatMap(decodeRecord), Effect.mapError(toLedgerError)),
       bus_leave: ({ address, session }) => bus.leave(address, session).pipe(Effect.as({ address })),

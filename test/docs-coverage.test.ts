@@ -85,7 +85,7 @@ const parameterNames = new Set(tools.flatMap((tool) => Object.keys(parametersOf(
  * interpolation stays as written, for a `<placeholder>` or ellipsis in the page to stand for.
  */
 const SOURCES = (() => {
-  const files = ["Bus", "mcp", "sparql", "Fluree", "client", "bin"].map((file) =>
+  const files = ["Bus", "mcp", "sparql", "Fluree", "Cursors", "client", "bin"].map((file) =>
     read(`src/${file}.ts`).replaceAll('\\"', '"')
   );
   const constants = new Map(

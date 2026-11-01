@@ -27,13 +27,13 @@ const QUERY_MAX_BYTES = 32_768;
  * JSON with an unbudgeted SPARQL JSON result.
  */
 const QUERY_TIMEOUT = "10 seconds";
-const MAX_ERROR_TEXT = 500;
 
 /** Messages are immutable, so each one is a subject named by its id. */
 const messageIri = (id: string) => `urn:agent-bus:message:${id}`;
 
-const ledgerError = (cause: unknown) =>
-  new LedgerError({ message: cause instanceof Error ? cause.message : String(cause) });
+const invalidResponse = () => new LedgerError({ message: "Fluree returned an invalid response." });
+const httpFailure = (status: number) =>
+  new LedgerError({ message: `Fluree request failed (HTTP ${status}).` });
 
 const Exists = Schema.Struct({ exists: Schema.Boolean });
 const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
@@ -116,28 +116,29 @@ export const layerFluree = (config: FlureeConfig) =>
       const api = `${config.url.replace(/\/$/, "")}/v1/fluree`;
       const ledger = encodeURIComponent(config.ledger);
 
-      /** Sends a request and returns its JSON body, failing with the server's error text. */
+      /** Upstream bodies and transport details are never safe tool error messages. */
       const send = (request: HttpClientRequest.HttpClientRequest) =>
         Effect.gen(function* () {
           const response = yield* client.execute(request);
           if (response.status >= 400) {
-            const text = yield* response.text;
-            return yield* Effect.fail(
-              new LedgerError({
-                message: `Fluree ${response.status}: ${text.slice(0, MAX_ERROR_TEXT)}`,
-              })
-            );
+            return yield* httpFailure(response.status);
           }
           return yield* response.json;
         }).pipe(
-          Effect.catchTag("HttpClientError", (error) => Effect.fail(ledgerError(error))),
+          Effect.catchTag("HttpClientError", (error) =>
+            Effect.fail(
+              error.reason._tag === "DecodeError"
+                ? invalidResponse()
+                : new LedgerError({ message: "Fluree could not complete the request." })
+            )
+          ),
           Effect.scoped
         );
 
       const decode =
         <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) =>
         (value: unknown) =>
-          Schema.decodeUnknownEffect(schema)(value).pipe(Effect.mapError(ledgerError));
+          Schema.decodeUnknownEffect(schema)(value).pipe(Effect.mapError(invalidResponse));
 
       const postJson = (path: string, body: unknown) =>
         send(HttpClientRequest.post(`${api}${path}`).pipe(HttpClientRequest.bodyJsonUnsafe(body)));
@@ -154,7 +155,7 @@ export const layerFluree = (config: FlureeConfig) =>
           Effect.as(true),
           // Another process created it first; that process writes the config.
           Effect.catchIf(
-            (error) => error.message.startsWith("Fluree 409"),
+            (error) => error.message === httpFailure(409).message,
             () => Effect.succeed(false)
           )
         );
@@ -184,7 +185,11 @@ export const layerFluree = (config: FlureeConfig) =>
       const decodeMessage = Schema.decodeUnknownEffect(MessageJson);
 
       const append = Effect.fn("Ledger.append")(function* (message: Message) {
-        const json = yield* encode(message).pipe(Effect.mapError(ledgerError));
+        const json = yield* encode(message).pipe(
+          Effect.mapError(
+            () => new LedgerError({ message: "The ledger entry could not be encoded." })
+          )
+        );
         yield* postJson(`/insert?ledger=${ledger}`, toNode(message, json));
       });
 
@@ -329,9 +334,7 @@ export const layerFluree = (config: FlureeConfig) =>
         Stream.map((): void => undefined),
         Stream.prepend([undefined]),
         Stream.concat(Stream.fail(new LedgerError({ message: "Fluree event stream closed" }))),
-        Stream.tapError((error) =>
-          Effect.logWarning(`Fluree events disconnected, reconnecting: ${String(error)}`)
-        ),
+        Stream.tapError(() => Effect.logWarning("Fluree events disconnected, reconnecting")),
         Stream.retry(Schedule.spaced(RECONNECT_INTERVAL)),
         Stream.catchCause(() => Stream.empty)
       );
