@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   symlinkSync,
   writeFileSync,
@@ -83,6 +84,28 @@ const command = (args: ReadonlyArray<string>, stdin?: string) => {
   });
   if (!result.success) throw new Error(`${args.slice(0, 3).join(" ")} failed`);
   return result.stdout.toString().trim();
+};
+
+/** A new repo on `branch`, or detached at its one commit; its real path, as git reports it. */
+const gitRepo = (branch: string, options: { readonly detached?: boolean } = {}) => {
+  const dir = realpathSync(tempDir());
+  const git = (...args: ReadonlyArray<string>) =>
+    command([
+      "git",
+      "-C",
+      dir,
+      "-c",
+      "user.name=test",
+      "-c",
+      "user.email=test@example.invalid",
+      ...args,
+    ]);
+  git("init", "-q", "-b", branch);
+  if (options.detached) {
+    git("-c", "commit.gpgsign=false", "commit", "-q", "--no-verify", "--allow-empty", "-m", "x");
+    git("checkout", "-q", "--detach");
+  }
+  return dir;
 };
 
 beforeAll(async () => {
@@ -536,12 +559,21 @@ for (const backend of backends) {
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
+        // Repos of the test's own, so the result doesn't depend on how this checkout is checked out.
+        const repo = gitRepo("fixture/origin");
+        const detached = gitRepo("fixture/detached", { detached: true });
         const gone = tempDir();
         yield* bus.join({
           address: "claude/a",
           runtime: "claude",
           session: sid("claude/a"),
-          cwd: process.cwd(),
+          cwd: repo,
+        });
+        yield* bus.join({
+          address: "claude/detached",
+          runtime: "claude",
+          session: sid("claude/detached"),
+          cwd: detached,
         });
         yield* bus.join({
           address: "claude/gone",
@@ -557,11 +589,22 @@ for (const backend of backends) {
           to: ["*"],
           body: "x",
         });
-        expect(message.origin?.cwd).toBe(process.cwd());
-        expect(message.origin?.repo).toBe(process.cwd());
-        expect(message.origin?.branch).toBeDefined();
+        expect(message.origin).toEqual(
+          new Origin({ host: hostname(), cwd: repo, repo, branch: "fixture/origin" })
+        );
         const [stored] = yield* bus.history({ limit: 1 });
         expect(stored?.origin).toEqual(message.origin);
+
+        // A detached checkout records its repo but no branch.
+        const fromDetached = yield* bus.publish({
+          from: "claude/detached",
+          session: sid("claude/detached"),
+          to: ["*"],
+          body: "w",
+        });
+        expect(fromDetached.origin).toEqual(
+          new Origin({ host: hostname(), cwd: detached, repo: detached })
+        );
 
         // A directory that has since disappeared records only the machine and the path.
         const fromGone = yield* bus.publish({
