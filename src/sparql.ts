@@ -25,6 +25,9 @@ const reachesOut = (node: unknown): boolean => {
 };
 
 /**
+ * Legacy syntax utility, not used by bus_query or Ledger.select while queries
+ * are withdrawn. Dataset confinement is not a public-data security boundary.
+ *
  * Checks that a query is a read of the bus ledger alone: one SPARQL SELECT with
  * no FROM (the ledger and time are pinned by the request) and no SERVICE.
  * Returns the query regenerated from its syntax tree, so caller comments, which

@@ -27,7 +27,7 @@ Publish recipients stay literal and case-sensitive: join normalisation does not 
 
 A topic and an address can appear together in `to`; an address matching both receives the message once. An `@mention` in the body has no routing effect. Recipient forms determine delivery, not whether a response is expected.
 
-A reply sets `replyTo` to the id of the message it answers. `replyTo` doesn't route: the reply goes only to whatever its own `to` names. It never inherits the original sender or recipients, including `*`. The ledger links the reply to the answered message, so history and queries can follow a conversation. The bus doesn't check that the id exists.
+A reply sets `replyTo` to the id of the message it answers. `replyTo` doesn't route: the reply goes only to whatever its own `to` names. It never inherits the original sender or recipients, including `*`. History returns that id so a reader can relate messages; the ledger also stores it as a link. The bus doesn't check that the id exists.
 
 ### Presence: joins and leaves
 
@@ -107,7 +107,7 @@ In Fluree, each entry is a node `urn:agent-bus:message:<id>`, typed `bus:Message
 - for presence, `bus:runtime` and `bus:status`;
 - `bus:json`, the exact encoded entry, which is what the bus reads back. The rest of a presence (its owning session, topics, `takeover`, `rejoinOf`, `codexThreadId` and note) is only there.
 
-The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`. So `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter"), and `bus_query` can rank with `f:fulltext`. A new ledger's text search finds nothing at first ([platforms: Fluree](../platforms/fluree.md#full-text-search)).
+The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`. `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter"). A new ledger's text search finds nothing at first ([platforms: Fluree](../platforms/fluree.md#full-text-search)). Public SPARQL is temporarily refused; this stored representation is not a public query contract ([interfaces](interfaces.md#bus_query)).
 
 ## Rules
 
@@ -143,8 +143,8 @@ Naming the holder's current join id means a takeover can't race a newer join, an
 
 ### Fluree as the one store
 
-One shared, ordered log across machines, with history, full-text search and SPARQL. Each message is one commit, so a cursor is a commit number and every machine sees the same order. `bus_query` is kept because the ledger's properties are to grow (topic, task, workstream, decisions, tags, reference docs), so history can be queried by meaning, not only by text.
-- **JSONL is test support only.** The unit tests' ledger (`test/jsonl-ledger.ts`) has byte-offset cursors, file watching, substring search and no `bus_query`.
+One shared, ordered log across machines, with history and full-text search. Each message is one commit, so a cursor is a commit number and every machine sees the same order. Richer queryable properties remain a possible extension, but public SPARQL is unavailable until its boundary is qualified ([connections](connections.md#rules)). Its refusal does not change the internal representation or the private reads used by ownership and delivery.
+- **JSONL is test support only.** The unit tests' ledger (`test/jsonl-ledger.ts`) has byte-offset cursors, file watching and substring search. Like Fluree, its retained `select` capability refuses.
 - **Rejected: JSONL as a second production store.** Both machines already ran on Fluree, so a second path had no use ([retired mechanisms](../frames/README.md#retired-mechanisms)).
 
 ### Smaller choices
@@ -184,3 +184,4 @@ Indexed in [frames](../frames/README.md).
 - [simplification-pass](../frames/simplification-pass.md): Fluree as the only production store, owner-less presences ignored, origin repo and branch kept, and `bus_query` and two locks per address kept.
 - [nudge-hygiene](../frames/nudge-hygiene.md): runs of joins (`rejoinOf`), topics kept on a rejoin, and takeover as `bus_takeover`.
 - [bus-design-query](../frames/bus-design-query.md): keep full internal presence for ownership and delivery while projecting ordinary public responses.
+- [public-query-containment](../frames/public-query-containment.md): withdraw only public SPARQL, retaining internal reads, representation and delivery.

@@ -25,6 +25,8 @@ Oldest first. "Superseded by" says what later changed; the frame itself keeps it
 | [docs-consolidation](docs-consolidation.md) | 2026-10-28 | Docs have three layers with fixed homes (reference, entry points and runbooks, the agent skill), a placement rule says where a new fact goes, `check-docs` and a coverage test hold them to it, and frames stay frozen and indexed here. | — | [overview](../overview.md), [AGENTS.md](../../AGENTS.md), [interfaces](../architecture/interfaces.md), [the runbooks](../runbooks/install.md) |
 | [bus-design](bus-design.md) | 2026-10-31 | Active draft: repair topic subscriptions with addressing guidance; separately review the public query boundary and test conversation semantics before adding protocol fields. | — | [messaging](../architecture/messaging.md), [interfaces](../architecture/interfaces.md), [connections](../architecture/connections.md), [the skill](../../plugin/skills/agent-bus/SKILL.md) |
 
+The [public-query-containment](public-query-containment.md) frame (2026-11-01) records the temporary withdrawal of `bus_query`, following [bus-design-query](bus-design-query.md)'s separate response projection. It supersedes earlier promises of a working public SELECT, not the stored representation or delivery design. Current owners: [interfaces](../architecture/interfaces.md#bus_query), [connections](../architecture/connections.md), [Fluree](../platforms/fluree.md) and [deploy](../runbooks/deploy.md#public-query-containment).
+
 ## Retired mechanisms
 
 | Mechanism | Replaced by | Why | Retired in |

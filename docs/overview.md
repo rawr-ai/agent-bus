@@ -43,7 +43,7 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 
 | Piece | What it does | Why it exists |
 | --- | --- | --- |
-| **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`, `src/sparql.ts`) | Stores every entry in Fluree, on one transaction server on the bus host, and vets `bus_query`'s SPARQL. The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`) | One shared, ordered log across machines, with history, full-text search and SPARQL |
+| **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree, on one transaction server on the bus host. Public SPARQL is temporarily withdrawn ([interfaces](architecture/interfaces.md#bus_query)); internal reads remain. The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`) | One shared, ordered log across machines, with history and full-text search |
 | **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`, `src/Cursors.ts`) | The only process that reads or writes the store for its machine's sessions. Serves the bus tools over MCP on loopback, keeps cursors, enforces ownership, and runs the Codex deliverer | One owner of cursors and locks per machine, so a message is taken once |
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
@@ -70,7 +70,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Addresses, sessions and ownership; topics and replies; the ledger, cursors and presence | [Messaging](architecture/messaging.md) |
 | Whether and how each kind of session is woken; the Claude hook and the Codex nudge; the policies that keep a Codex thread safe | [Delivery](architecture/delivery.md) |
 | The MCP tools and parameters, annotations, refusals, the CLI, configuration and environment | [Interfaces](architecture/interfaces.md) |
-| Trust boundaries, and what `serve` may do to a thread; security: Fluree's token, `serve`'s `Host` check, `bus_query`'s limits | [Connections](architecture/connections.md) |
+| Trust boundaries, and what `serve` may do to a thread; security: Fluree's token, `serve`'s `Host` check, public-query withdrawal | [Connections](architecture/connections.md) |
 | Installed versions, the findings register, and how platform claims are marked | [Platforms](platforms/README.md) |
 | How Codex, Claude Code and Fluree behave | [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md), [Fluree](platforms/fluree.md) |
 | Setting up the bus host and other machines | [Install](runbooks/install.md) |

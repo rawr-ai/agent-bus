@@ -17,12 +17,14 @@ import * as Serve from "../src/serve.ts";
 
 const marker = "synthetic-private-upstream-body";
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-public-errors-"));
+const storeRequests: Array<string> = [];
 let failure: { body: string; status: number } | undefined;
 const upstream = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   fetch(request) {
     const path = new URL(request.url).pathname;
+    if (!path.endsWith("/events")) storeRequests.push(path);
     if (path.includes("/exists/")) return Response.json({ exists: true });
     if (path.includes("/info/")) return Response.json({ ledger: { t: 2 } });
     if (path.includes("/show/")) return Response.json({ id: "fixture-commit" });
@@ -80,7 +82,6 @@ test.each([
   for (const [name, args] of [
     ["bus_history", {}],
     ["bus_peers", {}],
-    ["bus_query", { query: "SELECT ?m WHERE { ?m a bus:Message }" }],
   ] as const) {
     await refused(name, args, `Fluree request failed (HTTP ${status}).`);
   }
@@ -91,24 +92,22 @@ test("malformed JSON and schema failures omit source values", async () => {
   await refused("bus_history", {}, "Fluree returned an invalid response.");
   failure = { body: JSON.stringify({ nested: { session: marker } }), status: 200 };
   await refused("bus_history", {}, "Fluree returned an invalid response.");
-  failure = { body: JSON.stringify(marker), status: 200 };
-  await refused(
-    "bus_query",
-    { query: "SELECT ?m WHERE { ?m a bus:Message }" },
-    "Fluree returned an invalid query response."
-  );
 });
 
-test("query envelopes are unchanged by error scrubbing", async () => {
-  const envelope = { schema: ["from"], rows: [["other/sender"]], t: 2, hasMore: true };
-  failure = { body: JSON.stringify(envelope), status: 200 };
-  const result = await client.callTool({
-    name: "bus_query",
-    arguments: { query: "SELECT ?from WHERE { ?m bus:from ?from }", t: 2 },
-  });
-  expect(result.structuredContent).toEqual(envelope);
-  expect(result.content).toEqual([{ type: "text", text: JSON.stringify(envelope) }]);
-  failure = undefined;
+test("Fluree select itself refuses without parsing, reading head or querying upstream", async () => {
+  failure = { body: marker, status: 500 };
+  const before = storeRequests.length;
+  for (const query of ["SELECT ?m WHERE { ?m a bus:Message }", "", marker.repeat(4096)]) {
+    for (const t of [undefined, 1, 2, 0, -1, Number.MAX_SAFE_INTEGER]) {
+      const error = await server.runPromise(
+        Effect.flatMap(Ledger, (ledger) => Effect.flip(ledger.select(query, t)))
+      );
+      expect(error.message).toBe(
+        "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers."
+      );
+    }
+  }
+  expect(storeRequests.length).toBe(before);
 });
 
 test("transport failures do not echo request paths or raw transport errors", async () => {

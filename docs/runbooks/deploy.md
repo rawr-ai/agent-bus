@@ -23,6 +23,8 @@ What a deploy changes, and when:
 
 A restart of `serve` loses its memory, which costs at most one extra wake per address and leaves `hooked` unset until each Claude hook calls again, about five seconds later ([delivery](../architecture/delivery.md#claude-code-sessions)). The Codex daemon outlives `serve`'s restarts. The Fluree server isn't restarted unless you rerun the installer.
 
+Public-query containment has an additional [all-server check and rollback constraint](#public-query-containment). Read it before choosing either the target or the rollback commit. A successful upgrade on only one machine does not close an older server's query route to the shared ledger.
+
 You need the change merged into `main` on the remote, a shell on the bus host, and a quiet moment. Use one shell for the whole procedure, because `previous` is set in step 1 and used in step 10.
 
 The steps were *Rehearsed 2026-10-28* on a disposable instance: its own directory, ports and LaunchAgent labels, installed from a temporary clone that stood in for the primary checkout, with a second clone as its remote. It deployed three later commits: a version bump, a deliberately broken file, and its revert. A mark below says where a step differs.
@@ -95,7 +97,7 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
 
 9. **Check that `serve` restarted:** [the restart check](#check-that-serve-restarted), then [the end-to-end check](#check-the-bus-end-to-end). If either fails, go to step 10.
 
-10. **If anything failed, roll back.** Reset the primary checkout to the commit you wrote down, put the old code into service the way step 8 did, and run both checks again, whole:
+10. **If anything failed, roll back only to a refusal-preserving commit.** If `$previous` predates public-query containment, do not run the reset below: keep the affected `serve` stopped and prepare a reviewed repair or rollback that retains both the refusal and public response projection. Otherwise reset the primary checkout to the commit you wrote down, put the old code into service the way step 8 did, and run both checks again, whole:
 
     ```sh
     git reset --hard "$previous"
@@ -108,6 +110,41 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
     - **If the deploy changed the installer,** use `bun run install:launch-agents` in place of the `kickstart`. After the reset the checkout holds the previous revision, so this runs the previous revision's installer, which wrote the plists now in place and rewrites them as they were. Don't run the new revision's installer from a reset tree.
     - **If the deploy changed the plugin,** run [the plugin commands](#when-the-plugin-changed) again so the cache follows the checkout.
     - **On a disposable instance,** rehearse an installer rollback only when both revisions support the installer's overrides (`AGENT_BUS_DIR`, the two ports, `AGENT_BUS_LABEL` and `AGENT_BUS_LAUNCHER`). An installer from before they existed ignores them and rewrites the real launcher and the real LaunchAgents. With such a revision, don't run it: restore the instance's saved plists and launcher by hand ([operate](operate.md#run-an-isolated-bus-for-checks)).
+
+## Public-query containment
+
+For the containment release and every later deployment or rollback, enumerate every `serve` that can front the shared ledger. Activate a reviewed refusal-preserving commit and restart each one using the steps above; no Fluree credential change, reindex, migration or rejoin is needed. Do not widen credentials or change governance to make a public query succeed. Refresh cached tool/skill guidance as described in [upgrade](upgrade.md#refreshing-guidance-in-running-sessions); stale descriptions do not bypass the updated handler.
+
+From each machine's activated checkout, verify its local endpoint with this bounded check. It prints no result data and changes no bus state:
+
+```sh
+bun --no-env-file -e '
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+const client = new Client({ name: "query-containment-check", version: "1" });
+const expected = "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers.";
+try {
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${process.env.AGENT_BUS_PORT ?? 8096}/mcp`)));
+  await client.listTools();
+  for (const t of [undefined, 1, Number.MAX_SAFE_INTEGER]) {
+    const result = await client.callTool({ name: "bus_query", arguments: {
+      query: "SELECT (1 AS ?probe) WHERE {}", ...(t === undefined ? {} : { t })
+    } });
+    if (result.isError !== true || result.structuredContent !== undefined ||
+        JSON.stringify(result.content) !== JSON.stringify([{ type: "text", text: expected }])) {
+      throw new Error("Public-query containment check failed; do not claim containment.");
+    }
+  }
+  console.log("PASS: fixed public-query refusal");
+} finally {
+  await client.close();
+}
+'
+```
+
+Expected: `PASS: fixed public-query refusal` on every machine, then the existing end-to-end message check passes. The HTTP refusal contract is *Rehearsed 2026-11-01* on disposable fixtures by `test/public-query.test.ts`; this operator command and all-server deployment are *Unverified* on installed services. Record which exact reviewed commit each restarted process runs before claiming containment.
+
+If one endpoint still returns rows or any different error, treat rollout as incomplete. Keep that affected `serve` stopped until a reviewed repair is ready; a rollback that restores the old SELECT implementation reopens the route, even if another machine remains patched. Stopping `serve` interrupts that machine's delivery and hooks, but preserves the ledger and cursors. After any refusal-preserving rollback, rerun this check and the ordinary end-to-end check on each affected machine. A successful query requires a separately reviewed replacement under [connections rule 6](../architecture/connections.md#rules), not an operator bypass.
 
 ## Check that `serve` restarted
 
@@ -248,7 +285,7 @@ Use this when step 1 finds a dirty tree or another branch, or step 4 refuses wit
 
    Expected: `$base` is the commit the reflog shows the checkout fast-forwarded to, or cloned at, before the divergent commits. If the three disagree, pick the older and let step 4 deploy the rest. *Rehearsed 2026-10-28*
 
-3. **Restore it, restart, and verify.**
+3. **Restore it, restart, and verify, only if it preserves public-query containment.** If `$base` predates the refusal or public response projection, keep `serve` stopped and prepare a reviewed repair instead of activating it; [the containment rule](#public-query-containment) also applies to recovery.
 
    ```sh
    git reset --hard "$base"

@@ -10,8 +10,7 @@ import {
   Origin,
   Runtime,
 } from "./domain.ts";
-import { Ledger } from "./Ledger.ts";
-import { MAX_QUERY_LENGTH } from "./sparql.ts";
+import { PUBLIC_QUERY_REFUSAL, refusePublicQuery } from "./Ledger.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
 
 const Failure = Schema.Union([LedgerError, NotJoined, NotOwner, InvalidTopics]);
@@ -289,16 +288,16 @@ const History = Tool.make("bus_history", {
 }).annotateMerge(Lookup);
 
 const Query = Tool.make("bus_query", {
-  description: `Query the bus ledger with one read-only SPARQL 1.1 SELECT (Fluree store only). Prefixes bus:, xsd:, rdf: and f: need no declaration; FROM and SERVICE are not allowed.
-Each entry is a node typed bus:Message or bus:Presence with bus:id, bus:ts (xsd:dateTime), bus:from, bus:to (one value per recipient: an address, #topic or *), bus:subject, bus:body, bus:replyTo (the answered message's node), and where it was written: bus:host, bus:cwd, bus:repo, bus:branch. Presence entries add bus:runtime and bus:status (joined or left).
-Rank text with BIND(f:fulltext(?body, "words") AS ?score) FILTER(?score > 0). Pass t to read the ledger as of an earlier commit.
-Results are rows with a schema and the commit t they reflect, cut off at 32 KB (hasMore: true), so use LIMIT. Example: SELECT ?from (COUNT(?m) AS ?sent) WHERE { ?m a bus:Message ; bus:from ?from } GROUP BY ?from`,
+  description: `${PUBLIC_QUERY_REFUSAL} This tool remains listed for compatibility, but every schema-valid call returns the same refusal without reading the store.`,
   parameters: Schema.Struct({
     query: Schema.String.annotate({
-      description: `The SPARQL SELECT to run, up to ${MAX_QUERY_LENGTH} characters.`,
+      description:
+        "Retained query input; not parsed or executed while public queries are disabled.",
     }),
     t: Schema.optionalKey(
-      Schema.Int.annotate({ description: "Commit to read as of; defaults to the latest." })
+      Schema.Int.annotate({
+        description: "Retained commit input; ignored while queries are disabled.",
+      })
     ),
   }),
   success: Schema.Record(Schema.String, Schema.Unknown),
@@ -325,16 +324,9 @@ const BusToolkit = Toolkit.make(
   Leave
 );
 
-const decodeRecord = Schema.decodeUnknownEffect(Schema.Record(Schema.String, Schema.Unknown));
-const toLedgerError = (error: LedgerError | Schema.SchemaError) =>
-  error._tag === "LedgerError"
-    ? error
-    : new LedgerError({ message: "Fluree returned an invalid query response." });
-
 const BusHandlers = BusToolkit.toLayer(
   Effect.gen(function* () {
     const bus = yield* Bus;
-    const ledger = yield* Ledger;
     return {
       bus_join: (params) => bus.join({ ...params, session: params.session }),
       bus_takeover: ({ holder, ...params }) =>
@@ -366,8 +358,7 @@ const BusHandlers = BusToolkit.toLayer(
         bus
           .history({ query, participant, limit: limit ?? DEFAULT_HISTORY_LIMIT })
           .pipe(Effect.map(publicMessages)),
-      bus_query: ({ query, t }) =>
-        ledger.select(query, t).pipe(Effect.flatMap(decodeRecord), Effect.mapError(toLedgerError)),
+      bus_query: refusePublicQuery,
       bus_leave: ({ address, session }) => bus.leave(address, session).pipe(Effect.as({ address })),
     };
   })

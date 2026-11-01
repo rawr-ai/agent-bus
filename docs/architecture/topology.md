@@ -112,7 +112,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 
 ## Why
 
-- **One ledger on one transaction server.** The server orders every commit, so all machines share one log and a cursor is the last commit `t` read. The ledger is queryable (SPARQL and full-text through `bus_query` and `bus_history`) and readable as of any `t`. The other machine needs only a tunnel.
+- **One ledger on one transaction server.** The server orders every commit, so all machines share one log and a cursor is the last commit `t` read. Internal readers use commit history; public mail lookup uses `bus_history`. Public SPARQL is temporarily withdrawn ([interfaces](interfaces.md#bus_query)). The other machine needs only a tunnel.
 - **One `serve` per machine.** Locks and the marks of what was last woken live in the process, and the deliverer can move a cursor past mail that isn't the subscriber's. A second `serve` on the same machine and ledger could add duplicate nudges or move a cursor back, so the design has one.
 - **Loopback and a tunnel.** Nothing needs to listen beyond its own machine, so nothing does. SSH authenticates the other machine, and the Fluree token still applies on top ([connections](connections.md)).
 - **The checkout is the install.** The launcher link makes the hook run the checkout's code and dependencies, so one fast-forward and a restart of `serve` deploy both.

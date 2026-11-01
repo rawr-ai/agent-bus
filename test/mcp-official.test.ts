@@ -220,7 +220,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     );
   });
 
-  test("every tool but bus_query (Fluree only) answers with structured content its schema accepts", async () => {
+  test("tools other than the withdrawn bus_query answer with content their schema accepts", async () => {
     const { succeed } = await connect();
     const a = `${version}/a`;
     const b = `${version}/b`;

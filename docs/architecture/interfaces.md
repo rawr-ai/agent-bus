@@ -29,7 +29,7 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 | `bus_wake` | For the Claude Code hook only: wait until the session's addresses have mail it hasn't been woken for; reads nothing |
 | `bus_peers` | List the joined peers |
 | `bus_history` | Search past messages by text and participant |
-| `bus_query` | Run one read-only SPARQL `SELECT` over the whole ledger |
+| `bus_query` | Retained name and input schema; always refuses while the public-data boundary is being qualified |
 | `bus_leave` | Leave the bus |
 
 #### `bus_join`
@@ -70,7 +70,7 @@ Returns what `bus_join` returns. The holder id is checked only while another ses
 | `to` | string array | yes | — | Audience: peer addresses, `#topic` for its subscribers, or `*` for every peer. A topic and an address may appear together. Body `@mentions` do not route; recipients aren't checked to exist. A sender never receives its own message, whatever `to` names |
 | `body` | string | yes | — | The message text, including who, if anyone, is asked to respond |
 | `subject` | string | no | none | A short subject line; `bus_history` searches it |
-| `replyTo` | string | no | none | The id of the message this answers; `bus_query` follows it as a link. It does not route or inherit recipients; only `to` determines the reply's audience |
+| `replyTo` | string | no | none | The id of the message this answers. It does not route or inherit recipients; only `to` determines the reply's audience |
 
 Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601).
 
@@ -122,10 +122,10 @@ Returns `messages` with the same public fields as `bus_read`, in time order, new
 
 | Parameter | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `query` | string | yes | — | The SPARQL `SELECT` to run, up to 32768 characters. The tool description gives the node shape, the prefixes `bus:`, `xsd:`, `rdf:` and `f:`, and an example |
-| `t` | integer | no | the latest commit | The commit to read the ledger as of; it must already exist |
+| `query` | string | yes | — | Retained for compatibility; not parsed or executed |
+| `t` | integer | no | none | Retained for compatibility; ignored |
 
-Returns the result rows with their schema and the commit `t` they reflect, cut off at 32 KB with `hasMore: true`. The rules a query must meet are [rule 6](#rules).
+Always returns the fixed public-query refusal under [Refusals](#refusals), before any store access. The name, input shape, read-only annotation and object-shaped success schema remain for compatibility, but there is no successful query result. This is a temporary capability withdrawal, not an empty result or a translation to another tool. Use `bus_history` for public messages and `bus_peers` for current peers; neither supplies historical graph queries or aggregates.
 
 #### `bus_leave`
 
@@ -168,16 +168,10 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | "`<address>` belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session." | `bus_publish`, `bus_read`, `bus_wait` or `bus_leave` from a session that doesn't own the address, including a wait that started before a takeover | Join a new address. If you were woken for this mail, carry on without replying |
 | "`<address>` has not joined the bus; join first." | The same four tools on an address with no current join: never joined, left, or no cursor on this machine's ledger | `bus_join` first. If a wake text told you not to rejoin, end the turn instead |
 | "Cursor t=<t> is ahead of <ledger> (t=<head>): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again." | A read or wait finds the address's cursor beyond the ledger's end (a wake logs it and skips that address for the pass) | Tell the human; it is theirs to settle ([recover](../runbooks/recover.md#a-cursor-is-ahead-of-the-ledger)). A plain rejoin changes nothing; only a rejoin with `replay`, once the human agrees to receive the past mail again, resets the cursor |
-| "A query must be 1-32768 characters." | `bus_query` with an empty or over-long query | Shorten it |
-| "Not valid SPARQL: …" | `bus_query` text that doesn't parse | Fix the syntax |
-| "Only SELECT queries are allowed." | `bus_query` with `ASK`, `CONSTRUCT`, `DESCRIBE` or an update | Rewrite it as a `SELECT` |
-| "FROM and SERVICE are not allowed: queries read the bus ledger, at `t` when given." | `bus_query` with `FROM`, `FROM NAMED` or `SERVICE` anywhere in the tree | Remove it; pass `t` to read an earlier commit |
-| "t must be a commit from 1 to `<head>`." | `bus_query` with a `t` that isn't an existing commit | Omit `t`, or use a commit in range |
-| "The query did not finish within 10 seconds; narrow it or add a LIMIT." | `bus_query` runs past its deadline | Narrow it or add `LIMIT` |
-| "Fluree request failed (HTTP `<status>`)." | A ledger request gets an HTTP error | The status is retained, never the upstream body. For `bus_query`, check the query; otherwise tell the human and retry later ([recover](../runbooks/recover.md)) |
+| "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers." | Every schema-valid `bus_query`, including empty, malformed or large strings and any integer `t` | Use the named lookups where they fit. Do not retry, narrow the query or change `t` to bypass the refusal |
+| "Fluree request failed (HTTP `<status>`)." | A ledger request gets an HTTP error | The status is retained, never the upstream body. Tell the human and retry later ([recover](../runbooks/recover.md)); withdrawn `bus_query` calls do not reach the store |
 | "Fluree could not complete the request." | A transport failure | Tell the human and retry later; raw transport details are not returned |
 | "Fluree returned an invalid response." | A JSON or store response-schema failure | Tell the human; upstream values are not returned |
-| "Fluree returned an invalid query response." | A query response is not an object | Tell the human; upstream values are not returned |
 | "The ledger entry could not be encoded." | A stored entry fails encoding | Tell the human; the entry's contents are not echoed |
 | "The cursor could not be read or written." | A cursor file or schema operation fails | Tell the human; the path and stored values are not echoed |
 | A schema message that names the bound | An argument breaks the tool's schema: `cwd` not starting with `/`, `timeoutSeconds` outside 0 to 50, a `limit` below 1 or not an integer (so `0` is refused), a `t` that isn't an integer, a missing required field | Correct the argument. Before protocol revision 2025-11-25 this is a protocol error, not a tool error. A model may send `limit: 0` meaning "all"; omitting `limit` is what returns all |
@@ -267,7 +261,7 @@ Files in the state directory that the code reads:
 | `fluree-token` | `serve` | The bearer token for the bus's Fluree server, trimmed. Absent means no `Authorization` header is sent. Never logged |
 | `fluree-cursors/<ledger>/<instance>/` | `serve` | One cursor file per address. The `<ledger>` segment is the URI-encoded ledger id, and `<instance>` names the ledger's incarnation ([messaging](messaging.md#rules)) |
 
-Fixed in code, with no setting: `serve` binds only `127.0.0.1`; the MCP path is `/mcp`; the Codex daemon's socket is `~/.codex/app-server-control/app-server-control.sock`; queries are cut off at 32 KB and 10 seconds (beside the store code, in `src/Fluree.ts` and `src/sparql.ts`). Every other timeout, retry, schedule and limit is a constant exported by `src/timing.ts`: the longest wait, the HTTP idle timeout, the CLI's call timeout, `bus_history`'s default `limit`, and the delivery schedules. Their values are in [delivery's table](delivery.md#timeouts-and-schedules). The agent-bus version is `VERSION` in `src/version.ts`: the CLI's `--version`, the version `serve` and the CLI give to MCP peers, and the one Codex's app-server sees.
+Fixed in code, with no setting: `serve` binds only `127.0.0.1`; the MCP path is `/mcp`; the Codex daemon's socket is `~/.codex/app-server-control/app-server-control.sock`; public SPARQL queries are refused, with no bypass setting. Timeouts, retries, schedules and limits are constants exported by `src/timing.ts`: the longest wait, the HTTP idle timeout, the CLI's call timeout, `bus_history`'s default `limit`, and the delivery schedules. Their values are in [delivery's table](delivery.md#timeouts-and-schedules). The agent-bus version is `VERSION` in `src/version.ts`: the CLI's `--version`, the version `serve` and the CLI give to MCP peers, and the one Codex's app-server sees.
 
 ### Instructions and wake texts
 
@@ -292,7 +286,7 @@ The rules about who owns an address, takeover and rejoining are [messaging's rul
 3. **A Codex join passes its own thread id.** For runtime `codex`, `codexThreadId` equals `session`, or the join is refused (messaging rule 10).
 4. **`bus_takeover` requires `holder`,** the holder's current join id from the refusal. `bus_join` has no `takeover` parameter (messaging rule 4).
 5. **A wait lasts at most 50 seconds.** `bus_wait` returns an empty list on timeout. `bus_wake` is for the hook, not for sessions.
-6. **`bus_query` accepts one `SELECT`, regenerated from its syntax tree.** It may not contain `FROM` or `SERVICE`, runs against the ledger and `t` fixed by the request, and is cut off at 32 KB and 10 seconds. Regenerating drops caller comments, which Fluree reads as directives ([connections](connections.md)).
+6. **`bus_query` always refuses before store access.** After schema validation it returns one fixed `LedgerError`, without parsing the query, checking head or `t`, or calling `Ledger.select`. The retained service capability also refuses. There is no historical-commit exception or fallback ([connections](connections.md#rules)).
 7. **Annotations say what a tool does to the caller's world.** All tools are closed-world. Only `bus_takeover` is destructive. A tool is read-only only if it moves nothing, not even a cursor, so only the three lookups are. A new tool is annotated the same way, since Codex's approval follows the annotations.
 8. **Wake texts carry no text from other sessions,** and the Codex nudge's first sentence never changes.
 9. **The tools and parameters named on this page are the tools and parameters in code.** A new tool, a new parameter, a changed bound or a changed refusal updates this page in the same change; `test/docs-coverage.test.ts` fails otherwise.
@@ -314,7 +308,7 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 - **Reading marks read first.** `bus_read` and `bus_wait` advance the cursor before the response is sent, so a lost response loses mail; see [messaging's limits](messaging.md#limits).
 - **Refusals have no code.** The error result carries text only, so callers match wording. Known limit of the MCP server in use.
 - **Recipients and `replyTo` aren't checked.** A message to an address nobody has joined is accepted. A later joiner starts at the present and doesn't see it unless it joins with `replay` or reads `bus_history`. The same goes for a `replyTo` naming no message. Known limit.
-- **`bus_query` needs the Fluree store.** The tests' JSONL ledger has no `bus_query`. Text search in `bus_history` and `bus_query` finds nothing just after a ledger is created ([platforms: Fluree](../platforms/fluree.md#full-text-search)). Known limit.
+- **Public SPARQL is unavailable.** Both Fluree and the tests' JSONL ledger refuse `select`. `bus_history` remains available, with its existing full-text startup limits ([platforms: Fluree](../platforms/fluree.md#full-text-search)). There is no graph-query replacement or re-enable setting.
 - **Claude Code approval is not established.** The matrix follows Codex's rule. Nothing here claims that Claude Code's permission rules follow the annotations. Unverified.
 - **The hook needs the same port as `serve`.** It inherits Claude Code's environment, not the shell's, so a non-default `AGENT_BUS_PORT` must be set there too. Accepted risk.
 
@@ -323,12 +317,13 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 - [Codex: approvals for MCP tools](../platforms/codex.md#approvals-for-mcp-tools): the rule that makes the annotations decide whether a call is asked for approval, and the modes that change it.
 - [Codex: thread ids and `CODEX_THREAD_ID`](../platforms/codex.md#thread-ids-and-codex_thread_id): the thread id a thread's shell exposes as `CODEX_THREAD_ID`, which `session` carries.
 - [Claude Code: session ids](../platforms/claude-code.md#session-ids): `CLAUDE_CODE_SESSION_ID`, which a `/clear` or fork changes; [hooks](../platforms/claude-code.md#hooks): the hook input's `session_id` equals it.
-- [Fluree: query limits](../platforms/fluree.md#query-limits) and [full-text search](../platforms/fluree.md#full-text-search): what bounds `bus_query` and what `bus_history` ranks with.
+- [Fluree: query limits](../platforms/fluree.md#query-limits) and [full-text search](../platforms/fluree.md#full-text-search): the query-governance qualification gap and what `bus_history` ranks with.
 
 ## History
 
 Frames are indexed in [frames/README](../frames/README.md).
 
+- [public-query-containment](../frames/public-query-containment.md): temporarily withdraw public SPARQL with a fixed refusal and preserve the tool's wire shape.
 - [bus-design-query](../frames/bus-design-query.md): independent public message and peer projection, with upstream error bodies omitted; query evaluation is a separate boundary.
 - [address-ownership](../frames/address-ownership.md): the `session` argument on every call, the refusals, and the CLI's session defaults.
 - [claude-wake](../frames/claude-wake.md): `bus_wake` and the `claude-wake` command.
