@@ -92,7 +92,7 @@
       "executor": "nx:run-commands",
       "cache": false,
       "options": {
-        "command": "bun --no-env-file test test/viewer-server.test.ts",
+        "command": "bun --no-env-file test test/viewer-server.test.ts test/viewer-reader-bus.test.ts",
         "env": { "FORCE_COLOR": "0" }
       }
     },

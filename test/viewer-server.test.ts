@@ -33,8 +33,15 @@ const setup = (timeoutMillis = 1_000) => {
   const methods: string[] = [];
   const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
   const capturedHeaders: Array<Headers> = [];
-  let mode: "normal" | "tool-error" | "outage" | "hang" | "oversized" | "malformed" | "quarantine" =
-    "normal";
+  let mode:
+    | "normal"
+    | "tool-error"
+    | "outage"
+    | "hang"
+    | "oversized"
+    | "malformed"
+    | "quarantine"
+    | "no-peers-tool" = "normal";
   let peersFail = false;
   let remoteAborts = 0;
   const release = new Set<() => void>();
@@ -59,7 +66,10 @@ const setup = (timeoutMillis = 1_000) => {
         return respond({
           ttlMs: 0,
           cacheScope: "private",
-          tools: ["bus_history", "bus_peers", "bus_publish"].map((name) => ({
+          tools: (mode === "no-peers-tool"
+            ? ["bus_history", "bus_publish"]
+            : ["bus_history", "bus_peers", "bus_publish"]
+          ).map((name) => ({
             name,
             inputSchema: { type: "object", properties: {} },
           })),
@@ -183,9 +193,10 @@ test("viewer calls only fixed modern public tools and explicitly projects nested
       { name: "bus_history", arguments: { limit: 50 } },
       { name: "bus_peers", arguments: {} },
     ]);
-    expect(new Set(fixture.methods)).toEqual(
-      new Set(["server/discover", "tools/list", "tools/call"])
-    );
+    // One client and its discovered tools serve every read.
+    expect(fixture.methods).toEqual(["server/discover", "tools/list", "tools/call", "tools/call"]);
+    await fixture.client.history({ limit: 50 });
+    expect(fixture.methods.slice(4)).toEqual(["tools/call"]);
     expect(
       fixture.capturedHeaders.every(
         (headers) => headers.get("mcp-protocol-version") === "2026-07-28"
@@ -292,6 +303,30 @@ test("tool, transport, invalid-root and byte-cap failures are safe and independe
     fixture.failPeers();
     await expect(fixture.client.peers({})).rejects.toMatchObject({ code: "UPSTREAM_UNAVAILABLE" });
     expect((await fixture.client.history({ limit: 50 })).messages).toHaveLength(1);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a failed discovery is not kept, and a missing tool is discovered again", async () => {
+  const fixture = setup();
+  try {
+    fixture.mode("outage");
+    await expect(fixture.client.history({ limit: 50 })).rejects.toMatchObject({ status: 503 });
+    fixture.mode("no-peers-tool");
+    expect((await fixture.client.history({ limit: 50 })).messages).toHaveLength(1);
+    await expect(fixture.client.peers({})).rejects.toMatchObject({ status: 503 });
+    fixture.mode("normal");
+    expect((await fixture.client.peers({})).peers).toHaveLength(1);
+    expect(fixture.methods).toEqual([
+      "server/discover",
+      "server/discover",
+      "tools/list",
+      "tools/call",
+      "server/discover",
+      "tools/list",
+      "tools/call",
+    ]);
   } finally {
     await fixture.close();
   }
