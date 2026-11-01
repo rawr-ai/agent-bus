@@ -96,7 +96,7 @@ Use the smallest relevant lane during development, then the full uncached check 
    bun --no-env-file run check
    ```
 
-   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; 427 tests, types, lint and documentation passed using the qualified test tool, with later explicit-navigation changes checked by types and the native browser lane.*
+   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; after integrating current main, 418 tests, types, lint and documentation passed using the qualified test tool. The upstream retired-validator removal accounts for the count change, not skipped viewer or storage coverage.*
 
 ## If it fails
 

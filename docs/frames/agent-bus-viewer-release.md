@@ -126,6 +126,8 @@ The scoped first release is qualified as a local read-only observer, not a compl
 
 During closure, independently owned work advanced the main branch with retired-parser cleanup and native Codex skill installation documentation. The viewer work is checkpointed before a branch-only Graphite restack onto that current base; combined-source qualification remains a final integration gate. This does not authorize editing or redeploying the primary checkout.
 
+That integration gate passed on main `fa9e0c6`. Graphite restacked only the viewer branch. Root manifest/lock conflicts preserved every viewer/workbench pin while retaining the upstream parser removal; a structured lock comparison verified no version changes, only the four retired parser packages and their two orphan nested dependencies removed. Viewer, harness, story and build source stayed byte-identical to the qualified candidate. Frozen install made no changes. The combined uncached check passed 418 tests and 3,272 assertions in 40.08 seconds for tests, plus types, lint and 48 docs. The nine-test/eleven-assertion reduction is exactly the upstream retired-validator deletion, not viewer coverage omitted or cached. Production rebuild and cold compiled smoke also passed. The primary checkout and deployed bus were not modified by the viewer integration.
+
 ## Next product loop
 
 These are explicit follow-up questions, not hidden first-release work or an infinite completion condition. Observe actual use, select one complete next story, design its falsifier and repeat the accepted loop.
