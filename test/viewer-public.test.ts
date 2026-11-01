@@ -61,7 +61,7 @@ const histIds = (messages: unknown[], criteria = base) =>
 
 test("limits are the contracted constants", () => {
   expect(MAX_HISTORY_LIMIT).toBe(200);
-  expect(DEFAULT_HISTORY_LIMIT).toBe(50);
+  expect(DEFAULT_HISTORY_LIMIT).toBe(200);
 });
 
 describe("history projection", () => {

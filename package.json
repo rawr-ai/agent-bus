@@ -21,7 +21,8 @@
     "qualify:fluree": "bun scripts/qualify-fluree.ts",
     "install:launch-agents": "./scripts/install-launch-agents.sh",
     "viewer:build": "bun --no-env-file scripts/build-viewer.ts",
-    "viewer": "bun --no-env-file viewer/server/main.ts"
+    "viewer": "bun --no-env-file viewer/server/main.ts",
+    "test:viewer:unit": "bun --no-env-file test test/viewer-public.test.ts test/viewer-conversations.test.ts test/viewer-markdown-policy.test.ts test/viewer-observation-resource.test.ts"
   },
   "patchedDependencies": {
     "@catenarycloud/linteffect@0.0.6": "patches/@catenarycloud%2Flinteffect@0.0.6.patch"
@@ -33,7 +34,9 @@
     "effect": "4.0.6",
     "lucide-react": "1.64.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "react-markdown": "10.1.0",
+    "remark-gfm": "4.0.1"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
