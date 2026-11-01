@@ -63,7 +63,7 @@ export interface Pending {
 
 /** What a session's wake wait found. */
 export interface Woken {
-  /** The session's addresses with mail it hasn't been woken for. */
+  /** The session's addresses with eligible unread mail, including unchanged mail when fresh. */
   readonly addresses: ReadonlyArray<string>;
   /** Whether the session owns any address. */
   readonly owns: boolean;
@@ -138,7 +138,9 @@ export class Bus extends Context.Service<
      */
     readonly wake: (
       session: string | undefined,
-      timeoutSeconds: number
+      timeoutSeconds: number,
+      /** A compact hook may ring unchanged unread mail; that hook exits after one response. */
+      fresh?: boolean
     ) => Effect.Effect<Woken, LedgerError | NotOwner>;
   }
 >()("agent-bus/Bus") {}
@@ -200,19 +202,22 @@ export interface Moved {
 /**
  * Moves the marks a wake read, in one step, and returns their addresses. It
  * skips a mark another wake has moved since it was read (the new owner's,
- * after a takeover), and one already at the unread mail read. Each move is
- * added to `moved`, so a result that is never returned can be undone.
+ * after a takeover), and, unless fresh, one already at the unread mail read.
+ * Each move is added to `moved`, so a result that is never returned can be undone.
  */
 export const commitMarks = (
   woken: Map<string, Mark>,
   found: ReadonlyArray<Moved>,
-  moved: Array<Moved>
+  moved: Array<Moved>,
+  fresh = false
 ): Array<string> => {
   const addresses: Array<string> = [];
   for (const read of found) {
     const { address, previous, mark } = read;
     if (woken.get(address) !== previous) continue;
-    if (previous?.joinId === mark.joinId && previous.unread === mark.unread) continue;
+    if (!fresh && previous?.joinId === mark.joinId && previous.unread === mark.unread) {
+      continue;
+    }
     moved.push(read);
     woken.set(address, mark);
     addresses.push(address);
@@ -573,7 +578,7 @@ export const layer = Layer.effect(
     /**
      * The session's addresses, joined from this machine as Claude, whose unread
      * mail isn't what they were last woken for. New mail, or a partial read,
-     * changes it; mail left unread doesn't, so an ignored wake isn't repeated.
+     * changes it; a fresh compact hook can also ring for unchanged unread mail.
      * The reads, under each address's lock, can be interrupted, and an address
      * whose read fails is skipped for this pass, keeping its mark. The marks then
      * move in one step, only while this is still the session's wait. Each
@@ -584,7 +589,8 @@ export const layer = Layer.effect(
       session: string,
       mine: Deferred.Deferred<void>,
       moved: Array<Moved>,
-      counted: Set<string>
+      counted: Set<string>,
+      fresh: boolean
     ) =>
       Effect.gen(function* () {
         const here = machine(hostname());
@@ -630,7 +636,7 @@ export const layer = Layer.effect(
           (): Woken =>
             wakers.get(session) === mine
               ? {
-                  addresses: commitMarks(woken, found, moved),
+                  addresses: commitMarks(woken, found, moved, fresh),
                   owns: owned.length > 0,
                   superseded: false,
                 }
@@ -641,7 +647,7 @@ export const layer = Layer.effect(
     const skipped = (address: string, error: { readonly message: string }) =>
       Effect.logWarning(`Not waking ${address} this pass: ${error.message}`);
 
-    const wake = (session: string | undefined, timeoutSeconds: number) =>
+    const wake = (session: string | undefined, timeoutSeconds: number, fresh = false) =>
       Effect.gen(function* () {
         if (!validSession(session)) {
           return yield* new NotOwner({ address: "", message: sessionHelp });
@@ -653,7 +659,7 @@ export const layer = Layer.effect(
         // A first look now, and one per change after; the changes are subscribed
         // alongside the first look, so mail landing during it isn't left to the poll.
         const watch = Stream.merge(Stream.succeed(undefined), ledger.changes).pipe(
-          Stream.mapEffect(() => wakeable(session, mine, moved, counted)),
+          Stream.mapEffect(() => wakeable(session, mine, moved, counted, fresh)),
           Stream.filter(settled),
           Stream.runHead,
           Effect.map(Option.getOrElse(() => timedOut))

@@ -3374,6 +3374,91 @@ describe("claude wake", () => {
       })
     ));
 
+  test("compaction re-rings unchanged unread without moving its cursor; ordinary waits stay suppressed", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const cursors = yield* Cursors.Cursors;
+        yield* joinBoth(bus);
+        yield* send(bus, "kept across compact");
+        const cursor = yield* cursors.get("claude/a");
+        expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+        expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+        // Fresh is a hook-lifetime request, not a durable event id: another call may ring again.
+        expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
+        expect(yield* bus.wake(a, 0.3, false)).toEqual(nothing);
+        expect(yield* cursors.get("claude/a")).toEqual(cursor);
+        expect(bodies(yield* bus.take("claude/a", a))).toEqual(["kept across compact"]);
+      })
+    ));
+
+  test("compaction with no mail emits nothing; a new session cannot reset another owner's mark", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const cursors = yield* Cursors.Cursors;
+        yield* joinBoth(bus);
+        // Complete an empty read first: no new irrelevant entries remain to pass over.
+        expect(yield* bus.take("claude/a", a)).toEqual([]);
+        const cursor = yield* cursors.get("claude/a");
+        expect(yield* bus.wake(a, 0.3, true)).toEqual(nothing);
+        expect(yield* bus.wake(a, 0.3, true)).toEqual(nothing);
+        expect(yield* cursors.get("claude/a")).toEqual(cursor);
+        yield* send(bus, "later");
+        expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+        expect(yield* bus.wake("session:after-clear", 5, true)).toEqual({
+          ...nothing,
+          owns: false,
+        });
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+      })
+    ));
+
+  test("a compact hook recovers a lost nonempty response and emits once, leaving ordinary wakes quiet", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const cursors = yield* Cursors.Cursors;
+        yield* joinBoth(bus);
+        yield* send(bus, "kept");
+        const cursor = yield* cursors.get("claude/a");
+        expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+        let calls = 0;
+        const lost = yield* Deferred.make<void>();
+        const call = ((_name: string, _schema: unknown, args: Record<string, unknown>) =>
+          Effect.gen(function* () {
+            calls += 1;
+            expect(args).toEqual({ session: a, fresh: true });
+            const found = yield* bus.wake(a, 5, args.fresh === true);
+            if (calls === 1) {
+              expect(found.addresses).toEqual(["claude/a"]);
+              yield* Deferred.succeed(lost, undefined);
+              return yield* new Client.BusCallError({ message: "response lost" });
+            }
+            return found;
+          })) as unknown as ReturnType<typeof Client.call>;
+        const compact = JSON.stringify({
+          session_id: a,
+          hook_event_name: "SessionStart",
+          source: "compact",
+        });
+        const hook = yield* Effect.forkChild(claudeWake("unused", compact, call));
+        yield* Deferred.await(lost);
+        yield* TestClock.adjust("5 seconds");
+        expect(yield* Fiber.join(hook)).toEqual(Option.some(formatWake("claude/a")));
+        expect(calls).toBe(2);
+        expect(yield* cursors.get("claude/a")).toEqual(cursor);
+        // Use the test clock for the ordinary suppressed waiter too.
+        const ordinary = yield* Effect.forkChild(quiet(bus, a));
+        yield* TestClock.adjust("1 second");
+        expect(yield* Fiber.join(ordinary)).toEqual(nothing);
+        expect(calls).toBe(2);
+        expect(bodies(yield* bus.take("claude/a", a))).toEqual(["kept"]);
+      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), FetchHttpClient.layer)))
+    ));
+
   test(
     "mail that races a newer wait wakes exactly one of the two",
     () =>
@@ -3569,6 +3654,67 @@ describe("claude wake", () => {
     };
   };
 
+  test("a compact wake supersedes a stalled old scan without letting its cancellation undo the fresh ring", () => {
+    const { layer, plan } = unreliable();
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        yield* joinBoth(bus);
+        yield* send(bus, "unread");
+        expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+        const stall = yield* Deferred.make<void>();
+        plan(stall);
+        const older = yield* Effect.forkChild(bus.wake(a, 10));
+        yield* Effect.sleep("50 millis");
+        expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
+        expect(yield* Fiber.join(older)).toEqual({ ...nothing, superseded: true });
+        yield* Deferred.succeed(stall, undefined);
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+      }).pipe(Effect.provide(layer))
+    );
+  });
+
+  test("a cancelled compact scan can retry fresh without changing ordinary suppression", () => {
+    const { layer, plan } = unreliable();
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        yield* joinBoth(bus);
+        yield* send(bus, "unread");
+        expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+        const stall = yield* Deferred.make<void>();
+        plan(stall);
+        const compacting = yield* Effect.forkChild(bus.wake(a, 10, true));
+        yield* Effect.sleep("50 millis");
+        yield* Fiber.interrupt(compacting);
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+        yield* Deferred.succeed(stall, undefined);
+        expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+      }).pipe(Effect.provide(layer))
+    );
+  });
+
+  test("the latest compact waiter wins even when a prior compact scan is stalled", () => {
+    const { layer, plan } = unreliable();
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        yield* joinBoth(bus);
+        yield* send(bus, "unread");
+        expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+        const stall = yield* Deferred.make<void>();
+        plan(stall);
+        const first = yield* Effect.forkChild(bus.wake(a, 10, true));
+        yield* Effect.sleep("50 millis");
+        expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
+        expect(yield* Fiber.join(first)).toEqual({ ...nothing, superseded: true });
+        yield* Deferred.succeed(stall, undefined);
+        expect(yield* quiet(bus, a)).toEqual(nothing);
+      }).pipe(Effect.provide(layer))
+    );
+  });
+
   test("a read that fails for a later address loses no earlier address's wake", () => {
     const { layer, plan } = unreliable();
     return Effect.runPromise(
@@ -3591,7 +3737,10 @@ describe("claude wake", () => {
     );
   });
 
-  test("a scan outrun by a takeover doesn't overwrite the new owner's mark", () => {
+  test.each([
+    false,
+    true,
+  ])("a scan outrun by a takeover preserves the new owner's mark (fresh=%s)", (fresh) => {
     const { layer, plan } = unreliable();
     return Effect.runPromise(
       Effect.gen(function* () {
@@ -3608,7 +3757,7 @@ describe("claude wake", () => {
         // The old owner's scan reads claude/a, then stalls on claude/a2.
         const stall = yield* Deferred.make<void>();
         plan("read", stall);
-        const old = yield* Effect.forkChild(soon(bus, a));
+        const old = yield* Effect.forkChild(bus.wake(a, 5, fresh));
         yield* Effect.sleep("50 millis");
         const holder = (yield* bus.peers).find((peer) => peer.address === "claude/a");
         yield* bus.join({
@@ -3706,6 +3855,58 @@ describe("claude wake hook", () => {
       expect(calls).toEqual([]);
     }
   });
+
+  test("only SessionStart compact requests fresh mail; empty retries end after one nonempty response", async () => {
+    const compact = JSON.stringify({
+      session_id: sid("claude/a"),
+      hook_event_name: "SessionStart",
+      source: "compact",
+    });
+    const { call, calls } = scripted([answer([]), answer(["claude/a"])]);
+    expect(await wake(compact, call)).toEqual(Option.some(formatWake("claude/a")));
+    expect(calls).toHaveLength(2);
+    expect(calls).toEqual([
+      ["bus_wake", { session: sid("claude/a"), fresh: true }],
+      ["bus_wake", { session: sid("claude/a"), fresh: true }],
+    ]);
+
+    for (const [hook_event_name, source] of [
+      ["SessionStart", "resume"],
+      ["SessionStart", "clear"],
+      ["SessionStart", "startup"],
+      ["SessionStart", "fork"],
+      ["Stop", "compact"],
+      ["StopFailure", "compact"],
+    ]) {
+      const ordinary = scripted([answer([], false)]);
+      expect(
+        await wake(
+          JSON.stringify({ session_id: sid("claude/a"), hook_event_name, source }),
+          ordinary.call
+        )
+      ).toEqual(Option.none());
+      expect(ordinary.calls).toEqual([["bus_wake", { session: sid("claude/a") }]]);
+    }
+  });
+
+  test("a compact hook stays fresh across transport errors and empty replies, then exits once", () =>
+    Effect.runPromise(
+      Effect.gen(function* () {
+        const retried = scripted([failure, answer([]), answer(["claude/a"])]);
+        const compact = JSON.stringify({
+          session_id: sid("claude/a"),
+          hook_event_name: "SessionStart",
+          source: "compact",
+        });
+        const fiber = yield* Effect.forkChild(claudeWake("unused", compact, retried.call));
+        yield* TestClock.adjust("5 seconds");
+        expect(yield* Fiber.join(fiber)).toEqual(Option.some(formatWake("claude/a")));
+        expect(retried.calls).toHaveLength(3);
+        expect(retried.calls[0]?.[1]).toEqual({ session: sid("claude/a"), fresh: true });
+        expect(retried.calls[1]?.[1]).toEqual(retried.calls[0]?.[1]);
+        expect(retried.calls[2]?.[1]).toEqual(retried.calls[0]?.[1]);
+      }).pipe(Effect.provide(Layer.merge(TestClock.layer(), FetchHttpClient.layer)))
+    ));
 
   test("retries any failure every five seconds, and gives up after ten minutes of them", () =>
     Effect.runPromise(
@@ -4129,12 +4330,18 @@ describe("mcp over http", () => {
 
   test("the Claude wake hook exits 2 with the nudge on stderr, marking nothing read, and 0 for a stranger", () => {
     const { url, port, layer } = serve();
-    const hook = (session: string) =>
+    const hook = (session: string, source?: string) =>
       Effect.promise(async () => {
         const child = Bun.spawn(
           [process.execPath, join(import.meta.dir, "../src/bin.ts"), "claude-wake"],
           {
-            stdin: new Blob([JSON.stringify({ session_id: session, hook_event_name: "Stop" })]),
+            stdin: new Blob([
+              JSON.stringify({
+                session_id: session,
+                hook_event_name: source === undefined ? "Stop" : "SessionStart",
+                ...(source === undefined ? {} : { source }),
+              }),
+            ]),
             stdout: "ignore",
             stderr: "pipe",
             env: {
@@ -4168,6 +4375,10 @@ describe("mcp over http", () => {
           body: "wake",
         });
         expect(yield* hook(sid("claude/a"))).toEqual({ code: 2, stderr: formatWake("claude/a") });
+        expect(yield* hook(sid("claude/a"), "compact")).toEqual({
+          code: 2,
+          stderr: formatWake("claude/a"),
+        });
         expect(yield* hook("session:nobody")).toEqual({ code: 0, stderr: "" });
         const { messages } = yield* call("bus_read", Mcp.Messages, {
           address: "claude/a",
