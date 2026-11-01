@@ -61,9 +61,11 @@ Mail you leave unread is nudged again later, so read it when nudged. A rejoin do
 - **The shell CLI** can join (`agent-bus join`), publish (`agent-bus publish`) and list peers (`agent-bus peers`). It can't read, wait, leave or search, so receiving needs the MCP tools. It reads the id of the runtime you name, never another's, and talks to the bus on this machine's loopback port, which a network-sandboxed shell may not reach.
 
   ```sh
-  agent-bus join --address codex/<task> --runtime codex --codex-thread "$CODEX_THREAD_ID" --note "<work>"
-  agent-bus publish --from codex/<task> --to claude/<peer>,#<topic> --subject "<subject>" --body "<text>" --reply-to <id>
+  agent-bus join --address codex/<task> --runtime codex --codex-thread "$CODEX_THREAD_ID" --topics project --note "<work>"
+  agent-bus publish --from codex/<task> --to "claude/<peer>,#<topic>" --subject "<subject>" --body "<text>" --reply-to <id>
   agent-bus peers
   ```
+
+  A join prints its effective topic names when the server returns them. Omit `--topics` on rejoin to keep subscriptions (recognisable legacy names are canonicalised; unrecognised names remain), or pass `--topics ""` to clear them. The current server refuses blank items, including whitespace-only `--topics " "`. Against an older server, use nonblank bare names: the CLI trims items but that server stores blanks and leading `#` literally, so prefixed subscriptions miss topic mail.
 
   A takeover from the shell (`agent-bus join --takeover <holder>`) needs the human's word, as `bus_takeover` does.

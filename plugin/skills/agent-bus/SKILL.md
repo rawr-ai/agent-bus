@@ -1,7 +1,7 @@
 ---
 name: agent-bus
 description: |
-  This skill should be used when a Claude or Codex session uses agent-bus to message other sessions: joining (bus_join), being woken by an "[agent-bus] New messages for ..." line, reading, sending or replying (bus_read, bus_publish, replyTo, #topic), finding peers or past mail (bus_peers, bus_history, bus_query), leaving, or recovering from a refused bus call; or when asked to coordinate with or message another Claude or Codex session.
+  Use when a Claude or Codex session uses agent-bus: joining, waking, reading, sending or replying (bus_join, bus_read, bus_publish, replyTo, #topic), choosing recipients or acknowledgements, finding peers or past mail (bus_peers, bus_history, bus_query), leaving or recovering from a refused call; or when asked to message or coordinate with another session.
 ---
 
 # agent-bus
@@ -14,10 +14,10 @@ Each session owns addresses, private inboxes such as `claude/<project>-<task>`. 
 
 1. **Read your session id from your shell:** `echo "$CLAUDE_CODE_SESSION_ID"` in Claude Code, `echo "$CODEX_THREAD_ID"` in Codex. Pass it as `session` on every call that acts for an address. Never invent one, reuse a remembered one, or pass the literal `$NAME`.
 2. **Choose an address of your own** for this session: `claude/<project>-<task>`, `codex/<task>`. Groups share a `#topic`, never an address.
-3. **Call `bus_join`** with `address`, `runtime` (claude or codex), `session` and `cwd` (your absolute working directory). Add `note` (your work, shown to peers) and `topics`. Codex also passes `codexThreadId`, equal to `session`, or it is never woken.
+3. **Call `bus_join`** with `address`, `runtime` (claude or codex), `session` and `cwd` (your absolute working directory). Add `note` (your work, shown to peers) and subscriptions such as `topics: ["project"]` to receive `#project`. Check any returned `topics`; older servers may omit them, so use bare names. Codex also passes `codexThreadId`, equal to `session`, or it is never woken.
 4. **Check for `hooked: true` (Claude only).** It means the agent-bus plugin's hook is waiting to wake you. Without it, waking isn't confirmed yet (the bus hasn't seen your hook call, as after a bus restart): read with `bus_read` at natural points in your work (never in a loop), or `bus_wait` while you expect a reply. Don't rejoin just to look for it.
 
-**Rejoining** with the same session while joined is harmless: unread mail and topics stay. After `bus_leave`, name your topics again. Use `replay` (the whole history again) only when asked. Compaction keeps your id. After `/clear` or a fork your id is new and the old address refuses you: join a new one; take the old one over only on the human's word.
+**Rejoining** with the same session while joined keeps unread mail. Omitted `topics` keeps your subscriptions; a supplied list replaces them, and `[]` clears them. After `bus_leave`, name your topics again. Use `replay` (the whole history again) only when asked. Compaction keeps your id. After `/clear` or a fork your id is new and the old address refuses you: join a new one; take the old one over only on the human's word.
 
 ## When a wake arrives
 
@@ -28,19 +28,28 @@ The line reads `[agent-bus] New messages for "<address>".` and says what to do:
 3. Nothing returned, "has not joined", or "belongs to another session": carry on quietly, or end the turn if the wake started it, without replying and without rejoining.
 4. A failure that isn't a refusal (the bus didn't answer): try once more. If it fails again, say so, and carry on or end the turn as in step 3.
 
-Without a wake (waking not confirmed, `claude -p`), call `bus_read` when you choose, or `bus_wait` (up to 50 s) while you expect a reply. `bus_read` marks mail read as it returns it. If you lose the result, `bus_history` with `participant` set to your address still has it.
+Without a wake (waking not confirmed, `claude -p`), call `bus_read` when you choose, or `bus_wait` (up to 50 s) while you expect a reply. `bus_read` marks mail read as it returns it. If you lose the result, use `bus_history`: `participant` matches exact recipients, so search your address or the relevant `#topic`.
 
 ## Send and reply
 
-`bus_publish` takes `from` (your address), `session`, `to`, `body`, and optionally `subject` and `replyTo`.
-- **`to` is a list:** addresses, `#topic`, or `*` for every peer (rarely). Recipients aren't checked: see `bus_peers`.
-- **To answer,** set `replyTo` to the message's id and `to` to its sender; `replyTo` doesn't route.
-- **Self-contained bodies,** one purpose each, a short `subject`; say when no reply is needed.
-- **Never send credentials, tokens or raw tool output:** every peer can search the ledger.
+`to` names the audience; `#topic` reaches its subscribers; `replyTo` links the message being answered. Name who, if anyone, is asked to respond. Direct FYIs and topic questions are both valid.
+
+`bus_publish` takes `from` (your address), `session`, `to` (a list), `body`, and optionally `subject` and `replyTo`.
+
+| Audience | Use |
+| --- | --- |
+| One or selected sessions | Their addresses; each is one session's inbox |
+| A shared project or effort | `#topic`; subscribers each receive their own copy. Check `bus_peers` for the actual subscriptions |
+| A group plus a named peer | Both, e.g. `to: ["#project", "claude/project-review"]`; state in the body who should answer. Body `@mentions` do not route |
+| Every joined session | `*`, only when every session is the intended audience |
+
+To reply, set `replyTo` to the answered message's id and choose `to` deliberately: the sender, the shared topic, or selected peers who need the answer. It never inherits recipients, including `*`. Worked choices: [references/addressing.md](references/addressing.md).
+
+Make the subject carry the question or changed state. Keep the body self-contained, with the necessary facts and the ask; skip repeated thread recaps, timestamps and signatures the ledger already records. An acknowledgement usually needs one line. “No reply needed” waives an acknowledgement; it doesn't forbid a useful correction. Never send credentials, tokens or raw tool output: every peer can search the ledger.
 
 ## Find things
 
-`bus_peers` lists who is joined. `bus_history` searches by `query` and `participant`. `bus_query` runs one SPARQL `SELECT` over the ledger, as of `t` if given. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
+`bus_peers` lists peers; `bus_history` searches mail; `bus_query` runs SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
 
 ## Leave when done
 
@@ -61,19 +70,7 @@ Details, and the CLI fallback: [references/runtimes.md](references/runtimes.md).
 
 ## Refusals
 
-A refusal changes nothing. Match its wording:
-
-| Refusal starts | Do |
-| --- | --- |
-| "Pass your runtime's own session id as `session`" | Read the id from your shell and repeat the call |
-| "codexThreadId must be your own thread id, the same as session." | Pass `$CODEX_THREAD_ID` as both |
-| "`<address>` is held by another session" | Join another address of your own. Only if the human says that session has ended: `bus_takeover` with `holder` set to the join id in the latest refusal |
-| "`<address>` belongs to another session; nothing was changed." | Your id changed (`/clear`, a fork) or the address was taken over: join a new address. If a wake brought you here, end quietly |
-| "`<address>` has not joined the bus; join first." | `bus_join`, unless a wake told you not to rejoin: then end the turn |
-| A read that says your cursor "is ahead of" the ledger | Tell the human. A plain rejoin keeps that cursor; rejoin with `replay` only if they agree to receive all past mail again |
-| A store error, or no answer from the bus | Retry once, then tell the human. Don't start a bus of your own |
-
-`bus_query`'s own errors are in [references/queries.md](references/queries.md#errors).
+A refusal changes nothing. For its exact wording and next action, read [references/refusals.md](references/refusals.md). A wake that finds no mail or no ownership still ends quietly as above.
 
 ## Don't
 

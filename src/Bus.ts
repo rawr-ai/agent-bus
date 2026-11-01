@@ -13,6 +13,7 @@ import {
 } from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
+  InvalidTopics,
   isFor,
   type LedgerError,
   Message,
@@ -23,6 +24,7 @@ import {
   Presence,
   type Runtime,
   type Subscriber,
+  topicName,
   validSession,
 } from "./domain.ts";
 import { Ledger, type SearchInput } from "./Ledger.ts";
@@ -78,11 +80,14 @@ export class Bus extends Context.Service<
      * names the holder's join in `takeover`. `hooked` says this machine's bus
      * has seen the session's wake hook, which wakes it when mail arrives.
      */
-    readonly join: (
-      input: JoinInput
-    ) => Effect.Effect<
-      { readonly address: string; readonly cursor: number; readonly hooked?: true },
-      LedgerError | NotOwner
+    readonly join: (input: JoinInput) => Effect.Effect<
+      {
+        readonly address: string;
+        readonly topics: ReadonlyArray<string>;
+        readonly cursor: number;
+        readonly hooked?: true;
+      },
+      LedgerError | NotOwner | InvalidTopics
     >;
     readonly leave: (
       address: string,
@@ -389,11 +394,23 @@ export const layer = Layer.effect(
         const renews =
           last !== undefined && mine && last.presence.status === "joined" && input.replay !== true;
         // A rejoin that names no topics keeps its subscriptions; only the caller changes them.
-        const topics =
+        const requestedTopics =
           input.topics ??
           (last !== undefined && mine && last.presence.status === "joined"
             ? last.presence.topics
             : []);
+        const topics = new Set<string>();
+        for (const requested of requestedTopics) {
+          const topic = topicName(requested);
+          if (topic === undefined && input.topics !== undefined) {
+            return yield* new InvalidTopics({
+              message:
+                'Each topic must have a non-empty name with at most one leading #. Pass topics such as ["reviews"]; use [] only to clear subscriptions. Nothing was changed.',
+            });
+          }
+          // An omitted list must not make an older, malformed subscription block a rejoin.
+          topics.add(topic ?? requested);
+        }
         const presence = new Presence({
           runtime: input.runtime,
           status: "joined",
@@ -419,6 +436,7 @@ export const layer = Layer.effect(
         yield* touch(input.address);
         return {
           address: input.address,
+          topics: presence.topics,
           cursor,
           ...(input.runtime === "claude" && hooked.has(session) ? { hooked: true as const } : {}),
         };

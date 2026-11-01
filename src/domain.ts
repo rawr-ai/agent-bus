@@ -91,6 +91,17 @@ export class NotOwner extends Schema.TaggedError<NotOwner>()("NotOwner", {
   message: Schema.String,
 }) {}
 
+/** A join's topic list is malformed; no subscription or cursor was changed. */
+export class InvalidTopics extends Schema.TaggedError<InvalidTopics>()("InvalidTopics", {
+  message: Schema.String,
+}) {}
+
+/** A case-sensitive topic name, accepting one optional # marker and outer whitespace. */
+export const topicName = (input: string): string | undefined => {
+  const name = input.trim().replace(/^#/, "").trim();
+  return name === "" || name.startsWith("#") ? undefined : name;
+};
+
 export interface Subscriber {
   readonly address: string;
   readonly presence: Presence;
@@ -112,7 +123,11 @@ export const isFor = (message: Message, subscriber: Subscriber): boolean =>
     (recipient) =>
       recipient === "*" ||
       recipient === subscriber.address ||
-      (recipient.startsWith("#") && subscriber.presence.topics.includes(recipient.slice(1)))
+      (recipient.startsWith("#") &&
+        subscriber.presence.topics.some(
+          // Keep literal legacy matching, and accept its valid #prefixed subscriptions too.
+          (topic) => topic === recipient.slice(1) || topicName(topic) === recipient.slice(1)
+        ))
   );
 
 /** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */

@@ -40,12 +40,14 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 | `runtime` | `claude`, `codex`, `human` or `other` | yes | — | Your runtime, which decides how the bus wakes you. While you hold the address, a rejoin under a different runtime is refused |
 | `session` | string | yes (optional in the schema) | — | Your runtime's own session id, read from your shell: `$CODEX_THREAD_ID` in Codex, `$CLAUDE_CODE_SESSION_ID` in Claude Code, a stable id of your own for other clients. Only the session that joined an address may use it |
 | `cwd` | string starting with `/` | yes | — | Your absolute working directory. Messages you send record its repo and branch (found with `git`; left out when it isn't a repo) |
-| `topics` | string array | no | none on a first join or after a leave; your current topics on a rejoin | The topics to receive `#topic` messages for. Given, they replace the current ones |
+| `topics` | string array | no | none on a first join or after a leave; your current topics on a rejoin | The topics to receive `#topic` messages for, e.g. `["project"]`. One optional leading `#` and outer whitespace are removed; duplicates are merged in first-seen order, with case preserved. Blank names or another leading `#` refuse the whole join before anything is written. Given, the list replaces the current ones; `[]` clears them |
 | `codexThreadId` | string | no | none | Codex only: your thread id, the same as `session`. Without it a Codex peer isn't woken |
 | `note` | string | no | none | What you are working on, for other peers; refusals show it too. A rejoin that omits it drops the old note |
 | `replay` | boolean | no | false | Also deliver messages sent before you joined: your reading starts at the beginning of the ledger, and a rejoin with it delivers the address's whole past mail again |
 
-Returns `address` (the address you joined), `cursor` (your read position in the ledger, a Fluree commit number: unread mail is what comes after it) and, only for a Claude session whose wake hook this `serve` has seen since it started, `hooked` (`true`: the agent-bus plugin's hook wakes the session when mail arrives). `serve` holds that in memory, so after a restart `hooked` is absent until the hook calls again.
+Returns `address` (the address you joined), `topics` (the effective subscriptions), `cursor` (your read position in the ledger, a Fluree commit number: unread mail is what comes after it) and, only for a Claude session whose wake hook this `serve` has seen since it started, `hooked` (`true`: the agent-bus plugin's hook wakes the session when mail arrives). `serve` holds that in memory, so after a restart `hooked` is absent until the hook calls again.
+
+The current server always returns `topics`; it is optional in the wire schema so the CLI can still decode an older server's response. A no-topic rejoin canonicalises recognisable legacy subscriptions and preserves unrecognised names rather than refusing the rejoin. Canonicalising a stored `"#reviews"` to `"reviews"` preserves delivery to `#reviews`, but ends its old literal match for malformed `##reviews` recipients; this can skip unread malformed-recipient mail without resetting the cursor.
 
 A rejoin by the same session and runtime keeps your unread messages. A first join starts at the present. A `takeover` field is not accepted: use `bus_takeover`.
 
@@ -65,12 +67,14 @@ Returns what `bus_join` returns. The holder id is checked only while another ses
 | --- | --- | --- | --- | --- |
 | `from` | string | yes | — | The address you send as: your address, which you must own |
 | `session` | string | yes (optional in the schema) | — | As for `bus_join` |
-| `to` | string array | yes | — | Recipients: peer addresses, `#topic` for that topic's subscribers, or `*` for every peer. Recipients aren't checked to exist. A sender never receives its own message, whatever `to` names |
-| `body` | string | yes | — | The message text |
+| `to` | string array | yes | — | Audience: peer addresses, `#topic` for its subscribers, or `*` for every peer. A topic and an address may appear together. Body `@mentions` do not route; recipients aren't checked to exist. A sender never receives its own message, whatever `to` names |
+| `body` | string | yes | — | The message text, including who, if anyone, is asked to respond |
 | `subject` | string | no | none | A short subject line; `bus_history` searches it |
-| `replyTo` | string | no | none | The id of the message this answers; `bus_query` follows it as a link |
+| `replyTo` | string | no | none | The id of the message this answers; `bus_query` follows it as a link. It does not route or inherit recipients; only `to` determines the reply's audience |
 
 Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601).
+
+`to` entries remain literal and case-sensitive; join normalisation does not apply here. A `reviews` subscription receives `#reviews`, not `# reviews` or `#Reviews`. The bus does not flag unjoined or wrong-case targets, so check the intended audience with `bus_peers`.
 
 #### `bus_read`
 
@@ -158,6 +162,7 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | Message | Raised when | The caller should |
 | --- | --- | --- |
 | "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients." | A call that acts for an address (or `bus_wake`) has no `session`, a blank one, or an unexpanded placeholder (it contains `${` or starts with `$`) | Read the id from the shell and repeat the call. Don't invent one |
+| "Each topic must have a non-empty name with at most one leading #. Pass topics such as ["reviews"]; use [] only to clear subscriptions. Nothing was changed." | A supplied topic list includes a blank name, `#` alone, or a name with more than one leading `#` | Correct the list; use `[]` only to clear subscriptions intentionally |
 | "codexThreadId must be your own thread id, the same as session." | `bus_join` or `bus_takeover` with runtime `codex` and a `codexThreadId` that differs from `session` | Pass your own thread id as both |
 | "`<address>` is held by another session (…). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, take it over with bus_takeover, holder "`<join id>`" (agent-bus join --takeover from a shell)." | `bus_join` of an address another session holds (also the same session with a different runtime), or `bus_takeover` with a `holder` that isn't the holder's current join id, including a stale one. The parentheses list the holder's runtime, machine, join time, note, last call, and whether a wait is open on this machine | Join an address of your own. Take the address over only when that session has ended and the human says so, with the id in this message. The holder's id changes each time it joins, so use the latest refusal's |
 | "`<address>` belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session." | `bus_publish`, `bus_read`, `bus_wait` or `bus_leave` from a session that doesn't own the address, including a wait that started before a takeover | Join a new address. If you were woken for this mail, carry on without replying |
@@ -189,7 +194,7 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 | Subcommand | Purpose | Calls |
 | --- | --- | --- |
 | `serve` | Run this machine's bus: MCP at `/mcp` and delivery to this machine's Codex peers. One per machine | none: it is the server |
-| `join` | Join as an address from the current directory | `bus_join`, or `bus_takeover` with `--takeover` |
+| `join` | Join as an address from the current directory; prints the effective topic list when returned by the server | `bus_join`, or `bus_takeover` with `--takeover` |
 | `publish` | Send a message; prints the new id | `bus_publish` |
 | `peers` | List joined peers, one per line: `address (runtime) on host #topics — note` | `bus_peers` |
 | `claude-wake` | The plugin's hook: reads the hook input on stdin, waits for mail, then prints the nudge to stderr and exits 2, which wakes the session | `bus_wake`, repeatedly |
@@ -204,7 +209,7 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 | `join` | `--runtime` | yes | — | `claude`, `codex`, `human` or `other` |
 | `join` | `--session` | no | By runtime, see below | Your session id |
 | `join` | `--takeover` | no | none | Replace an ended session: the holder's join id from the refusal; only when the human says so |
-| `join` | `--topics` | no | none | Comma-separated topics to receive |
+| `join` | `--topics` | no | none on a first join; kept on rejoin | Comma-separated topic names. The current server accepts one optional `#` and refuses blank items; an older server does neither. `--topics ""` clears subscriptions |
 | `join` | `--codex-thread` | no | none | The Codex thread id the bus wakes (`codexThreadId`) |
 | `join` | `--note` | no | none | What you are working on |
 | `join` | `--replay` | no | false | Also deliver messages sent before joining |
@@ -217,6 +222,8 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 | `publish` | `--session` | no | By runtime, see below | Your session id |
 
 `peers` and `claude-wake` take no flags. `join` takes its working directory from where it runs; there is no flag for it.
+
+The CLI previously dropped blank comma-separated topic items silently. With the current server, `--topics "a,,b"` and `--topics "a,b,"` now refuse the join; change them to `--topics "a,b"`. Whitespace-only `--topics " "` now refuses rather than clearing subscriptions. The explicit `--topics ""` still clears them. Against an older server the CLI trims items but sends blanks and leading `#` literally: blank items can be stored, and `#reviews` will not receive `#reviews` mail. Until that server is upgraded, use nonblank bare names such as `reviews,ops`.
 
 #### Session and runtime defaults
 

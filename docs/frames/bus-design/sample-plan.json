@@ -1,0 +1,38 @@
+[
+  {
+    "stratum": "topic_audience",
+    "eligible_after_previous_strata": 2,
+    "selected": 2,
+    "rationale": "Topic routing is rare; include both observed cases."
+  },
+  {
+    "stratum": "acknowledgement_waived_text",
+    "eligible_after_previous_strata": 13,
+    "selected": 8,
+    "rationale": "Text match candidates probe whether useful contributions remain permitted; no semantic label is implied."
+  },
+  {
+    "stratum": "reply_omits_parent_recipient",
+    "eligible_after_previous_strata": 104,
+    "selected": 10,
+    "rationale": "Audience reduction may be deliberate or mistaken; adjudicate rather than condemn."
+  },
+  {
+    "stratum": "reply_omits_parent_sender",
+    "eligible_after_previous_strata": 36,
+    "selected": 8,
+    "rationale": "Parent link does not route; a child can address a different audience."
+  },
+  {
+    "stratum": "remaining_multi_recipient",
+    "eligible_after_previous_strata": 174,
+    "selected": 10,
+    "rationale": "Several audience members need not mean several required responders."
+  },
+  {
+    "stratum": "remaining_single_direct",
+    "eligible_after_previous_strata": 927,
+    "selected": 12,
+    "rationale": "Single-address routing can carry FYI, request, answer, or closure."
+  }
+]
