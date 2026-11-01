@@ -8,7 +8,9 @@ Use this to put a new version of agent-bus into service: the primary-checkout ru
 - the `serve` LaunchAgent, which runs its `src/bin.ts` and picks up changes only when it restarts;
 - every Claude session's wake hook, which runs the same file through the link and so picks up changes at its next run, at once.
 
-A half-edited tree there breaks `serve` at its next restart and the hooks at their next run ([topology](../architecture/topology.md#rules), rule 7). So nothing is edited, branched or checked out in the primary checkout. Develop in a worktree (`git worktree add <path> -b <branch>`). The primary checkout changes only by fast-forwarding to `main`, which is a deploy.
+A half-edited tree there breaks `serve` at its next restart and the hooks at their next run ([topology](../architecture/topology.md#rules), rule 7). So nothing is edited, branched or checked out in the primary checkout. Develop in a worktree using the [Git and Graphite workflow](../../AGENTS.md#git-and-graphite). The primary checkout changes only by fast-forwarding to a reviewed commit on remote `main`, which is a deploy.
+
+Coordinate source activation with the deployment owner before any command can move local `main`, including `gt sync` from another worktree. Even `gt sync --no-restack` can update other branches, clean up merged or closed branches and overwrite a divergent trunk; it cannot select an exact commit or enforce fast-forward-only refusal. Step 4 therefore uses a narrow deployment exception to the Graphite workflow: fetch, inspect and fast-forward to the pinned commit. Graphite owns development and remote PR integration; the Git commands here own only that controlled activation and the explicit rollback/recovery paths below.
 
 What a deploy changes, and when:
 
@@ -40,17 +42,24 @@ The steps were *Rehearsed 2026-10-28* on a disposable instance: its own director
 
 2. **Run [the end-to-end check](#check-the-bus-end-to-end) on the version that runs now,** so that a later failure is the deploy's.
 
-3. **Merge the change into `main` on the remote,** by merging its pull request, or by a fast-forward push of the reviewed branch (`git push origin <branch>:main`, which refuses anything but a fast-forward). Nothing is deployed yet. *Done 2026-10-29 by a fast-forward push.*
+3. **Merge the intended PR sequence into `main` through Graphite.** In the development worktree, inspect `gt merge --dry-run`, then run `gt merge` from the top of the intended sequence. Verify each PR is merged on GitHub before continuing; a merge job starting is not completion. Return to the primary checkout without running `gt sync`. If the PRs were already merged, only verify their state. Nothing is deployed yet. *Unverified: this Graphite merge path has not been rehearsed for this repository.*
 
-4. **Fast-forward the primary checkout to `main`:**
+4. **Pin and review the target from remote `main`:**
 
    ```sh
    git fetch origin
-   git log --oneline HEAD..origin/main
-   git merge --ff-only origin/main
+   candidate=$(git rev-parse origin/main)
+   git log --oneline "$previous..$candidate"
    ```
 
-   Expected: the log lists exactly the commits you mean to deploy; the merge prints `Fast-forward` and the changed files. `--ff-only` refuses anything else with `Not possible to fast-forward` (exit status 128): the primary checkout holds a commit that isn't on `main` ([If it fails](#if-it-fails)).
+   Expected: the log lists exactly the commits you mean to deploy. Record `$candidate` as the reviewed target; if the list is wrong, stop before changing the checkout. Activate that exact commit:
+
+   ```sh
+   git merge --ff-only "$candidate"
+   git rev-parse HEAD
+   ```
+
+   Expected: the merge prints `Fast-forward` and the changed files (or `Already up to date`), and `HEAD` equals `$candidate`. `--ff-only` refuses divergent history with `Not possible to fast-forward` (exit status 128): recover the primary checkout ([If it fails](#if-it-fails)). Pinning prevents a later fetch from silently changing the selected target. *Rehearsed 2026-10-28 for activation; Rehearsed 2026-11-01 on disposable Git repositories for pinned selection after another fetch and refusal of divergence.*
 
 5. **See what else the deploy changed:**
 

@@ -1,6 +1,6 @@
 # agent-bus
 
-Contributor rules for agent-bus: where documentation goes, the toolkit, the invariants, project memory and verification. Users of the bus start at the [README](README.md); agents using it load the `agent-bus` skill.
+Contributor rules for agent-bus: where documentation goes, the toolkit, Git and Graphite, the invariants, project memory and verification. Users of the bus start at the [README](README.md); agents using it load the `agent-bus` skill.
 
 ## Documentation
 
@@ -44,6 +44,20 @@ A release that designs and qualifies something writes a frame, which ends with a
 - Effect work follows the `effect-ts` skill where it is installed (`.agents/skills`, local and untracked); research the vendored source in `.repos/effect` (pinned to the installed version by `scripts/prepare-effect.sh`). This repo uses stable Effect 4.0.6, where the skill's beta names have moved: `effect/unstable/ai` and `effect/unstable/cli` are `effect/ai` and `effect/cli`, `Schema.TaggedErrorClass` is `Schema.TaggedError`, and CLI flags are `Flag.String`, `Flag.Boolean`, `Flag.Int`, `Flag.Literals`. Trust the vendored source over the skill when they differ.
 - Runtime, tests and packaging follow the `bun` skill where installed. Prefer Bun-native APIs (`Bun.file`, `Bun.spawn`, `WebSocket` over `ws+unix://`) at the edges and Effect services everywhere else.
 - The only HTTP API is the MCP endpoint, served by `effect/ai`'s `McpServer.layerHttp`; the CLI reaches it with `McpClient`. oRPC is not used. If another HTTP API is added, follow the `orpc` and `effect-orpc` skills where installed, and confirm the provider profile before writing code.
+
+## Git and Graphite
+
+Graphite owns branch navigation and lifecycle, commits, stack topology, PR submission, merging and synchronization. Before this work, load the installed core `dev:graphite` skill (also exposed as `graphite`) from the available skill catalogue, then its relevant command, workflow and worktree references. It supplies generic guidance; this section owns repository policy. Confirm flags with `gt <command> --help`. Do not vendor the skill or patch its installed cache.
+
+Develop in a dedicated worktree. The primary checkout is live `serve`, hook and plugin source: never edit or switch it for development. Updating it is an owner-controlled [deployment](docs/runbooks/deploy.md). Graphite metadata is shared across worktrees. Check whether the clone is initialized before running `gt ls`, which can initialize an uninitialized clone; use `gt init --trunk main` for deliberate first setup. Initialization and branch tracking change metadata, not deployed source. Do not reinitialize an existing repository or reset its metadata to fix an ordinary stack problem.
+
+- **Inspect scope first:** `git status --short --branch`, `git worktree list --porcelain`, `gt ls` and `gt trunk`. Check affected branches' ownership and dirty state before mutations. Independent work starts from `main`; dependent branches stack on their actual source dependency. Keep one coherent change per branch, with readable commits; a checkpoint or review correction need not create another branch.
+- **Create and commit through Graphite:** use `gt create <branch> --onto <parent>` in the development worktree. Import an existing branch with `gt track <branch> --parent <parent>`. Stage only intended files with `git add`, run `bun run check`, then use `gt modify --commit -m "type(scope): change"`. `gt modify` automatically restacks descendants, even when adding a commit: inspect and coordinate their ownership first.
+- **Keep topology scoped:** use native `gt move`, `gt reorder`, `gt fold` or `gt split` when the change needs them. Restack only your affected scope with `gt restack --upstack` or `--only`; coordinate branches owned by another agent, including those checked out elsewhere. Resolve Graphite conflicts, stage resolutions, then `gt continue`; use `gt abort` to abandon that operation.
+- **Publish through Graphite:** include `--ai` on every submission. Use `gt submit --stack --ai` for affected stacks, adding `--draft` for draft PRs or `--update-only` for existing PRs. Inspect `--dry-run` when scope is uncertain; preserve hooks and normal lease protection. Use `gt merge` for the intended trunk-to-current PR sequence and verify every PR actually merged before cleanup.
+- **Coordinate synchronization:** use `gt sync --no-restack` in parallel workflows, then let each owner restack their affected branches. It still moves trunk and can clean up merged or closed branches, so coordinate with the deployment owner before running it in a repository whose primary checkout is live. It is not the deployment primitive: the [deploy runbook](docs/runbooks/deploy.md#deploy-a-new-version) activates an exact reviewed commit with fast-forward-only refusal. Never rewrite or remove another owner's stack or worktree as incidental cleanup.
+
+Git remains available for inspection, staging, worktree mechanics and plumbing that does not change tracked branch history or Graphite metadata, plus explicit Graphite-directed conflict recovery and the deployment runbook's pinned activation, rollback and recovery. Do not use `git commit`, `git push`, `git rebase` or `git merge` as ordinary substitutes for Graphite. Finish with a clean, committed worktree and verify the resulting stack.
 
 ## Invariants
 
