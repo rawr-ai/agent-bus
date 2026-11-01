@@ -48,6 +48,7 @@ import * as Serve from "../src/serve.ts";
 import { validateSelect } from "../src/sparql.ts";
 import { MAX_PAGES } from "../src/timing.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
+import { legacyTopicServer } from "./legacy-topic-server.ts";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -3991,6 +3992,60 @@ describe("mcp over http", () => {
           out: "joined as other/cli; topics: []",
         });
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
+
+  test("the CLI trims topics for an older server without silently dropping blank list items", () => {
+    const port = nextPort++;
+    const legacy = legacyTopicServer(port);
+    const address = "other/legacy-cli";
+    const cli = (...args: Array<string>) =>
+      Effect.promise(async () => {
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "../src/bin.ts"),
+            "join",
+            "--address",
+            address,
+            "--runtime",
+            "other",
+            "--session",
+            "legacy-cli",
+            ...args,
+          ],
+          {
+            timeout: 20_000,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, AGENT_BUS_PORT: String(port) },
+          }
+        );
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        return { code, out: (stdout + stderr).trim() };
+      });
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const joined = { code: 0, out: `joined as ${address}` };
+        expect(yield* cli("--topics", " reviews, ops ")).toEqual(joined);
+        expect(legacy.topicsOf(address)).toEqual(["reviews", "ops"]);
+        expect(legacy.recipients("#reviews")).toEqual([address]);
+        expect(legacy.recipients("#ops")).toEqual([address]);
+        expect(yield* cli()).toEqual(joined);
+        expect(legacy.topicsOf(address)).toEqual(["reviews", "ops"]);
+        // Keep empty items on the wire so a newer server can refuse atomically.
+        // This older server stores them literally; it does not validate them.
+        expect(yield* cli("--topics", "reviews, ,ops,")).toEqual(joined);
+        expect(legacy.topicsOf(address)).toEqual(["reviews", "", "ops", ""]);
+        expect(yield* cli("--topics", "")).toEqual(joined);
+        expect(legacy.topicsOf(address)).toEqual([]);
+        expect(legacy.recipients("#ops")).toEqual([]);
+      }).pipe(Effect.provide(legacy.layer))
     );
   });
 

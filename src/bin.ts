@@ -174,7 +174,9 @@ const joinCommand = Command.make(
         cwd: process.cwd(),
         ...Client.defined({
           topics: Option.getOrUndefined(
-            Option.map(input.topics, (text) => (text === "" ? [] : text.split(",")))
+            Option.map(input.topics, (text) =>
+              text === "" ? [] : text.split(",").map((topic) => topic.trim())
+            )
           ),
           codexThreadId: Option.getOrUndefined(input.codexThread),
           note: Option.getOrUndefined(input.note),
