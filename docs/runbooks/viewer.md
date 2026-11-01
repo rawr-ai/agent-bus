@@ -43,6 +43,11 @@ Expected: the pinned dependencies install without changing the lockfile. `--igno
 
 Use Control-C in the viewer terminal. Expected: it stops intake, interrupts active requests and awaits runtime cleanup without stopping the existing bus. Rebuild after browser-source changes, then restart the viewer; the product uses the same built assets in development and cold-artifact checks. *Rehearsed 2026-11-01 with the compiled artifact's SIGINT and SIGTERM handlers, clean exit and a rebuilt/restarted local viewer.*
 
+## Find and keep reading
+
+1. Enter text and, optionally, an exact participant/address, then apply the search. Empty fields are absent; other whitespace and case remain literal. Apply opens all server result groups, not an intersection with the previously selected topic. Clear requests a fresh latest observation. Current peers can open an exact-address investigation when the address fits the input contract. Actual scope/time belongs to the displayed observation; a failed different search retains and labels previous criteria rather than claiming that old messages match. *Rehearsed 2026-11-01 against the synthetic endpoint; upstream arguments, failure scope and clear-to-latest checked.*
+2. Automatic refresh is initially enabled. Pause stops scheduled observations, not manual Refresh. Hidden pages suppress scheduled work; resume or becoming visible requests once. History and peers fail/recover independently. Read a conversation or context flow while the window changes: if a displayed message would disappear, exactly one prior unit stays readable with its old criteria/time and a persistent outside-current-observation indicator. It is never merged into the current list. Select a context/conversation or use Read context to accept the current unit and start it at the top; ordinary Refresh does not discard the retained reading. Reload starts fresh criteria/pause state and does not recover it. *Rehearsed 2026-11-01 with the native browser's controlled production timer, including overlap, independent peers, pause, visibility, manual counts, conversation and flow eviction, focus, absolute/relative reading position, visible retained-state cue and explicit acceptance at scroll position zero.*
+
 ## Verify the viewer
 
 Use the smallest relevant lane during development, then the full uncached check at the story boundary. The browser and workbench commands below use synthetic data, not the running bus, credentials or a user's browser profile. Their launcher refuses root dotenv names before invoking tools, allowlists inherited environment, disables telemetry/cloud and binds owned servers to loopback. Do not run these tools directly to bypass that boundary.
@@ -63,16 +68,17 @@ Use the smallest relevant lane during development, then the full uncached check 
    bun --no-env-file run test:storybook
    ```
 
-   Expected: the runner owns an ephemeral static server and fresh local Stagehand browsers, reports actual successful play phases, and closes them. A static build alone does not execute plays. Render-only and deliberately failing internal harness-oracle stories must be rejected when explicitly selected. For interactive component work, `bun --no-env-file run storybook` uses the fixed local development port and refuses a collision rather than taking another owner's server. Stop it with Control-C. *Build and five positive plays rehearsed 2026-11-01; real failure and no-play oracles correctly refused. The long-lived interactive development command is unverified.*
+   Expected: the runner owns an ephemeral static server and fresh local Stagehand browsers, reports actual successful play phases, and closes them. A static build alone does not execute plays. Render-only and deliberately failing internal harness-oracle stories must be rejected when explicitly selected. For interactive component work, `bun --no-env-file run storybook` uses the fixed local development port and refuses a collision rather than taking another owner's server. Stop it with Control-C. *Build and eight positive plays rehearsed 2026-11-01; real failure and no-play oracles correctly refused. Interactive local startup, a native exact-search play against that dev server and owned shutdown also rehearsed.*
 
 3. Build and check connected production journeys:
 
    ```sh
    bun --no-env-file run nx run agent-bus:viewer-build
    bun --no-env-file run test:browser
+   bun --no-env-file run test:browser:investigation
    ```
 
-   Expected: native Stagehand exercises the compiled viewer against a synthetic public endpoint, checks actual viewport, context/reply navigation, safe Markdown/theme and mobile focus, then closes its owned viewer, endpoint and browsers. Browser and integration targets are uncached. This does not prove the existing bus's present availability. *Rehearsed 2026-11-01; three journeys passed with clean owned-process exit.*
+   Expected: native Stagehand exercises the compiled viewer against a synthetic public endpoint, checks actual viewport, context/reply navigation, safe Markdown/theme and mobile focus, then closes its owned viewer, endpoint and browsers. The investigation lane adds real submitted arguments and refresh/failure/reading-continuity behavior. Its test-only clock intercepts the production interval instead of waiting through wall-clock delays; pure scheduler tests separately prove that interval. Browser and integration targets are uncached. This does not prove the existing bus's present availability. *Rehearsed 2026-11-01 for the initial three journeys and the separate investigation lane; current combined regression qualification is recorded at release closure.*
 
    To check the already running real viewer explicitly, use `bun --no-env-file run test:browser:live --url http://127.0.0.1:4317/`. It emits only structural flags/counts, not message content, and does not start or stop the existing viewer or bus. Successful empty history is labeled as not proving message reading; unavailable history fails. *Checked read-only 2026-11-01; actual context/body/audience/theme and independent peer observation passed.*
 
@@ -90,7 +96,7 @@ Use the smallest relevant lane during development, then the full uncached check 
    bun --no-env-file run check
    ```
 
-   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; 412 tests, types, lint and documentation passed for the expanded story using the qualified test tool.*
+   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; 427 tests, types, lint and documentation passed using the qualified test tool, with later explicit-navigation changes checked by types and the native browser lane.*
 
 ## If it fails
 

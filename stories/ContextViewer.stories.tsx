@@ -78,7 +78,7 @@ export const MobileContext: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     const alpha = await canvas.findByRole("button", { name: "#alpha" });
-    for (let i = 0; i < 5; i++) await userEvent.tab();
+    for (let i = 0; i < 12 && document.activeElement !== alpha; i++) await userEvent.tab();
     await expect(alpha).toHaveFocus();
     await userEvent.keyboard("{Enter}");
     await waitFor(() => expect(canvas.getByRole("heading", { name: "#alpha" })).toHaveFocus());

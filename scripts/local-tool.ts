@@ -14,13 +14,20 @@ if (tool === "nx") {
 } else if (tool === "storybook") {
   const pkg = dirname(fileURLToPath(import.meta.resolve("storybook/package.json")));
   cmd = [process.execPath, "--no-env-file", resolve(pkg, "dist/bin/dispatcher.js"), ...args];
-} else if (tool === "browser" || tool === "browser-live" || tool === "storybook-plays") {
+} else if (
+  tool === "browser" ||
+  tool === "browser-live" ||
+  tool === "browser-investigation" ||
+  tool === "storybook-plays"
+) {
   const entry =
     tool === "browser"
       ? "tests/browser/viewer.browser.ts"
       : tool === "browser-live"
         ? "tests/browser/live.browser.ts"
-        : "scripts/check-storybook-plays.ts";
+        : tool === "browser-investigation"
+          ? "tests/browser/investigation.browser.ts"
+          : "scripts/check-storybook-plays.ts";
   cmd = [process.execPath, "--no-env-file", resolve(root, entry), ...args];
 } else {
   throw new Error("Select the local nx, storybook, browser or storybook-plays tool");

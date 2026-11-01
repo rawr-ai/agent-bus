@@ -123,6 +123,9 @@ async function main() {
         "reader-message-body--dark-mobile",
         "viewer-context-journey--cross-audience",
         "viewer-context-journey--mobile-context",
+        "viewer-investigation--exact-search-and-clear",
+        "viewer-investigation--dark-narrow",
+        "viewer-automatic-refresh--pause-and-resume",
       ];
   assert.ok(
     ids.every((id) => /^[a-zA-Z0-9_-]+$/.test(id)),
@@ -160,33 +163,38 @@ async function main() {
       assert.ok(isRecord(entry) && entry.type === "story", "requested story exists");
       const start = performance.now();
       const mobile = id.endsWith("--mobile-context") || id.endsWith("--dark-mobile");
-      await withNativePage(mobile ? 390 : 1440, mobile ? 844 : 900, async (page) => {
-        await page.goto(new URL(`iframe.html?id=${id}&viewMode=story`, base).href, {
-          timeout: 10_000,
-        });
-        await page.waitForFunction(
-          (storyId) => {
-            const preview: unknown = Reflect.get(window, "__STORYBOOK_PREVIEW__");
-            if (!preview || typeof preview !== "object") return false;
-            const render: unknown = Reflect.get(preview, "currentRender");
-            return (
-              render !== null &&
-              typeof render === "object" &&
-              Reflect.get(render, "id") === storyId &&
-              ["finished", "errored"].includes(String(Reflect.get(render, "phase")))
-            );
-          },
-          id,
-          { timeout: 15_000 }
-        );
-        const observation = await page.evaluate(observePlay, { storyId: id, timeoutMs: 15_000 });
-        const verdict = playVerdict(id, observation);
-        if (!verdict.ok) console.error(JSON.stringify(observation));
-        failed ||= !verdict.ok;
-        console.log(
-          `${verdict.ok ? "PASS" : "FAIL"} ${id}: ${verdict.reason} (${((performance.now() - start) / 1000).toFixed(2)}s)`
-        );
-      });
+      const narrow = id.endsWith("--dark-narrow");
+      await withNativePage(
+        narrow ? 320 : mobile ? 390 : 1440,
+        narrow ? 640 : mobile ? 844 : 900,
+        async (page) => {
+          await page.goto(new URL(`iframe.html?id=${id}&viewMode=story`, base).href, {
+            timeout: 10_000,
+          });
+          await page.waitForFunction(
+            (storyId) => {
+              const preview: unknown = Reflect.get(window, "__STORYBOOK_PREVIEW__");
+              if (!preview || typeof preview !== "object") return false;
+              const render: unknown = Reflect.get(preview, "currentRender");
+              return (
+                render !== null &&
+                typeof render === "object" &&
+                Reflect.get(render, "id") === storyId &&
+                ["finished", "errored"].includes(String(Reflect.get(render, "phase")))
+              );
+            },
+            id,
+            { timeout: 15_000 }
+          );
+          const observation = await page.evaluate(observePlay, { storyId: id, timeoutMs: 15_000 });
+          const verdict = playVerdict(id, observation);
+          if (!verdict.ok) console.error(JSON.stringify(observation));
+          failed ||= !verdict.ok;
+          console.log(
+            `${verdict.ok ? "PASS" : "FAIL"} ${id}: ${verdict.reason} (${((performance.now() - start) / 1000).toFixed(2)}s)`
+          );
+        }
+      );
     }
     if (failed) process.exitCode = 1;
   } finally {

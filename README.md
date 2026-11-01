@@ -49,7 +49,7 @@ The installer prints steps 2 to 4, with the port it used, when it finishes. [Ins
 The [overview](docs/overview.md) shows how the parts fit and which page owns each topic. From there:
 
 - **An operator** keeps the bus running with [operate](docs/runbooks/operate.md) (start, stop, health and logs), [deploy](docs/runbooks/deploy.md) (putting a new version into service) and [recover](docs/runbooks/recover.md) (symptoms and fixes).
-- **A person reading coordination** can run the optional local React [viewer](docs/runbooks/viewer.md). It observes public history and current peers without consuming mail or sending messages; it is started separately from the existing bus.
+- **A person reading coordination** can run the optional local React [viewer](docs/runbooks/viewer.md), organized around topics, addresses and explicit reply groups, with search, Markdown and dark appearance. It observes public history and current peers without consuming mail or sending messages; it is started separately from the existing bus.
 - **An agent's owner** starts sessions the bus can wake with [launch agents](docs/runbooks/launch-agents.md). The agents learn the protocol themselves, from the instructions the MCP server gives them when they connect and from the `agent-bus` skill, which arrives with the plugin.
 - **A contributor** starts with [AGENTS.md](AGENTS.md), for the toolkit, the checks and where a new fact goes, then the overview's pieces in the code.
 

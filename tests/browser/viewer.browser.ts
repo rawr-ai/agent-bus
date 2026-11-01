@@ -42,46 +42,114 @@ async function main() {
     let started = performance.now();
     stage = "native context and reply journey";
     await withNativePage(1440, 900, async (page) => {
-      await page.goto(fixture.url, { timeout: 10_000 });
-      await waitFor(page, ".context-group button");
-      await clickText(page, ".context-item", "#alpha");
-      await page.waitForFunction(
-        () => document.querySelector("#thread-heading")?.textContent === "Context flow",
-        undefined,
-        { timeout: 5_000 }
-      );
-      const ids = await page.evaluate(() =>
-        Array.from(document.querySelectorAll("article[data-message-id]")).map((node) =>
-          node.getAttribute("data-message-id")
-        )
-      );
-      assert.deepEqual(ids.slice(0, 3), ["msg-a-root", "msg-b-direct-reply", "msg-c-beta-reply"]);
-      const row = await page.evaluate(() =>
-        Array.from(document.querySelectorAll(".conversation-row")).findIndex((node) =>
-          node.textContent?.includes("Alpha root")
-        )
-      );
-      assert.ok(row >= 0);
-      await page.locator(".conversation-row").nth(row).click({ timeout: 5_000 });
-      await page.waitForFunction(
-        () => document.querySelectorAll("article[data-message-id]").length === 3,
-        undefined,
-        { timeout: 5_000 }
-      );
-      await page
-        .locator('[data-message-id="msg-c-beta-reply"] .reply-link')
-        .click({ timeout: 5_000 });
-      await page.waitForFunction(
-        () => document.activeElement?.getAttribute("data-message-id") === "msg-b-direct-reply",
-        undefined,
-        { timeout: 5_000 }
-      );
-      await clickText(page, "button", "Return to reply");
-      await page.waitForFunction(
-        () => document.activeElement?.getAttribute("data-message-id") === "msg-c-beta-reply",
-        undefined,
-        { timeout: 5_000 }
-      );
+      try {
+        stage = "context: navigate compiled fixture";
+        await page.goto(fixture.url, { timeout: 10_000 });
+        stage = "context: wait observed context controls";
+        await waitFor(page, ".context-group button");
+        stage = "context: click alpha context";
+        await clickText(page, ".context-item", "#alpha");
+        stage = "context: wait context-flow heading";
+        await page.waitForFunction(
+          () => document.querySelector("#thread-heading")?.textContent === "Context flow",
+          undefined,
+          { timeout: 5_000 }
+        );
+        stage = "context: assert cross-audience source order";
+        const ids = await page.evaluate(() =>
+          Array.from(document.querySelectorAll("article[data-message-id]")).map((node) =>
+            node.getAttribute("data-message-id")
+          )
+        );
+        assert.deepEqual(ids.slice(0, 3), ["msg-a-root", "msg-b-direct-reply", "msg-c-beta-reply"]);
+        const row = await page.evaluate(() =>
+          Array.from(document.querySelectorAll(".conversation-row")).findIndex((node) =>
+            node.textContent?.includes("Alpha root")
+          )
+        );
+        assert.ok(row >= 0);
+        stage = "context: click root conversation row";
+        await page.locator(".conversation-row").nth(row).click({ timeout: 5_000 });
+        stage = "context: wait selected three-message conversation";
+        await page.waitForFunction(
+          () => document.querySelectorAll("article[data-message-id]").length === 3,
+          undefined,
+          { timeout: 5_000 }
+        );
+        stage = "context: wait explicit navigation focus before following a reply";
+        await page.waitForFunction(
+          () => document.activeElement?.id === "thread-heading",
+          undefined,
+          { timeout: 5_000 }
+        );
+        stage = "context: click third-message reply link";
+        await page
+          .locator('[data-message-id="msg-c-beta-reply"] .reply-link')
+          .click({ timeout: 5_000 });
+        stage = "context: wait parent message focus";
+        await page.waitForFunction(
+          () => document.activeElement?.getAttribute("data-message-id") === "msg-b-direct-reply",
+          undefined,
+          { timeout: 5_000 }
+        );
+        stage = "context: click return-to-reply control";
+        await clickText(page, "button", "Return to reply");
+        stage = "context: wait original reply focus";
+        await page.waitForFunction(
+          () => document.activeElement?.getAttribute("data-message-id") === "msg-c-beta-reply",
+          undefined,
+          { timeout: 5_000 }
+        );
+        stage = "context: native resource cleanup";
+      } catch (error) {
+        const errorFlags = {
+          assertion: error instanceof assert.AssertionError,
+          timeout: error instanceof Error && /timeout|timed out|deadline/i.test(error.message),
+          connectionClosed:
+            error instanceof Error && /connection.*closed|disconnected/i.test(error.message),
+          targetLookup:
+            error instanceof Error && /element|locator|selector|centroid/i.test(error.message),
+        };
+        const structure = await page
+          .evaluate(() => {
+            const link = document.querySelector('[data-message-id="msg-c-beta-reply"] .reply-link');
+            const rect = link?.getBoundingClientRect();
+            const center = rect
+              ? document.elementFromPoint(rect.x + rect.width / 2, rect.y + rect.height / 2)
+              : null;
+            return {
+              contexts: document.querySelectorAll(".context-group button").length,
+              rows: document.querySelectorAll(".conversation-row").length,
+              messageNodes: document.querySelectorAll("article[data-message-id]").length,
+              alphaSelected:
+                document.querySelector(".context-group .context-item.active")?.textContent ===
+                "#alpha",
+              contextFlow:
+                document.querySelector("#thread-heading")?.textContent === "Context flow",
+              conversationHeading:
+                document.querySelector("#thread-heading")?.textContent === "Conversation",
+              selectedMessageInHash: new URLSearchParams(location.hash.slice(1)).has("message"),
+              parentFocused:
+                document.activeElement?.getAttribute("data-message-id") === "msg-b-direct-reply",
+              childFocused:
+                document.activeElement?.getAttribute("data-message-id") === "msg-c-beta-reply",
+              targetExists: link !== null,
+              targetInViewport: Boolean(rect && rect.top >= 0 && rect.bottom <= innerHeight),
+              targetHitTest: Boolean(link && center && link.contains(center)),
+              targetTop: rect?.top ?? 0,
+              targetBottom: rect?.bottom ?? 0,
+              viewportHeight: innerHeight,
+              historyError: document.querySelector(".context-rail .observation-error") !== null,
+            };
+          })
+          .catch(() => ({ pageStateUnavailable: true }));
+        console.error(JSON.stringify({ stage, ...errorFlags, ...structure }));
+        if (captureDir)
+          await page
+            .screenshot({ path: join(captureDir, "failure-context.png") })
+            .catch(() => undefined);
+        throw error;
+      }
     });
     console.log(
       `PASS connected cross-audience context and reply focus (${((performance.now() - started) / 1000).toFixed(2)}s)`
