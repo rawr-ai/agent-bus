@@ -30,7 +30,7 @@ The normal context-reading request is up to 200 messages. The viewer preserves l
 | Viewer boundary | Value |
 | --- | --- |
 | Default bind and browser address | `127.0.0.1:4317`; exact Host, and exact same Origin when present |
-| Viewer port override | Server-owned `AGENT_BUS_VIEWER_PORT`, integer 1 through 65535 |
+| Viewer port override | Server-owned `AGENT_BUS_VIEWER_PORT`, integer 1 through 65535; a port already held on `127.0.0.1`, `0.0.0.0` or `[::]` is refused at startup |
 | Upstream | Existing `127.0.0.1:<AGENT_BUS_PORT>/mcp`, default port 8096; fixed stateless MCP `2026-07-28`, no fallback |
 | RPC methods and media type | POST and `application/json` only; no batch or generic call route |
 | Request body | At most 4,096 bytes, including streamed/chunked bodies |

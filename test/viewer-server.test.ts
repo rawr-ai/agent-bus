@@ -3,6 +3,7 @@ import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { Schema } from "effect";
 import { createViewer } from "../viewer/server/host.ts";
+import { ViewerPortInUse } from "../viewer/server/port.ts";
 import { MAX_MESSAGE_BYTES } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 
@@ -384,4 +385,26 @@ test("close cancels stalled intake and active calls, is idempotent and prevents 
   expect((await fixture.direct("/rpc/history", post({ limit: 50 }))).status).toBe(503);
   expect(fixture.calls).toHaveLength(1);
   await fixture.close();
+});
+
+test("a port another owner holds on any interface is refused, leaving that owner's traffic", async () => {
+  const assets = new Map();
+  for (const hostname of ["0.0.0.0", "::", "127.0.0.1"]) {
+    const holder = Bun.serve({ hostname, port: 0, fetch: () => new Response("holder") });
+    const port = holder.port ?? 0;
+    try {
+      expect(() => createViewer({ port, busPort: 1, assets })).toThrow(ViewerPortInUse);
+      const answer = await fetch(`http://127.0.0.1:${port}/`, { headers: { host: "holder" } });
+      expect(await answer.text()).toBe("holder");
+    } finally {
+      await holder.stop(true);
+    }
+  }
+  // Once released, the same port is accepted.
+  const released = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response() });
+  const port = released.port ?? 0;
+  await released.stop(true);
+  const viewer = createViewer({ port, busPort: 1, assets });
+  expect(viewer.url.port).toBe(String(port));
+  await viewer.close();
 });

@@ -1,5 +1,6 @@
 import { Schema } from "effect";
 import { createViewer, type ViewerAssets } from "./host.ts";
+import { ViewerPortInUse } from "./port.ts";
 
 const Manifest = Schema.Array(
   Schema.Struct({
@@ -47,7 +48,11 @@ const start = async () => {
   }
 };
 
-start().catch(() => {
-  console.error("Viewer could not start. Build the viewer and check its local ports.");
+start().catch((error: unknown) => {
+  console.error(
+    error instanceof ViewerPortInUse
+      ? `Viewer port ${error.port} is already in use on 127.0.0.1, 0.0.0.0 or [::]. Choose an unused port with AGENT_BUS_VIEWER_PORT.`
+      : "Viewer could not start. Build the viewer and check its local ports."
+  );
   process.exitCode = 1;
 });

@@ -4,6 +4,7 @@
 // data. No URL inside it is ever fetched, and no real bus, ledger, store or credential is used.
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
+import { assertPortFree } from "../viewer/server/port.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import type { PublicMessage, PublicPeer } from "../viewer/shared/public.ts";
 
@@ -670,9 +671,11 @@ const within = async <T>(promise: Promise<T>, ms: number): Promise<T | "timeout"
   }
 };
 
-// Never bind over another process: probe first; the viewer itself also refuses an occupied port.
-const assertPortFree = async (port: number): Promise<void> => {
+// Never bind over another process. The viewer refuses a port held on 127.0.0.1, 0.0.0.0 or [::];
+// this fixture applies the same check before starting its own endpoints.
+const assertViewerPortFree = async (port: number): Promise<void> => {
   try {
+    assertPortFree(port);
     await Bun.serve({ hostname: "127.0.0.1", port, fetch: () => new Response() }).stop(true);
   } catch {
     throw new Error("Viewer port unavailable");
@@ -722,7 +725,7 @@ export const startFixture = async (
   const viewerPort = options.viewerPort ?? DEFAULT_VIEWER_PORT;
   if (!validPort(viewerPort)) throw new Error("Invalid viewer port");
   if (!(await Bun.file(VIEWER_MAIN).exists())) throw new Error("Compiled viewer is missing");
-  await assertPortFree(viewerPort);
+  await assertViewerPortFree(viewerPort);
   const store = createStore();
   const abort = new AbortController();
   const stops: Array<() => Promise<void>> = [];
