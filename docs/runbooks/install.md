@@ -1,6 +1,6 @@
 # Install
 
-Use this to set up the bus host, add another machine, and register the MCP server and the Claude plugin. Upgrading an existing install is in [upgrade](upgrade.md); putting a new version into service is in [deploy](deploy.md).
+Use this to set up the bus host, add another machine, and register the MCP server and the Claude and Codex plugins. Upgrading an existing install is in [upgrade](upgrade.md); putting a new version into service is in [deploy](deploy.md).
 
 Each step's expected result ends with how it was verified ([runbook shape](../../AGENTS.md#page-shapes)). The rehearsals ran on a disposable instance with its own directory, ports and LaunchAgent labels (the overrides in the installer's header), which behaves as the default install does. The commands here use the default values.
 
@@ -202,6 +202,47 @@ claude plugin update agent-bus@agent-bus
 ```
 
 Then repeat the cache check above: the new directory must hold `skills/agent-bus/SKILL.md` and `references/`. Sessions get the change when they next start, or with `/reload-plugins`: `claude plugin update --help` says a restart is required to apply it. *Unverified*: it would change the owner's installed plugin.
+
+## Install the Codex skill plugin
+
+MCP registration supplies tools, not the agent skill. Install the complete plugin for each Codex home on each machine that runs bus participants, from that machine's deployed primary checkout. Use the native executable for the client being configured; the desktop bundle's path is shown below. Check its help before proceeding rather than assuming the shell's `codex` is the same executable ([platforms: Codex](../platforms/codex.md#the-bundled-cli-and-private-app-servers)).
+
+```sh
+CODEX_BIN=/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
+"$CODEX_BIN" plugin --help
+"$CODEX_BIN" plugin marketplace list --json
+```
+
+Expected: native plugin commands and the configured marketplaces. If `agent-bus` already names this deployed checkout, skip the next `marketplace add`; if it names another source, stop and reconcile that ownership before replacing it. These commands use the current user's Codex home; when configuring another home, pass its explicit `CODEX_HOME` consistently. *Checked read-only 2026-11-01* on both machines.
+
+```sh
+"$CODEX_BIN" plugin marketplace add "$PWD" --json
+"$CODEX_BIN" plugin add agent-bus@agent-bus --json
+"$CODEX_BIN" plugin list --marketplace agent-bus --json
+```
+
+Expected: `agent-bus@agent-bus` is installed and enabled, sourced from this checkout's `plugin/`. The native `plugin add` also refreshes an existing incomplete copy. *Observed live 2026-11-01:* one machine's manifest-only copy was refreshed; the other machine's marketplace and plugin were installed. Other plugin and marketplace settings stayed unchanged; the resulting inventory was *Checked read-only 2026-11-01*.
+
+Select the installed cache from that result's version, not its `source.path` (which names the source checkout). Check the whole installed plugin against deployed source, then render a fresh prompt without calling a model:
+
+```sh
+version=$("$CODEX_BIN" plugin list --marketplace agent-bus --json | bun -e '
+const result = await Bun.stdin.json();
+const plugin = result.installed.find((entry) => entry.pluginId === "agent-bus@agent-bus");
+if (!plugin?.installed || !plugin.enabled || typeof plugin.version !== "string") {
+  throw new Error("agent-bus must be installed and enabled before checking its cache");
+}
+console.log(plugin.version);
+')
+installed="${CODEX_HOME:-$HOME/.codex}/plugins/cache/agent-bus/agent-bus/$version"
+ls "$installed/.claude-plugin/plugin.json" "$installed/skills/agent-bus/SKILL.md" "$installed/skills/agent-bus/references"
+diff -r plugin "$installed"
+"$CODEX_BIN" debug prompt-input | grep -o 'agent-bus:agent-bus'
+```
+
+Expected: the installed manifest and skill, all four references, no output from `diff`, then `agent-bus:agent-bus`, whose listing in the full prompt output points into that installed skill directory. A successful MCP connection or an enabled manifest alone does not verify skill discovery. *Checked read-only 2026-11-01:* both machines' installed plugin directories matched the source, and fresh prompt rendering listed the skill after it had been absent before installation. This checks discovery, not a model's use of the skill.
+
+A shell installation does not refresh the plugin set of an already-loaded desktop or daemon thread ([platforms: Codex](../platforms/codex.md#how-codex-finds-skills-and-shows-them-to-the-model)). Do not restart another owner's session to force it. Tell active participants where to read the updated skill and references now; normal later loads pick up the installed plugin.
 
 ## Add another machine
 

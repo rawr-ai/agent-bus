@@ -19,6 +19,7 @@ What a deploy changes, and when:
 | `src/` | The Claude hook | At once |
 | `src/` | `serve` | At its restart (step 8) |
 | `plugin/` or `.claude-plugin/` | Claude sessions | After `claude plugin update` and a session restart ([When the plugin changed](#when-the-plugin-changed)) |
+| `plugin/` or `.claude-plugin/` | Codex threads | After native plugin refresh and a later thread load; active owners can read the changed skill immediately ([install](install.md#install-the-codex-skill-plugin)) |
 | `scripts/install-launch-agents.sh` | The LaunchAgents' plists and Fluree's flags | When the installer is rerun (step 8) |
 
 A restart of `serve` loses its memory, which costs at most one extra wake per address and leaves `hooked` unset until each Claude hook calls again, about five seconds later ([delivery](../architecture/delivery.md#claude-code-sessions)). The Codex daemon outlives `serve`'s restarts. The Fluree server isn't restarted unless you rerun the installer.
@@ -260,6 +261,8 @@ ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$ne
 ```
 
 Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory is the one named by the `Version` that `claude plugin list` shows. Don't pick the newest directory by time: an update writes an `.orphaned_at` marker into the old one, which makes it the newest. A cache made before the skill shipped has only the manifest, and `ls` then says `No such file or directory` for the skill: update the plugin. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache, made before the skill shipped, correctly lacked it (*Checked read-only 2026-10-28*).
+
+Also refresh the Codex plugin on every machine and Codex home with participants, following [the native installation and discovery check](install.md#install-the-codex-skill-plugin). MCP registration alone does not deliver the skill. Notify active participants of the changed guidance and its source path; do not equate an installed cache with a refresh of already-loaded threads. *Observed live 2026-11-01:* native refresh repaired a manifest-only installation on one machine and installed the missing plugin on the other. Source equality and fresh prompt discovery were *Checked read-only 2026-11-01* on both.
 
 ## Recover a diverged primary checkout
 
