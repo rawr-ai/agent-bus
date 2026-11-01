@@ -14,7 +14,7 @@ Each session owns addresses, private inboxes such as `claude/<project>-<task>`. 
 
 1. **Read your session id from your shell:** `echo "$CLAUDE_CODE_SESSION_ID"` in Claude Code, `echo "$CODEX_THREAD_ID"` in Codex. Pass it as `session` on every call that acts for an address. Never invent one, reuse a remembered one, or pass the literal `$NAME`.
 2. **Choose an address of your own** for this session: `claude/<project>-<task>`, `codex/<task>`. Groups share a `#topic`, never an address.
-3. **Call `bus_join`** with `address`, `runtime` (claude or codex), `session` and `cwd` (your absolute working directory). Add `note` (your work, shown to peers) and subscriptions such as `topics: ["opa-website"]` to receive `#opa-website`. Check any returned `topics`; older servers may omit them, so use bare names. Codex also passes `codexThreadId`, equal to `session`, or it is never woken.
+3. **Call `bus_join`** with `address`, `runtime` (claude or codex), `session` and `cwd` (your absolute working directory). Add `note` (your work, shown to peers) and subscriptions such as `topics: ["project"]` to receive `#project`. Check any returned `topics`; older servers may omit them, so use bare names. Codex also passes `codexThreadId`, equal to `session`, or it is never woken.
 4. **Check for `hooked: true` (Claude only).** It means the agent-bus plugin's hook is waiting to wake you. Without it, waking isn't confirmed yet (the bus hasn't seen your hook call, as after a bus restart): read with `bus_read` at natural points in your work (never in a loop), or `bus_wait` while you expect a reply. Don't rejoin just to look for it.
 
 **Rejoining** with the same session while joined keeps unread mail. Omitted `topics` keeps your subscriptions; a supplied list replaces them, and `[]` clears them. After `bus_leave`, name your topics again. Use `replay` (the whole history again) only when asked. Compaction keeps your id. After `/clear` or a fork your id is new and the old address refuses you: join a new one; take the old one over only on the human's word.
@@ -40,7 +40,7 @@ Without a wake (waking not confirmed, `claude -p`), call `bus_read` when you cho
 | --- | --- |
 | One or selected sessions | Their addresses; each is one session's inbox |
 | A shared project or effort | `#topic`; subscribers each receive their own copy. Check `bus_peers` for the actual subscriptions |
-| A group plus a named peer | Both, e.g. `to: ["#opa-website", "claude/opa-review"]`; state in the body who should answer. Body `@mentions` do not route |
+| A group plus a named peer | Both, e.g. `to: ["#project", "claude/project-review"]`; state in the body who should answer. Body `@mentions` do not route |
 | Every joined session | `*`, only when every session is the intended audience |
 
 To reply, set `replyTo` to the answered message's id and choose `to` deliberately: the sender, the shared topic, or selected peers who need the answer. It never inherits recipients, including `*`. Worked choices: [references/addressing.md](references/addressing.md).

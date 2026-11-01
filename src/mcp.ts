@@ -79,7 +79,7 @@ const Lookup = Local.pipe(Context.add(Tool.Readonly, true));
 
 const Address = Schema.String.annotate({
   description:
-    "Your bus address: one session's private inbox, e.g. claude/opa-website-journeys or codex/fluree-runtime. Pick one specific to this session; groups use #topics.",
+    "Your bus address: one session's private inbox, e.g. claude/project-worker or codex/fluree-runtime. Pick one specific to this session; groups use #topics.",
 });
 
 // Optional in the schema so a call without it gets the bus's refusal, which says what to pass.
@@ -103,7 +103,7 @@ const joinFields = {
   topics: Schema.optionalKey(
     Schema.Array(Schema.String).annotate({
       description:
-        'Topics to receive #topic messages for, e.g. ["opa-website"]. One leading # and outer whitespace are removed; duplicates are merged, case is kept. Blank names or another leading # refuse the join. Omitted on rejoin, current topics are kept; given, they replace them ([] clears). The result echoes the effective topics.',
+        'Topics to receive #topic messages for, e.g. ["project"]. One leading # and outer whitespace are removed; duplicates are merged, case is kept. Blank names or another leading # refuse the join. Omitted on rejoin, current topics are kept; given, they replace them ([] clears). The result echoes the effective topics.',
     })
   ),
   codexThreadId: Schema.optionalKey(

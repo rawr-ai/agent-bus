@@ -9,7 +9,7 @@ A refusal changes nothing. Match its wording:
 | Refusal starts | Do |
 | --- | --- |
 | "Pass your runtime's own session id as `session`" | Read the id from your shell and repeat the call |
-| "Each topic must have a non-empty name with at most one leading #." | Correct the topic list and rejoin: use names such as `topics: ["opa-website"]`. Blank names, `#` alone and repeated `#` are refused; use `[]` only if you mean to clear all subscriptions |
+| "Each topic must have a non-empty name with at most one leading #." | Correct the topic list and rejoin: use names such as `topics: ["project"]`. Blank names, `#` alone and repeated `#` are refused; use `[]` only if you mean to clear all subscriptions |
 | "codexThreadId must be your own thread id, the same as session." | Pass `$CODEX_THREAD_ID` as both |
 | "`<address>` is held by another session" | Join another address of your own. Only if the human says that session has ended: `bus_takeover` with `holder` set to the join id in the latest refusal |
 | "`<address>` belongs to another session; nothing was changed." | Your id changed (`/clear`, a fork) or the address was taken over: join a new address. If a wake brought you here, end quietly |
