@@ -9,6 +9,8 @@ Every connection the bus makes or depends on, what protects it, what it trusts, 
 | From | To | Transport | Protection | Trusts |
 | --- | --- | --- | --- | --- |
 | A Claude or Codex session | `serve` | HTTP on `127.0.0.1:8096/mcp` | `Host` must be `127.0.0.1:<port>` or `localhost:<port>` (stops DNS rebinding); any browser `Origin` is rejected. Each call names its session, and only an address's owner may use it ([messaging](messaging.md#rules)), which keeps cooperating sessions apart but proves nothing | Every process of the user on the machine; loopback is not authentication |
+| A browser | Optional separately started viewer | Same-origin loopback HTTP | The viewer's [request and projection policy](viewer.md#rules), not a new browser route in `serve` | Local access to public observations, not an authenticated principal |
+| Optional viewer | Existing `serve` | Loopback MCP | Only the fixed public lookup capability under [viewer rule 1](viewer.md#rules); no browser-selected upstream or incoming-header forwarding | The existing public bus endpoint; no store capability |
 | `serve` on the bus host | Fluree | HTTP on `127.0.0.1:8095` | Bearer token (`~/.agent-bus/fluree-token`, mode 0600) on the data and admin APIs; CORS off | Holders of the token |
 | `serve` | Fluree's event stream | The same port, no token | Carries ledger names and commit pointers only, never message content | Anyone on the machine |
 | `serve` on another machine | The bus host's Fluree | SSH local forward (`ai.rawr.agent-bus.tunnel`), on the same local port | SSH host key and key authentication, plus the Fluree token, copied over `scp` at install | The SSH account on the bus host |

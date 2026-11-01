@@ -12,8 +12,35 @@ The contract of every way into the bus: the MCP tools and their parameters, anno
 | `agent-bus` CLI | `join`, `publish` and `peers` from a shell, each an MCP client of the local `serve`; and `serve` itself | People, scripts and shell-only agents |
 | Plugin hook | `agent-bus claude-wake`, a CLI command that calls `bus_wake` and wakes a Claude session | Claude Code, through the agent-bus plugin |
 | `GET /health` | Returns `ok`; no authentication. It reports only that `serve` answers, and stays `ok` while Fluree is down, so `agent-bus peers` is the end-to-end check ([operate](../runbooks/operate.md)) | The installer's waits, operators |
+| Optional local viewer | A separate loopback browser app and two fixed read-only RPC procedures; it does not add a browser route to `serve` | People observing public coordination; [viewer](viewer.md) and its [runbook](../runbooks/viewer.md) |
 
 `serve` is the only process that touches the store. The CLI and the hook reach it through the same tools as an agent. The server answers the MCP revisions listed in `src/mcp.ts` under the name `agent-bus`, and sends the `instructions` described under [Instructions and wake texts](#instructions-and-wake-texts). Its tool list never changes while it runs, and it offers no subscriptions.
+
+### Viewer
+
+The optional viewer is a separate application, not a CLI subcommand or MCP forwarding endpoint. Its only RPC paths are `POST /rpc/history` and `POST /rpc/peers`, using native oRPC JSON framing on the same origin as its built assets. Current procedures return a deliberate public projection and an independent viewer receipt time. The record fields retain the [history](#bus_history) and [peer](#bus_peers) meaning below; `omitted` counts records excluded from this particular response because validation or duplicate-identity quarantine failed, not historical gaps or total records.
+
+| Procedure | Input | Successful observation |
+| --- | --- | --- |
+| `history` | Required integer `limit` from 1 to 200; optional nonempty `query` up to 256 characters and exact `participant` up to 512 characters; no unknown fields | `messages`, effective `criteria`, `observedAt`, `omitted`; no total, cursor or completeness marker |
+| `peers` | Empty object, no unknown fields | `peers`, independent `observedAt`, `omitted`; no liveness or historical membership marker |
+
+The normal history request is 50 messages. The viewer preserves literal text, case and audience rather than trimming or expanding an exact participant. It preserves the returned message order. Ordinary message fields and all named optional public origin fields remain available; private/internal and unknown nested fields do not cross the projection. Invalid envelopes and excessive counts fail the observation. An all-omitted response is separately visible from an ordinary successful empty response.
+
+| Viewer boundary | Value |
+| --- | --- |
+| Default bind and browser address | `127.0.0.1:4317`; exact Host, and exact same Origin when present |
+| Viewer port override | Server-owned `AGENT_BUS_VIEWER_PORT`, integer 1 through 65535 |
+| Upstream | Existing `127.0.0.1:<AGENT_BUS_PORT>/mcp`, default port 8096; fixed stateless MCP `2026-07-28`, no fallback |
+| RPC methods and media type | POST and `application/json` only; no batch or generic call route |
+| Request body | At most 4,096 bytes, including streamed/chunked bodies |
+| Whole request / upstream operation | 10 seconds each; abort and cleanup are explicit |
+| Active reads | At most eight; excess intake is refused |
+| MCP message bytes | At most 8 MiB; excess is unavailable, never silently truncated text |
+| Peer records per observation | At most 1,000; excess is unavailable |
+| Browser asset access | Only generated manifest paths, GET/HEAD; no filesystem catch-all, source maps or environment inlining |
+
+Unavailable, timeout, cancellation and internal failure have safe public outcomes, never raw MCP/store/parse diagnostics. Unsupported methods, hosts, origins, paths, input fields and bounds are refused before business work. Missing Origin is permitted for local non-browser clients; this is not user authentication or public-hosting readiness. Limits, response semantics and trust policy are in [viewer](viewer.md); literal start/stop commands and recovery are in the [runbook](../runbooks/viewer.md).
 
 ### MCP tools
 
