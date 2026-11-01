@@ -2,7 +2,7 @@ import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ViewerClient } from "../shared/client-types";
 import { DEFAULT_HISTORY_LIMIT } from "../shared/limits";
-import type { HistoryObservation, PeersObservation } from "../shared/public";
+import type { HistoryInput, HistoryObservation, PeersObservation } from "../shared/public";
 import { ConversationMessage } from "./features/conversations/ConversationMessage";
 import {
   buildConversationIndex,
@@ -12,48 +12,24 @@ import {
   messageMatchesContext,
   type ObservedConversation,
 } from "./features/conversations/model";
+import { AutoRefreshToggle } from "./features/investigation/AutoRefreshToggle";
+import { InvestigationControls } from "./features/investigation/InvestigationControls";
 import { PeerList } from "./features/peers/PeerList";
+import { canonicalHistoryInput, historyInputKey, isHistoryInvestigation } from "./history-criteria";
+import { createObservationResource } from "./observation-resource";
+import {
+  EMPTY_READING_SNAPSHOT,
+  type ReadingIntent,
+  type ReadingSnapshot,
+  type ReadingUnit,
+  reconcileReadingUnit,
+} from "./reading-unit";
 import { formatTime, Text } from "./Text";
 import { ThemeToggle } from "./ThemeToggle";
+import { useAutomaticRefresh, useObservation } from "./use-observation";
 import "./style.css";
 import "./conversation.css";
 
-function useResource<T>(load: (signal: AbortSignal) => Promise<T>) {
-  const [state, setState] = useState<{ data: T | null; loading: boolean; error: boolean }>({
-    data: null,
-    loading: true,
-    error: false,
-  });
-  const current = useRef<{ generation: number; controller: AbortController | null }>({
-    generation: 0,
-    controller: null,
-  });
-  const refresh = useCallback(() => {
-    current.current.controller?.abort();
-    const controller = new AbortController();
-    const generation = ++current.current.generation;
-    current.current.controller = controller;
-    setState((previous) => ({ ...previous, loading: true, error: false }));
-    void load(controller.signal).then(
-      (data) => {
-        if (generation === current.current.generation)
-          setState({ data, loading: false, error: false });
-      },
-      () => {
-        if (generation === current.current.generation && !controller.signal.aborted)
-          setState((previous) => ({ ...previous, loading: false, error: true }));
-      }
-    );
-  }, [load]);
-  useEffect(() => {
-    refresh();
-    return () => {
-      current.current.generation++;
-      current.current.controller?.abort();
-    };
-  }, [refresh]);
-  return { ...state, refresh };
-}
 type Navigation = {
   context: ConversationContext;
   message: string | null;
@@ -114,6 +90,26 @@ function Refresh({ label, onClick }: { label: string; onClick: () => void }) {
     </button>
   );
 }
+function CriteriaScope({ criteria }: { criteria: HistoryInput }) {
+  return (
+    <p className="observation-scope">
+      {isHistoryInvestigation(criteria) ? "Server matches" : "Latest messages"} · limit{" "}
+      {criteria.limit}
+      {criteria.query !== undefined && (
+        <>
+          {" "}
+          · Query: <Text value={criteria.query} />
+        </>
+      )}
+      {criteria.participant !== undefined && (
+        <>
+          {" "}
+          · Exact participant: <Text value={criteria.participant} />
+        </>
+      )}
+    </p>
+  );
+}
 function Observation({
   loading,
   error,
@@ -121,14 +117,16 @@ function Observation({
   omitted,
 }: {
   loading: boolean;
-  error: boolean;
+  error: null | "unavailable" | "timeout";
   observedAt: string | undefined;
   omitted: number | undefined;
 }) {
   const status = error
     ? observedAt
-      ? `Refresh failed · last observed ${formatTime(observedAt)}`
-      : "Observation unavailable"
+      ? `${error === "timeout" ? "Refresh timed out" : "Refresh failed"} · last observed ${formatTime(observedAt)}`
+      : error === "timeout"
+        ? "Observation timed out"
+        : "Observation unavailable"
     : loading
       ? observedAt
         ? `Observed ${formatTime(observedAt)} · Refreshing`
@@ -148,24 +146,44 @@ function Observation({
   );
 }
 export function App({ client }: { client: ViewerClient }) {
-  const historyRequest = useCallback(
-    (signal: AbortSignal) => client.history({ limit: DEFAULT_HISTORY_LIMIT }, { signal }),
+  const resources = useMemo(
+    () => ({
+      history: createObservationResource<HistoryInput, HistoryObservation>({
+        input: { limit: DEFAULT_HISTORY_LIMIT },
+        keyOf: historyInputKey,
+        load: (input, signal) => client.history(input, { signal }),
+      }),
+      peers: createObservationResource<Record<string, never>, PeersObservation>({
+        input: {},
+        keyOf: () => "peers",
+        load: (input, signal) => client.peers(input, { signal }),
+      }),
+    }),
     [client]
   );
-  const peersRequest = useCallback((signal: AbortSignal) => client.peers({}, { signal }), [client]);
-  const history = useResource<HistoryObservation>(historyRequest);
-  const peers = useResource<PeersObservation>(peersRequest);
+  const history = useObservation(resources.history);
+  const peers = useObservation(resources.peers);
+  const automaticRead = useCallback(() => {
+    resources.history.refresh({ replacePending: false });
+    resources.peers.refresh({ replacePending: false });
+  }, [resources]);
+  const automatic = useAutomaticRefresh(automaticRead);
+  const applyCriteria = (input: HistoryInput) => {
+    const next = canonicalHistoryInput(input);
+    const same = historyInputKey(next) === resources.history.getSnapshot().key;
+    resources.history.setInput(next);
+    if (same) resources.history.refresh();
+  };
+  const previousCriteria =
+    history.data !== null && historyInputKey(history.data.criteria) !== history.key;
   const [nav, setNav] = useState<Navigation>(() => (location.hash ? parseHash() : defaultNav));
-  const [snapshot, setSnapshot] = useState<{
-    group: ObservedConversation;
-    observedAt: string;
-    criteria: HistoryObservation["criteria"];
-  } | null>(null);
+  const [readingSnapshot, setReadingSnapshot] = useState<ReadingSnapshot>(EMPTY_READING_SNAPSHOT);
   const [returnId, setReturnId] = useState<string | null>(null);
   const nodes = useRef(new Map<string, HTMLElement>());
   const contextHeading = useRef<HTMLHeadingElement>(null);
   const listHeading = useRef<HTMLHeadingElement>(null);
   const threadHeading = useRef<HTMLHeadingElement>(null);
+  const readerScroll = useRef<HTMLDivElement>(null);
   const peersHeading = useRef<HTMLHeadingElement>(null);
   const selectedRow = useRef<HTMLButtonElement>(null);
   const index = useMemo(
@@ -182,33 +200,36 @@ export function App({ client }: { client: ViewerClient }) {
       window.removeEventListener("hashchange", change);
     };
   }, []);
-  useEffect(() => {
-    if (group && history.data)
-      setSnapshot({ group, observedAt: history.data.observedAt, criteria: history.data.criteria });
-  }, [group, history.data]);
   const navigate = (next: Navigation) => {
     window.history.pushState(null, "", toHash(next));
     setNav(next);
   };
-  const selectContext = (context: ConversationContext) => {
-    setReturnId(null);
-    navigate({ ...nav, context, message: null, page: "conversations", chronology: false });
+  const investigate = (input: HistoryInput) => {
+    applyCriteria(input);
+    navigate({ ...nav, context: { kind: "all" }, page: "conversations", chronology: false });
     requestAnimationFrame(() => listHeading.current?.focus());
   };
+  const selectContext = (context: ConversationContext) => {
+    setReadingSnapshot(EMPTY_READING_SNAPSHOT);
+    setReturnId(null);
+    navigate({ ...nav, context, message: null, page: "conversations", chronology: false });
+    requestAnimationFrame(() => {
+      if (readerScroll.current) readerScroll.current.scrollTop = 0;
+      listHeading.current?.focus({ preventScroll: true });
+    });
+  };
   const selectGroup = (selected: ObservedConversation, id = selected.anchorMessageId) => {
-    if (history.data)
-      setSnapshot({
-        group: selected,
-        observedAt: history.data.observedAt,
-        criteria: history.data.criteria,
-      });
+    setReadingSnapshot(EMPTY_READING_SNAPSHOT);
     setReturnId(null);
     navigate({ ...nav, message: id, page: "thread" });
     requestAnimationFrame(() => {
       if (id !== selected.messages[0]?.id) {
         nodes.current.get(id)?.scrollIntoView({ block: "start" });
-        nodes.current.get(id)?.focus();
-      } else threadHeading.current?.focus();
+        nodes.current.get(id)?.focus({ preventScroll: true });
+      } else {
+        if (readerScroll.current) readerScroll.current.scrollTop = 0;
+        threadHeading.current?.focus({ preventScroll: true });
+      }
     });
   };
   const backToList = () => {
@@ -222,23 +243,61 @@ export function App({ client }: { client: ViewerClient }) {
     nodes.current.get(id)?.scrollIntoView({ block: "start" });
     nodes.current.get(id)?.focus();
   };
-  const selectedGroup =
-    group ??
-    (nav.message !== null && snapshot?.group.messages.some((message) => message.id === nav.message)
-      ? snapshot.group
-      : undefined);
   const groups = index ? conversationsForContext(index, nav.context) : [];
   const contexts = index?.contexts ?? [];
   const visibleGroups =
     nav.chronology && index
       ? [...index.conversations].sort((a, b) => b.latestSourceIndex - a.latestSourceIndex)
       : groups;
-  const contextIds = new Set(groups.flatMap((item) => item.messages.map((message) => message.id)));
-  const contextMessages =
-    history.data?.messages.filter((message) => contextIds.has(message.id)) ?? [];
+  const contextMessages = useMemo(() => {
+    const contextGroups = index ? conversationsForContext(index, nav.context) : [];
+    const ids = new Set(
+      contextGroups.flatMap((item) => item.messages.map((message) => message.id))
+    );
+    return history.data?.messages.filter((message) => ids.has(message.id)) ?? [];
+  }, [index, nav.context, history.data]);
   const showContextFlow =
     nav.message === null && nav.context.kind !== "all" && !nav.chronology && history.data !== null;
-  const readMessages = selectedGroup?.messages ?? (showContextFlow ? contextMessages : undefined);
+  const readingIntent = useMemo<ReadingIntent | null>(
+    () =>
+      nav.message !== null
+        ? { kind: "conversation", selectedMessageId: nav.message }
+        : showContextFlow
+          ? { kind: "flow", context: nav.context }
+          : null,
+    [nav.message, nav.context, showContextFlow]
+  );
+  const candidate = useMemo<ReadingUnit | null>(() => {
+    if (history.data === null || readingIntent === null) return null;
+    const observation = { criteria: history.data.criteria, observedAt: history.data.observedAt };
+    if (readingIntent.kind === "conversation")
+      return group
+        ? {
+            ...readingIntent,
+            ...observation,
+            conversation: group,
+            messages: group.messages,
+          }
+        : null;
+    return { ...readingIntent, ...observation, messages: contextMessages };
+  }, [history.data, readingIntent, group, contextMessages]);
+  const reading = useMemo(
+    () => reconcileReadingUnit(readingSnapshot, readingIntent, candidate),
+    [readingSnapshot, readingIntent, candidate]
+  );
+  useEffect(() => {
+    if (reading !== readingSnapshot) setReadingSnapshot(reading);
+  }, [reading, readingSnapshot]);
+  const unit = reading.unit;
+  const selectedGroup = unit?.kind === "conversation" ? unit.conversation : undefined;
+  const readMessages = unit?.messages;
+  const retainedSelection = unit !== null && reading.retained;
+  const previousReadingCriteria = unit !== null && historyInputKey(unit.criteria) !== history.key;
+  const readingState = retainedSelection
+    ? "Outside current observation"
+    : readMessages !== undefined && previousReadingCriteria
+      ? "Previous criteria observation"
+      : "";
   return (
     <div className="app-shell">
       <header className="app-header">
@@ -253,6 +312,7 @@ export function App({ client }: { client: ViewerClient }) {
           <span className="brand-context">Observer</span>
         </div>
         <div className="header-actions">
+          <AutoRefreshToggle enabled={automatic.enabled} onToggle={automatic.toggle} />
           <ThemeToggle />
           <Refresh
             label="Refresh all"
@@ -270,7 +330,7 @@ export function App({ client }: { client: ViewerClient }) {
             <h1 id="contexts-heading" ref={contextHeading} tabIndex={-1}>
               Contexts
             </h1>
-            <p>In the latest {history.data?.criteria.limit ?? DEFAULT_HISTORY_LIMIT} messages</p>
+            <CriteriaScope criteria={history.data?.criteria ?? history.input} />
           </div>
           <Observation
             loading={history.loading}
@@ -278,6 +338,12 @@ export function App({ client }: { client: ViewerClient }) {
             observedAt={history.data?.observedAt}
             omitted={history.data?.omitted}
           />
+          {previousCriteria && (
+            <p className="notice">
+              Showing the previous criteria observation until the applied criteria succeeds.
+            </p>
+          )}
+          <InvestigationControls criteria={history.input} onApply={investigate} />
           <div className="context-scroll">
             <button
               type="button"
@@ -361,14 +427,24 @@ export function App({ client }: { client: ViewerClient }) {
             observedAt={history.data?.observedAt}
             omitted={history.data?.omitted}
           />
+          {previousCriteria && (
+            <p className="notice">
+              Previous criteria observation. Applied criteria has not succeeded.
+            </p>
+          )}
+          {history.data && <CriteriaScope criteria={history.data.criteria} />}
           {nav.context.kind !== "all" && !nav.chronology && history.data && (
             <button
               className="read-context"
               type="button"
               onClick={() => {
+                setReadingSnapshot(EMPTY_READING_SNAPSHOT);
                 setReturnId(null);
                 navigate({ ...nav, message: null, page: "thread" });
-                requestAnimationFrame(() => threadHeading.current?.focus());
+                requestAnimationFrame(() => {
+                  if (readerScroll.current) readerScroll.current.scrollTop = 0;
+                  threadHeading.current?.focus({ preventScroll: true });
+                });
               }}
             >
               Read context
@@ -477,7 +553,13 @@ export function App({ client }: { client: ViewerClient }) {
                 observedAt={peers.data?.observedAt}
                 omitted={peers.data?.omitted}
               />
-              <PeerList data={peers.data} error={peers.error} />
+              <PeerList
+                data={peers.data}
+                error={peers.error !== null}
+                onInvestigate={(address) => {
+                  investigate({ limit: DEFAULT_HISTORY_LIMIT, participant: address });
+                }}
+              />
             </>
           ) : (
             <>
@@ -496,15 +578,40 @@ export function App({ client }: { client: ViewerClient }) {
                   <h2 id="thread-heading" ref={threadHeading} tabIndex={-1}>
                     {showContextFlow ? "Context flow" : "Conversation"}
                   </h2>
+                  <p className="reading-observation-state" role="status" aria-atomic="true">
+                    {readingState}
+                  </p>
                 </div>
               </div>
-              <div className="thread-scroll">
+              <div className="thread-scroll" ref={readerScroll}>
                 {readMessages ? (
                   <div className="thread-inner">
-                    {!group && !showContextFlow && snapshot && (
+                    {retainedSelection && unit && (
                       <p className="notice">
-                        Not in the latest observation · limit {snapshot.criteria.limit} · last
-                        observed <Text value={formatTime(snapshot.observedAt)} />
+                        Not in the current observation · limit {unit.criteria.limit} · last observed{" "}
+                        <Text value={formatTime(unit.observedAt)} />
+                      </p>
+                    )}
+                    {unit && <CriteriaScope criteria={unit.criteria} />}
+                    {retainedSelection && history.error && (
+                      <p className="notice">
+                        Current history refresh failed. This retained reading is from an earlier
+                        observation.
+                      </p>
+                    )}
+                    {!retainedSelection && unit && (
+                      <Observation
+                        loading={history.loading}
+                        error={history.error}
+                        observedAt={unit.observedAt}
+                        omitted={history.data?.omitted}
+                      />
+                    )}
+                    {previousReadingCriteria && (
+                      <p className="notice">
+                        {previousCriteria
+                          ? "Showing the previous criteria observation. Applied criteria has not succeeded."
+                          : "This retained reading uses earlier criteria."}
                       </p>
                     )}
                     <div className="thread-scope">

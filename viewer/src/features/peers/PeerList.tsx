@@ -1,7 +1,16 @@
+import { MAX_PARTICIPANT_LENGTH } from "../../../shared/limits";
 import type { PeersObservation } from "../../../shared/public";
 import { Audience, Text } from "../../Text";
 
-export function PeerList({ data, error }: { data: PeersObservation | null; error: boolean }) {
+export function PeerList({
+  data,
+  error,
+  onInvestigate,
+}: {
+  data: PeersObservation | null;
+  error: boolean;
+  onInvestigate?: (address: string) => void;
+}) {
   return (
     <div className="thread-scroll">
       {!data && <p className="empty">{error ? "Peers unavailable." : "Loading peers…"}</p>}
@@ -17,6 +26,17 @@ export function PeerList({ data, error }: { data: PeersObservation | null; error
           <div className="peer-address">
             <Text value={peer.address} />
           </div>
+          {onInvestigate &&
+            peer.address !== "" &&
+            peer.address.length <= MAX_PARTICIPANT_LENGTH && (
+              <button
+                type="button"
+                className="text-action"
+                onClick={() => onInvestigate(peer.address)}
+              >
+                Investigate exact address
+              </button>
+            )}
           <div className="peer-meta">
             <Text value={peer.runtime} />
             {peer.host && (

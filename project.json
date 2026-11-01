@@ -39,10 +39,15 @@
         "{workspaceRoot}/viewer/src/features/conversations/model.ts",
         "{workspaceRoot}/viewer/src/markdown-policy.ts",
         "{workspaceRoot}/viewer/src/observation-resource.ts",
+        "{workspaceRoot}/viewer/src/auto-refresh.ts",
+        "{workspaceRoot}/viewer/src/history-criteria.ts",
+        "{workspaceRoot}/viewer/src/reading-unit.ts",
         "{workspaceRoot}/test/viewer-public.test.ts",
         "{workspaceRoot}/test/viewer-conversations.test.ts",
         "{workspaceRoot}/test/viewer-markdown-policy.test.ts",
         "{workspaceRoot}/test/viewer-observation-resource.test.ts",
+        "{workspaceRoot}/test/viewer-investigation.test.ts",
+        "{workspaceRoot}/test/viewer-reading-unit.test.ts",
         "{workspaceRoot}/tsconfig.json"
       ],
       "outputs": [],
@@ -105,6 +110,15 @@
       "cache": false,
       "dependsOn": ["viewer-build"],
       "options": { "command": "bun --no-env-file run test:browser", "env": { "FORCE_COLOR": "0" } }
+    },
+    "browser-investigation": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "dependsOn": ["viewer-build"],
+      "options": {
+        "command": "bun --no-env-file run test:browser:investigation",
+        "env": { "FORCE_COLOR": "0" }
+      }
     }
   }
 }

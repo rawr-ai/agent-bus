@@ -93,6 +93,52 @@ The owner's first use rejected the activity-first opening as too flat: topic and
 
 The owner also requested dark mode and proper Markdown. Those remain required reading-quality work. The next complete story selects one bounded latest-200 observation for context projection, preserving whole observed reply components across audiences; a topic is not a complete historical room. Supported server search, honest automatic freshness and complete rendered-product qualification remain in the first-release objective, not silently deferred out of it. No first-release or goal-complete claim is made by the foundation commit.
 
+## Search and freshness story
+
+After the context-first reader and owner-directed workbench were committed, the next accepted story added exact server search and participant investigation, clear-to-latest, and periodic independent history/peer observation. The application uses reusable resource controllers through React's external-store API; StrictMode cleanup cancels work without permanently disposing the reused controller. One scheduler pauses on explicit choice or hidden-page state, resumes once, skips already-pending resources independently and never changes navigation, focus or scroll. Applied requests, actual last-good criteria and a retained evicted conversation remain distinct.
+
+The pure temporal/criteria tests use injected clocks rather than real waiting. A native browser lane intercepts only the production polling interval and checks actual upstream synthetic-tool arguments, different-criteria failure, independent peers, clear, paused/manual/resumed/visibility counts, overlap refusal and a pinned message's focused visual reading anchor. The first continuity assertion mistakenly raced an explicit navigation's scheduled focus and assumed numeric scroll offsets could not change when an honest notice was inserted. Waiting for navigation settlement and comparing the visual reading anchor fixed the falsifier without changing product behavior or dropping focus preservation. The qualified lane then passed in 2.34 seconds; 320/390 page-width checks and synthetic desktop/mobile/theme captures passed.
+
+Source verification at this stage passed 145 focused viewer tests and 986 assertions in 137 ms, plus the uncached full repository check: 418 tests and 3,243 assertions in 42.32 seconds for the test portion, root/server/browser/workbench/harness types, lint and 48 Markdown pages. The full run retained core/storage coverage and explicitly selected the qualified disposable Fluree tool. Production and workbench builds passed; final Storybook regression, native browser regression diagnosis and independent rendered review are still qualification gates, not inferred from these passes.
+
+No public API, store authority, deployment, network sharing, send action or draft persistence changed. The [workbench frame](viewer-workbench.md) owns the testing/caching-method decision; current search and freshness rules/commands belong to the viewer reference, interface catalogue and runbook.
+
+## First-release qualification
+
+A fresh exact-model Opus high challenge received bounded public source and four approved synthetic image blocks through tool-free input. It identified real distinct visible anchors, not image placeholders. High effort was requested, not independently attested. No real bus capture, credentials or raw upstream response entered the review. The source and rendered challenge supported the context-first operator job and found one supported blocker: the retained-data caveat could scroll away beside the current list's clock.
+
+That blocker was repaired with a persistent fixed-reader-header state line, reserving its height even when empty. A strict native check proves the retained cue stays visible outside the scroller while focus and the absolute and relative visual reading anchor remain unchanged. The review's inferred context-flow continuity risk was separately falsified: eviction removed the focused article and left focus on the page body. This promoted a residual hypothesis to a real product defect rather than ignoring it because the review had not observed it.
+
+The repair stores exactly one bounded reading unit, conversation or context flow, and reconciles it synchronously before rendering. Any evicted previously displayed ID retains the whole old unit, even if the selected anchor remains current; there is no union or accumulating archive. The current list continues observing independently. Explicit context/conversation selection or Read context accepts the current unit. Native tests prove conversation and flow retention, visible stale-state labeling, exact criteria/time ownership, focus and visual-anchor continuity, then explicit acceptance at scroll position zero. New replies and merges can advance when no old displayed ID disappears. Nine pure tests cover the state boundary, identity, metadata, order, bounds and explicit acceptance.
+
+Final verification passed:
+
+- Full uncached repository qualification: 427 tests, 3,283 assertions, 40.85 seconds for the test portion; all root, server, browser, workbench and browser-harness types, lint and 48 Markdown pages. The command explicitly selected the qualified disposable storage test tool, with no service/global upgrade. Later explicit-navigation changes passed whole-repository types, lint and native checks.
+- Focused viewer lane: 154 tests and 1,026 assertions in 122 milliseconds.
+- Eight actual production-component Storybook plays, with individual cases around one to 4.6 seconds; real intentional-failure and render-only oracles correctly refuse. Interactive local workbench startup, a native exact-search play and owned shutdown also passed.
+- Three connected native synthetic journeys passed; the separate strict search/freshness/retention lane passed in 2.14 seconds, including actual submitted upstream arguments, separate-resource recovery, overlap/pause/visibility/manual counts, conversation and flow eviction, 320/390 layouts and explicit-current acceptance.
+- Production build and dependency-graph checks; a cold compiled artifact's assets, exact modern public calls, foreign-Origin refusal and clean shutdown; seventeen disposable cache correctness experiments, including exact output restoration and hostile root-config refusal.
+- After the parent-owned final restart, actual native live reading passed in 1.01 seconds: nonempty current history, literal context flow, unclamped Source, audiences, theme change and separately observed peers. Only structural flags/counts were retained.
+
+Earlier generic first-journey browser failures were not conclusively explained. Granular safe structural diagnostics were added; isolated and controlled paired fixed-artifact runs passed, so concurrency was not established as their cause. The navigation test now also waits for the actual explicit navigation focus before following a reply, avoiding the separately demonstrated animation-frame precondition race without weakening assertions or adding retries. The final current-source native runs pass; this remains a disclosed harness risk, not a claimed proven historical repair.
+
+The scoped first release is qualified as a local read-only observer, not a complete archive, push stream, authenticated multi-user service or accessibility certification. The visible composition location remains inert. Core deployment, network exposure, publication and merging were not performed.
+
+During closure, independently owned work advanced the main branch with retired-parser cleanup and native Codex skill installation documentation. The viewer work is checkpointed before a branch-only Graphite restack onto that current base; combined-source qualification remains a final integration gate. This does not authorize editing or redeploying the primary checkout.
+
+That integration gate passed on main `fa9e0c6`. Graphite restacked only the viewer branch. Root manifest/lock conflicts preserved every viewer/workbench pin while retaining the upstream parser removal; a structured lock comparison verified no version changes, only the four retired parser packages and their two orphan nested dependencies removed. Viewer, harness, story and build source stayed byte-identical to the qualified candidate. Frozen install made no changes. The combined uncached check passed 418 tests and 3,272 assertions in 40.08 seconds for tests, plus types, lint and 48 docs. The nine-test/eleven-assertion reduction is exactly the upstream retired-validator deletion, not viewer coverage omitted or cached. Production rebuild and cold compiled smoke also passed. The primary checkout and deployed bus were not modified by the viewer integration.
+
+## Next product loop
+
+These are explicit follow-up questions, not hidden first-release work or an infinite completion condition. Observe actual use, select one complete next story, design its falsifier and repeat the accepted loop.
+
+| Question | Trigger for the next story |
+| --- | --- |
+| Make distinct reply groups and cross-audience relationships even clearer inside chronological context flow | First-use evidence that readers confuse separate groups despite literal audiences and reply links |
+| Improve activity cues and stable ordering in the context rail | Repeated investigation effort locating active or quiet contexts in the bounded window |
+| Reduce refresh announcements and qualify assistive technology, actual browser zoom and mobile pause-state recognition | Before claiming accessibility conformance or broader assistive-technology use |
+| Characterize intermittent native-browser startup/focus failures with the new bounded diagnostics | A reproducible failure on an unchanged artifact, without concealing it through retries or longer waits |
+
 ## Moved into current docs
 
 - [x] Contract: foundation procedures and limits are in [interfaces](../architecture/interfaces.md#viewer).

@@ -35,13 +35,16 @@ The normal context-reading request is up to 200 messages. The viewer preserves l
 | RPC methods and media type | POST and `application/json` only; no batch or generic call route |
 | Request body | At most 4,096 bytes, including streamed/chunked bodies |
 | Whole request / upstream operation | 10 seconds each; abort and cleanup are explicit |
+| Browser resource deadline | 12 seconds independently for history and peers; late generations cannot replace the current observation |
+| Automatic observation interval | 15 seconds while enabled and visible; one timer, pending resources skipped independently, no catch-up queue |
+| Retained reading | At most one previous conversation or literal context flow, at most 200 messages; original criteria/time, persistent visible state, no union with the current observation |
 | Active reads | At most eight; excess intake is refused |
 | MCP message bytes | At most 8 MiB; excess is unavailable, never silently truncated text |
 | Peer records per observation | At most 1,000; excess is unavailable |
 | Markdown preview per body | At most 100,000 UTF-16 code units; larger bodies use their full Source view, never silent truncation |
 | Browser asset access | Only generated manifest paths, GET/HEAD; no filesystem catch-all, source maps or environment inlining |
 
-Unavailable, timeout, cancellation and internal failure have safe public outcomes, never raw MCP/store/parse diagnostics. Unsupported methods, hosts, origins, paths, input fields and bounds are refused before business work. Missing Origin is permitted for local non-browser clients; this is not user authentication or public-hosting readiness. Navigation uses a browser hash; it does not expose arbitrary HTTP query forwarding. The browser stores only an explicit light/dark preference under `agent-bus-viewer-theme`, with system preference as the default; observations and message bodies are not persisted. Limits, response semantics and trust policy are in [viewer](viewer.md); literal start/stop commands and recovery are in the [runbook](../runbooks/viewer.md).
+Unavailable, timeout, cancellation and internal failure have safe public outcomes, never raw MCP/store/parse diagnostics. Unsupported methods, hosts, origins, paths, input fields and bounds are refused before business work. Missing Origin is permitted for local non-browser clients; this is not user authentication or public-hosting readiness. Navigation uses a browser hash; it does not expose arbitrary HTTP query forwarding. Applying search replaces the active observation; an old successful result keeps its own criteria/time while a new request is pending or failed. Manual refresh may replace pending work, and explicit resume or page visibility restoration requests once. The browser stores only an explicit light/dark preference under `agent-bus-viewer-theme`, with system preference as the default; criteria, pause state, observations and message bodies are not persisted. Limits, response semantics and trust policy are in [viewer](viewer.md); literal start/stop commands and recovery are in the [runbook](../runbooks/viewer.md).
 
 ### MCP tools
 
