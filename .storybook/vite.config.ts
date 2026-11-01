@@ -1,0 +1,6 @@
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  envDir: false,
+  css: { postcss: { plugins: [] } },
+});

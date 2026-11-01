@@ -26,7 +26,7 @@ The selected message ID anchors navigation, not a fabricated stable thread ID. R
 
 Message bodies have a safe GFM Markdown view and a Source view. HTML is not interpreted, image nodes do not create image elements, and only explicit absolute HTTP(S) links can be activated by the reader. Metadata remains isolated text. Directional/control characters use visible notation. A large body's full source remains readable when its Markdown preview exceeds the client rendering limit. Light/dark appearance defaults to the system until a reader chooses; only that appearance preference is persisted, never messages.
 
-The implementation lives under `viewer/`; `scripts/build-viewer.ts` emits the browser assets, exact asset manifest and server artifact. App composition owns shared navigation/selection, feature code owns reading surfaces, and the shared public contract owns projection. The production bootstrap creates the real typed client. Browser imports of the server client surface are type-only; the production build checks the browser module graph for core/server imports.
+The implementation lives under `viewer/`; `scripts/build-viewer.ts` emits the browser assets, exact asset manifest and server artifact. App composition owns shared navigation/selection, feature code owns reading surfaces, and the shared public contract owns projection. The production bootstrap creates the real typed client; Storybook injects synthetic state into the same App and production components. Browser imports of the server client surface are type-only; the production build checks the browser module graph for core/server and test-workbench imports.
 
 ## Rules
 
@@ -64,3 +64,4 @@ The current [public tool contracts](interfaces.md#bus_history), [messaging model
 ## History
 
 The [preparation frame](../frames/agent-bus-viewer.md) records the accepted product/team boundary. The [implementation and qualification frame](../frames/agent-bus-viewer-release.md) records discovery, alternatives, exact compatibility experiments and release evidence.
+The [workbench frame](../frames/viewer-workbench.md) records the owner-directed Storybook, Stagehand and local caching qualification.

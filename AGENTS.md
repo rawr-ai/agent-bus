@@ -81,6 +81,8 @@ When a decision, constraint or trap changes, `update` its memory instead of addi
 
 `bun run check` must pass before committing. It runs `typecheck`, `lint`, `test` and `check:docs`, each also a script of its own. `bun run lint:effect` (stricter Effect rules) and `bunx knip` (unused files, exports and dependencies) are advisory.
 
+Viewer changes use the [viewer verification lanes](docs/runbooks/viewer.md#verify-the-viewer): direct Bun pure tests for the tight loop, production-component Storybook plays for UI, native local Stagehand for representative connected journeys, and Nx for deterministic local check/build reuse. Never cache browser, integration, live-data or full qualification outcomes. The root tool launcher refuses dotenv before invocation and strips provider/cloud credentials; use the package commands rather than bypassing it. Browser tests have their own [instructions](tests/browser/AGENTS.md). Load the ignored local `agent-bus-workbench` skill where installed; it routes the actual workbench and upstream Browse skill, not the generic resource's older Stagehand API. No upstream skill cache is vendored or edited by this repository.
+
 ```sh
 bun install                 # also clones the Effect source into .repos/effect
 bun run check

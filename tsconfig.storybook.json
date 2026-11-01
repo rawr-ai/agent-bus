@@ -1,0 +1,4 @@
+{
+  "extends": "./viewer/tsconfig.browser.json",
+  "include": ["viewer/src", "stories", ".storybook"]
+}

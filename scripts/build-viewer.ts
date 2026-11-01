@@ -18,8 +18,12 @@ const browser = await Bun.build({
 });
 if (!browser.success) throw new Error("Viewer browser build failed");
 const browserGraph = JSON.stringify(browser.metafile);
-if (/viewer\/server\/|src\/(?:Bus|Ledger|mcp|client)\.ts/.test(browserGraph)) {
-  throw new Error("Server code entered the browser build");
+if (
+  /viewer\/server\/|src\/(?:Bus|Ledger|mcp|client)\.ts|(?:^|[/\\])(?:stories|\.storybook|test|tests)[/\\]|@storybook|stagehand/.test(
+    browserGraph
+  )
+) {
+  throw new Error("Server or test-workbench code entered the browser build");
 }
 const manifest = browser.outputs.map((artifact) => {
   const file = artifact.path.split("/").at(-1);

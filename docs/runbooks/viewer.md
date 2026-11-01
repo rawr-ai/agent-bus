@@ -43,6 +43,55 @@ Expected: the pinned dependencies install without changing the lockfile. `--igno
 
 Use Control-C in the viewer terminal. Expected: it stops intake, interrupts active requests and awaits runtime cleanup without stopping the existing bus. Rebuild after browser-source changes, then restart the viewer; the product uses the same built assets in development and cold-artifact checks. *Rehearsed 2026-11-01 with the compiled artifact's SIGINT and SIGTERM handlers, clean exit and a rebuilt/restarted local viewer.*
 
+## Verify the viewer
+
+Use the smallest relevant lane during development, then the full uncached check at the story boundary. The browser and workbench commands below use synthetic data, not the running bus, credentials or a user's browser profile. Their launcher refuses root dotenv names before invoking tools, allowlists inherited environment, disables telemetry/cloud and binds owned servers to loopback. Do not run these tools directly to bypass that boundary.
+
+1. Check pure projection, conversation, Markdown-policy and resource behavior:
+
+   ```sh
+   bun --no-env-file run test:viewer:unit
+   bun --no-env-file run check:fast
+   ```
+
+   Expected: direct focused Bun tests run first; the second command runs locally cached types, lint and pure tests. A cache hit is reuse of a deterministic check, not a new browser or live observation. Direct tests remain useful when they cost less than Nx startup. *Rehearsed 2026-11-01; fresh execution and three unchanged local cache hits checked.*
+
+2. Build the component workbench, then execute its authored plays:
+
+   ```sh
+   bun --no-env-file run nx run agent-bus:storybook-build
+   bun --no-env-file run test:storybook
+   ```
+
+   Expected: the runner owns an ephemeral static server and fresh local Stagehand browsers, reports actual successful play phases, and closes them. A static build alone does not execute plays. Render-only and deliberately failing internal harness-oracle stories must be rejected when explicitly selected. For interactive component work, `bun --no-env-file run storybook` uses the fixed local development port and refuses a collision rather than taking another owner's server. Stop it with Control-C. *Build and five positive plays rehearsed 2026-11-01; real failure and no-play oracles correctly refused. The long-lived interactive development command is unverified.*
+
+3. Build and check connected production journeys:
+
+   ```sh
+   bun --no-env-file run nx run agent-bus:viewer-build
+   bun --no-env-file run test:browser
+   ```
+
+   Expected: native Stagehand exercises the compiled viewer against a synthetic public endpoint, checks actual viewport, context/reply navigation, safe Markdown/theme and mobile focus, then closes its owned viewer, endpoint and browsers. Browser and integration targets are uncached. This does not prove the existing bus's present availability. *Rehearsed 2026-11-01; three journeys passed with clean owned-process exit.*
+
+   To check the already running real viewer explicitly, use `bun --no-env-file run test:browser:live --url http://127.0.0.1:4317/`. It emits only structural flags/counts, not message content, and does not start or stop the existing viewer or bus. Successful empty history is labeled as not proving message reading; unavailable history fails. *Checked read-only 2026-11-01; actual context/body/audience/theme and independent peer observation passed.*
+
+4. Qualify cache behavior after changing task inputs, outputs or tool identity:
+
+   ```sh
+   bun --no-env-file run qualify:viewer-cache
+   ```
+
+   Expected: a disposable source copy demonstrates misses, hits, byte-for-byte artifact restoration, relevant-change failures, independent reuse, affected-project selection and dotenv refusal. It deletes only its own temporary copy. A single root project has coarse affected selection; target inputs decide reuse. *Rehearsed 2026-11-01 on disposable source; all initial cache experiments passed.*
+
+5. At completion, run the existing full check and actual local-data reading step above:
+
+   ```sh
+   bun --no-env-file run check
+   ```
+
+   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; 412 tests, types, lint and documentation passed for the expanded story using the qualified test tool.*
+
 ## If it fails
 
 - **No startup URL:** check that the production build exists, the configured ports are integers in range and the viewer port is unused. Rebuild from the same checkout. Startup errors deliberately omit paths and raw diagnostics.
@@ -52,5 +101,8 @@ Use Control-C in the viewer terminal. Expected: it stops intake, interrupts acti
 - **Large or slow observation:** request bodies, input lengths, history/peer counts, MCP bytes, concurrency and time are bounded under [interfaces](../architecture/interfaces.md#viewer). A response over a bound fails rather than truncating message text. Do not remove a bound or increase arbitrary tool access as recovery.
 - **Text search misses older content:** follow the [known Fluree limits](../platforms/fluree.md#full-text-search). Do not infer that a historical message never existed, start a second server or reindex production as a viewer repair.
 - **Contributor full check fails at Fluree search:** verify which Fluree binary the test process selects. The [platform findings](../platforms/fluree.md#full-text-search) distinguish the qualified tool from older local behavior. Do not skip Fluree or merely increase a timeout to conceal an empty result.
+- **Tool refused before startup:** the isolated development checkout contains root dotenv names. Keep credential files in their actual owning environment; use a separate credential-free development checkout. Do not print, move or delete somebody else's files. The task dotenv switch alone does not prevent the parent tool from reading them.
+- **Workbench build succeeds but plays fail:** inspect the native play verdict, rendered error and selected story. No-play, native exception and timeout are failures even if a terminal success event follows. Rebuild after story/config changes; do not replace this check with screenshots or build-only success.
+- **A browser lane is unexpectedly slow:** inspect the bounded failing selector/play, startup and exact viewport separately. The normal representative lane is not a three-minute qualification job. Do not add sleeps, cloud/model fallback or global process cleanup. Close only the named owned session or process; preserve the user's browsers.
 
 Public hosting, core deployment and persistent installation are outside this runbook. Return to the owner for those decisions rather than expanding a local-viewer procedure.
