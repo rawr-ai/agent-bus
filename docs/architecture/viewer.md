@@ -4,7 +4,7 @@ The optional browser viewer's reading model, implementation boundary and limits.
 
 ## What it does
 
-The viewer is a separate loopback process, not another `serve`. It serves built React assets and two fixed oRPC procedures, which use a narrowly scoped Effect MCP reader of the existing machine's `serve`. The reader discovers that server once and reuses one client and its tool list, so each observation is a single tool call; a failed discovery or a missing tool is discovered again on the next read. It imports no core bus, ledger, cursor or wake implementation. The core executable and its deployment are unchanged.
+The viewer is a separate loopback process, not another `serve`. It serves built React assets and two fixed oRPC procedures, which use a narrowly scoped Effect MCP reader of the existing machine's `serve`. The reader discovers that server once and shares one reference-counted client and its tool list, so each observation is a single tool call; a failed discovery or a missing tool is discovered again on the next read. A client superseded by a missing tool closes when the last read still using it finishes. It imports no core bus, ledger, cursor or wake implementation. The core executable and its deployment are unchanged.
 
 ```mermaid
 flowchart LR

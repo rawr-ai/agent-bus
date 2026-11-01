@@ -1,10 +1,11 @@
+import { heapStats } from "bun:jsc";
 import { expect, test } from "bun:test";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
-import { Schema } from "effect";
+import { Context, Effect, Exit, Layer, Schema, Scope } from "effect";
 import { createViewer } from "../viewer/server/host.ts";
 import { ViewerPortInUse } from "../viewer/server/port.ts";
-import { MAX_MESSAGE_BYTES } from "../viewer/server/reader.ts";
+import { MAX_MESSAGE_BYTES, ObservationReader, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import { failureFromStatus } from "../viewer/src/observation-resource.ts";
 
@@ -151,6 +152,7 @@ const setup = (timeoutMillis = 1_000) => {
     viewer,
     client,
     direct,
+    busPort: upstream.port ?? 0,
     calls,
     methods,
     capturedHeaders,
@@ -332,6 +334,63 @@ test("a failed discovery is not kept, and a missing tool is discovered again", a
       "tools/call",
     ]);
   } finally {
+    await fixture.close();
+  }
+});
+
+/** Objects still reachable after full collections: what a long-running reader keeps. */
+const liveObjects = () => {
+  Bun.gc(true);
+  Bun.gc(true);
+  return heapStats().objectCount;
+};
+
+test("a superseded client is released once its last concurrent read finishes", async () => {
+  const fixture = setup();
+  const scope = Scope.makeUnsafe();
+  try {
+    const reader = await Effect.runPromise(
+      Layer.buildWithScope(readerLayer({ busPort: fixture.busPort }), scope).pipe(
+        Effect.map((context) => Context.get(context, ObservationReader))
+      )
+    );
+    const read = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.exit(effect));
+    // Each peers read discovers a client without bus_peers, which that read then supersedes.
+    fixture.mode("no-peers-tool");
+    const failPeers = async (reads: number) => {
+      for (let attempt = 0; attempt < reads; attempt++) {
+        expect(Exit.isFailure(await read(reader.peers()))).toBe(true);
+      }
+    };
+    await failPeers(50);
+    const before = liveObjects();
+    await failPeers(200);
+    expect(fixture.methods.filter((method) => method === "server/discover")).toHaveLength(250);
+    // A retained client keeps about 300 objects alive; this bound admits only fixture records.
+    expect((liveObjects() - before) / 200).toBeLessThan(50);
+
+    // A read still using the client when a missing tool supersedes it is neither cancelled nor
+    // failed.
+    expect(Exit.isSuccess(await read(reader.history({ limit: 50 })))).toBe(true);
+    fixture.mode("hang");
+    const pending = read(reader.history({ limit: 50 }));
+    while (fixture.calls.length < 2) await Bun.sleep(2);
+    expect(Exit.isFailure(await read(reader.peers()))).toBe(true);
+    fixture.release();
+    expect(Exit.isSuccess(await pending)).toBe(true);
+    expect(fixture.abortCount()).toBe(0);
+
+    // The next read discovers a current client.
+    fixture.mode("normal");
+    const discovered = fixture.methods.length;
+    expect(Exit.isSuccess(await read(reader.peers()))).toBe(true);
+    expect(fixture.methods.slice(discovered)).toEqual([
+      "server/discover",
+      "tools/list",
+      "tools/call",
+    ]);
+  } finally {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     await fixture.close();
   }
 });

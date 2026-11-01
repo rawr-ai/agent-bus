@@ -1,4 +1,4 @@
-import { Context, Data, Duration, Effect, Exit, Layer, Schema, Scope, Semaphore } from "effect";
+import { Context, Data, Duration, Effect, Layer, RcRef, Schema, Semaphore } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import {
@@ -36,7 +36,6 @@ export const readerLayer = (options: {
 }) =>
   Layer.effect(ObservationReader)(
     Effect.gen(function* () {
-      const layerScope = yield* Effect.scope;
       const permits = Semaphore.makeUnsafe(MAX_CONCURRENT_READS);
       const timeout = options.timeoutMillis ?? OPERATION_TIMEOUT_MILLIS;
       const clientLayer = McpClient.layerHttp({
@@ -49,32 +48,28 @@ export const readerLayer = (options: {
       }).pipe(Layer.provide(FetchHttpClient.layer));
 
       // The stateless protocol keeps no session, so one client and its discovered tools serve
-      // every read: each observation is one tools/call. A connection is kept only once discovery
-      // succeeds, and a missing tool makes the next read discover again.
-      const connect = Effect.gen(function* () {
-        const scope = yield* Scope.fork(layerScope);
-        return yield* Layer.buildWithScope(clientLayer, scope).pipe(
-          Effect.flatMap((context) => {
-            const client = Context.get(context, McpClient.McpClient);
-            return Effect.map(client.listTools(), (tools) => ({ client, tools }));
-          }),
-          Effect.onExit((exit) => (Exit.isSuccess(exit) ? Effect.void : Scope.close(scope, exit)))
-        );
+      // every read: each observation is one tools/call. The reference-counted client is kept only
+      // once discovery succeeds. A missing tool invalidates it, so the next read discovers again;
+      // reads still holding the invalidated client finish with it, and the last one closes it.
+      const connection = yield* RcRef.make({
+        acquire: Effect.gen(function* () {
+          const client = Context.get(yield* Layer.build(clientLayer), McpClient.McpClient);
+          return { client, tools: yield* client.listTools() };
+        }),
+        idleTimeToLive: Duration.infinity,
       });
-      const [connection, rediscover] = yield* Effect.cachedInvalidateWithTTL(connect, (exit) =>
-        Exit.isSuccess(exit) ? Duration.infinity : Duration.zero
-      );
 
       const lookup = (name: "bus_history" | "bus_peers", args: Record<string, unknown>) =>
         Effect.gen(function* () {
-          const { client, tools } = yield* connection;
+          const { client, tools } = yield* RcRef.get(connection);
           const tool = tools.find((candidate) => candidate.name === name);
           if (tool === undefined) {
-            yield* rediscover;
+            yield* RcRef.invalidate(connection);
             return yield* new ObservationUnavailable();
           }
           return yield* client.callTool({ tool, schema: Schema.Unknown, arguments: args });
         }).pipe(
+          Effect.scoped,
           Effect.mapError(() => new ObservationUnavailable()),
           permits.withPermits(1),
           Effect.timeoutOrElse({
