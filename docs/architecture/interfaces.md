@@ -25,7 +25,7 @@ The optional viewer is a separate application, not a CLI subcommand or MCP forwa
 | `history` | Required integer `limit` from 1 to 200; optional nonempty `query` up to 256 characters and exact `participant` up to 512 characters; no unknown fields | `messages`, effective `criteria`, `observedAt`, `omitted`; no total, cursor or completeness marker |
 | `peers` | Empty object, no unknown fields | `peers`, independent `observedAt`, `omitted`; no liveness or historical membership marker |
 
-The normal history request is 50 messages. The viewer preserves literal text, case and audience rather than trimming or expanding an exact participant. It preserves the returned message order. Ordinary message fields and all named optional public origin fields remain available; private/internal and unknown nested fields do not cross the projection. Invalid envelopes and excessive counts fail the observation. An all-omitted response is separately visible from an ordinary successful empty response.
+The normal context-reading request is up to 200 messages. The viewer preserves literal text, case and audience rather than trimming or expanding an exact participant. It preserves the returned message order. Ordinary message fields and all named optional public origin fields remain available; private/internal and unknown nested fields do not cross the projection. Invalid envelopes and excessive counts fail the observation. An all-omitted response is separately visible from an ordinary successful empty response. Topic/address context selection is a local projection over the active observation, not an upstream inbox filter.
 
 | Viewer boundary | Value |
 | --- | --- |
@@ -38,9 +38,10 @@ The normal history request is 50 messages. The viewer preserves literal text, ca
 | Active reads | At most eight; excess intake is refused |
 | MCP message bytes | At most 8 MiB; excess is unavailable, never silently truncated text |
 | Peer records per observation | At most 1,000; excess is unavailable |
+| Markdown preview per body | At most 100,000 UTF-16 code units; larger bodies use their full Source view, never silent truncation |
 | Browser asset access | Only generated manifest paths, GET/HEAD; no filesystem catch-all, source maps or environment inlining |
 
-Unavailable, timeout, cancellation and internal failure have safe public outcomes, never raw MCP/store/parse diagnostics. Unsupported methods, hosts, origins, paths, input fields and bounds are refused before business work. Missing Origin is permitted for local non-browser clients; this is not user authentication or public-hosting readiness. Limits, response semantics and trust policy are in [viewer](viewer.md); literal start/stop commands and recovery are in the [runbook](../runbooks/viewer.md).
+Unavailable, timeout, cancellation and internal failure have safe public outcomes, never raw MCP/store/parse diagnostics. Unsupported methods, hosts, origins, paths, input fields and bounds are refused before business work. Missing Origin is permitted for local non-browser clients; this is not user authentication or public-hosting readiness. Navigation uses a browser hash; it does not expose arbitrary HTTP query forwarding. The browser stores only an explicit light/dark preference under `agent-bus-viewer-theme`, with system preference as the default; observations and message bodies are not persisted. Limits, response semantics and trust policy are in [viewer](viewer.md); literal start/stop commands and recovery are in the [runbook](../runbooks/viewer.md).
 
 ### MCP tools
 

@@ -8,7 +8,7 @@ The viewer is a separate loopback process, not another `serve`. It serves built 
 
 ```mermaid
 flowchart LR
-  Browser[Browser activity and message inspector] --> Viewer[Loopback viewer: guarded assets and RPC]
+  Browser[Browser contexts and conversation reader] --> Viewer[Loopback viewer: guarded assets and RPC]
   Viewer --> Reader[Fixed public MCP reader]
   Reader --> Serve[Existing machine serve]
   Serve --> Ledger[Existing store]
@@ -18,11 +18,15 @@ flowchart LR
   class Serve,Ledger existing
 ```
 
-History and current peers are independent observations. Each has its own receipt time, loading/error state, omitted-record count and last-good content. Receipt time belongs to the viewer clock, not the ledger. A message inspector preserves full sender-authored text, literal audience, recorded time, reply reference and optional recorded origin. The composition location is inert and has no send path.
+History and current peers are independent observations. Each has its own receipt time, loading/error state, omitted-record count and last-good content. Receipt time belongs to the viewer clock, not the ledger. The primary reading units are literal topic/address contexts and observed reply groups, not a global message list. The composition location is inert and has no send path.
 
-The browser's selected message is not a claimed complete thread. Reply targets can be resolved only within its currently loaded history observation. A selected record outside a later successful observation retains its prior content and last-observed time with an explicit caveat. Text and metadata are inert; directional/control characters are visibly escaped and isolated rather than allowed to reorder interface labels.
+The conversation model projects one active bounded history observation. A visible message is a node; an explicit `replyTo` is an edge to its loaded target or a reference-only missing anchor. Weakly connected components include siblings sharing a missing parent, cycles and isolated messages. A context matches any literal member but retains its whole observed component, including replies addressed elsewhere. Current peers never expand those audiences. Messages keep source order; group summaries use latest source position, not a new interpretation of timestamps. A topic context can be read as a full context flow without clicking every singleton group; that flow is not one invented conversation. Chronology remains an alternate view.
 
-The implementation lives under `viewer/`; `scripts/build-viewer.ts` emits the browser assets, exact asset manifest and server artifact. App composition owns shared navigation/selection, feature code owns reading surfaces, and the shared public contract owns projection. Browser imports of the server client surface are type-only; the production build checks the browser module graph for core/server imports.
+The selected message ID anchors navigation, not a fabricated stable thread ID. Reply targets resolve only inside the loaded observation. If the selected ID leaves a refreshed observation, at most one previous group's content, criteria and receipt time remain with an explicit caveat; old and new groups are not merged. Hash navigation supports local links and Back without changing the HTTP trust boundary.
+
+Message bodies have a safe GFM Markdown view and a Source view. HTML is not interpreted, image nodes do not create image elements, and only explicit absolute HTTP(S) links can be activated by the reader. Metadata remains isolated text. Directional/control characters use visible notation. A large body's full source remains readable when its Markdown preview exceeds the client rendering limit. Light/dark appearance defaults to the system until a reader chooses; only that appearance preference is persisted, never messages.
+
+The implementation lives under `viewer/`; `scripts/build-viewer.ts` emits the browser assets, exact asset manifest and server artifact. App composition owns shared navigation/selection, feature code owns reading surfaces, and the shared public contract owns projection. The production bootstrap creates the real typed client. Browser imports of the server client surface are type-only; the production build checks the browser module graph for core/server imports.
 
 ## Rules
 
@@ -30,14 +34,15 @@ The implementation lives under `viewer/`; `scripts/build-viewer.ts` emits the br
 2. Viewer and upstream destinations are server-owned loopback addresses. The viewer binds `127.0.0.1`, requires its exact Host and same Origin when Origin is present, rejects foreign and `null` origins, and serves no permissive CORS response. Origin-less local clients remain allowed; this is not user authentication.
 3. One guarded handler serves only the generated asset allowlist and the exact RPC leaves. RPC is POST-only JSON. Method, body, input and concurrency checks precede business work. Unknown fields cannot select tools, headers, paths or a destination. Environment files are not part of the supported launch path.
 4. Runtime validation and explicit nested projection establish the browser DTO. Unknown extra fields are discarded. Invalid records and all raw rows sharing a duplicate valid identity are omitted with a count, never silently replaced by an arbitrary winner. Invalid envelopes, excess counts or response-byte limits make the resource unavailable rather than truncating it. No raw upstream response, diagnostic, private cause or parse value enters browser errors or logs.
-5. History is a bounded newest or best-match selection, returned chronologically. Preserve the returned order and literal audience. Neither a full nor a short result proves completeness or exhaustion. Exact participant matching is not a recipient inbox or a subscription expansion. Current peer subscriptions never rewrite historical audiences.
+5. History is a bounded newest or best-match selection, returned chronologically. Preserve the returned message order and literal audience. Neither a full nor a short result proves completeness or exhaustion. Context grouping is a projection of explicit reply references, not topic co-occurrence, subject similarity or body mentions. Select whole observed components before filtering their messages away. Missing anchors are not fabricated messages or proof of deletion. Exact participant matching is not a recipient inbox or a subscription expansion. Current peer subscriptions never rewrite historical audiences.
 6. Reading, routing, reply linkage, acceptance and completion are different facts. Do not infer read/delivery/completion, verified identity, online state, historical membership or deletion from these observations. Origin describes recorded message provenance, not the sender's current working state.
 7. Failed refreshes preserve independently labeled last-good data. A failed lookup is not an empty success; an all-omitted observation is not an ordinary empty result. Preserve reading position, focus and explicit selection rather than replacing them with new data. No messages are persisted in browser storage or accumulated into an unbounded archive.
 8. The application owns the native async/Effect boundary, safe error classification, interruption and shutdown. Stop intake, cancel active requests, await dependency cleanup and runtime disposal. Do not hide defects inside an expected upstream error or rely on TypeScript as output validation.
+9. Markdown changes presentation, not trust. No raw HTML/MDX, executable playground, automatic image/media request, prefetch or message-controlled local/custom-protocol navigation exists. Unsupported destinations are inert rather than empty/self links. Checked Markdown task items are read-only sender-authored content, never inferred bus task state. Source with controls exposed is not claimed as byte-identical clipboard data.
 
 ## Why
 
-An activity-first reading workspace serves the actual coordination unit without manufacturing inbox, chat-room or task-monitor state. A participant directory remains useful context but cannot explain historical recipients from current subscriptions. A complete pinned historical audit product would require a different public capability and its own decision.
+Topic/address context and explicit reply groups let a reader follow actual coordination without reconstructing it from isolated global rows. Context flow also works when senders supplied no reply links. A directory of current peers cannot explain historical recipients from present subscriptions. A complete pinned historical audit product would require a different public capability and its own decision.
 
 A separate viewer process avoids expanding the deployed bus server's browser surface or granting its store capability to a UI. Fixed public procedures are smaller and more auditable than generic MCP forwarding. Native oRPC plus an explicit application-owned Effect edge preserves the existing runtime without adopting an unqualified bridge package, alternate Effect major, ambient context bridge or prototype extension.
 
@@ -47,6 +52,8 @@ The existing Bun build tool handles this bounded browser application. A generate
 
 - This is a local observer for any client that can reach its loopback boundary, not a per-address confidentiality or authenticated multi-user product. Public message text, notes and allowed provenance can themselves contain sensitive content; projection is not a secret detector.
 - There is no complete-history pagination, exact-ID lookup, pinned snapshot, total, historical membership or delivery/read evidence. Search has the upstream [full-text limits](../platforms/fluree.md#full-text-search), including index-startup and historical-gap uncertainty. Empty results do not establish that a historical match does not exist.
+- Observed reply groups are not complete threads, even when every visible parent resolves. A latest window can omit a quiet topic's older exchange or later replies. Context flow includes matching groups' differently addressed replies without claiming that they were sent to the selected topic.
+- Markdown previews have a bounded parsing workload; long full source is not discarded. HTTP(S)-only links are a scheme policy, not a guarantee that a destination is reputable. Remote images remain omitted even when the same image could be fetched manually elsewhere.
 - Limits and launch settings belong to the [viewer interface catalogue](interfaces.md#viewer); the [runbook](../runbooks/viewer.md#if-it-fails) covers failures. Oversized responses fail visibly, not partially truncated text.
 - The shipped browser and server artifacts share one local release. Runtime dependencies increase this private package's install footprint even though the core executable does not import the viewer. Public hosting, merging, deployment of the core bus or persistent service installation are separate decisions.
 

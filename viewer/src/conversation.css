@@ -1,0 +1,428 @@
+:root {
+  --canvas: #fafbf9;
+  --paper: #fff;
+  --ink: #202a29;
+  --secondary: #53665d;
+  --muted: #59695f;
+  --border: #e1e6e2;
+  --border-soft: #e9edea;
+  --border-strong: #b9cbc3;
+  --hover: #f2f6f3;
+  --selected: #eaf4ef;
+  --teal-text: #286d60;
+  --warning: #86571a;
+  color-scheme: light;
+}
+:root[data-theme="dark"] {
+  --canvas: #171b19;
+  --paper: #1d2220;
+  --ink: #edf3ef;
+  --secondary: #c4d2c9;
+  --muted: #a4b4aa;
+  --border: #39443e;
+  --border-soft: #303a34;
+  --border-strong: #5d7065;
+  --hover: #28332d;
+  --selected: #263d34;
+  --teal-text: #9ad8c4;
+  --warning: #f1cb84;
+  color-scheme: dark;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme]) {
+    --canvas: #171b19;
+    --paper: #1d2220;
+    --ink: #edf3ef;
+    --secondary: #c4d2c9;
+    --muted: #a4b4aa;
+    --border: #39443e;
+    --border-soft: #303a34;
+    --border-strong: #5d7065;
+    --hover: #28332d;
+    --selected: #263d34;
+    --teal-text: #9ad8c4;
+    --warning: #f1cb84;
+    color-scheme: dark;
+  }
+}
+.brand-context {
+  color: var(--muted);
+}
+.render-limit {
+  color: var(--warning);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.mode-control button:disabled {
+  color: var(--muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+.header-actions {
+  display: flex;
+  gap: 4px;
+}
+.context-workspace {
+  display: grid;
+  grid-template-columns: minmax(190px, 225px) minmax(280px, 350px) minmax(0, 1fr);
+  flex: 1;
+  min-height: 0;
+}
+.context-rail,
+.conversation-list,
+.thread-view {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--paper);
+}
+.context-rail,
+.conversation-list {
+  border-right: 1px solid var(--border);
+}
+.context-rail {
+  background: var(--canvas);
+}
+.rail-title {
+  padding: 24px 20px 8px;
+}
+.rail-title h1,
+.list-title h2,
+.thread-title h2 {
+  font-size: 19px;
+  line-height: 1.25;
+  margin: 5px 0;
+  color: var(--ink);
+}
+.rail-title p,
+.list-title p {
+  font-size: 11px;
+  color: var(--muted);
+  margin: 7px 0;
+}
+.context-rail .observation,
+.conversation-list .observation {
+  padding-left: 20px;
+  padding-right: 20px;
+}
+.context-scroll,
+.conversation-scroll,
+.thread-scroll {
+  overflow: auto;
+  min-height: 0;
+  flex: 1;
+}
+.read-context {
+  align-self: flex-start;
+  margin: 12px 20px;
+  padding: 8px 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: 4px;
+  background: var(--paper);
+  color: var(--teal-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+.read-context:hover {
+  background: var(--hover);
+}
+.context-scroll {
+  padding: 12px 8px;
+}
+.context-item {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+  font-size: 12px;
+  font-weight: 600;
+  padding: 9px 12px;
+  border-radius: 4px;
+  overflow-wrap: anywhere;
+}
+.context-item:hover {
+  background: var(--hover);
+}
+.context-item.active {
+  background: var(--selected);
+  color: var(--teal-text);
+}
+.context-group {
+  margin-top: 20px;
+}
+.context-group h2 {
+  font-size: 10px;
+  color: var(--muted);
+  margin: 0 12px 5px;
+  text-transform: uppercase;
+}
+.peer-link {
+  border-top: 1px solid var(--border);
+  margin-top: 16px;
+  border-radius: 0;
+  padding-top: 16px;
+}
+.list-title,
+.thread-title {
+  min-height: 85px;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.list-title > div,
+.thread-title > div {
+  flex: 1;
+  min-width: 0;
+}
+.list-title h2 {
+  overflow-wrap: anywhere;
+}
+.conversation-row {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  text-align: left;
+  gap: 8px;
+  width: 100%;
+  padding: 18px 20px;
+  background: transparent;
+  border: 0;
+  border-bottom: 1px solid var(--border-soft);
+  color: var(--ink);
+}
+.conversation-row:hover {
+  background: var(--hover);
+}
+.conversation-row.selected {
+  background: var(--selected);
+  border-left: 3px solid #338b7b;
+  padding-left: 17px;
+}
+.conversation-row strong {
+  font-size: 13px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+}
+.summary-meta {
+  font-size: 11px;
+  color: var(--muted);
+  line-height: 1.5;
+}
+.thread-title {
+  border-bottom: 1px solid var(--border);
+  padding-left: 32px;
+}
+.thread-inner {
+  max-width: 900px;
+  padding: 24px 32px 48px;
+}
+.thread-scope {
+  font-size: 12px;
+  color: var(--muted);
+  margin-bottom: 18px;
+}
+.thread-message {
+  padding: 25px 0;
+  border-top: 1px solid var(--border);
+  scroll-margin: 12px;
+  overflow-wrap: anywhere;
+}
+.thread-message:focus-visible {
+  outline: 3px solid #178879;
+  outline-offset: 3px;
+}
+.thread-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+.thread-header h3 {
+  font-size: 16px;
+  line-height: 1.4;
+  margin: 8px 0 0;
+}
+.thread-header time {
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--muted);
+  text-align: right;
+}
+.thread-to {
+  display: flex;
+  gap: 12px;
+  align-items: baseline;
+  margin-top: 12px;
+  font-size: 12px;
+}
+.thread-to .audience-value {
+  color: var(--secondary);
+}
+.thread-message .reply {
+  padding: 12px 0 0;
+  border: 0;
+  font-size: 12px;
+}
+.body-section {
+  margin-top: 24px;
+}
+.body-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 12px;
+}
+.mode-control {
+  display: flex;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  overflow: hidden;
+}
+.mode-control button {
+  width: 36px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--secondary);
+}
+.mode-control button[aria-pressed="true"] {
+  background: var(--selected);
+  color: var(--teal-text);
+}
+.markdown,
+.message-source {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink);
+  unicode-bidi: isolate;
+  overflow-wrap: anywhere;
+}
+.message-source {
+  white-space: pre-wrap;
+}
+.markdown > :first-child {
+  margin-top: 0;
+}
+.markdown h1,
+.markdown h2,
+.markdown h3,
+.markdown h4,
+.markdown h5,
+.markdown h6 {
+  font-size: 15px;
+  line-height: 1.4;
+  margin: 20px 0 8px;
+}
+.markdown p {
+  margin: 0 0 14px;
+}
+.markdown a {
+  color: var(--teal-text);
+  text-decoration: underline;
+}
+.markdown blockquote {
+  border-left: 3px solid var(--border-strong);
+  margin: 14px 0;
+  padding: 2px 0 2px 16px;
+  color: var(--secondary);
+}
+.markdown code {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+  font-size: 12px;
+}
+.code-scroll,
+.table-scroll {
+  max-width: 100%;
+  overflow: auto;
+  margin: 16px 0;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+}
+.code-scroll pre {
+  margin: 0;
+  padding: 14px;
+  white-space: pre;
+}
+.table-scroll table {
+  border-collapse: collapse;
+  min-width: max-content;
+  font-size: 12px;
+}
+.table-scroll th,
+.table-scroll td {
+  padding: 8px 12px;
+  border: 1px solid var(--border);
+  text-align: left;
+}
+.markdown input {
+  accent-color: #338b7b;
+}
+.mobile-back {
+  display: none;
+}
+.return-link {
+  margin-bottom: 10px;
+}
+.thread-scroll .empty {
+  padding: 32px;
+}
+.thread-scroll .peer-row {
+  padding: 20px 32px;
+}
+@media (max-width: 1000px) {
+  .context-workspace {
+    display: block;
+    overflow: auto;
+  }
+  .context-rail,
+  .conversation-list,
+  .thread-view {
+    display: none;
+    min-height: 100%;
+    border: 0;
+  }
+  .page-contexts .context-rail,
+  .page-conversations .conversation-list,
+  .page-thread .thread-view,
+  .page-peers .thread-view {
+    display: flex;
+  }
+  .context-scroll,
+  .conversation-scroll,
+  .thread-scroll {
+    overflow: visible;
+  }
+  .mobile-back {
+    display: grid;
+  }
+  .thread-title {
+    padding-left: 12px;
+  }
+  .thread-inner {
+    padding: 20px 16px 40px;
+  }
+  .thread-header {
+    display: block;
+  }
+  .thread-header time {
+    display: block;
+    text-align: left;
+    margin-top: 8px;
+  }
+  .thread-scroll .peer-row {
+    padding: 18px 16px;
+  }
+  .context-scroll {
+    padding-bottom: 30px;
+  }
+}

@@ -1,10 +1,11 @@
 import { Option, Schema } from "effect";
+import { MAX_HISTORY_LIMIT, MAX_PARTICIPANT_LENGTH, MAX_QUERY_LENGTH } from "./limits.ts";
+
+export { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./limits.ts";
 
 // Public projection of the bus's already-decoded history and peers results. Records are
 // validated by hand so no input value can reach an error, and every output is rebuilt.
 
-export const MAX_HISTORY_LIMIT = 200;
-export const DEFAULT_HISTORY_LIMIT = 50;
 const MAX_PEERS = 1000;
 const RUNTIMES = ["claude", "codex", "human", "other"] as const;
 const FAILURE = "Public observation rejected";
@@ -13,8 +14,12 @@ const OptionalText = Schema.optionalKey(Schema.String);
 const Strings = Schema.mutable(Schema.Array(Schema.String));
 const Omitted = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
 // Exact lengths only: no trimming, normalization or casefolding.
-const Query = Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(256));
-const Participant = Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512));
+const Query = Schema.String.check(Schema.isMinLength(1)).check(
+  Schema.isMaxLength(MAX_QUERY_LENGTH)
+);
+const Participant = Schema.String.check(Schema.isMinLength(1)).check(
+  Schema.isMaxLength(MAX_PARTICIPANT_LENGTH)
+);
 
 const OriginSchema = Schema.Struct({
   host: Schema.String,
