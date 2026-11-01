@@ -4,7 +4,7 @@ import { Duration } from "effect";
  * Every timeout, retry, delay, schedule and limit of delivery, the Claude
  * wake, `serve` and the MCP and CLI calls, by the name the docs' table of
  * timeouts and schedules gives it. The store's own query and read bounds stay
- * beside the store code (`Fluree.ts`, `sparql.ts`).
+ * beside the store code (`Fluree.ts`).
  */
 
 // The ledger's change stream (`Fluree.ts`).

@@ -26,15 +26,13 @@
   },
   "dependencies": {
     "@effect/platform-bun": "4.0.6",
-    "effect": "4.0.6",
-    "sparqljs": "3.7.4"
+    "effect": "4.0.6"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.3",
     "@catenarycloud/linteffect": "0.0.6",
     "@modelcontextprotocol/sdk": "1.32.2",
     "@types/bun": "1.3.14",
-    "@types/sparqljs": "3.1.12",
     "typescript": "5.9.3"
   },
   "overrides": {
