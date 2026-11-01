@@ -16,7 +16,7 @@ export const Joined = Schema.Struct({
   topics: Schema.optionalKey(
     Schema.Array(Schema.String).annotate({
       description:
-        "Your effective topic subscriptions. New names are unique and have no # marker; an omitted list preserves unrecognized legacy names.",
+        "Your effective topic subscriptions. New names are unique and have no # marker; an omitted list preserves unrecognised legacy names.",
     })
   ),
   cursor: Schema.Finite.annotate({

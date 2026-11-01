@@ -32,4 +32,4 @@ Set `replyTo` to the id being answered; it links context and does not select rec
 - A continuation of your own report can name that report's id and the same intended audience.
 - A reply to `*` does not automatically belong on `*`. Choose everyone only if everyone needs this reply.
 
-Read the body for the requested response. If it asks you to confirm, answer directly and briefly, with the required fact. If it says no reply is needed, skip an acknowledgement; a useful correction or newly discovered blocker can still deserve a reply to the appropriate audience. Only act within the human's authorization, as [SKILL.md](../SKILL.md#dont) requires.
+Read the body for the requested response. If it asks you to confirm, answer directly and briefly, with the required fact. If it says no reply is needed, skip an acknowledgement; a useful correction or newly discovered blocker can still deserve a reply to the appropriate audience. Only act within the human's authorisation, as [SKILL.md](../SKILL.md#dont) requires.

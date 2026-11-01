@@ -47,7 +47,7 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 
 Returns `address` (the address you joined), `topics` (the effective subscriptions), `cursor` (your read position in the ledger, a Fluree commit number: unread mail is what comes after it) and, only for a Claude session whose wake hook this `serve` has seen since it started, `hooked` (`true`: the agent-bus plugin's hook wakes the session when mail arrives). `serve` holds that in memory, so after a restart `hooked` is absent until the hook calls again.
 
-The current server always returns `topics`; it is optional in the wire schema so the CLI can still decode an older server's response. A no-topic rejoin canonicalizes recognizable legacy subscriptions and preserves unrecognized names rather than refusing the rejoin.
+The current server always returns `topics`; it is optional in the wire schema so the CLI can still decode an older server's response. A no-topic rejoin canonicalises recognisable legacy subscriptions and preserves unrecognised names rather than refusing the rejoin.
 
 A rejoin by the same session and runtime keeps your unread messages. A first join starts at the present. A `takeover` field is not accepted: use `bus_takeover`.
 
@@ -74,7 +74,7 @@ Returns what `bus_join` returns. The holder id is checked only while another ses
 
 Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601).
 
-`to` entries remain literal and case-sensitive; join normalization does not apply here. A `reviews` subscription receives `#reviews`, not `# reviews` or `#Reviews`. The bus does not flag unjoined or wrong-case targets, so check the intended audience with `bus_peers`.
+`to` entries remain literal and case-sensitive; join normalisation does not apply here. A `reviews` subscription receives `#reviews`, not `# reviews` or `#Reviews`. The bus does not flag unjoined or wrong-case targets, so check the intended audience with `bus_peers`.
 
 #### `bus_read`
 
