@@ -167,7 +167,7 @@ const sid = (address: string) => `session:${address}`;
 const bodies = (messages: ReadonlyArray<{ readonly body: string }>) => messages.map((m) => m.body);
 
 for (const backend of backends) {
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger>) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) =>
     Effect.runPromise(Effect.provide(effect, backend.make().layer));
 
   describe.if(backend.enabled)(`delivery (${backend.name})`, () => {
@@ -219,6 +219,177 @@ for (const backend of backends) {
             "everyone",
           ]);
           expect(yield* bus.take("claude/a", sid("claude/a"))).toEqual([]);
+        })
+      ));
+
+    test("joins store and echo canonical topics, routing each message once and preserving case", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const joining = {
+            address: "claude/subscriber",
+            runtime: "claude" as const,
+            session: "subscriber",
+            cwd: process.cwd(),
+            topics: [" #reviews ", "reviews", "# Release ", "Release"],
+          };
+          const joined = yield* bus.join(joining);
+          expect(joined.topics).toEqual(["reviews", "Release"]);
+          expect((yield* ledger.presence).at(-1)?.presence?.topics).toEqual(joined.topics);
+          expect((yield* bus.peers)[0]?.presence.topics).toEqual(joined.topics);
+          yield* bus.join({ ...joining, address: "claude/sender", session: "sender" });
+          for (const [to, body] of [
+            [["#reviews"], "topic"],
+            [["#Release"], "case kept"],
+            [["#release"], "different case"],
+            [["reviews"], "bare recipient is an address"],
+            [["#reviews", joining.address], "topic and address once"],
+          ] as const) {
+            yield* bus.publish({ from: "claude/sender", session: "sender", to, body });
+          }
+          expect(bodies(yield* bus.take(joining.address, joining.session))).toEqual([
+            "topic",
+            "case kept",
+            "topic and address once",
+          ]);
+          expect(yield* bus.take("claude/sender", "sender")).toEqual([]);
+        })
+      ));
+
+    test("malformed topic replacements change nothing, while an explicit empty list clears", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const cursors = yield* Cursors.Cursors;
+          const joining = {
+            address: "claude/subscriber",
+            runtime: "claude" as const,
+            session: "subscriber",
+            cwd: process.cwd(),
+          };
+          yield* bus.join({ ...joining, topics: ["reviews"] });
+          yield* bus.join({ ...joining, address: "claude/sender", session: "sender" });
+          yield* bus.publish({
+            from: "claude/sender",
+            session: "sender",
+            to: ["#reviews"],
+            body: "still unread",
+          });
+          const before = yield* cursors.get(joining.address);
+          const end = yield* ledger.end;
+          for (const topics of [[""], [" # "], ["##reviews"], ["valid", " "]]) {
+            const error = yield* Effect.flip(bus.join({ ...joining, topics }));
+            expect(error._tag).toBe("InvalidTopics");
+            expect(yield* cursors.get(joining.address)).toEqual(before);
+            expect(yield* ledger.end).toBe(end);
+            expect((yield* bus.peers)[0]?.presence.topics).toEqual(["reviews"]);
+          }
+          expect(bodies(yield* bus.take(joining.address, joining.session))).toEqual([
+            "still unread",
+          ]);
+          const read = yield* cursors.get(joining.address);
+          const cleared = yield* bus.join({ ...joining, topics: [] });
+          expect(cleared.topics).toEqual([]);
+          expect(yield* cursors.get(joining.address)).toEqual(read);
+          yield* bus.publish({
+            from: "claude/sender",
+            session: "sender",
+            to: ["#reviews"],
+            body: "no longer subscribed",
+          });
+          expect(yield* bus.take(joining.address, joining.session)).toEqual([]);
+        })
+      ));
+
+    test("legacy prefixed subscriptions route before rejoin; rejoin canonicalizes without moving the cursor", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const cursors = yield* Cursors.Cursors;
+          const joining = {
+            address: "claude/subscriber",
+            runtime: "claude" as const,
+            session: "subscriber",
+            cwd: process.cwd(),
+          };
+          yield* bus.join(joining);
+          yield* bus.join({ ...joining, address: "claude/sender", session: "sender" });
+          const legacy = new Message({
+            id: Bun.randomUUIDv7(),
+            ts: new Date().toISOString(),
+            from: joining.address,
+            to: ["*"],
+            kind: "presence",
+            body: "legacy join",
+            presence: new Presence({
+              runtime: joining.runtime,
+              session: joining.session,
+              status: "joined",
+              topics: ["#reviews", "reviews", "##legacy"],
+            }),
+          });
+          yield* ledger.append(legacy);
+          yield* bus.publish({
+            from: "claude/sender",
+            session: "sender",
+            to: ["#reviews"],
+            body: "pending topic mail",
+          });
+          const before = yield* cursors.get(joining.address);
+          expect(
+            yield* bus.deliver(joining.address, ({ messages }) => Effect.succeed(bodies(messages)))
+          ).toEqual(["pending topic mail"]);
+          expect(yield* cursors.get(joining.address)).toEqual(before);
+          const rejoined = yield* bus.join(joining);
+          expect(rejoined.topics).toEqual(["reviews", "##legacy"]);
+          expect(Option.some(rejoined.cursor)).toEqual(before);
+          expect(yield* cursors.get(joining.address)).toEqual(before);
+          const presences = yield* ledger.presence;
+          expect(presences.at(-1)?.presence?.topics).toEqual(["reviews", "##legacy"]);
+          expect(presences.at(-1)?.presence?.rejoinOf).toBe(legacy.id);
+          expect(presences.find(({ id }) => id === legacy.id)?.presence?.topics).toEqual([
+            "#reviews",
+            "reviews",
+            "##legacy",
+          ]);
+          expect(bodies(yield* bus.take(joining.address, joining.session))).toEqual([
+            "pending topic mail",
+          ]);
+        })
+      ));
+
+    test("replyTo links messages without routing to their sender, audience or body mentions", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          for (const address of ["author", "reader", "observer"]) {
+            yield* bus.join({
+              address,
+              runtime: "other",
+              session: address,
+              cwd: process.cwd(),
+            });
+          }
+          const original = yield* bus.publish({
+            from: "author",
+            session: "author",
+            to: ["*"],
+            body: "question for everyone",
+          });
+          for (const address of ["reader", "observer"]) yield* bus.take(address, address);
+          const reply = yield* bus.publish({
+            from: "reader",
+            session: "reader",
+            to: ["observer"],
+            replyTo: original.id,
+            body: "@author is mentioned, but this answer is for observer",
+          });
+          expect(reply.replyTo).toBe(original.id);
+          expect(yield* bus.take("author", "author")).toEqual([]);
+          expect((yield* bus.take("observer", "observer")).map(({ id }) => id)).toEqual([reply.id]);
         })
       ));
 
@@ -3630,7 +3801,7 @@ describe("mcp over http", () => {
     });
   }
 
-  test("a Codex join returns its address and cursor, with nothing about where the thread runs", () => {
+  test("a Codex join returns its address, topics and cursor, with nothing about where the thread runs", () => {
     const { url, layer } = serve();
     return Effect.runPromise(
       Effect.gen(function* () {
@@ -3643,7 +3814,7 @@ describe("mcp over http", () => {
           codexThreadId: thread,
         });
         const joined = yield* join("codex/a", codex("t-1"));
-        expect(Object.keys(joined).sort()).toEqual(["address", "cursor"]);
+        expect(Object.keys(joined).sort()).toEqual(["address", "cursor", "topics"]);
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });
@@ -3757,6 +3928,72 @@ describe("mcp over http", () => {
     );
   });
 
+  test("the CLI echoes canonical topics, preserves them when omitted and rejects empty list items", () => {
+    const { url, port, layer } = serve();
+    const cli = (...args: Array<string>) =>
+      Effect.promise(async () => {
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "../src/bin.ts"),
+            "join",
+            "--address",
+            "other/cli",
+            "--runtime",
+            "other",
+            "--session",
+            "cli",
+            ...args,
+          ],
+          {
+            timeout: 20_000,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, AGENT_BUS_PORT: String(port) },
+          }
+        );
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        return { code, out: (stdout + stderr).trim() };
+      });
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const call = Client.call(url);
+        const joined = { code: 0, out: 'joined as other/cli; topics: ["reviews"]' };
+        expect(yield* cli("--topics", " #reviews ,reviews ")).toEqual(joined);
+        yield* call("bus_join", Mcp.Joined, {
+          address: "other/sender",
+          runtime: "other",
+          session: "sender",
+          cwd: process.cwd(),
+        });
+        yield* call("bus_publish", Mcp.Published, {
+          from: "other/sender",
+          session: "sender",
+          to: ["#reviews"],
+          body: "CLI topic mail",
+        });
+        const refused = yield* cli("--topics", "reviews,,other");
+        expect(refused.code).toBe(1);
+        expect(refused.out).toContain("Each topic must have a non-empty name");
+        expect(yield* cli()).toEqual(joined);
+        const read = yield* call("bus_read", Mcp.Messages, {
+          address: "other/cli",
+          session: "cli",
+        });
+        expect(bodies(read.messages)).toEqual(["CLI topic mail"]);
+        expect(yield* cli("--topics", "")).toEqual({
+          code: 0,
+          out: "joined as other/cli; topics: []",
+        });
+      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
+
   test("the CLI takes an address over only with --takeover, through bus_takeover", () => {
     const { url, port, layer } = serve();
     const cli = (...args: Array<string>) =>
@@ -3801,7 +4038,7 @@ describe("mcp over http", () => {
         const holder = /holder "([^"]+)"/.exec(refused.out)?.[1] ?? "";
         expect(yield* cli(...joining, "--takeover", holder)).toEqual({
           code: 0,
-          out: "joined as claude/a",
+          out: "joined as claude/a; topics: []",
         });
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );

@@ -1,17 +1,24 @@
 import { Context, Effect, Layer, Schema } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus } from "./Bus.ts";
-import { LedgerError, Message, NotJoined, NotOwner, Runtime } from "./domain.ts";
+import { InvalidTopics, LedgerError, Message, NotJoined, NotOwner, Runtime } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { MAX_QUERY_LENGTH } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
 
-const Failure = Schema.Union([LedgerError, NotJoined, NotOwner]);
+const Failure = Schema.Union([LedgerError, NotJoined, NotOwner, InvalidTopics]);
 // Numbers are Finite or Int: Schema.Number's JSON Schema also admits "NaN" and "Infinity"
 // strings, and drops the description and bounds clients are shown.
 export const Messages = Schema.Struct({ messages: Schema.Array(Message) });
 export const Joined = Schema.Struct({
   address: Schema.String.annotate({ description: "The address you joined." }),
+  // Older servers did not echo topics; the CLI uses this schema to decode their results too.
+  topics: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description:
+        "Your effective topic subscriptions. New names are unique and have no # marker; an omitted list preserves unrecognized legacy names.",
+    })
+  ),
   cursor: Schema.Finite.annotate({
     description: "Your read position in the ledger: unread mail is what comes after it.",
   }),
@@ -96,7 +103,7 @@ const joinFields = {
   topics: Schema.optionalKey(
     Schema.Array(Schema.String).annotate({
       description:
-        "Topics to receive #topic messages for. Omitted when you rejoin, your current topics are kept; given, they replace them.",
+        'Topics to receive #topic messages for, e.g. ["opa-website"]. One leading # and outer whitespace are removed; duplicates are merged, case is kept. Blank names or another leading # refuse the join. Omitted on rejoin, current topics are kept; given, they replace them ([] clears). The result echoes the effective topics.',
     })
   ),
   codexThreadId: Schema.optionalKey(
@@ -137,20 +144,25 @@ const Takeover = Tool.make("bus_takeover", {
 
 const Publish = Tool.make("bus_publish", {
   description:
-    "Send a message. `to` takes peer addresses, #topic for topic subscribers, or * for everyone. Set replyTo to the id of the message you are answering.",
+    "Send a message. `to` names the audience: peer addresses, #topic for its subscribers, or * for everyone. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond.",
   parameters: Schema.Struct({
     from: Address,
     session: Session,
     to: Schema.Array(Schema.String).annotate({
       description:
-        "Recipients: peer addresses, #topic for that topic's subscribers, or * for every peer. A sender never receives its own message.",
+        "Audience: peer addresses, #topic for its subscribers, or * for every peer. A topic and an address may appear together; @mentions in body do not route. A sender never receives its own message. Choose a reply's audience explicitly; replyTo does not inherit recipients.",
     }),
-    body: Schema.String.annotate({ description: "The message text." }),
+    body: Schema.String.annotate({
+      description: "The message text, including who, if anyone, is asked to respond.",
+    }),
     subject: Schema.optionalKey(
       Schema.String.annotate({ description: "A short subject line; bus_history searches it." })
     ),
     replyTo: Schema.optionalKey(
-      Schema.String.annotate({ description: "The id of the message this answers." })
+      Schema.String.annotate({
+        description:
+          "The id of the message this answers. Links the conversation; only to routes it.",
+      })
     ),
   }),
   success: Published,

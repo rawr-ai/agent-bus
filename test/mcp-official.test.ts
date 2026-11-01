@@ -189,6 +189,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     const b = `${version}/b`;
     expect(await succeed("bus_join", joining(a))).toEqual({
       address: a,
+      topics: [],
       cursor: expect.any(Number),
     });
     await succeed("bus_join", joining(b));
@@ -213,6 +214,34 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     }
   });
 
+  test("topic joins echo their effective subscriptions and malformed replacements are tool refusals", async () => {
+    const { succeed, refused } = await connect();
+    const reader = `${version}/topic-reader`;
+    const sender = `${version}/topic-sender`;
+    const joined = await succeed("bus_join", {
+      ...joining(reader),
+      topics: [" #reviews ", "reviews"],
+    });
+    expect(joined.topics).toEqual(["reviews"]);
+    await succeed("bus_join", joining(sender));
+    const sent = await succeed("bus_publish", {
+      from: sender,
+      session: sid(sender),
+      to: ["#reviews"],
+      body: "unread through a normalized topic",
+    });
+    await refused(
+      "bus_join",
+      { ...joining(reader), topics: ["#"] },
+      /Each topic must have a non-empty name/
+    );
+    const rejoined = await succeed("bus_join", joining(reader));
+    expect(rejoined).toEqual(joined);
+    expect(await succeed("bus_read", { address: reader, session: sid(reader) })).toMatchObject({
+      messages: [{ id: sent.id }],
+    });
+  });
+
   test("refusals are tool errors that say why, not protocol errors", async () => {
     const { call, succeed, refused } = await connect();
     const owner = `${version}/owner`;
@@ -233,6 +262,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     await refused("bus_takeover", { ...other, holder: "stale" }, /held by another session/);
     expect(await succeed("bus_takeover", { ...other, holder: joinId })).toEqual({
       address: owner,
+      topics: [],
       cursor: expect.any(Number),
     });
     await refused(

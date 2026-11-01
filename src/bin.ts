@@ -152,7 +152,7 @@ const joinCommand = Command.make(
       Flag.optional
     ),
     topics: Flag.String("topics").pipe(
-      Flag.withDescription("Comma-separated topics to receive"),
+      Flag.withDescription("Comma-separated topic names (optional #); an empty string clears them"),
       Flag.optional
     ),
     codexThread: Flag.String("codex-thread").pipe(
@@ -173,7 +173,9 @@ const joinCommand = Command.make(
         session: yield* Client.sessionFor(input.runtime, Option.getOrUndefined(input.session)),
         cwd: process.cwd(),
         ...Client.defined({
-          topics: list(input.topics),
+          topics: Option.getOrUndefined(
+            Option.map(input.topics, (text) => (text === "" ? [] : text.split(",")))
+          ),
           codexThreadId: Option.getOrUndefined(input.codexThread),
           note: Option.getOrUndefined(input.note),
         }),
@@ -183,7 +185,9 @@ const joinCommand = Command.make(
         onNone: () => call("bus_join", Mcp.Joined, joining),
         onSome: (holder) => call("bus_takeover", Mcp.Joined, { ...joining, holder }),
       });
-      yield* Console.log(`joined as ${joined.address}`);
+      const topics =
+        joined.topics === undefined ? "" : `; topics: ${JSON.stringify(joined.topics)}`;
+      yield* Console.log(`joined as ${joined.address}${topics}`);
     })
 ).pipe(Command.withDescription("Join the bus as an address, from this directory"));
 

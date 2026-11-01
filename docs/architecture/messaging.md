@@ -19,9 +19,15 @@ A message's `to` lists its recipients, each one of:
 
 So topics and `*` fan out, as in pub/sub, but underneath each recipient reads its own inbox on its own cursor. An address never receives a message sent from itself, even through a topic or `*`. Topic membership is checked when the mail is read, against the address's topics at that moment: an address reads a topic's mail only while it subscribes to the topic.
 
+Subscriptions use bare names, such as `topics: ["opa-website"]` for `to: ["#opa-website"]`. A join canonicalizes a supplied list: it trims outer whitespace, removes one optional `#`, trims the resulting name, and merges duplicates in first-seen order without changing case. Empty names and another leading `#` refuse the entire join before the cursor or presence changes. An explicit `[]` clears subscriptions.
+
+Older stored subscriptions are matched literally and, when recognizable, by the same canonical name, so an existing `"#opa-website"` subscription receives `#opa-website` mail without rejoining. History is never rewritten. A rejoin with no list canonicalizes recognizable names and retains unrecognized legacy names. The join result echoes the effective subscriptions.
+
 Recipients aren't checked. Mail to an address nobody has joined is written, and stays in `bus_history`. A session that later joins that address starts at the present, so it gets that mail only if it joins with `replay`.
 
-A reply sets `replyTo` to the id of the message it answers. `replyTo` doesn't route: the reply goes to whatever its `to` names, usually the original sender. The ledger links the reply to the answered message, so history and queries can follow a conversation. The bus doesn't check that the id exists.
+A topic and an address can appear together in `to`; an address matching both receives the message once. An `@mention` in the body has no routing effect. Recipient forms determine delivery, not whether a response is expected.
+
+A reply sets `replyTo` to the id of the message it answers. `replyTo` doesn't route: the reply goes only to whatever its own `to` names. It never inherits the original sender or recipients, including `*`. The ledger links the reply to the answered message, so history and queries can follow a conversation. The bus doesn't check that the id exists.
 
 ### Presence: joins and leaves
 
@@ -111,7 +117,7 @@ The ledger's config graph enables inline full-text scoring on `bus:body` and `bu
 6. **The CLI never takes another runtime's id variable.** It presents `--session`, or else the variable of `--runtime` (`$AGENT_BUS_SESSION` for runtimes other than Codex and Claude). Outside `join`, `--runtime` defaults to the runtime the address joined with.
 7. **Joins and leaves written without an owner,** by a `serve` from before owners, are ignored.
 8. **Ownership is checked under the address's lock at the moment of effect,** so a wait or send that started before a takeover can't act after it.
-9. **Topics change only when the caller names them.** A rejoin that names no topics keeps the address's topics; one that names topics replaces them. A leave clears them.
+9. **The caller controls topic membership.** A rejoin that names no topics preserves the address's subscriptions, canonicalizing recognizable legacy names; a supplied list replaces them. New names accept one optional `#` and outer whitespace, preserve case and deduplicate. Malformed new names refuse the whole join; an explicit empty list or a leave clears subscriptions.
 10. **A Codex join's `codexThreadId` must be its own thread id,** the same as `session`, or the join is refused. It is what lets this machine's `serve` wake the thread.
 11. **A cursor belongs to one incarnation of the ledger.** Cursors are kept per ledger instance, named by its first commit, so a replacement store starts every subscriber over instead of skipping messages. A cursor ahead of the ledger fails the read rather than skipping.
 
@@ -143,6 +149,7 @@ One shared, ordered log across machines, with history, full-text search and SPAR
 
 - **Owner-less presences are ignored,** rather than adopted under legacy rules. The cost: an address whose history was only owner-less left the peer list, and a plain join of it starts at the present, without its earlier mail.
 - **A new owner starts at the present,** so mail left on an address isn't handed to whoever claims it next. A takeover is the one way to inherit unread mail, and it needs the human's word.
+- **Topic names are canonicalized at join.** Both `"reviews"` and `"#reviews"` mean the subscription reached by `#reviews`. Blank or repeated-marker inputs are refused rather than silently dropped, since dropping an entire replacement list would unsubscribe the caller. Legacy matching fixes existing prefixed subscriptions without a migration or cursor reset; exact legacy matching remains for unrecognized names.
 - **Topics are kept on a rejoin that names none.** Models rejoin with few arguments, and a rejoin without topics used to drop every subscription, so a later read passed over pending topic mail.
 - **Two locks per address,** so a send doesn't wait behind a slow delivery (a Codex nudge holds the read lock for up to 6 s), while a session that loses an address still can't send after it.
 - **Origin repo and branch on every entry.** A branch can't be recovered once its worktree or branch is gone, and a session can switch branches. Recording them once at join, which misses switches, and dropping them, which loses workstream context, were both rejected. `git` gets 2 seconds because it runs under the address's lock.

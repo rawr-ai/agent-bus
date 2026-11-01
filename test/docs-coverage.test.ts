@@ -405,12 +405,12 @@ const refusalRows = (path: string) =>
 describe("refusals quote the code", () => {
   const pages: Array<string> = ["docs/architecture/interfaces.md", ...SKILL_FILES];
 
-  test("interfaces.md, SKILL.md and queries.md have refusal tables", () => {
+  test("interfaces.md, refusals.md and queries.md have refusal tables", () => {
     const withRows = pages.filter((path) => refusalRows(path).length > 0);
     expect(withRows).toEqual(
       expect.arrayContaining([
         "docs/architecture/interfaces.md",
-        "plugin/skills/agent-bus/SKILL.md",
+        "plugin/skills/agent-bus/references/refusals.md",
         "plugin/skills/agent-bus/references/queries.md",
       ])
     );
