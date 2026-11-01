@@ -34,6 +34,8 @@ Oldest first. "Superseded by" says what later changed; the frame itself keeps it
 
 The [public-query-containment](public-query-containment.md) frame (2026-11-01) records the temporary withdrawal of `bus_query`, following [bus-design-query](bus-design-query.md)'s separate response projection. It supersedes earlier promises of a working public SELECT, not the stored representation or delivery design. [turnaround-query-design](turnaround-query-design.md) retires the refusal it introduced. Current owners: [interfaces](../architecture/interfaces.md#bus_query), [connections](../architecture/connections.md), [Fluree](../platforms/fluree.md) and [deploy](../runbooks/deploy.md#query-tools).
 
+The [coordination turnaround](coordination-turnaround.md) is a proposed dated follow-up to the bus-design and containment decisions, not a claim that a new release is active. Its feature frames cover [read-only queries](turnaround-query.md), [project discovery](turnaround-projects.md), [semantic topics](turnaround-topics.md), [built-in bulletins](turnaround-bulletin.md), [reachable inactivity](turnaround-activity.md) and [viewer query integration](turnaround-viewer.md). Frame acceptance, deployment and real-team adoption remain open.
+
 ## Retired mechanisms
 
 | Mechanism | Replaced by | Why | Retired in |
