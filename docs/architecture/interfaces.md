@@ -47,7 +47,7 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 
 Returns `address` (the address you joined), `topics` (the effective subscriptions), `cursor` (your read position in the ledger, a Fluree commit number: unread mail is what comes after it) and, only for a Claude session whose wake hook this `serve` has seen since it started, `hooked` (`true`: the agent-bus plugin's hook wakes the session when mail arrives). `serve` holds that in memory, so after a restart `hooked` is absent until the hook calls again.
 
-The current server always returns `topics`; it is optional in the wire schema so the CLI can still decode an older server's response. A no-topic rejoin canonicalises recognisable legacy subscriptions and preserves unrecognised names rather than refusing the rejoin.
+The current server always returns `topics`; it is optional in the wire schema so the CLI can still decode an older server's response. A no-topic rejoin canonicalises recognisable legacy subscriptions and preserves unrecognised names rather than refusing the rejoin. Canonicalising a stored `"#reviews"` to `"reviews"` preserves delivery to `#reviews`, but ends its old literal match for malformed `##reviews` recipients; this can skip unread malformed-recipient mail without resetting the cursor.
 
 A rejoin by the same session and runtime keeps your unread messages. A first join starts at the present. A `takeover` field is not accepted: use `bus_takeover`.
 
@@ -209,7 +209,7 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 | `join` | `--runtime` | yes | — | `claude`, `codex`, `human` or `other` |
 | `join` | `--session` | no | By runtime, see below | Your session id |
 | `join` | `--takeover` | no | none | Replace an ended session: the holder's join id from the refusal; only when the human says so |
-| `join` | `--topics` | no | none on a first join; kept on rejoin | Comma-separated topic names, optionally prefixed with `#`. `--topics ""` clears subscriptions; a blank item in any other list refuses the join |
+| `join` | `--topics` | no | none on a first join; kept on rejoin | Comma-separated topic names. The current server accepts one optional `#` and refuses blank items; an older server does neither. `--topics ""` clears subscriptions |
 | `join` | `--codex-thread` | no | none | The Codex thread id the bus wakes (`codexThreadId`) |
 | `join` | `--note` | no | none | What you are working on |
 | `join` | `--replay` | no | false | Also deliver messages sent before joining |
@@ -223,7 +223,7 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 
 `peers` and `claude-wake` take no flags. `join` takes its working directory from where it runs; there is no flag for it.
 
-The CLI previously dropped blank comma-separated topic items silently. `--topics "a,,b"` and `--topics "a,b,"` now refuse the join; change them to `--topics "a,b"`. The explicit `--topics ""` still clears subscriptions.
+The CLI previously dropped blank comma-separated topic items silently. With the current server, `--topics "a,,b"` and `--topics "a,b,"` now refuse the join; change them to `--topics "a,b"`. Whitespace-only `--topics " "` now refuses rather than clearing subscriptions. The explicit `--topics ""` still clears them. Against an older server the CLI trims items but sends blanks and leading `#` literally: blank items can be stored, and `#reviews` will not receive `#reviews` mail. Until that server is upgraded, use nonblank bare names such as `reviews,ops`.
 
 #### Session and runtime defaults
 
