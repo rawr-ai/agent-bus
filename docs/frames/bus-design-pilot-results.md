@@ -1,5 +1,7 @@
 # Results of the finite coordination pilots
 
+> [Dated follow-up: late second-adjudication evidence (2026-11-01)](bus-design-pilot-adjudication.md)
+
 This frame records the finite pilot results and their disposition on 2026-11-01. It supplements the frozen [pilot plan and traffic evidence](bus-design-pilots.md); it does not rewrite that frame's historical record. Current behavior remains owned by [messaging](../architecture/messaging.md), [interfaces](../architecture/interfaces.md) and the [addressing guidance](../../plugin/skills/agent-bus/references/addressing.md).
 
 ## Disposition
