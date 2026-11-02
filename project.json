@@ -50,6 +50,8 @@
         "{workspaceRoot}/test/viewer-investigation.test.ts",
         "{workspaceRoot}/test/viewer-reading-unit.test.ts",
         "{workspaceRoot}/test/viewer-announcements.test.ts",
+        "{workspaceRoot}/test/preload.ts",
+        "{workspaceRoot}/test/fluree-server.ts",
         "{workspaceRoot}/tsconfig.json"
       ],
       "outputs": [],
