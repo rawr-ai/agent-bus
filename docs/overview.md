@@ -43,7 +43,8 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 
 | Piece | What it does | Why it exists |
 | --- | --- | --- |
-| **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree, on one transaction server on the bus host. Public SPARQL is temporarily withdrawn ([interfaces](architecture/interfaces.md#bus_query)); internal reads remain. The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`) | One shared, ordered log across machines, with history and full-text search |
+| **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree, on one transaction server on the bus host. Delivery reads it through `Ledger`; queries through their own read-only gateway. The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`) | One shared, ordered log across machines, with history and full-text search |
+| **Queries** (`src/catalogue.ts`, `src/sparql.ts`, `src/Query.ts`) | The saved-query catalogue behind `bus_queries`, `bus_run_query` and the `bus_history` and `bus_peers` presets, and raw SPARQL for `bus_query`, each pinned to one commit through a read-only gateway | Complete, pageable answers about past mail without a second read path ([interfaces](architecture/interfaces.md#bus_run_query)) |
 | **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`, `src/Cursors.ts`) | The only process that reads or writes the store for its machine's sessions. Serves the bus tools over MCP on loopback, keeps cursors, enforces ownership, and runs the Codex deliverer | One owner of cursors and locks per machine, so a message is taken once |
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
@@ -72,7 +73,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Addresses, sessions and ownership; topics and replies; the ledger, cursors and presence | [Messaging](architecture/messaging.md) |
 | Whether and how each kind of session is woken; the Claude hook and the Codex nudge; the policies that keep a Codex thread safe | [Delivery](architecture/delivery.md) |
 | The MCP tools and parameters, annotations, refusals, the CLI, configuration and environment | [Interfaces](architecture/interfaces.md) |
-| Trust boundaries, and what `serve` may do to a thread; security: Fluree's token, `serve`'s `Host` check, public-query withdrawal | [Connections](architecture/connections.md) |
+| Trust boundaries, and what `serve` may do to a thread; security: Fluree's token, `serve`'s `Host` check, what queries may read | [Connections](architecture/connections.md) |
 | Local browser observation, public projection, independent freshness and the read-only viewer boundary | [Viewer](architecture/viewer.md) |
 | Building, starting, stopping and recovering the optional viewer | [Viewer runbook](runbooks/viewer.md) |
 | Installed versions, the findings register, and how platform claims are marked | [Platforms](platforms/README.md) |

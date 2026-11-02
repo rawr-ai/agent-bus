@@ -64,7 +64,7 @@ Git remains available for inspection, staging, worktree mechanics and plumbing t
 - Storage goes through the `Ledger` service; change notifications only wake readers, and reading from a cursor decides delivery. A cursor advances only after a complete read.
 - Fluree features follow the docs of the installed version (`fluree docs search`, `fluree docs get`), which are version-exact. Run `bun run qualify:fluree` after upgrading Fluree. Team Fluree Runtime advises on server topology, Team Fluree Platform on search and other capabilities.
 - One `agent-bus serve` per machine is the only process that reads or writes the store for that machine's sessions. It writes the cursors of the peers that joined from its machine, and serializes joins, leaves, reads and deliveries per address through `Bus.deliver`.
-- The servers listen on loopback. Keep Fluree's data and admin APIs behind the token and `serve` behind its Host check. `bus_query` and `Ledger.select` must refuse without store access until the public-data boundary is qualified ([connections](docs/architecture/connections.md#rules)).
+- The servers listen on loopback. Keep Fluree's data and admin APIs behind the token and `serve` behind its Host check. Queries go only through `QueryGateway`: pinned to one commit, SELECT-only for raw SPARQL, and never claiming completeness past a cap or unchecked damage ([connections](docs/architecture/connections.md#rules)).
 - Never put credentials or raw tool responses in messages, logs or the ledger.
 
 ## Project memory
