@@ -745,13 +745,20 @@ const unique = (name: string, values: ReadonlyArray<string> | undefined) =>
     ? Effect.void
     : Effect.fail(invalid(`${name} has duplicates.`));
 const sorted = <A extends string>(values: ReadonlyArray<A>) => [...values].sort();
+/** An Instant padded to nanoseconds, so equal instants compare equal whatever their spelling. */
+const instantKey = (value: string) => {
+  const [seconds, fraction = ""] = value.slice(0, -1).split(".");
+  return `${seconds}.${fraction.padEnd(9, "0")}`;
+};
 const checkWindow = (window: { fromTs?: string | undefined; toTs?: string | undefined }) => {
   for (const value of [window.fromTs, window.toTs]) {
     if (value !== undefined && !Number.isFinite(Date.parse(value))) {
       return Effect.fail(invalid(`${value} is not a valid instant.`));
     }
   }
-  return window.fromTs !== undefined && window.toTs !== undefined && window.fromTs >= window.toTs
+  return window.fromTs !== undefined &&
+    window.toTs !== undefined &&
+    instantKey(window.fromTs) >= instantKey(window.toTs)
     ? Effect.fail(invalid("fromTs must be before toTs."))
     : Effect.void;
 };

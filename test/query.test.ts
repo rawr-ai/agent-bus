@@ -312,6 +312,55 @@ describe("entries", () => {
     });
   });
 
+  test("history and counts order window bounds as instants, however many fractional digits they spell", async () => {
+    const bus = await startBus(flureeStore(await freshLedger("window-precision")));
+    const at = (time: string) => `2026-11-04T${time}Z`;
+    const entry = (time: string) =>
+      message({ from: "claude/a", to: ["#w"], body: time, ts: at(time) });
+    const early = entry("09:00:00.050");
+    const middle = entry("09:00:00.120");
+    await bus.append(early, middle, entry("09:00:00.200"));
+    const answers: ReadonlyArray<readonly [string, string, ReadonlyArray<Message>]> = [
+      // A whole second before a fractional one.
+      [at("09:00:00"), at("09:00:00.100"), [early]],
+      // One and two fractional digits.
+      [at("09:00:00.1"), at("09:00:00.15"), [middle]],
+      // Nanoseconds against milliseconds.
+      [at("09:00:00.120000000"), at("09:00:00.2"), [middle]],
+    ];
+    for (const [fromTs, toTs, expected] of answers) {
+      const history = await bus.run("history", { fromTs, toTs });
+      expect(ids(history.rows)).toEqual(expected.map((entry) => entry.id));
+      const counts = await bus.run("counts", {
+        groupBy: ["sender"],
+        unit: "message",
+        fromTs,
+        toTs,
+      });
+      expect(counts.total).toBe(expected.length);
+    }
+    const refusals: ReadonlyArray<readonly [string, string]> = [
+      // Equal instants spelled differently: an empty window.
+      [at("09:00:00.000"), at("09:00:00")],
+      [at("09:00:00.1"), at("09:00:00.100000000")],
+      // True inversions, whole and fractional.
+      [at("09:00:01"), at("09:00:00")],
+      [at("09:00:00.100"), at("09:00:00")],
+      [at("09:00:00.15"), at("09:00:00.1")],
+    ];
+    for (const [fromTs, toTs] of refusals) {
+      expect(
+        await bus.refused("bus_run_query", { name: "history", args: { fromTs, toTs } })
+      ).toContain("fromTs must be before toTs");
+      expect(
+        await bus.refused("bus_run_query", {
+          name: "counts",
+          args: { groupBy: ["sender"], unit: "message", fromTs, toTs },
+        })
+      ).toContain("fromTs must be before toTs");
+    }
+  });
+
   test("entries sharing one commit page by (t, id)", async () => {
     const config = await freshLedger("same-commit");
     const bus = await startBus(flureeStore(config));
