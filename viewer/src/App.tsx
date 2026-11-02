@@ -336,7 +336,8 @@ export function App({ client }: { client: ViewerClient }) {
   const historyAnnouncement = useAnnouncement(resources.history, historyAnnouncer);
   const peersAnnouncement = useAnnouncement(resources.peers, peersAnnouncer);
   // A tree read at one commit answers the same each time, so an unchanged key is not read
-  // again; only a failed read is retried, and any retained tree stays until a retry succeeds.
+  // again; only a failed read is retried. A retained reading stays retained after a retry
+  // succeeds: only the reader's own selection replaces it.
   const retryThread = useCallback(() => {
     if (resources.thread.getSnapshot().error !== null) resources.thread.refresh();
   }, [resources]);

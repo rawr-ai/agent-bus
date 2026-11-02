@@ -291,7 +291,7 @@ export const ConversationFollowsCommits: Story = {
   },
 };
 
-/** A failed tree read is retried at the same commit, by its own action or by Refresh all. */
+/** A failed tree read is retried at the same commit, by its own action or an automatic read. */
 export const ThreadRetriedAtSameCommit: Story = {
   beforeEach: () => {
     script.history = historyOf([request, answer, followUp, unrelated]);
@@ -305,6 +305,8 @@ export const ThreadRetriedAtSameCommit: Story = {
       reads.push([input.id, input.t]);
       return failure ?? threadOf(input);
     };
+    // Paused, so no timer read lands between the counted ones.
+    await userEvent.click(canvas.getByRole("button", { name: "Pause automatic refresh" }));
     await userEvent.click(
       await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
     );
@@ -322,19 +324,20 @@ export const ThreadRetriedAtSameCommit: Story = {
       ["a", 1],
       ["a", 1],
     ]);
-    // Refresh all retries a failed read at the unchanged commit, and leaves a good one alone.
+    // Resuming reads at once: it retries a failed read at the unchanged commit.
     failure = new StatusError(503);
     await userEvent.click(canvas.getByRole("button", { name: /Status update/ }));
     await expect(await canvas.findByText("Conversation unavailable.")).toBeVisible();
     failure = null;
     const historyCalls = script.historyCalls;
-    await userEvent.click(canvas.getByRole("button", { name: "Refresh all" }));
+    await userEvent.click(canvas.getByRole("button", { name: "Resume automatic refresh" }));
     await expect(await canvas.findByText("Deployment window moved.")).toBeVisible();
     await waitFor(() => expect(script.historyCalls).toBe(historyCalls + 1));
     await expect(reads.slice(3)).toEqual([
       ["d", 1],
       ["d", 1],
     ]);
+    // Refresh all leaves a good read alone.
     await userEvent.click(canvas.getByRole("button", { name: "Refresh all" }));
     await waitFor(() => expect(script.historyCalls).toBe(historyCalls + 2));
     await expect(reads).toHaveLength(5);
@@ -509,13 +512,22 @@ export const TreeKeepsItsCriteria: Story = {
     await expect(pane.getByText("This retained reading uses earlier criteria.")).toBeVisible();
     await expect(pane.getByText("Confirmed with one note.")).toBeVisible();
 
-    // Recovery: the next observation, at commit 3 under the same criteria, reads the tree.
+    // Service returns while the bus stays at commit 2: Refresh all retries the failed read
+    // there, and the retained reading keeps its commit and criteria.
     const reads: number[] = [];
     script.thread = (input) => {
       const tree = threadOf(input);
       reads.push(input.t);
       return tree;
     };
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh all" }));
+    await waitFor(() => expect(reads).toEqual([2]));
+    await expect(state()).toBe("Outside current observation");
+    await expect(pane.getByText("Whole reply tree at commit 1")).toBeVisible();
+    await expect(pane.getByText("This retained reading uses earlier criteria.")).toBeVisible();
+    await expect(pane.queryByText("Whole reply tree at commit 2")).toBeNull();
+
+    // Recovery: the next observation, at commit 3 under the same criteria, reads the tree.
     script.history = historyOf([request, followUp], {
       criteria,
       observedAt: "2026-01-01T12:09:00Z",
