@@ -1,4 +1,5 @@
 import { dirname, join } from "node:path";
+import { requirePinnedBun } from "./tool-environment.ts";
 
 const typecheckProjects = [
   "tsconfig.json",
@@ -9,6 +10,7 @@ const typecheckProjects = [
 ] as const;
 
 const root = dirname(import.meta.dir);
+await requirePinnedBun(root);
 const manifest = await Bun.file(join(root, "package.json")).json();
 const native = manifest.devDependencies["@typescript/native"] as string;
 if (!/^npm:typescript@\d+\.\d+\.\d+$/.test(native)) {

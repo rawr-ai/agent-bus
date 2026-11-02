@@ -1,12 +1,12 @@
 import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { localToolEnvironment, refuseDotEnv } from "./tool-environment.ts";
+import { localToolEnvironment, refuseDotEnv, requirePinnedBun } from "./tool-environment.ts";
 
 const root = resolve(import.meta.dir, "..");
+await requirePinnedBun(root);
 await refuseDotEnv(root);
 const manifest = await Bun.file(join(root, "package.json")).json();
-if (Bun.version !== manifest.engines.bun) throw new Error("Use the repository's pinned Bun");
 const version = manifest.devDependencies["@typescript/native"].slice("npm:typescript@".length);
 const enhanced = join(root, "node_modules/@effect/tsgo/dist/effect-tsgo.cjs");
 const stock = join(root, "node_modules/@typescript/native/bin/tsc");

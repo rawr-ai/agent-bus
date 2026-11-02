@@ -79,13 +79,15 @@ When a decision, constraint or trap changes, `update` its memory instead of addi
 
 ## Verification
 
+`bun test` cannot detect type errors or discarded Effects. After each coherent edit batch, run `bun run check:fast` with the Bun pinned in `package.json`, resolve introduced failures, then continue. Put that Bun first on `PATH` in the command's shell: an absolute `bun run` invocation alone does not select it for nested package scripts.
+
 Use the repository's domain stewards when their judgment is relevant, in both Codex and Claude. Canonical definitions live in `.codex/agents/`, with native Claude counterparts in `.claude/agents/`; select the named role and supply the task's outcome and context rather than copying its foundation into a generic agent. [Stewards](docs/runbooks/stewards.md) describes native invocation, available domains and maintenance.
 
 Every lane touching code and writing tests invokes `agent-bus-testing-design-steward` early enough to shape meaningful coverage, and re-engages it when material assumptions or implementation change. Implementation owns production decisions and integrated checks; resolve findings or explicitly decline them with a reason, not a second approval chain. Invocation is not itself qualification or adoption.
 
 `bun run check` must pass before committing. It runs `typecheck`, `lint`, `test`, `check:docs` and `check:stewards`, each also a script of its own. `bun run lint:effect` (stricter Effect rules) and `bunx knip` (unused files, exports and dependencies) are advisory.
 
-After a coherent code-edit batch, run `bun run check:fast`, read the diagnostics and resolve introduced failures before continuing. Nx schedules and caches this early loop; the mandatory full check remains uncached and does not require Nx. Typechecking uses the Effect-enhanced native compiler for all five project scopes. Effect errors, including floating Effects, block the check; warnings remain visible and advisory. The legacy TypeScript package supplies the JavaScript compiler API to tools such as Nx, not a fallback checker. Configuration or a running LSP alone is not evidence that an agent received useful diagnostics.
+Nx schedules and caches the early loop; the mandatory full check remains uncached and does not require Nx. Typechecking uses the Effect-enhanced native compiler for all five project scopes. Effect errors, including floating Effects, block the check; warnings remain visible and advisory. The legacy TypeScript package supplies the JavaScript compiler API to tools such as Nx, not a fallback checker. Configuration or a running LSP alone is not evidence that an agent received useful diagnostics.
 
 After compiler or lint-tool upgrades, run `bun run qualify:toolchain`. It checks the actual inherited configurations against stock and Effect-enhanced native compilers, valid and invalid controls, corrected code, and an upstream advisory rule without the retired patch. Its explicit executable paths run with no fallback tools on `PATH`; it is qualification, not another task scheduler.
 

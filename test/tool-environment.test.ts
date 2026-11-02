@@ -2,7 +2,25 @@ import { expect, test } from "bun:test";
 import { mkdtemp, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { localToolEnvironment, refuseDotEnv } from "../scripts/tool-environment.ts";
+import {
+  localToolEnvironment,
+  refuseDotEnv,
+  requirePinnedBun,
+} from "../scripts/tool-environment.ts";
+
+test("tool entrypoints require the pinned Bun without selecting a fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "agent-bus-tool-runtime-"));
+  try {
+    await Bun.write(join(root, "package.json"), JSON.stringify({ engines: { bun: Bun.version } }));
+    await requirePinnedBun(root);
+    await Bun.write(join(root, "package.json"), JSON.stringify({ engines: { bun: "0.0.0" } }));
+    await expect(requirePinnedBun(root)).rejects.toThrow(
+      `Tool requires Bun 0.0.0; running ${Bun.version}`
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("local tool environment does not inherit provider, Node options or cloud credentials", () => {
   const env = localToolEnvironment({

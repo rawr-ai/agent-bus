@@ -29,7 +29,6 @@ The two machines don't match exactly: the other machine's daemon is a release ah
 
 | Setting | Value | Where | Since | Why |
 | --- | --- | --- | --- | --- |
-| TOML multiline literal opening newline is trimmed; generated adapter parity must account for it | Bun 1.4.4+38afee6c8 compared with 1.3.14 | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or the native adapter renderer changes |
 | `thread_unload_delay_secs` | 300 (Codex's default is 1800) | `~/.codex/config.toml`, both machines | 2026-10-27, on Codex 0.164 (bus host) and the 0.165 daemon (other machine) | So threads left on the daemon are freed in 5 minutes rather than 30. How the setting works is in [Codex](codex.md#how-long-a-thread-stays-loaded); setting it is in [operate](../runbooks/operate.md) |
 
 ## Version-sensitive findings
@@ -38,6 +37,8 @@ Each finding below was observed on the versions named. The last column says what
 
 | Finding | Observed on | Basis | Described in | Recheck when |
 | --- | --- | --- | --- | --- |
+| TOML multiline literal opening newline is trimmed; generated adapter parity must account for it | Bun 1.4.4+38afee6c8 compared with 1.3.14 | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or the native adapter renderer changes |
+| An absolute `bun run` can execute a script's bare `bun` from `PATH` instead of the parent executable | Bun 1.4.4+38afee6c8 with 1.3.14 on `PATH` | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or script runtime selection changes |
 | One writer per Codex thread (`thread-writer-locks/`); a second app-server's resume is refused | Codex 0.164.0-alpha.11.1; the lock code is also in 0.165.0 | Verified live, read in code | [Codex](codex.md#one-writer-per-thread) | Codex is upgraded on any machine: rerun the two-app-server resume |
 | A private app-server's queue list, add, delete and read load no thread and meet no lock; the bundled CLI is the desktop's build | Codex 0.164.0-alpha.11.1 (bundled CLI on both machines; daemon 0.165.0 on the other) | Verified live, read in code | [Codex](codex.md#the-bundled-cli-and-private-app-servers) | The desktop app or the daemon is upgraded, or the bundled CLI's version stops matching the daemon's |
 | How long a thread stays loaded: `thread_unload_delay_secs`, its per-request override, the daemon ignoring `-c` for it, and the desktop's 3 h and 10-thread hold | Codex 0.164.0-alpha.11.1 (same rule in 0.165.0); desktop 26.1021.31345 | Verified live (overrides, edge cases); read in code (the daemon, the desktop's hold, applying without a restart) | [Codex](codex.md#how-long-a-thread-stays-loaded) | Codex or the desktop app is upgraded; `~/.codex/config.toml` is edited |
