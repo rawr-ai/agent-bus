@@ -1,21 +1,11 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import type { ViewerClient } from "../viewer/shared/client-types";
-import type {
-  HistoryObservation,
-  PeersObservation,
-  PublicMessage,
-  PublicPeer,
-} from "../viewer/shared/public";
+import type { HistoryObservation, PeersObservation, PublicMessage } from "../viewer/shared/public";
 import { App } from "../viewer/src/App";
 import { formatTime } from "../viewer/src/Text";
+import { historyOf, peersOf, resetStoryBus, StatusError, threadOf } from "./story-bus";
 
-/** A rejection shaped like the oRPC client's: only the HTTP status is read. */
-class StatusError extends Error {
-  constructor(readonly status: number) {
-    super(`Synthetic ${status}`);
-  }
-}
 type Reply<T> = T | StatusError;
 
 // Each story sets the replies before it renders; a play changes them before a manual refresh.
@@ -35,6 +25,7 @@ const client: ViewerClient = {
     return reply(script.history);
   },
   peers: async () => reply(script.peers),
+  thread: async (input) => threadOf(input),
 };
 
 const request: PublicMessage = {
@@ -75,16 +66,6 @@ const unrelated: PublicMessage = {
   subject: "Status update",
   body: "Deployment window moved.",
 };
-const historyOf = (
-  messages: PublicMessage[],
-  observedAt = "2026-01-01T12:00:00Z",
-  omitted = 0
-): HistoryObservation => ({ observedAt, criteria: { limit: 200 }, omitted, messages });
-const peersOf = (addresses: string[], omitted = 0): PeersObservation => ({
-  observedAt: "2026-01-01T12:00:01Z",
-  omitted,
-  peers: addresses.map((address): PublicPeer => ({ address, runtime: "other", topics: [] })),
-});
 
 const meta = {
   title: "Viewer/Observation states",
@@ -93,6 +74,7 @@ const meta = {
   beforeEach: () => {
     history.replaceState(null, "", location.pathname + location.search);
     script.historyCalls = 0;
+    resetStoryBus();
   },
 } satisfies Meta<typeof App>;
 export default meta;
@@ -121,7 +103,7 @@ export const EmptyAndAllOmitted: Story = {
     );
     await expect(canvasElement.querySelectorAll(".observation[role]")).toHaveLength(0);
     await expect(canvas.getByText("No matching messages in this observation.")).toBeVisible();
-    script.history = historyOf([], "2026-01-01T12:01:00Z", 2);
+    script.history = historyOf([], { observedAt: "2026-01-01T12:01:00Z", omitted: 2 });
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
     await expect(
       await canvas.findByText("No displayable messages in this observation.")
@@ -131,7 +113,7 @@ export const EmptyAndAllOmitted: Story = {
     await waitFor(() => expect(live.history).toHaveTextContent("History: 2 records omitted."));
     // A refresh that observes the same records and omissions stays quiet.
     const spoken = live.history.firstElementChild;
-    script.history = historyOf([], "2026-01-01T12:02:00Z", 2);
+    script.history = historyOf([], { observedAt: "2026-01-01T12:02:00Z", omitted: 2 });
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
     const observed = `Observed ${formatTime("2026-01-01T12:02:00Z")}`;
     await waitFor(() =>
@@ -238,7 +220,7 @@ export const RefreshAnnouncesArrivals: Story = {
     await expect(
       canvas.getByRole("button", { name: /Review request.*2 observed/ })
     ).toHaveAttribute("aria-current", "true");
-    script.history = historyOf([request, answer, followUp], "2026-01-01T12:01:00Z");
+    script.history = historyOf([request, answer, followUp], { observedAt: "2026-01-01T12:01:00Z" });
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
     await waitFor(() => expect(live.history).toHaveTextContent("History: 1 new message."));
     await expect(
@@ -262,6 +244,37 @@ export const RefreshAnnouncesArrivals: Story = {
   },
 };
 
+/** A conversation follows the bus: its reply tree is read again at each new history commit. */
+export const ConversationFollowsCommits: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp]);
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const state = () =>
+      canvasElement.querySelector(".reading-observation-state")?.textContent?.trim();
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
+    );
+    await expect(canvas.getByRole("heading", { name: /^Conversation$/ })).toBeVisible();
+    await expect(await canvas.findByText("Whole reply tree at t=1")).toBeVisible();
+    await expect(state()).toBe("");
+    // The window moves past the conversation; the bus still holds it, so it is read at t=2.
+    script.history = historyOf([unrelated], { observedAt: "2026-01-01T12:05:00Z" });
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
+    await expect(await canvas.findByText("Whole reply tree at t=2")).toBeVisible();
+    await expect(state()).toBe("");
+    await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
+    const status = canvas.getByRole("button", { name: /Status update/ });
+    await userEvent.click(status);
+    await expect(status).toHaveAttribute("aria-current", "true");
+    await expect(canvas.getByText("Deployment window moved.")).toBeVisible();
+    await expect(canvas.queryByText("Confirmed with one note.")).toBeNull();
+  },
+};
+
+/** A context flow whose messages leave the window is frozen at the commit it was read at. */
 export const RetainedReading: Story = {
   beforeEach: () => {
     script.history = historyOf([request, answer, followUp]);
@@ -272,22 +285,79 @@ export const RetainedReading: Story = {
     const live = announcements(canvasElement);
     const state = () =>
       canvasElement.querySelector(".reading-observation-state")?.textContent?.trim();
-    await userEvent.click(
-      await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
-    );
-    await expect(canvas.getByRole("heading", { name: /^Conversation$/ })).toBeVisible();
+    await userEvent.click(await canvas.findByRole("button", { name: "#alpha" }));
+    await userEvent.click(canvas.getByRole("button", { name: "Read context" }));
+    await expect(canvas.getByRole("heading", { name: "Context flow" })).toBeVisible();
     await expect(state()).toBe("");
-    script.history = historyOf([unrelated], "2026-01-01T12:05:00Z");
+    script.history = historyOf([unrelated], {
+      observedAt: "2026-01-01T12:05:00Z",
+      window: "latest",
+    });
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
     await waitFor(() => expect(state()).toBe("Outside current observation"));
     await expect(live.history).toHaveTextContent("History: 1 new message.");
-    await expect(canvas.getByText(/^Not in the current observation · limit 200/)).toBeVisible();
+    await expect(
+      canvas.getByText(/^Not in the current observation · frozen at t=1 · last observed/)
+    ).toBeVisible();
+    // The frozen reading keeps the label of the window it was read from.
+    await expect(canvas.getAllByText("All entries at t=1")[0]).toBeVisible();
     await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
-    const status = canvas.getByRole("button", { name: /Status update/ });
-    await userEvent.click(status);
-    await waitFor(() => expect(state()).toBe(""));
-    await expect(status).toHaveAttribute("aria-current", "true");
-    await expect(canvas.getByText("Deployment window moved.")).toBeVisible();
-    await expect(canvas.queryByText("Confirmed with one note.")).toBeNull();
+  },
+};
+
+/** A replaced ledger never replaces a reading: the conversation stays frozen at its commit. */
+export const LedgerReplacedFreezesConversation: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp]);
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const state = () =>
+      canvasElement.querySelector(".reading-observation-state")?.textContent?.trim();
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
+    );
+    await expect(await canvas.findByText("Whole reply tree at t=1")).toBeVisible();
+    script.history = historyOf([request, answer, followUp, unrelated], {
+      ledger: "story-ledger-replaced",
+      t: 1,
+      observedAt: "2026-01-01T12:06:00Z",
+    });
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
+    await waitFor(() => expect(state()).toBe("Outside current observation"));
+    await expect(
+      canvas.getByText(/^Not in the current observation · frozen at t=1 · last observed/)
+    ).toBeVisible();
+    await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
+  },
+};
+
+/** Upstream incompleteness is labelled from the bus's own answer, apart from omissions. */
+export const OlderEntriesDamageAndMovedHead: Story = {
+  beforeEach: () => {
+    script.history = historyOf([answer, followUp], {
+      t: 7,
+      currentHeadT: 9,
+      window: "latest",
+      damaged: 2,
+      omitted: 1,
+    });
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    await expect(
+      (await canvas.findAllByText("Latest 3 entries at t=7; older entries exist"))[0]
+    ).toBeVisible();
+    await expect(canvas.getAllByText("2 entries unreadable at t=7")[0]).toBeVisible();
+    await expect(canvas.getAllByText("The bus reached t=9 while this was read")[0]).toBeVisible();
+    await expect(canvas.getAllByText("1 record omitted")[0]).toBeVisible();
+    // The answer's parent is not an entry on this synthetic bus, so the tree is cut there.
+    await userEvent.click(canvas.getByRole("button", { name: /Review reply/ }));
+    await expect(
+      await canvas.findByText("Reply tree at t=7; cut at 1 missing entry")
+    ).toBeVisible();
+    await expect(canvas.getByText("Target is not an entry at t=7")).toBeVisible();
   },
 };

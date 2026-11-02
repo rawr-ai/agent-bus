@@ -42,6 +42,7 @@
         "{workspaceRoot}/viewer/src/auto-refresh.ts",
         "{workspaceRoot}/viewer/src/history-criteria.ts",
         "{workspaceRoot}/viewer/src/reading-unit.ts",
+        "{workspaceRoot}/viewer/src/snapshot-labels.ts",
         "{workspaceRoot}/viewer/src/announcements.ts",
         "{workspaceRoot}/test/viewer-public.test.ts",
         "{workspaceRoot}/test/viewer-conversations.test.ts",

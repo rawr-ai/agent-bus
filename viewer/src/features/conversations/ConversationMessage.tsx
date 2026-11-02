@@ -6,11 +6,14 @@ import { Audience, formatTime, safeText, Text } from "../../Text";
 export function ConversationMessage({
   message,
   messages,
+  missingAt,
   focusMessage,
   register,
 }: {
   message: PublicMessage;
   messages: readonly PublicMessage[];
+  /** The commit at which the bus reported this message's reply target as not an entry. */
+  missingAt?: number | undefined;
   focusMessage: (id: string) => void;
   register: (id: string, node: HTMLElement | null) => void;
 }) {
@@ -52,7 +55,11 @@ export function ConversationMessage({
               <span>
                 <Text value={message.replyTo} />
               </span>
-              <span className="reply-unresolved">Target not in this observation</span>
+              <span className="reply-unresolved">
+                {missingAt === undefined
+                  ? "Target not in this observation"
+                  : `Target is not an entry at t=${missingAt}`}
+              </span>
             </>
           )}
         </div>

@@ -4,6 +4,8 @@ import {
   HistoryInputSchema,
   HistoryObservationSchema,
   PeersObservationSchema,
+  ThreadInputSchema,
+  ThreadObservationSchema,
 } from "../shared/public.ts";
 import { ObservationReader, ObservationTimeout, ObservationUnavailable } from "./reader.ts";
 
@@ -75,6 +77,20 @@ export const createRouter = (runtime: ViewerRuntime) => ({
       runObservation(
         runtime,
         Effect.flatMap(ObservationReader, (reader) => reader.peers()),
+        signal
+      )
+    ),
+  thread: base
+    .input(
+      Schema.toStandardSchemaV1(ThreadInputSchema, {
+        parseOptions: { onExcessProperty: "error" },
+      })
+    )
+    .output(Schema.toStandardSchemaV1(ThreadObservationSchema))
+    .handler(({ input, signal }) =>
+      runObservation(
+        runtime,
+        Effect.flatMap(ObservationReader, (reader) => reader.thread(input)),
         signal
       )
     ),

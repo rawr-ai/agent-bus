@@ -58,7 +58,10 @@ export const createViewer = (options: {
     const origin = request.headers.get("origin");
     if (origin !== null && origin !== `http://${authority}`) return error(403, "Request refused");
     if (url.search !== "") return error(404, "Not Found");
-    const rpc = url.pathname === "/rpc/history" || url.pathname === "/rpc/peers";
+    const rpc =
+      url.pathname === "/rpc/history" ||
+      url.pathname === "/rpc/peers" ||
+      url.pathname === "/rpc/thread";
     if (!rpc) {
       const asset = options.assets.get(url.pathname);
       if (asset === undefined) return error(404, "Not Found");

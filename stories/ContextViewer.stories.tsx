@@ -1,57 +1,53 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import type { ViewerClient } from "../viewer/shared/client-types";
-import type { HistoryObservation, PeersObservation } from "../viewer/shared/public";
+import type { PublicMessage } from "../viewer/shared/public";
 import { App } from "../viewer/src/App";
+import { historyOf, peersOf, resetStoryBus, threadOf } from "./story-bus";
 
-const observation: HistoryObservation = {
-  observedAt: "2026-01-01T12:00:00Z",
-  criteria: { limit: 200 },
-  omitted: 0,
-  messages: [
-    {
-      id: "a",
-      ts: "2026-01-01T10:00:00Z",
-      from: "agent/lead",
-      to: ["#alpha"],
-      kind: "message",
-      subject: "Review request",
-      body: "Please review **the proposal**.",
-    },
-    {
-      id: "b",
-      ts: "2026-01-01T10:01:00Z",
-      from: "agent/reviewer",
-      to: ["agent/lead"],
-      kind: "message",
-      subject: "Review reply",
-      body: "Confirmed with one note.",
-      replyTo: "a",
-    },
-    {
-      id: "c",
-      ts: "2026-01-01T10:02:00Z",
-      from: "agent/lead",
-      to: ["#beta"],
-      kind: "message",
-      subject: "Follow-up",
-      body: "Thanks for the note.",
-      replyTo: "b",
-    },
-  ],
+const messages: PublicMessage[] = [
+  {
+    id: "a",
+    ts: "2026-01-01T10:00:00Z",
+    from: "agent/lead",
+    to: ["#alpha"],
+    kind: "message",
+    subject: "Review request",
+    body: "Please review **the proposal**.",
+  },
+  {
+    id: "b",
+    ts: "2026-01-01T10:01:00Z",
+    from: "agent/reviewer",
+    to: ["agent/lead"],
+    kind: "message",
+    subject: "Review reply",
+    body: "Confirmed with one note.",
+    replyTo: "a",
+  },
+  {
+    id: "c",
+    ts: "2026-01-01T10:02:00Z",
+    from: "agent/lead",
+    to: ["#beta"],
+    kind: "message",
+    subject: "Follow-up",
+    body: "Thanks for the note.",
+    replyTo: "b",
+  },
+];
+const client: ViewerClient = {
+  history: async () => historyOf(messages, { t: 1 }),
+  peers: async () => peersOf(["agent/lead"]),
+  thread: async (input) => threadOf(input),
 };
-const peers: PeersObservation = {
-  observedAt: "2026-01-01T12:00:01Z",
-  omitted: 0,
-  peers: [{ address: "agent/lead", runtime: "other", topics: ["alpha"] }],
-};
-const client: ViewerClient = { history: async () => observation, peers: async () => peers };
 const meta = {
   title: "Viewer/Context journey",
   component: App,
   args: { client },
   beforeEach: () => {
     history.replaceState(null, "", location.pathname + location.search);
+    resetStoryBus();
   },
 } satisfies Meta<typeof App>;
 export default meta;

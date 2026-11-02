@@ -8,6 +8,8 @@ import {
   PeersObservationSchema,
   projectHistory,
   projectPeers,
+  projectThread,
+  ThreadObservationSchema,
 } from "../viewer/shared/public.ts";
 
 const AT = "2026-01-02T03:04:05.000Z";
@@ -15,7 +17,12 @@ const MARK = "MARKER-private-7f3a9c";
 const FAILED = "Public observation rejected";
 const base = { limit: 50 };
 
+const LEDGER = "ledger-incarnation";
+const SNAPSHOT_T = 10_000;
+// Each fixture gets the next commit, so commit order is the order fixtures are made in.
+let commit = 0;
 const message = (id: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  t: ++commit,
   id,
   ts: "2026-01-01T00:00:00.000Z",
   from: "agent/a",
@@ -27,9 +34,34 @@ const message = (id: string, extra: Record<string, unknown> = {}): Record<string
 const peer = (address: string, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
   address,
   runtime: "other",
+  status: "joined",
   topics: [],
+  t: ++commit,
   ...extra,
 });
+
+/** One bus_run_query page at SNAPSHOT_T, exhausted and not claimed complete unless overridden. */
+const page = (rows: unknown, extra: Record<string, unknown> = {}): Record<string, unknown> => ({
+  name: "history",
+  catalogueVersion: 1,
+  ledger: LEDGER,
+  t: SNAPSHOT_T,
+  unit: "entry",
+  args: {},
+  rows,
+  damage: "checked",
+  damaged: 0,
+  damagedTotal: 0,
+  exhausted: true,
+  complete: false,
+  note: "note",
+  ...extra,
+});
+const hist = (rows: unknown, extra: Record<string, unknown> = {}) => [page(rows, extra)];
+const peerPages = (rows: unknown, extra: Record<string, unknown> = {}) => [
+  page(rows, { name: "peers", unit: "address", ...extra }),
+];
+const SNAPSHOT = { ledger: LEDGER, t: SNAPSHOT_T };
 
 // Method signatures are bivariant, so hostile non-typed inputs reach the projectors uncast.
 interface Loose {
@@ -57,7 +89,7 @@ const expectGeneric = (run: () => unknown) => {
 };
 
 const histIds = (messages: unknown[], criteria = base) =>
-  projectHistory({ messages }, criteria, AT).messages.map((m) => m.id);
+  projectHistory(hist(messages), criteria, AT).messages.map((m) => m.id);
 
 test("limits are the contracted constants", () => {
   expect(MAX_HISTORY_LIMIT).toBe(200);
@@ -67,9 +99,10 @@ test("limits are the contracted constants", () => {
 describe("history projection", () => {
   test("keeps only named public fields at every level", () => {
     const result = projectHistory(
-      {
-        messages: [
+      hist(
+        [
           {
+            t: 1,
             id: "m1",
             ts: "2026-01-01T00:00:00.000Z",
             from: "agent/a",
@@ -83,9 +116,8 @@ describe("history projection", () => {
             internal: { secret: MARK },
           },
         ],
-        extra: MARK,
-        session: MARK,
-      },
+        { extra: MARK, session: MARK }
+      ),
       base,
       AT
     );
@@ -106,6 +138,10 @@ describe("history projection", () => {
       criteria: { limit: 50 },
       observedAt: "2026-01-02T03:04:05.000Z",
       omitted: 0,
+      snapshot: SNAPSHOT,
+      window: "all",
+      damaged: 0,
+      complete: false,
     });
     expect(JSON.stringify(result)).not.toContain(MARK);
     expect(Schema.is(HistoryObservationSchema)(result)).toBe(true);
@@ -113,9 +149,7 @@ describe("history projection", () => {
 
   test("origin keeps exactly the fields it has", () => {
     const result = projectHistory(
-      {
-        messages: [message("a", { origin: { host: "h" } }), message("b", { origin: { host: "" } })],
-      },
+      hist([message("a", { origin: { host: "h" } }), message("b", { origin: { host: "" } })]),
       base,
       AT
     );
@@ -124,18 +158,16 @@ describe("history projection", () => {
 
   test("permits optional fields and unvalidated public strings", () => {
     const result = projectHistory(
-      {
-        messages: [
-          message("", {
-            ts: "not a date",
-            from: "",
-            body: "",
-            subject: "",
-            replyTo: "",
-            to: [],
-          }),
-        ],
-      },
+      hist([
+        message("", {
+          ts: "not a date",
+          from: "",
+          body: "",
+          subject: "",
+          replyTo: "",
+          to: [],
+        }),
+      ]),
       base,
       AT
     );
@@ -177,7 +209,7 @@ describe("history projection", () => {
   ];
   for (const [name, extra] of invalid) {
     test(`omits a record with invalid ${name}`, () => {
-      const result = projectHistory({ messages: [message("m1", extra)] }, base, AT);
+      const result = projectHistory(hist([message("m1", extra)]), base, AT);
       expect(result.messages).toStrictEqual([]);
       expect(result.omitted).toBe(1);
     });
@@ -187,7 +219,7 @@ describe("history projection", () => {
     test(`omits a record missing ${key}`, () => {
       const record = message("m1");
       delete record[key];
-      const result = projectHistory({ messages: [record] }, base, AT);
+      const result = projectHistory(hist([record]), base, AT);
       expect(result.messages).toStrictEqual([]);
       expect(result.omitted).toBe(1);
     });
@@ -199,21 +231,19 @@ describe("history projection", () => {
     raw[2] = null;
     raw[3] = "text";
     raw[4] = [message("nested")];
-    const result = projectHistory({ messages: raw }, base, AT);
+    const result = projectHistory(hist(raw), base, AT);
     expect(result.messages.map((m) => m.id)).toStrictEqual(["a"]);
     expect(result.omitted).toBe(4);
   });
 
   test("mixes valid, unexpected-kind and malformed records with an exact count", () => {
     const result = projectHistory(
-      {
-        messages: [
-          message("a"),
-          message("p", { kind: "presence" }),
-          message("b", { body: 1 }),
-          message("c"),
-        ],
-      },
+      hist([
+        message("a"),
+        message("p", { kind: "presence" }),
+        message("b", { body: 1 }),
+        message("c"),
+      ]),
       base,
       AT
     );
@@ -229,7 +259,7 @@ describe("history projection", () => {
       message("e", { body: "two" }),
       message("f"),
     ];
-    const result = projectHistory({ messages: raw }, base, AT);
+    const result = projectHistory(hist(raw), base, AT);
     expect(result.messages.map((m) => m.id)).toStrictEqual(["f"]);
     expect(result.omitted).toBe(4);
   });
@@ -242,7 +272,7 @@ describe("history projection", () => {
       message("y"),
       message("z"),
     ];
-    const result = projectHistory({ messages: raw }, base, AT);
+    const result = projectHistory(hist(raw), base, AT);
     expect(result.messages.map((m) => m.id)).toStrictEqual(["z"]);
     expect(result.omitted).toBe(4);
   });
@@ -257,56 +287,159 @@ describe("history projection", () => {
       noId,
       { ...noId },
     ];
-    const result = projectHistory({ messages: raw }, base, AT);
+    const result = projectHistory(hist(raw), base, AT);
     expect(result.messages.map((m) => m.id)).toStrictEqual(["5"]);
     expect(result.omitted).toBe(4);
   });
 
   test("all omitted is success, distinct from empty", () => {
-    const allOmitted = projectHistory({ messages: [null, message("a", { kind: "x" })] }, base, AT);
+    const allOmitted = projectHistory(hist([null, message("a", { kind: "x" })]), base, AT);
     expect(allOmitted.messages).toStrictEqual([]);
     expect(allOmitted.omitted).toBe(2);
-    const empty = projectHistory({ messages: [] }, base, AT);
+    const empty = projectHistory(hist([]), base, AT);
     expect(empty.messages).toStrictEqual([]);
     expect(empty.omitted).toBe(0);
   });
 
-  test("keeps upstream order without parsing dates", () => {
-    const raw = [
-      message("b", { ts: "9999-12-31" }),
-      message("a", { ts: "not a date" }),
-      message("c", { ts: "0001-01-01" }),
-      message("d", { ts: "" }),
-    ];
-    expect(histIds(raw)).toStrictEqual(["b", "a", "c", "d"]);
+  test("orders by commit t, then id, without parsing dates", () => {
+    const b = message("b", { ts: "9999-12-31" });
+    const a = message("a", { ts: "not a date" });
+    const c = message("c", { ts: "0001-01-01" });
+    const d = message("d", { ts: "" });
+    // Newest first, as history backward returns them; shown in commit order.
+    expect(histIds([d, c, a, b])).toStrictEqual(["b", "a", "c", "d"]);
+    // Entries sharing a commit order by id.
+    expect(histIds([message("y", { t: 7 }), message("x", { t: 7 })])).toStrictEqual(["x", "y"]);
   });
 
-  test("rejects roots that are not the bare collection", () => {
+  test("omits a row without a commit at or before the snapshot", () => {
+    const result = projectHistory(
+      hist([
+        message("none", { t: undefined }),
+        message("zero", { t: 0 }),
+        message("text", { t: "5" }),
+        message("later", { t: SNAPSHOT_T + 1 }),
+        message("ok", { t: SNAPSHOT_T }),
+      ]),
+      base,
+      AT
+    );
+    expect(result.messages.map((m) => m.id)).toStrictEqual(["ok"]);
+    expect(result.omitted).toBe(4);
+  });
+
+  test("rejects anything but a list of well-formed pages", () => {
     const roots: unknown[] = [
       null,
       undefined,
       "text",
       5,
       [],
-      [{ messages: [] }],
       {},
-      { messages: "x" },
-      { messages: {} },
-      { messages: null },
-      { peers: [] },
-      { result: { messages: [] } },
-      { structuredContent: { messages: [] } },
-      { content: [{ type: "text", text: '{"messages":[]}' }] },
-      { results: '{"messages":[]}' },
-      '{"messages":[]}',
+      page([]),
+      [{ messages: [] }],
+      [{ structuredContent: page([]) }],
+      [{ content: [{ type: "text", text: JSON.stringify(page([])) }] }],
+      [JSON.stringify(page([]))],
+      new Array(1),
+      Array.from({ length: 9 }, (_, i) =>
+        page([], i < 8 ? { exhausted: false, next: `n${i}` } : {})
+      ),
     ];
     for (const root of roots) expectGeneric(() => projectHistory(root, base, AT));
   });
 
-  test("fails the whole observation above the requested bound, never truncating", () => {
+  test("rejects a malformed page envelope", () => {
+    const pages: Array<Record<string, unknown>> = [
+      { ledger: undefined },
+      { ledger: 5 },
+      { t: 0 },
+      { t: 1.5 },
+      { t: "10000" },
+      { currentHeadT: SNAPSHOT_T },
+      { currentHeadT: 3 },
+      { currentHeadT: "10001" },
+      { rows: undefined },
+      { rows: {} },
+      { damagedTotal: -1 },
+      { damagedTotal: undefined },
+      { exhausted: "true" },
+      { complete: undefined },
+      { next: 5 },
+      // A position and exhaustion must agree, and complete needs both exhaustion and no damage.
+      { next: "n" },
+      { exhausted: false },
+      { exhausted: false, next: "n", complete: true },
+      { complete: true, damagedTotal: 1 },
+    ];
+    for (const extra of pages) expectGeneric(() => projectHistory(hist([], extra), base, AT));
+  });
+
+  test("a traversal stays at one commit of one ledger, each page leading to the next", () => {
+    const open = { exhausted: false, next: "n1" };
+    const two = (first: Record<string, unknown>, second: Record<string, unknown>) =>
+      projectHistory([page([message("a")], first), page([message("b")], second)], base, AT);
+    expect(two(open, {}).messages.map((m) => m.id)).toStrictEqual(["a", "b"]);
+    expectGeneric(() => two(open, { ledger: "another" }));
+    expectGeneric(() => two(open, { t: SNAPSHOT_T - 1 }));
+    expectGeneric(() => two({}, {}));
+    expectGeneric(() => two({ ...open, damagedTotal: 2 }, { damagedTotal: 1 }));
+    // The furthest head seen while reading is the one reported.
+    expect(
+      two({ ...open, currentHeadT: SNAPSHOT_T + 5 }, { currentHeadT: SNAPSHOT_T + 2 }).snapshot
+    ).toStrictEqual({ ledger: LEDGER, t: SNAPSHOT_T, currentHeadT: SNAPSHOT_T + 5 });
+  });
+
+  test("labels the window from exhaustion and ranking, never from the row count", () => {
+    const latest = projectHistory(
+      hist([message("a"), message("b")], { exhausted: false, next: "n" }),
+      { limit: 2 },
+      AT
+    );
+    expect(latest.window).toBe("latest");
+    expect(latest.complete).toBe(false);
+    // Exactly limit rows, and the bus says nothing is left: all of them.
+    const all = projectHistory(
+      hist([message("a"), message("b")], { complete: true }),
+      { limit: 2 },
+      AT
+    );
+    expect(all.window).toBe("all");
+    expect(all.complete).toBe(true);
+    // Fewer rows than the limit but not exhausted (damaged entries took the page): still latest.
+    const short = projectHistory(
+      hist([message("a")], { exhausted: false, next: "n", damagedTotal: 3 }),
+      base,
+      AT
+    );
+    expect(short.window).toBe("latest");
+    expect(short.damaged).toBe(3);
+    const ranked = projectHistory(hist([message("a")]), { query: "q", limit: 5 }, AT);
+    expect(ranked.window).toBe("ranked");
+    expectGeneric(() => projectHistory(hist([], { complete: true }), { query: "q", limit: 5 }, AT));
+  });
+
+  test("a last page that overshoots the limit keeps the first rows and is never all", () => {
+    const oldest = message("oldest");
+    const middle = message("middle");
+    const newest = message("newest");
+    const result = projectHistory(
+      [
+        page([newest], { exhausted: false, next: "n1" }),
+        page([middle, oldest], { complete: true, damagedTotal: 0 }),
+      ],
+      { limit: 2 },
+      AT
+    );
+    expect(result.messages.map((m) => m.id)).toStrictEqual(["middle", "newest"]);
+    expect(result.window).toBe("latest");
+    expect(result.complete).toBe(false);
+  });
+
+  test("fails the whole observation when a page exceeds the requested bound", () => {
     const three = [message("a"), message("b"), message("c")];
-    expectGeneric(() => projectHistory({ messages: three }, { limit: 2 }, AT));
-    expectGeneric(() => projectHistory({ messages: [message("a"), null] }, { limit: 1 }, AT));
+    expectGeneric(() => projectHistory(hist(three), { limit: 2 }, AT));
+    expectGeneric(() => projectHistory(hist([message("a"), null]), { limit: 1 }, AT));
     expect(histIds(three.slice(0, 2), { limit: 2 })).toStrictEqual(["a", "b"]);
   });
 
@@ -314,7 +447,7 @@ describe("history projection", () => {
     const criteria = Object.freeze({ query: " Q ", participant: " P", limit: 5 });
     const to = ["agent/b"];
     const origin = { host: "h", cwd: "/w" };
-    const raw = { messages: [message("m1", { to, origin })] };
+    const raw = hist([message("m1", { to, origin })]);
     const before = JSON.stringify(raw);
     const result = projectHistory(raw, criteria, AT);
     expect(JSON.stringify(raw)).toBe(before);
@@ -326,12 +459,12 @@ describe("history projection", () => {
     origin.cwd = "/changed";
     expect(result.messages[0]?.to).toStrictEqual(["agent/b"]);
     expect(result.messages[0]?.origin).toStrictEqual({ host: "h", cwd: "/w" });
-    expect(Object.hasOwn(projectHistory({ messages: [] }, base, AT).criteria, "query")).toBe(false);
+    expect(Object.hasOwn(projectHistory(hist([]), base, AT).criteria, "query")).toBe(false);
   });
 
   test("quarantined marker-bearing data never appears in the observation", () => {
     const result = projectHistory(
-      { messages: [message("a", { body: { secret: MARK } }), message("b", { extra: MARK })] },
+      hist([message("a", { body: { secret: MARK } }), message("b", { extra: MARK })]),
       base,
       AT
     );
@@ -341,7 +474,7 @@ describe("history projection", () => {
 
   test("rejects a non-string observation time", () => {
     for (const at of [undefined, 5, null, { MARK }]) {
-      expectGeneric(() => loose.history({ messages: [] }, base, at));
+      expectGeneric(() => loose.history(hist([]), base, at));
     }
   });
 });
@@ -388,13 +521,13 @@ describe("history input contract", () => {
   accepted.forEach((input, index) => {
     test(`accepts case ${index} natively and in the projector`, () => {
       expect("value" in validate(input)).toBe(true);
-      expect(() => loose.history({ messages: [] }, input, AT)).not.toThrow();
+      expect(() => loose.history(hist([]), input, AT)).not.toThrow();
     });
   });
   rejected.forEach((input, index) => {
     test(`rejects case ${index} natively and in the projector`, () => {
       expect("value" in validate(input)).toBe(false);
-      expectGeneric(() => loose.history({ messages: [] }, input, AT));
+      expectGeneric(() => loose.history(hist([]), input, AT));
     });
   });
 
@@ -405,7 +538,7 @@ describe("history input contract", () => {
       participant: " Agent/X\n",
       limit: 7,
     });
-    const projected = projectHistory({ messages: [] }, { query: " Q", limit: 1 }, AT);
+    const projected = projectHistory(hist([]), { query: " Q", limit: 1 }, AT);
     expect(projected.criteria).toStrictEqual({ query: " Q", limit: 1 });
   });
 });
@@ -414,8 +547,8 @@ describe("peers projection", () => {
   test("keeps only named public fields and clones topics", () => {
     const topics = ["t1", "#t2"];
     const result = projectPeers(
-      {
-        peers: [
+      peerPages(
+        [
           peer("claude/a", {
             runtime: "claude",
             topics,
@@ -427,8 +560,8 @@ describe("peers projection", () => {
           }),
           peer("codex/b", { runtime: "codex" }),
         ],
-        extra: MARK,
-      },
+        { extra: MARK }
+      ),
       AT
     );
     expect(result).toStrictEqual({
@@ -444,6 +577,9 @@ describe("peers projection", () => {
       ],
       observedAt: "2026-01-02T03:04:05.000Z",
       omitted: 0,
+      snapshot: SNAPSHOT,
+      damaged: 0,
+      complete: false,
     });
     expect(result.peers[0]?.topics).not.toBe(topics);
     topics.push("late");
@@ -454,17 +590,15 @@ describe("peers projection", () => {
 
   test("accepts exactly the four runtimes and empty optional strings", () => {
     const result = projectPeers(
-      {
-        peers: [
-          peer("a", { runtime: "claude", host: "", note: "" }),
-          peer("b", { runtime: "codex" }),
-          peer("c", { runtime: "human" }),
-          peer("d", { runtime: "other" }),
-          peer("e", { runtime: "Claude" }),
-          peer("f", { runtime: "bot" }),
-          peer("g", { runtime: 5 }),
-        ],
-      },
+      peerPages([
+        peer("a", { runtime: "claude", host: "", note: "" }),
+        peer("b", { runtime: "codex" }),
+        peer("c", { runtime: "human" }),
+        peer("d", { runtime: "other" }),
+        peer("e", { runtime: "Claude" }),
+        peer("f", { runtime: "bot" }),
+        peer("g", { runtime: 5 }),
+      ]),
       AT
     );
     expect(result.peers.map((p) => `${p.address}:${p.runtime}`)).toStrictEqual([
@@ -493,7 +627,7 @@ describe("peers projection", () => {
   ];
   for (const [name, extra] of invalid) {
     test(`omits a peer with invalid ${name}`, () => {
-      const result = projectPeers({ peers: [peer("a", extra)] }, AT);
+      const result = projectPeers(peerPages([peer("a", extra)]), AT);
       expect(result.peers).toStrictEqual([]);
       expect(result.omitted).toBe(1);
     });
@@ -503,7 +637,7 @@ describe("peers projection", () => {
     for (const key of ["address", "runtime", "topics"]) {
       const record = peer("a");
       delete record[key];
-      const result = projectPeers({ peers: [record] }, AT);
+      const result = projectPeers(peerPages([record]), AT);
       expect(result.peers).toStrictEqual([]);
       expect(result.omitted).toBe(1);
     }
@@ -511,18 +645,16 @@ describe("peers projection", () => {
 
   test("withholds every peer sharing an address, including malformed collisions", () => {
     const result = projectPeers(
-      {
-        peers: [
-          peer("dup"),
-          peer("dup", { note: "other" }),
-          peer("bad", { runtime: "nope" }),
-          peer("bad"),
-          peer("7"),
-          { ...peer("x"), address: 7 },
-          { ...peer("y"), address: 7 },
-          peer("ok"),
-        ],
-      },
+      peerPages([
+        peer("dup"),
+        peer("dup", { note: "other" }),
+        peer("bad", { runtime: "nope" }),
+        peer("bad"),
+        peer("7"),
+        { ...peer("x"), address: 7 },
+        { ...peer("y"), address: 7 },
+        peer("ok"),
+      ]),
       AT
     );
     expect(result.peers.map((p) => p.address)).toStrictEqual(["7", "ok"]);
@@ -530,41 +662,115 @@ describe("peers projection", () => {
   });
 
   test("keeps upstream order, and distinguishes all omitted from empty", () => {
-    const ordered = projectPeers({ peers: [peer("z"), peer("a"), peer("m")] }, AT);
+    const ordered = projectPeers(peerPages([peer("z"), peer("a"), peer("m")]), AT);
     expect(ordered.peers.map((p) => p.address)).toStrictEqual(["z", "a", "m"]);
-    const allOmitted = projectPeers({ peers: [null, 3, "x"] }, AT);
+    const allOmitted = projectPeers(peerPages([null, 3, "x"]), AT);
     expect(allOmitted.peers).toStrictEqual([]);
     expect(allOmitted.omitted).toBe(3);
-    expect(projectPeers({ peers: [] }, AT)).toStrictEqual({
+    expect(projectPeers(peerPages([]), AT)).toStrictEqual({
       peers: [],
       observedAt: "2026-01-02T03:04:05.000Z",
       omitted: 0,
+      snapshot: SNAPSHOT,
+      damaged: 0,
+      complete: false,
     });
   });
 
-  test("rejects malformed roots and wrappers", () => {
+  test("rejects malformed roots, wrappers and unfinished traversals", () => {
     const roots: unknown[] = [
       null,
       "text",
       [],
       {},
-      { peers: {} },
-      { peers: "x" },
-      { messages: [] },
-      { structuredContent: { peers: [] } },
-      { content: [{ type: "text", text: '{"peers":[]}' }] },
-      '{"peers":[]}',
+      { peers: [] },
+      [{ peers: [] }],
+      [{ structuredContent: page([]) }],
+      [JSON.stringify(page([]))],
+      peerPages([], { exhausted: false, next: "n" }),
     ];
     for (const root of roots) expectGeneric(() => projectPeers(root, AT));
-    expectGeneric(() => loose.peers({ peers: [] }, 5));
+    expectGeneric(() => loose.peers(peerPages([]), 5));
   });
 
-  test("enforces the 1000 peer bound without truncating", () => {
-    const make = (count: number) => Array.from({ length: count }, (_, i) => peer(`a/${i}`));
-    const ok = projectPeers({ peers: make(1000) }, AT);
+  test("enforces the 500 per page and 1000 peer bounds without truncating", () => {
+    const make = (count: number, from = 0) =>
+      Array.from({ length: count }, (_, i) => peer(`a/${from + i}`));
+    const pages = (...counts: number[]) =>
+      counts.map((count, index) =>
+        page(make(count, index * 500), {
+          name: "peers",
+          ...(index < counts.length - 1 ? { exhausted: false, next: `n${index}` } : {}),
+        })
+      );
+    const ok = projectPeers(pages(500, 500), AT);
     expect(ok.peers.length).toBe(1000);
     expect(ok.omitted).toBe(0);
-    expectGeneric(() => projectPeers({ peers: make(1001) }, AT));
+    expectGeneric(() => projectPeers(pages(500, 500, 1), AT));
+    expectGeneric(() => projectPeers(peerPages(make(501)), AT));
+  });
+
+  test("shows joined peers only", () => {
+    const result = projectPeers(peerPages([peer("a"), peer("b", { status: "left" })]), AT);
+    expect(result.peers.map((p) => p.address)).toStrictEqual(["a"]);
+    expect(result.omitted).toBe(1);
+  });
+});
+
+describe("thread projection", () => {
+  const request = { id: "root", ledger: LEDGER, t: SNAPSHOT_T };
+  const tree = (rows: unknown[], extra: Record<string, unknown> = {}) => [
+    page(rows, { name: "thread", missingReplyTargets: [], ...extra }),
+  ];
+
+  test("keeps the tree in commit order with the bus's own missing reply targets", () => {
+    const root = message("root", { replyTo: "gone" });
+    const reply = message("reply", { replyTo: "root" });
+    const result = projectThread(
+      tree([reply, root], { missingReplyTargets: ["gone"], complete: false, damagedTotal: 1 }),
+      request,
+      AT
+    );
+    expect(result.messages.map((m) => m.id)).toStrictEqual(["root", "reply"]);
+    expect(result.missingReplyTargets).toStrictEqual(["gone"]);
+    expect(result.request).toStrictEqual(request);
+    expect(result.snapshot).toStrictEqual(SNAPSHOT);
+    expect(result.damaged).toBe(1);
+    expect(result.exhausted).toBe(true);
+    expect(Schema.is(ThreadObservationSchema)(result)).toBe(true);
+  });
+
+  test("a tree with more entries than one page says so", () => {
+    const result = projectThread(
+      tree([message("root")], { exhausted: false, next: "n" }),
+      request,
+      AT
+    );
+    expect(result.exhausted).toBe(false);
+    expect(result.complete).toBe(false);
+  });
+
+  test("refuses a tree read at another commit or ledger than requested", () => {
+    expectGeneric(() => projectThread(tree([]), { ...request, t: SNAPSHOT_T - 1 }, AT));
+    expectGeneric(() => projectThread(tree([]), { ...request, ledger: "replaced" }, AT));
+  });
+
+  test("refuses malformed requests, targets and oversized pages", () => {
+    const loosely = projectThread as (pages: unknown, request: unknown, at: unknown) => unknown;
+    for (const bad of [
+      {},
+      { ...request, id: "" },
+      { ...request, t: 0 },
+      { ...request, ledger: 5 },
+      { ...request, extra: MARK },
+    ]) {
+      expectGeneric(() => loosely(tree([]), bad, AT));
+    }
+    expectGeneric(() => loosely(tree([]), request, 5));
+    expectGeneric(() => projectThread(tree([], { missingReplyTargets: undefined }), request, AT));
+    expectGeneric(() => projectThread(tree([], { missingReplyTargets: [5] }), request, AT));
+    const many = Array.from({ length: 201 }, (_, i) => message(`m${i}`));
+    expectGeneric(() => projectThread(tree(many), request, AT));
   });
 });
 
@@ -579,16 +785,16 @@ test("failures are generic and never carry input, schema or causes", () => {
   const many = Array.from({ length: 3 }, (_, i) => message(`${MARK}-${i}`, { body: MARK }));
   const cases: Array<() => unknown> = [
     () => projectHistory(MARK, base, AT),
-    () => projectHistory({ messages: MARK }, base, AT),
+    () => projectHistory(hist(MARK), base, AT),
     () => projectHistory({ content: [{ type: "text", text: MARK }] }, base, AT),
-    () => projectHistory({ messages: many }, { limit: 2 }, AT),
+    () => projectHistory(hist(many), { limit: 2 }, AT),
     () => projectHistory(trap, base, AT),
-    () => loose.history({ messages: [] }, { limit: 1, [MARK]: MARK }, AT),
-    () => loose.history({ messages: [] }, { query: MARK, limit: 0 }, AT),
-    () => loose.history({ messages: [] }, base, { MARK }),
+    () => loose.history(hist([]), { limit: 1, [MARK]: MARK }, AT),
+    () => loose.history(hist([]), { query: MARK, limit: 0 }, AT),
+    () => loose.history(hist([]), base, { MARK }),
     () => projectPeers(MARK, AT),
-    () => projectPeers({ peers: Array.from({ length: 1001 }, () => peer(MARK)) }, AT),
-    () => loose.peers({ peers: [] }, { MARK }),
+    () => projectPeers(peerPages(Array.from({ length: 501 }, () => peer(MARK))), AT),
+    () => loose.peers(peerPages([]), { MARK }),
   ];
   for (const run of cases) expectGeneric(run);
 });
