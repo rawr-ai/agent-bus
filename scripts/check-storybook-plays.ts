@@ -138,6 +138,7 @@ async function main() {
         "viewer-observation-states--tree-keeps-its-criteria",
         "viewer-observation-states--earlier-commit-freezes-conversation",
         "viewer-observation-states--selected-beyond-the-tree-read",
+        "viewer-observation-states--withheld-presence-keeps-tree",
         "viewer-stopped--render-defect",
       ];
   assert.ok(
