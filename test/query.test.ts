@@ -595,6 +595,58 @@ describe("snapshots and cursors", () => {
     expect(resolved).toMatchObject({ notFound: [late.id], currentHeadT: resolved.t + 1 });
   });
 
+  test("a ledger replaced while a query runs fails the call instead of answering from it", async () => {
+    const config = await freshLedger("replaced");
+    // Once armed, the gateway drops the ledger and recreates it under the same alias right after
+    // its next query returns, as an operator's replacement would, before the closing pin.
+    let armed = false;
+    const replace = async () => {
+      const drop = await flureeFetch("/v1/fluree/drop", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ledger: config.ledger.replace(/:main$/, ""), hard: true }),
+      });
+      const create = await flureeFetch("/v1/fluree/create", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ ledger: config.ledger }),
+      });
+      if (!drop.ok || !create.ok) throw new Error("replacing the ledger failed");
+      await insertRaw(config, {
+        "@id": "urn:agent-bus:message:other",
+        "https://rawr.ai/ns/agent-bus#id": "other",
+      });
+    };
+    const after = <A, E, R>(query: Effect.Effect<A, E, R>) =>
+      Effect.tap(query, () => {
+        if (!armed) return Effect.void;
+        armed = false;
+        return Effect.promise(replace);
+      });
+    const store = flureeStore(config);
+    const decorated = Layer.effect(
+      QueryGateway,
+      Effect.map(QueryGateway, (inner) =>
+        QueryGateway.of({
+          ...inner,
+          jsonld: (t, body) => after(inner.jsonld(t, body)),
+          sparql: (t, text) => after(inner.sparql(t, text)),
+        })
+      )
+    ).pipe(Layer.provide(store));
+    const bus = await startBus(Layer.merge(store, decorated));
+    await bus.append(message({ from: "claude/a", to: ["*"], body: "before" }));
+    const replaced = "The ledger was replaced while the query ran; run it again.";
+    armed = true;
+    expect(await bus.refused("bus_run_query", { name: "history", args: {} })).toBe(replaced);
+    expect(armed).toBe(false);
+    armed = true;
+    expect(await bus.refused("bus_query", { query: "SELECT ?id WHERE { ?m bus:id ?id }" })).toBe(
+      replaced
+    );
+    expect(armed).toBe(false);
+  });
+
   test("cursors are bound to their operation, args, page size, snapshot and ledger", async () => {
     const config = await freshLedger("cursor");
     const bus = await startBus(flureeStore(config));
@@ -668,10 +720,10 @@ describe("snapshots and cursors", () => {
     const big = (body: string) =>
       message({ from: "claude/a", to: ["*"], body: body.repeat(40_000) });
     // damaged, valid (fits), damaged, valid (too big to share the page)
-    await damaged(config);
+    const before = await damaged(config);
     const fits = big("a");
     await bus.append(fits);
-    await damaged(config);
+    const between = await damaged(config);
     const crowded = big("b");
     await bus.append(crowded, big("c"));
     const first = await bus.run("history", { limit: 10 });
@@ -685,6 +737,15 @@ describe("snapshots and cursors", () => {
     expect(rowsOf(pages).length).toBe(3);
     expect(pages.at(-1)).toMatchObject({ damagedTotal: 2, exhausted: true, complete: false });
     for (const page of pages) expect(JSON.stringify(page).length).toBeLessThanOrEqual(65_536);
+
+    // Offset paging consumes the same prefix: the ids after the last emitted row are asked again.
+    const lookup = { ids: [before, fits.id, between, crowded.id] };
+    const byId = await bus.run("messages", lookup);
+    expect(ids(byId.rows)).toEqual([fits.id]);
+    expect(byId).toMatchObject({ damaged: 1, damagedTotal: 1, exhausted: false });
+    const rest = await bus.run("messages", lookup, { cursor: byId.next });
+    expect(ids(rest.rows)).toEqual([crowded.id]);
+    expect(rest).toMatchObject({ damaged: 1, damagedTotal: 2, exhausted: true, complete: false });
 
     const huge = message({ from: "claude/a", to: ["*"], body: "x".repeat(70_000) });
     await bus.append(huge);
