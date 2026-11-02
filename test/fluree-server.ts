@@ -23,6 +23,16 @@ interface Server {
   readonly process: ReturnType<typeof Bun.spawn>;
 }
 
+/** Whether nothing listens on the port now: a quick bind and release. */
+const portFree = (port: number) => {
+  try {
+    Bun.listen({ hostname: "127.0.0.1", port, socket: { data() {} } }).stop(true);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 const launch = async (): Promise<Server> => {
   if (flureeBin === null) {
     throw new Error("The fluree CLI is not on PATH; the query and store suites need it.");
@@ -42,8 +52,21 @@ const launch = async (): Promise<Server> => {
     `--${scope}-auth-trusted-issuer`,
     key.did,
   ]);
+  // Only the child trusts the key made above, and it refuses requests without a token: a
+  // server that answers both ways is this child, never another process on the same port.
+  const ours = async (url: string) => {
+    const status = (headers: Record<string, string>) =>
+      fetch(`${url}/v1/fluree/ledgers`, { headers }).then(
+        (r) => r.status,
+        () => 0
+      );
+    return (
+      (await status({ authorization: `Bearer ${token}` })) === 200 && (await status({})) === 401
+    );
+  };
   for (let launchAttempt = 0; launchAttempt < 5; launchAttempt++) {
     const port = 18_500 + Math.floor(Math.random() * 1400);
+    if (!portFree(port)) continue;
     const url = `http://127.0.0.1:${port}`;
     const child = Bun.spawn(
       [flureeBin, "server", "run", "--memory", "--listen-addr", `127.0.0.1:${port}`, "--"].concat([
@@ -53,11 +76,7 @@ const launch = async (): Promise<Server> => {
       { stdout: "ignore", stderr: "ignore" }
     );
     for (let attempt = 0; attempt < 50 && child.exitCode === null; attempt++) {
-      const ready = await fetch(`${url}/health`).then(
-        (r) => r.ok,
-        () => false
-      );
-      if (ready) return { url, token, process: child };
+      if (await ours(url)) return { url, token, process: child };
       await Bun.sleep(100);
     }
     child.kill();

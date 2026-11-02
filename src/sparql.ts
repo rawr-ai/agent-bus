@@ -54,6 +54,21 @@ const readable = new Set<string>(
 export const JSON_REFUSAL =
   "bus:json is not readable through bus_query; use bus_run_query for decoded entries and damage counts.";
 
+/** The bus: classes an entry is typed with, which a query may name as terms. */
+const BUS_CLASSES = new Set([`${BUS}Message`, `${BUS}Presence`]);
+const notReadable = (iri: string) =>
+  iri === `${BUS}json`
+    ? JSON_REFUSAL
+    : `<${iri}> is not readable through bus_query; it reads ${READABLE_PREDICATES.join(", ")}.`;
+
+/**
+ * Checks an IRI in any position. A bus: IRI must be a readable predicate or an
+ * entry class, so bus:json and unlisted bus: terms are refused even outside a
+ * predicate position (a quoted triple built with TRIPLE(), VALUES, a function).
+ */
+const unreadableTerm = (iri: string): string | undefined =>
+  iri.startsWith(BUS) && !readable.has(iri) && !BUS_CLASSES.has(iri) ? notReadable(iri) : undefined;
+
 /** Checks a predicate position: a named, readable IRI, or a path built only from them. */
 const unreadable = (predicate: unknown): string | undefined => {
   if (typeof predicate !== "object" || predicate === null) return undefined;
@@ -63,11 +78,7 @@ const unreadable = (predicate: unknown): string | undefined => {
     }
     if (predicate.termType === "NamedNode" && "value" in predicate) {
       const iri = String(predicate.value);
-      if (iri === `${BUS}json`) return JSON_REFUSAL;
-      if (!readable.has(iri)) {
-        return `<${iri}> is not readable through bus_query; it reads ${READABLE_PREDICATES.join(", ")}.`;
-      }
-      return undefined;
+      return readable.has(iri) ? undefined : notReadable(iri);
     }
     return "That predicate is not allowed: name each predicate (bus_queries lists them).";
   }
@@ -84,7 +95,10 @@ const unreadable = (predicate: unknown): string | undefined => {
   return "That predicate is not allowed: name each predicate (bus_queries lists them).";
 };
 
-/** The first predicate anywhere in the tree, quoted triples included, that a raw query may not read. */
+/**
+ * The first predicate, or bus: IRI in any position, anywhere in the tree (quoted
+ * triples included) that a raw query may not read.
+ */
 const firstUnreadable = (node: unknown): string | undefined => {
   if (Array.isArray(node)) {
     for (const item of node) {
@@ -94,6 +108,10 @@ const firstUnreadable = (node: unknown): string | undefined => {
     return undefined;
   }
   if (typeof node !== "object" || node === null) return undefined;
+  if ("termType" in node && node.termType === "NamedNode" && "value" in node) {
+    const found = unreadableTerm(String(node.value));
+    if (found !== undefined) return found;
+  }
   if ("predicate" in node) {
     const found = unreadable(node.predicate);
     if (found !== undefined) return found;

@@ -661,18 +661,58 @@ const BEFORE_KEY = "(or (< ?t ?bt) (and (= ?t ?bt) (< ?id ?bid)))";
 const keyOf = (position: Position): Key =>
   "after" in position ? position.after : "before" in position ? position.before : [0, ""];
 
-/** Keyset items from (t, id, json) rows, damaged ones included in place. */
+type Candidate = readonly [t: number, id: string, json: string | null, ...rest: unknown[]];
+
+interface Group<R extends Candidate> {
+  readonly first: R;
+  /** How many rows share this entry's key: more than one means several bus:json values. */
+  copies: number;
+  /** The index of the group's last row in the query result. */
+  last: number;
+}
+
+/**
+ * Candidate rows grouped by entry key (t, id). A subject holding two bus:json values comes back
+ * as two rows with one key: that is one damaged entry, never two rows or a silent pick. The
+ * queries order by key, so a key's rows are adjacent. When the result reached its row limit,
+ * its last group may be cut short, so it is left to the next page unless it is the only one.
+ */
+const groupCandidates = <R extends Candidate>(
+  rows: ReadonlyArray<R>,
+  size: number
+): ReadonlyArray<Group<R>> => {
+  const groups: Array<Group<R>> = [];
+  for (const [index, row] of rows.entries()) {
+    const previous = groups[groups.length - 1];
+    if (previous !== undefined && previous.first[0] === row[0] && previous.first[1] === row[1]) {
+      previous.copies += 1;
+      previous.last = index;
+    } else groups.push({ first: row, copies: 1, last: index });
+  }
+  const whole = rows.length > size && groups.length > 1 ? groups.slice(0, -1) : groups;
+  return whole.slice(0, size);
+};
+
+/** A grouped candidate's entry, or nothing when it is damaged or stored more than once. */
+const decodeGroup = <R extends Candidate>(group: Group<R>) =>
+  group.copies > 1 ? Option.none<Message>() : decodeEntry(group.first[1], group.first[2]);
+
+/** Keyset items from (t, id, json) rows fetched with limit size + 1, damaged ones in place. */
 const entryItems = (
   rows: ReadonlyArray<readonly [number, string, string | null]>,
+  size: number,
   key: "after" | "before"
-): Array<Item<EntryRow>> =>
-  rows.map(([t, id, json]) => {
+): { readonly items: Array<Item<EntryRow>>; readonly more: boolean } => ({
+  items: groupCandidates(rows, size).map((group) => {
+    const [t, id] = group.first;
     const at: Position = key === "after" ? { after: [t, id] } : { before: [t, id] };
-    const message = decodeEntry(id, json);
+    const message = decodeGroup(group);
     return Option.isSome(message)
       ? { kind: "row", row: entryRow(message.value, t), at, label: `${id} (t=${t})` }
       : { kind: "damaged", t, at };
-  });
+  }),
+  more: rows.length > size,
+});
 
 const unique = (name: string, values: ReadonlyArray<string> | undefined) =>
   values === undefined || new Set(values).size === values.length
@@ -753,10 +793,7 @@ export const history = define({
           limit: size + 1,
         })
         .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      return {
-        items: entryItems(rows.slice(0, size), backward ? "before" : "after"),
-        more: rows.length > size,
-      };
+      return entryItems(rows, size, backward ? "before" : "after");
     }),
 });
 
@@ -789,12 +826,19 @@ export const messages = define({
                 where: [candidate("?m"), storedJson("?m")],
               })
               .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      const found = new Map(rows.map((row) => [row[1], row] as const));
+      // An id with more than one stored row (several bus:json values) is damaged, not a pick.
+      const found = new Map<string, Group<(typeof rows)[number]>>();
+      for (const [index, row] of rows.entries()) {
+        const group = found.get(row[1]);
+        if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
+        else group.copies += 1;
+      }
       const items = wanted.map((id, index): Item<EntryRow> => {
         const position = { offset: offset + index + 1 };
-        const row = found.get(id);
-        if (row === undefined) return { kind: "absent", id, at: position };
-        const message = decodeEntry(id, row[2]);
+        const group = found.get(id);
+        if (group === undefined) return { kind: "absent", id, at: position };
+        const row = group.first;
+        const message = decodeGroup(group);
         return Option.isSome(message)
           ? {
               kind: "row",
@@ -816,11 +860,12 @@ const ResolvedRows = Schema.Array(Schema.Tuple([Schema.Number]));
 
 export const thread = define({
   name: "thread",
-  purpose: "The whole reply tree containing a message, from its root, in commit order.",
+  purpose:
+    "The reply tree containing a message, from the nearest top its replyTo links reach at t, in commit order.",
   unit: "entry",
   paging: "keyset",
   coverage: "entries",
-  note: "The tree follows replyTo links only: related mail without a reply link is outside it, so whole-job coverage pairs thread with history. missingReplyTargets are replied-to ids that are not entries at t.",
+  note: "The tree follows replyTo links only, up to the nearest top they reach at t: a reply to an id that is not an entry at t cuts it there, so mail above that gap is outside it, and so is related mail without a reply link; whole-job coverage pairs thread with history. root is absent when the tree is cut; missingReplyTargets are the replied-to ids that are not entries at t.",
   Args: ThreadArgs,
   Row: EntryRow,
   example: { id: "<message id>" },
@@ -890,8 +935,7 @@ export const thread = define({
         })
         .pipe(Effect.flatMap(decodeRows(CandidateRows)));
       return {
-        items: entryItems(rows.slice(0, size), "after"),
-        more: rows.length > size,
+        ...entryItems(rows, size, "after"),
         extra: {
           ...optionalKey("root", root),
           members: memberIris.size,
@@ -949,14 +993,18 @@ export const search = define({
             storedJson("?m"),
           ],
           groupBy: ["?t", "?id", "?json"],
-          orderBy: [["desc", "?best"], "?t"],
+          // Every stored copy of an entry scores the same, so ordering by key after the
+          // score keeps its rows adjacent.
+          orderBy: [["desc", "?best"], "?t", "?id"],
           limit: size + 1,
           offset,
         })
         .pipe(Effect.flatMap(decodeRows(SearchRows)));
-      const items = rows.slice(0, size).map(([t, id, json, score], index): Item<SearchRow> => {
-        const position = { offset: offset + index + 1 };
-        const message = decodeEntry(id, json);
+      // Offsets count result rows, so a position is just past the group's last row.
+      const items = groupCandidates(rows, size).map((group): Item<SearchRow> => {
+        const [t, id, , score] = group.first;
+        const position = { offset: offset + group.last + 1 };
+        const message = decodeGroup(group);
         return Option.isSome(message)
           ? {
               kind: "row",
@@ -1135,8 +1183,17 @@ export const peers = define({
       const decoded: Array<Message> = [];
       const commits = new Map<string, number>();
       const damaged: Array<number> = [];
-      for (const [t, id, json] of rows) {
-        const message = decodeEntry(id, json);
+      // Grouped by key, so a presence stored with several bus:json values is damaged once.
+      const keyed = new Map<string, Group<(typeof rows)[number]>>();
+      for (const [index, row] of rows.entries()) {
+        const key = JSON.stringify([row[0], row[1]]);
+        const group = keyed.get(key);
+        if (group === undefined) keyed.set(key, { first: row, copies: 1, last: index });
+        else group.copies += 1;
+      }
+      for (const group of keyed.values()) {
+        const [t, id] = group.first;
+        const message = decodeGroup(group);
         if (Option.isSome(message)) {
           decoded.push(message.value);
           commits.set(id, t);
