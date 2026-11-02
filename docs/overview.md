@@ -48,7 +48,7 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
 | **Codex deliverer** (`src/codex.ts`, `src/rollout.ts`) | Gives each Codex thread with unread mail one nudge in its own queue, through a short-lived app-server of `serve`'s own. A thread loaded nowhere is borrowed by the machine's Codex daemon to run it, when its stored settings, read from its rollout, allow | Wakes every Codex thread, desktop or daemon, without a second writer |
-| **Installer** (`scripts/install-launch-agents.sh`) | The LaunchAgents and the `~/.local/bin/agent-bus` link | Keeps the bus running across logins |
+| **Installer** (`scripts/install-launch-agents.sh`) | The LaunchAgents and the managed `~/.local/bin/agent-bus` launcher | Keeps the bus running across logins |
 | **Optional viewer** (`viewer/`) | A separately started loopback React app observing fixed public history and current peers through the existing MCP server | Read coordination without consuming inboxes or adding a send path; [viewer](architecture/viewer.md) |
 
 agent-bus runs on Bun and is written with Effect; `package.json` pins the versions.
@@ -76,7 +76,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Local browser observation, public projection, independent freshness and the read-only viewer boundary | [Viewer](architecture/viewer.md) |
 | Building, starting, stopping and recovering the optional viewer | [Viewer runbook](runbooks/viewer.md) |
 | Installed versions, the findings register, and how platform claims are marked | [Platforms](platforms/README.md) |
-| How Codex, Claude Code and Fluree behave | [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md), [Fluree](platforms/fluree.md) |
+| How Bun, Codex, Claude Code and Fluree behave | [Bun](platforms/bun.md), [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md), [Fluree](platforms/fluree.md) |
 | Setting up the bus host and other machines | [Install](runbooks/install.md) |
 | Starting, stopping, health and logs | [Operate](runbooks/operate.md) |
 | Putting a new version into service | [Deploy](runbooks/deploy.md) |

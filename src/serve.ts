@@ -37,7 +37,7 @@ export const layerHttp = (options: { readonly port: number; readonly version: st
       BunHttpServer.layer({
         hostname: "127.0.0.1",
         port: options.port,
-        // Long enough for the longest bus_wait; Bun's default closes idle requests after 10 s.
+        // Bound idle connections while allowing the longest bus_wait or bus_wake.
         idleTimeout: IDLE_TIMEOUT_SECONDS,
       })
     )

@@ -2,7 +2,7 @@
   "extends": "../tsconfig.json",
   "compilerOptions": {
     "lib": ["ES2022", "DOM", "DOM.Iterable"],
-    "types": ["react", "react-dom"],
+    "types": ["react", "react-dom", "vite/client"],
     "jsx": "react-jsx"
   },
   "include": ["src"]

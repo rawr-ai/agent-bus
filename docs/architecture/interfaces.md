@@ -220,7 +220,9 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 
 ### The CLI
 
-`agent-bus` is `src/bin.ts`, whose shebang is `bun --no-env-file`, so run directly (as the `~/.local/bin/agent-bus` link and the hook do) Bun loads no `.env` file. The LaunchAgent runs `bun --no-env-file src/bin.ts serve` for the same reason: it starts in the state directory, where a `.env` file would otherwise be loaded into `serve`'s environment. The installer links it to `~/.local/bin/agent-bus`. `agent-bus --help` and `--version` work. A refused or failed bus call, or a missing store, prints its message alone and sets exit status 1. The CLI finds `serve` at `http://127.0.0.1:<AGENT_BUS_PORT>/mcp` and opens a fresh MCP connection for each call, with the deadline `CALL_TIMEOUT_SECONDS` (`WAKE_CALL_TIMEOUT_SECONDS` for `claude-wake`'s `bus_wake` calls).
+`agent-bus` is `src/bin.ts`. The installer writes one managed `~/.local/bin/agent-bus` launcher that executes an exact Bun and the canonical source entry with `--no-env-file`; the hook calls it, and the `serve` LaunchAgent's arguments are that launcher and `serve`. Thus neither loads a `.env` from its working directory. `agent-bus --help` and `--version` work. A refused or failed bus call, or a missing store, prints its message alone and sets exit status 1. The CLI finds `serve` at `http://127.0.0.1:<AGENT_BUS_PORT>/mcp` and opens a fresh MCP connection for each call, with the deadline `CALL_TIMEOUT_SECONDS` (`WAKE_CALL_TIMEOUT_SECONDS` for `claude-wake`'s `bus_wake` calls).
+
+The installer accepts `--bun /absolute/path` to select a runtime, checks it against both exact source pins, and resolves it once. `--runtime-only --bun /absolute/path` updates only the launcher and `serve` LaunchAgent; `--remote` cannot be combined with it. The installer adopts its old source symlink or a recognized unmodified managed launcher, but refuses foreign files and symlinks. Writes are atomic per file, not across both files. Full installation uses the same launcher machinery ([install](../runbooks/install.md)); controlled activation and rollback are in [deploy](../runbooks/deploy.md).
 
 | Subcommand | Purpose | Calls |
 | --- | --- | --- |
@@ -283,7 +285,9 @@ The CLI presents the session id of the runtime in question and never another run
 | `AGENT_BUS_SESSION` | none | the CLI | The session id for runtimes `human` and `other` |
 | `CODEX_THREAD_ID` | set by Codex in a thread's shell | the CLI; agents, who read it for `session` | The session id of a Codex thread ([platforms: Codex](../platforms/codex.md#thread-ids-and-codex_thread_id)) |
 | `CLAUDE_CODE_SESSION_ID` | set by Claude Code in a session's shell | the CLI; agents, who read it for `session` | The session id of a Claude Code session ([platforms: Claude Code](../platforms/claude-code.md#session-ids)) |
-| `BUN_INSTALL`, `HOME` | `~/.bun`, the user's home | the installer; `HOME` also locates the Codex daemon's socket | Where the installer finds `bun`; where `~/.local/bin/agent-bus` and `~/.codex` are |
+| `AGENT_BUS_REPO` | Installer's checkout | installer | Absolute source root, including for a retained installer to bind restored source during rollback |
+| `AGENT_BUS_LAUNCHER`, `AGENT_BUS_LABEL` | `~/.local/bin/agent-bus`, `ai.rawr.agent-bus` | installer | Managed launcher path and LaunchAgent label prefix; useful for isolated installations |
+| `HOME` | the user's home | installer; also locates the Codex daemon's socket | Where the default launcher, state and `~/.codex` are; absent `--bun`, the installer selects Bun from `PATH` |
 
 Files in the state directory that the code reads:
 

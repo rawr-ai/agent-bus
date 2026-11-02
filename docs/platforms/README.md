@@ -1,6 +1,7 @@
 # Platforms and versions
 
-This folder holds the behaviour of Codex, Claude Code and Fluree that agent-bus depends on, much of it experimental or undocumented, apart from agent-bus's own decisions, which are in [`docs/architecture/`](../architecture/). Each fact carries its basis and its version. This page records which versions were installed, which version each finding was observed on, and what could make a finding stale, so a reader can tell when to recheck a claim. A page of this folder may cite the frame or research page whose experiment established a claim; no other page relies on one.
+This folder holds the behaviour of Bun, Codex, Claude Code and Fluree that agent-bus depends on, much of it experimental or undocumented, apart from agent-bus's own decisions, which are in [`docs/architecture/`](../architecture/). Each fact carries its basis and its version. This page records which versions were installed, which version each finding was observed on, and what could make a finding stale, so a reader can tell when to recheck a claim. A page of this folder may cite the frame or research page whose experiment established a claim; no other page relies on one.
+- [Bun](bun.md): runtime selection and TOML parsing;
 - [Codex](codex.md): app-servers, the writer lock, unloading and the gap after it, the queue, desktop features and the desktop's IPC router, the wake link, what a resume restores, hooks, ids, the daemon, `codex exec`, what a plugin can carry and how skills load;
 - [Claude Code](claude-code.md): how the desktop app runs it, hooks, session ids, plugin monitors, the inbox socket, channels and plugins;
 - [Fluree](fluree.md): the transaction server, its event stream and tokens, full-text search and query limits.
@@ -28,6 +29,7 @@ The two machines don't match exactly: the other machine's daemon is a release ah
 
 | Setting | Value | Where | Since | Why |
 | --- | --- | --- | --- | --- |
+| TOML multiline literal opening newline is trimmed; generated adapter parity must account for it | Bun 1.4.4+38afee6c8 compared with 1.3.14 | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or the native adapter renderer changes |
 | `thread_unload_delay_secs` | 300 (Codex's default is 1800) | `~/.codex/config.toml`, both machines | 2026-10-27, on Codex 0.164 (bus host) and the 0.165 daemon (other machine) | So threads left on the daemon are freed in 5 minutes rather than 30. How the setting works is in [Codex](codex.md#how-long-a-thread-stays-loaded); setting it is in [operate](../runbooks/operate.md) |
 
 ## Version-sensitive findings

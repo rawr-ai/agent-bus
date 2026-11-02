@@ -15,19 +15,66 @@
 #
 # Rerunning is safe: existing config, credentials and messages are kept.
 #
+# --runtime-only --bun /absolute/path/to/bun updates just the managed command and serve
+# LaunchAgent, without inspecting Fluree, SSH or credentials. It also supports rollback:
+# run this retained installer with AGENT_BUS_REPO=/absolute/canonical/source and the old
+# explicit Bun after restoring that source. The selected Bun must match its package pin.
+# Full installs may omit --bun to select the Bun currently on PATH.
+#
 # AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL (the label prefix) and
-# AGENT_BUS_LAUNCHER (the `agent-bus` link) override the defaults, so a disposable instance can
-# run beside the real one.
+# AGENT_BUS_LAUNCHER (the managed `agent-bus` executable) override the defaults, so a
+# disposable instance can run beside the real one. AGENT_BUS_REPO selects the source root.
 
 set -eu
 
 remote=""
-if [ "${1:-}" = "--remote" ]; then
-  remote=${2:?"usage: $0 [--remote SSH_HOST]"}
+runtime_only=false
+show_help=false
+bun_bin=""
+usage() {
+  echo "usage: $0 [--remote SSH_HOST] [--bun /absolute/path/to/bun]"
+  echo "       $0 --runtime-only --bun /absolute/path/to/bun"
+  echo "AGENT_BUS_REPO may select an absolute source root, including for explicit rollback."
+}
+fail() { echo "$*" >&2; exit 1; }
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --remote|--bun)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
+      case "$2" in --*) fail "$1 requires a value" ;; esac
+      if [ "$1" = --remote ]; then
+        [ -z "$remote" ] || fail "--remote was supplied more than once"
+        remote=$2
+      else
+        [ -z "$bun_bin" ] || fail "--bun was supplied more than once"
+        case "$2" in /*) bun_bin=$2 ;; *) fail "--bun must name an absolute executable path" ;; esac
+      fi
+      shift 2
+      ;;
+    --runtime-only)
+      [ "$runtime_only" = false ] || fail "--runtime-only was supplied more than once"
+      runtime_only=true
+      shift
+      ;;
+    --help|-h) show_help=true; shift ;;
+    *) usage >&2; fail "unknown argument: $1" ;;
+  esac
+done
+[ "$show_help" = false ] || { usage; exit 0; }
+if [ "$runtime_only" = true ]; then
+  [ -z "$remote" ] || fail "--runtime-only cannot be combined with --remote"
+  [ -n "$bun_bin" ] || fail "--runtime-only requires an explicit --bun path"
 fi
 
-repo_dir=$(cd "$(dirname "$0")/.." && pwd)
-bun_bin=$(command -v bun || echo "${BUN_INSTALL:-$HOME/.bun}/bin/bun")
+source_root="${AGENT_BUS_REPO:-$(cd "$(dirname "$0")/.." && pwd -P)}"
+case "$source_root" in /*) ;; *) fail "AGENT_BUS_REPO must name an absolute source root" ;; esac
+repo_dir=$(cd "$source_root" && pwd -P) || fail "source root does not exist: $source_root"
+[ -f "$repo_dir/src/bin.ts" ] || fail "source entry does not exist: $repo_dir/src/bin.ts"
+if [ -z "$bun_bin" ]; then
+  bun_bin=$(command -v bun) || fail "bun is not on PATH; supply --bun /absolute/path/to/bun"
+  bun_bin="$(cd "$(dirname "$bun_bin")" && pwd -P)/$(basename "$bun_bin")"
+fi
+[ -f "$bun_bin" ] && [ -x "$bun_bin" ] || fail "Bun is not an executable file: $bun_bin"
 bus_dir="${AGENT_BUS_DIR:-$HOME/.agent-bus}"
 fluree_dir="$bus_dir/fluree"
 port="${AGENT_BUS_FLUREE_PORT:-8095}"
@@ -38,24 +85,61 @@ ledger="agent-bus:main"
 agents="$HOME/Library/LaunchAgents"
 domain="gui/$(id -u)"
 prefix="${AGENT_BUS_LABEL:-ai.rawr.agent-bus}"
-
-mkdir -p "$bus_dir" "$agents"
-
-# The `agent-bus` command: a link to this checkout, which the Claude Code plugin's hook runs.
-# Checked as the hook runs it: a launchd-style PATH after the user's bun directories, outside
-# the checkout.
 launcher="${AGENT_BUS_LAUNCHER:-$HOME/.local/bin/agent-bus}"
-if [ -e "$launcher" ] && [ ! -L "$launcher" ]; then
-  echo "$launcher exists and is not a link; move it aside and rerun" >&2
-  exit 1
-fi
-mkdir -p "$(dirname "$launcher")"
-ln -sfn "$repo_dir/src/bin.ts" "$launcher"
-(cd / && env -i HOME="$HOME" PATH="$(dirname "$launcher"):$HOME/.local/bin:$HOME/.bun/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
-  "$launcher" --help >/dev/null) || { echo "$launcher does not run" >&2; exit 1; }
+case "$launcher" in /*) ;; *) fail "AGENT_BUS_LAUNCHER must be an absolute path" ;; esac
+case "$prefix" in ""|*/*) fail "AGENT_BUS_LABEL must be a nonempty label without slashes" ;; esac
 
-# write_agent LABEL LOG ARG... writes a KeepAlive LaunchAgent running ARGs.
-write_agent() {
+# Validate source, runtime and ownership before creating any directories or temporary files.
+# Recognition is the exact generated shape, not merely the marker or an executable bit.
+validation=$("$bun_bin" --no-env-file - "$repo_dir/package.json" "$launcher" "$repo_dir/src/bin.ts" "$bun_bin" <<'JS'
+import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+const [manifestPath, launcher, entry, runtimePath] = process.argv.slice(2);
+const fail = (message) => { console.error(message); process.exit(1); };
+const accept = () => { process.stdout.write(`agent-bus-runtime-binding-v1:${realpathSync(runtimePath)}`); process.exit(0); };
+const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
+const pin = manifest.engines?.bun;
+if (!/^\d+\.\d+\.\d+$/.test(pin ?? "") || manifest.packageManager !== `bun@${pin}`)
+  fail(`Source must pin the same exact Bun in engines.bun and packageManager: ${manifestPath}`);
+if (Bun.version !== pin) fail(`Selected Bun ${Bun.version} does not match source pin ${pin}`);
+let info;
+try { info = lstatSync(launcher); }
+catch (error) { if (error.code === "ENOENT") accept(); throw error; }
+if (info.isSymbolicLink() && resolve(dirname(launcher), readlinkSync(launcher)) === entry)
+  accept();
+const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
+if (info.isFile()) {
+  const content = readFileSync(launcher, "utf8");
+  const header = "#!/bin/sh\n# agent-bus managed runtime launcher v1\nexec ";
+  const suffix = ` --no-env-file ${quote(entry)} "$@"\n`;
+  if (content.startsWith(header) && content.endsWith(suffix)) {
+    const word = content.slice(header.length, -suffix.length);
+    const runtime = word.slice(1, -1).replaceAll("'\\''", "'");
+    if (runtime.startsWith("/") && !runtime.includes("\n") && quote(runtime) === word)
+      accept();
+  }
+}
+fail(`Refusing foreign launcher at ${launcher}; move it aside explicitly before installing`);
+JS
+) || fail "Selected Bun could not validate the source and launcher"
+case "$validation" in
+  # Resolve a selected symlink once, rather than borrowing a mutable global Bun shim.
+  agent-bus-runtime-binding-v1:/*) bun_bin=${validation#agent-bus-runtime-binding-v1:} ;;
+  *) fail "Selected executable did not validate as Bun: $bun_bin" ;;
+esac
+(cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+  "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
+
+launcher_tmp=""
+agent_tmp=""
+trap '[ -z "$launcher_tmp" ] || rm -f "$launcher_tmp"; [ -z "$agent_tmp" ] || rm -f "$agent_tmp"' EXIT
+trap 'exit 1' HUP INT TERM
+
+shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
+xml_escape() { printf '%s' "$1" | sed 's/\&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g; s/'"'"'/\&apos;/g'; }
+
+# render_agent LABEL LOG ARG... emits a KeepAlive LaunchAgent running ARGs.
+render_agent() {
   label=$1 log=$2
   shift 2
   {
@@ -64,28 +148,32 @@ write_agent() {
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>Label</key><string>$label</string>
+  <key>Label</key><string>$(xml_escape "$label")</string>
   <key>ProgramArguments</key>
   <array>
 PLIST
-    for arg in "$@"; do printf '    <string>%s</string>\n' "$arg"; done
+    for arg in "$@"; do printf '    <string>%s</string>\n' "$(xml_escape "$arg")"; done
     cat <<PLIST
   </array>
-  <key>WorkingDirectory</key><string>$bus_dir</string>
+  <key>WorkingDirectory</key><string>$(xml_escape "$bus_dir")</string>
   <key>EnvironmentVariables</key>
   <dict>
-    <key>AGENT_BUS_DIR</key><string>$bus_dir</string>
-    <key>AGENT_BUS_PORT</key><string>$bus_port</string>
+    <key>AGENT_BUS_DIR</key><string>$(xml_escape "$bus_dir")</string>
+    <key>AGENT_BUS_PORT</key><string>$(xml_escape "$bus_port")</string>
   </dict>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>ThrottleInterval</key><integer>10</integer>
-  <key>StandardOutPath</key><string>$log</string>
-  <key>StandardErrorPath</key><string>$log</string>
+  <key>StandardOutPath</key><string>$(xml_escape "$log")</string>
+  <key>StandardErrorPath</key><string>$(xml_escape "$log")</string>
 </dict>
 </plist>
 PLIST
-  } > "$agents/$label.plist"
+  }
+}
+
+load_agent() {
+  label=$1 log=$2
   # bootout returns before the old job is gone, and bootstrapping over it fails (error 5).
   launchctl bootout "$domain/$label" 2>/dev/null || true
   attempt=0
@@ -95,6 +183,39 @@ PLIST
   done
   launchctl bootstrap "$domain" "$agents/$label.plist"
   echo "loaded $label; log: $log"
+}
+
+write_agent() {
+  agent_tmp=$(mktemp "$agents/$1.plist.tmp.XXXXXX")
+  render_agent "$@" > "$agent_tmp"
+  chmod 644 "$agent_tmp"
+  mv -f "$agent_tmp" "$agents/$1.plist"
+  agent_tmp=""
+  load_agent "$1" "$2"
+}
+
+# Stage both files before replacing either; mv replaces an old symlink, never its target.
+install_runtime() {
+  mkdir -p "$bus_dir" "$agents" "$(dirname "$launcher")"
+  launcher_tmp=$(mktemp "$launcher.tmp.XXXXXX")
+  {
+    printf '#!/bin/sh\n# agent-bus managed runtime launcher v1\nexec '
+    shell_quote "$bun_bin"
+    printf ' --no-env-file '
+    shell_quote "$repo_dir/src/bin.ts"
+    printf ' "$@"\n'
+  } > "$launcher_tmp"
+  chmod 755 "$launcher_tmp"
+  (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    "$launcher_tmp" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
+  agent_tmp=$(mktemp "$agents/$prefix.plist.tmp.XXXXXX")
+  render_agent "$prefix" "$bus_dir/agent-bus.log" "$launcher" serve > "$agent_tmp"
+  chmod 644 "$agent_tmp"
+  mv -f "$launcher_tmp" "$launcher"
+  launcher_tmp=""
+  mv -f "$agent_tmp" "$agents/$prefix.plist"
+  agent_tmp=""
+  load_agent "$prefix" "$bus_dir/agent-bus.log"
 }
 
 # valid_token FILE succeeds when FILE holds a JWS (three base64url parts).
@@ -135,6 +256,14 @@ wait_for() {
     sleep 0.2
   done
 }
+
+if [ "$runtime_only" = true ]; then
+  install_runtime
+  wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
+  exit 0
+fi
+
+mkdir -p "$bus_dir" "$agents"
 
 if [ -z "$remote" ]; then
   fluree_bin=$(command -v fluree) || {
@@ -198,10 +327,7 @@ if [ ! -f "$bus_dir/config.json" ]; then
   echo "bus store: $ledger at $url"
 fi
 
-# --no-env-file, as bin.ts's shebang has: Bun would otherwise load a .env from the working
-# directory ($bus_dir) into serve's environment.
-write_agent "$prefix" "$bus_dir/agent-bus.log" \
-  "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" serve
+install_runtime
 wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
 
 echo "Register the bus with each agent runtime on this machine:"

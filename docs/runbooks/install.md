@@ -4,17 +4,19 @@ Use this to set up the bus host, add another machine, and register the MCP serve
 
 Each step's expected result ends with how it was verified ([runbook shape](../../AGENTS.md#page-shapes)). The rehearsals ran on a disposable instance with its own directory, ports and LaunchAgent labels (the overrides in the installer's header), which behaves as the default install does. The commands here use the default values.
 
+Earlier rehearsal marks refer to the previous installer, not a live run of the managed-launcher version. Treat the revised installation and its launchd checks as *Unverified* until rehearsed.
+
 ## Before you start
 
-Install from the checkout that `serve` will run, which stays on a deployed `main` ([deploy](deploy.md#before-you-start)). The installer links `~/.local/bin/agent-bus` to it, so if you move the checkout later, rerun the installer.
+Install from the canonical checkout that `serve` will run, which stays clean and detached at its approved deployed commit ([deploy](deploy.md#before-you-start)). The installer binds a managed launcher to that checkout and an exact Bun executable; moving either requires a controlled rebinding.
 
 What each machine needs:
 
 | Needs | On | Why |
 | --- | --- | --- |
-| macOS and `bun`, at the version pinned in `package.json` | Every machine | The installer writes LaunchAgents and runs `serve` with Bun. It looks for `bun` on `PATH`, then in `~/.bun/bin` |
+| macOS and `bun`, at the version pinned in `package.json` | Every machine | The installer writes LaunchAgents and runs `serve` with Bun. It selects `bun` on `PATH`, or an absolute executable supplied with `--bun` |
 | The `fluree` CLI on `PATH` | The bus host only | The installer runs the Fluree server from it. Other machines run none ([topology](../architecture/topology.md#two-machine-roles)) |
-| `~/.local/bin` on your shell's `PATH` | Every machine | `agent-bus` is the installer's link there |
+| `~/.local/bin` on your shell's `PATH` | Every machine | `agent-bus` is the managed launcher there |
 | The Claude Code CLI, `claude` | Machines with Claude sessions | Registers the MCP server and installs the plugin |
 | The Codex CLI, `codex`, and the ChatGPT desktop app | Machines with Codex threads | `codex` registers the MCP server. `serve` posts nudges through the desktop's bundled CLI, which has the queue methods |
 | An SSH alias for the bus host with key authentication, and `scp` | The other machine only | The installer copies the token with `scp` and keeps the tunnel with `ssh`, both without prompts (`BatchMode`) |
@@ -45,16 +47,18 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
 1. **Install the dependencies,** from the checkout:
 
    ```sh
-   bun install
+   bun install --frozen-lockfile
    ```
 
-   Expected: Bun's package summary, and on the first run Effect's source cloned into `.repos/effect` (the `prepare` script). A rerun reports no changes. *Rehearsed 2026-10-28*
+   Expected: Bun's package summary, and on the first run Effect's source cloned into `.repos/effect` (the `prepare` script). A rerun reports no changes. The frozen install on the selected new cohort is *Unverified*; development-only vendor preparation may be skipped for deployment as described in [deploy](deploy.md).
 
 2. **Run the installer:**
 
    ```sh
    bun run install:launch-agents
    ```
+
+   To bind a particular executable, pass `-- --bun /absolute/path/to/bun`. Its version must match both exact source pins.
 
    Expected on a first install, in about a second, with full paths:
 
@@ -66,7 +70,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    loaded ai.rawr.agent-bus; log: ~/.agent-bus/agent-bus.log
    ```
 
-   Then the registration commands, which the next sections cover. *Rehearsed 2026-10-28*
+   Then the registration commands, which the next sections cover. The managed-launcher installer has only fixture tests so far; live LaunchAgent installation is *Unverified*.
 
 3. **Check what it created:**
 
@@ -78,14 +82,14 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
 
    | Created | Where | Note |
    | --- | --- | --- |
-   | The launcher | `~/.local/bin/agent-bus`, a link to the checkout's `src/bin.ts` | What the Claude plugin's hook runs. The installer checks it runs under a launchd-style `PATH` from outside the checkout, and stops if a file that isn't a link is already there |
+   | The launcher | `~/.local/bin/agent-bus`, a managed executable | What the hook and `serve` run; it binds exact Bun and canonical source with `--no-env-file`. The installer checks minimal-environment execution, adopts its old source symlink, and refuses foreign files, symlinks or modified wrappers |
    | The signing key | `~/.agent-bus/fluree-key.json`, mode 0600 | The key the Fluree server trusts tokens from |
    | The token | `~/.agent-bus/fluree-token`, mode 0600 | The bearer token for Fluree's data and admin APIs. It has no subject and lasts 520 weeks ([connections](../architecture/connections.md#limits)) |
    | `config.json` | `~/.agent-bus/config.json` | `{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`, written only if absent. `serve` won't start without it |
    | The Fluree project and storage | `~/.agent-bus/fluree/` | The ledger lives here |
-   | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; loaded at once. `serve` runs as `bun --no-env-file src/bin.ts serve`, so a `.env` file in the state directory (its working directory) isn't loaded; a plist written by an earlier installer lacks the flag until the installer is rerun (read in the script, *Unverified* on a loaded job) |
+   | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; `serve` runs the managed launcher with `serve`, so a `.env` file in the state directory is not loaded |
 
-   Expected: the link points into your checkout, the key and token show `-rw-------`, `config.json` names port 8095, and both plists are listed. Both servers listen on loopback only. *Rehearsed 2026-10-28*
+   Expected: the launcher names the selected executable and checkout, the key and token show `-rw-------`, `config.json` names port 8095, and both plists are listed. Both servers listen on loopback only. New launcher and plist: *Unverified* on launchd.
 
 4. **Check that both LaunchAgents run:**
 
@@ -127,17 +131,17 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    agent-bus peers
    ```
 
-   Expected: `agent-bus v…`, then the joined peers (none on a fresh bus). A failure here means the link or `serve` is broken. *Rehearsed 2026-10-28, checked read-only 2026-10-28*
+   Expected: `agent-bus v…`, then the joined peers (none on a fresh bus). A failure here means the launcher or `serve` is broken. New launcher: *Unverified* live.
 
 ### Rerun the installer
 
-Rerunning is safe. It keeps the key, the token, `config.json` and every message, rewrites both plists and restarts both servers. It is therefore also how to apply a change to the installer itself. `serve`'s memory is lost, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
+A full rerun keeps the key, token, `config.json` and messages, but rewrites both plists and restarts both servers. Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
 
 ```sh
 bun run install:launch-agents
 ```
 
-Expected: the two `loaded …` lines and no `created …` line; the same checksums for `fluree-key.json`, `fluree-token` and `config.json` (`shasum`); new process ids; every earlier message still readable. A "Fluree events disconnected, reconnecting" warning in `serve`'s log during the restart is expected. *Rehearsed 2026-10-28*
+Expected: the two `loaded …` lines and no `created …` line; the same checksums for `fluree-key.json`, `fluree-token` and `config.json` (`shasum`); new process ids; every earlier message still readable. A "Fluree events disconnected, reconnecting" warning in `serve`'s log during the restart is expected. The current full installer is *Unverified* on launchd.
 
 ## Register the MCP server
 
@@ -188,7 +192,7 @@ Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md
 What to know about it:
 - **The plugin is a hooks manifest and the agent skill:** `plugin/.claude-plugin/plugin.json` (the three hooks) and `plugin/skills/agent-bus/` (`SKILL.md` and `references/`, with `queries.md` and `runtimes.md`). Claude Code copies all of it into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)). The hook runs the checkout, but the skill is read from the cache, so a change to the skill needs a plugin update.
 - **Its hook runs the checkout,** through `~/.local/bin/agent-bus claude-wake`. A deploy therefore reaches the hook at once, with no plugin update ([delivery](../architecture/delivery.md#claude-code-sessions)).
-- **The hook finds `bun`** in `~/.local/bin`, then `~/.bun/bin`, then on Claude Code's `PATH`, because hooks inherit Claude Code's environment, not your shell's.
+- **The hook uses the managed launcher's exact Bun**, not the `PATH` inherited from Claude Code.
 - **It needs the same `AGENT_BUS_PORT` as `serve`,** or neither set.
 - **Deploy `serve` before the plugin,** so the hook finds `bus_wake` ([deploy](deploy.md#when-the-plugin-changed)).
 
@@ -248,10 +252,10 @@ A shell installation does not refresh the plugin set of an already-loaded deskto
 
 Another machine runs its own `serve` and an SSH tunnel to the bus host's Fluree server, on the same local port. It runs no Fluree. Every step here runs on that machine, which this page has not been run on.
 
-1. **Clone the repo on `main`, check [the prerequisites](#before-you-start)** (it needs no `fluree`), **and install the dependencies:**
+1. **Prepare the approved canonical checkout, check [the prerequisites](#before-you-start)** (it needs no `fluree`), **and install the dependencies:**
 
    ```sh
-   bun install
+   bun install --frozen-lockfile
    ```
 
    *Unverified*
@@ -288,15 +292,16 @@ Another machine runs its own `serve` and an SSH tunnel to the bus host's Fluree 
 
 ### `bun` on the other machine's remote shell
 
-The other machine's non-interactive SSH `PATH` lacks `bun`, so a command run over SSH, say `ssh <host> bun install`, can fail to find it. Give the path (`ssh <host> '~/.bun/bin/bun --version'`) or put `~/.bun/bin` on the `PATH` that remote commands get. The installer is not affected: it runs on the machine itself, and finds Bun on the shell's `PATH` or in `~/.bun`. See also [recover](recover.md). The limit is recorded from earlier use, with no error message. *Unverified*
+The other machine's non-interactive SSH `PATH` may lack `bun`, so a command run over SSH can fail to find it. Use the approved absolute executable path. The installer accepts `--bun` explicitly and records its resolved path in the launcher. See also [recover](recover.md). *Unverified* for the selected runtime on the other machine.
 
 ## If it fails
 
 | What you see | What it means and what to do |
 | --- | --- |
 | `fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun`, exit status 1 | `fluree` isn't on `PATH` (bus host). Check with `command -v fluree`, fix the `PATH`, rerun. *Rehearsed 2026-10-28* |
-| `… exists and is not a link; move it aside and rerun` | A real file sits at `~/.local/bin/agent-bus`. Move it aside, rerun. *Rehearsed 2026-10-28* |
-| `… does not run` | The link's target can't run under a launchd-style `PATH`. Check that `bun` is in `~/.bun/bin` or `~/.local/bin` and that `bun install` finished |
+| `Refusing foreign launcher …` | A foreign file, symlink or modified wrapper occupies the launcher path. Establish ownership before moving it aside; the installer will not overwrite it. Fixture-tested; live *Unverified*. |
+| `Selected runtime cannot run …` | The selected executable or source cannot run under a minimal environment. Check the exact pin and frozen dependency install before retrying. *Unverified* live. |
+| A runtime-only update fails after replacing a file | Launcher and plist replacement are atomic individually, not together. Inspect both and the job; rerun the qualified installer or follow [deploy rollback](deploy.md). *Unverified* on launchd. |
 | `The Fluree server at … does not enforce the bus token` | Another server holds the Fluree port. Find it with `lsof -nP -iTCP:8095 -sTCP:LISTEN`, stop it by its pid, rerun. *Rehearsed 2026-10-28* |
 | `Nothing answers at … ; see <log>` | A server didn't come up within 20 s. Read the log it names ([operate](operate.md)) |
 | `could not copy the token from <host>` | The `scp` failed or the file isn't a token. Repeat step 2 of [Add another machine](#add-another-machine) |

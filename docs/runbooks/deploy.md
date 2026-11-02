@@ -4,113 +4,51 @@ Use this to put a new version of agent-bus into service: the primary-checkout ru
 
 ## Before you start
 
-**The rule: the primary checkout runs only a deployed `main`.** The primary checkout is the one the installer linked `~/.local/bin/agent-bus` to. Two things run from it:
-- the `serve` LaunchAgent, which runs its `src/bin.ts` and picks up changes only when it restarts;
-- every Claude session's wake hook, which runs the same file through the link and so picks up changes at its next run, at once.
+The primary checkout stays clean and detached at the exact approved deployed commit. It is live source for `serve` and the Claude hook, not a development worktree. Never edit or switch it for development. Graphite owns development and merging; the commands below are the narrow activation and rollback exception. Coordinate with the deployment owner before changing any primary or shared branch metadata.
 
-A half-edited tree there breaks `serve` at its next restart and the hooks at their next run ([topology](../architecture/topology.md#rules), rule 7). So nothing is edited, branched or checked out in the primary checkout. Develop in a worktree using the [Git and Graphite workflow](../../AGENTS.md#git-and-graphite). The primary checkout changes only by fast-forwarding to a reviewed commit on remote `main`, which is a deploy.
+A source change reaches a newly started hook immediately, but reaches `serve` only on restart; an already-waiting hook retains its loaded code and runtime until it rearms. Restarting `serve` loses its in-memory wake state, not the ledger. Plugin changes require a separate cache refresh ([When the plugin changed](#when-the-plugin-changed)).
 
-Coordinate source activation with the deployment owner before any command can move local `main`, including `gt sync` from another worktree. Even `gt sync --no-restack` can update other branches, clean up merged or closed branches and overwrite a divergent trunk; it cannot select an exact commit or enforce fast-forward-only refusal. Step 4 therefore uses a narrow deployment exception to the Graphite workflow: fetch, inspect and fast-forward to the pinned commit. Graphite owns development and remote PR integration; the Git commands here own only that controlled activation and the explicit rollback/recovery paths below.
+**This revised procedure is unverified end to end.** Do not activate on the strength of fixture tests. Before approval, rehearse the exact source, dependency, launcher and launchd transition and rollback on a disposable instance. Verify old hook to new server and new hook to old server; after approved activation verify actual Claude wake on each machine. The existing [end-to-end check](#check-the-bus-end-to-end) uses a stand-in hook and is not a real session wake.
 
-What a deploy changes, and when:
-
-| Changed | Reaches | When |
-| --- | --- | --- |
-| `src/` | The Claude hook | At once |
-| `src/` | `serve` | At its restart (step 8) |
-| `plugin/` or `.claude-plugin/` | Claude sessions | After `claude plugin update` and a session restart ([When the plugin changed](#when-the-plugin-changed)) |
-| `plugin/` or `.claude-plugin/` | Codex threads | After native plugin refresh and a later thread load; active owners can read the changed skill immediately ([install](install.md#install-the-codex-skill-plugin)) |
-| `scripts/install-launch-agents.sh` | The LaunchAgents' plists and Fluree's flags | When the installer is rerun (step 8) |
-
-A restart of `serve` loses its memory, which costs at most one extra wake per address and leaves `hooked` unset until each Claude hook calls again, about five seconds later ([delivery](../architecture/delivery.md#claude-code-sessions)). The Codex daemon outlives `serve`'s restarts. The Fluree server isn't restarted unless you rerun the installer.
-
-Public-query containment has an additional [all-server check and rollback constraint](#public-query-containment). Read it before choosing either the target or the rollback commit. A successful upgrade on only one machine does not close an older server's query route to the shared ledger.
-
-You need the change merged into `main` on the remote, a shell on the bus host, and a quiet moment. Use one shell for the whole procedure, because `previous` is set in step 1 and used in step 10.
-
-The steps were *Rehearsed 2026-10-28* on a disposable instance: its own directory, ports and LaunchAgent labels, installed from a temporary clone that stood in for the primary checkout, with a second clone as its remote. It deployed three later commits: a version bump, a deliberately broken file, and its revert. A mark below says where a step differs.
+The activation decision must name the exact merged source commit and tree, each machine's previous source and Bun executable, the new executable, frozen dependencies, affected services, checks and rollback. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed; no interim real-data viewer deployment is authorized by the toolchain upgrade. [Public-query containment](#public-query-containment) applies to every server and rollback.
 
 ## Deploy a new version
 
-1. **Open the primary checkout and record what runs now:**
+1. **Identify the primary explicitly** from the deployment record, not from `readlink`: the launcher may be a regular managed file. In that checkout record `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, the running `serve` process and its launcher/runtime binding. Stop if the tree is dirty, attached to a branch, or its identity differs from the approved record. Preserve both old source and exact runtime for rollback. *Unverified* for the revised procedure.
+
+2. **Check the existing service** with [containment](#public-query-containment), [the restart check](#check-that-serve-restarted) and [the end-to-end check](#check-the-bus-end-to-end) on each machine. Record results and arrange an owned real Claude participant for the later wake check. *Unverified* for this release.
+
+3. **Merge and pin only after separate approval.** Verify the intended PR sequence merged through Graphite, fetch remote `main`, and confirm the approved candidate is on it and descends from the recorded previous commit. Compare the exact candidate commit and tree with the approval, and inspect the full delta before activating. A newer remote head is not automatic approval. *Unverified* for this release.
+
+4. **Activate the pinned source only in a clean, detached primary**, after the reviewed compatibility and rollback rehearsal. Set `candidate` to the exact approved commit and `previous` to the recorded deployed commit:
 
    ```sh
-   cd "$(dirname "$(readlink ~/.local/bin/agent-bus)")/.."
-   git status --short
-   git branch --show-current
-   previous=$(git rev-parse HEAD); echo "$previous"
-   ```
-
-   Expected: no output from `status`, then `main`, then a commit id. Write the id down: it is the commit to roll back to. If `status` prints anything, or the branch isn't `main`, stop: someone broke the rule ([If it fails](#if-it-fails)). *Rehearsed 2026-10-28, checked read-only 2026-10-28*
-
-2. **Run [the end-to-end check](#check-the-bus-end-to-end) on the version that runs now,** so that a later failure is the deploy's.
-
-3. **Merge the intended PR sequence into `main` through Graphite.** In the development worktree, inspect `gt merge --dry-run`, then run `gt merge` from the top of the intended sequence. Verify each PR is merged on GitHub before continuing; a merge job starting is not completion. Return to the primary checkout without running `gt sync`. If the PRs were already merged, only verify their state. Nothing is deployed yet. *Observed live 2026-11-01:* PR #3 and the PR #4-6 sequence actually merged through `gt merge`; completion was verified, not inferred from merge-job acceptance.
-
-4. **Pin and review the target from remote `main`:**
-
-   ```sh
-   git fetch origin
-   candidate=$(git rev-parse origin/main)
-   git log --oneline "$previous..$candidate"
-   ```
-
-   Expected: the log lists exactly the commits you mean to deploy. Record `$candidate` as the reviewed target; if the list is wrong, stop before changing the checkout. Activate that exact commit:
-
-   ```sh
+   git merge-base --is-ancestor "$previous" "$candidate"
    git merge --ff-only "$candidate"
-   git rev-parse HEAD
+   git rev-parse HEAD HEAD^{tree}
    ```
 
-   Expected: the merge prints `Fast-forward` and the changed files (or `Already up to date`), and `HEAD` equals `$candidate`. `--ff-only` refuses divergent history with `Not possible to fast-forward` (exit status 128): recover the primary checkout ([If it fails](#if-it-fails)). Pinning prevents a later fetch from silently changing the selected target. *Rehearsed 2026-10-28 for activation; Rehearsed 2026-11-01 on disposable Git repositories for pinned selection after another fetch and refusal of divergence. Checked read-only 2026-11-01:* both primary checkouts were pinned to `0202499`.
+   Expected: the ancestry check succeeds, fast-forward succeeds, and both printed identities match approval. Stop on any mismatch. *Unverified* for this revised procedure.
 
-5. **See what else the deploy changed:**
+5. **Install the reviewed locked dependencies with the approved absolute Bun executable**, after checking its version and identity. In the primary:
 
    ```sh
-   git diff --name-only "$previous" HEAD -- package.json bun.lock scripts/install-launch-agents.sh plugin .claude-plugin
+   "$approved_bun" install --frozen-lockfile --ignore-scripts
    ```
 
-   Expected: usually nothing. If `scripts/install-launch-agents.sh` is listed, restart in step 8 with the installer. If `plugin/…` or `.claude-plugin/…` is listed, do [When the plugin changed](#when-the-plugin-changed) after step 9.
+   Expected: the locked install completes without changing the lockfile. The development-only Effect vendor preparation is not needed by the running server. A frozen-lockfile mismatch is a failure, not permission to update the lock. *Unverified* for the selected cohort.
 
-6. **Install the dependencies:**
+6. **Apply the reviewed service change.** If only source changed and the existing launcher and service configuration remain correct, restart just `serve` with `launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus`. If the runtime binding changes, use the retained, qualified upgraded installer, not the old whole installer:
 
    ```sh
-   bun install
+   AGENT_BUS_REPO="$primary" "$retained_installer" --runtime-only --bun "$approved_bun"
    ```
 
-   Expected: `Checked … installs … (no changes)` unless `package.json` or `bun.lock` changed, in which case Bun installs the difference.
+   Here `primary`, `retained_installer` and `approved_bun` are absolute paths recorded in the decision. This mode updates the launcher and `serve`, not Fluree, the tunnel or credentials. Inspect other installer changes individually: run a full installer only when separately justified and approved, because it reprovisions service configuration and restarts Fluree or the tunnel. *Unverified* on launchd for this release.
 
-7. **Check the deployed tree,** which takes about 40 seconds (type check, lint, tests, docs check). It starts throwaway servers on random ports and doesn't touch the bus:
+7. **Verify the activated pair on each machine.** Confirm exact source commit and tree, installed dependency and Bun identities, launcher contents, LaunchAgent arguments, and the running process entrypoint and start time. Run the restart, public-query containment and end-to-end checks, then verify a real Claude wake through an owned participant. Do not restart another owner's session to force its hook to rearm. Refresh the plugin only if its source changed. Record every result; a stand-in hook or a health response alone is insufficient. *Unverified* for this release.
 
-   ```sh
-   bun run check
-   ```
-
-   Expected: `0 fail` and `check-docs: … ok`. If it fails, roll back (step 10) before restarting anything. *Observed live 2026-11-01:* both primary checkouts at `0202499` passed the full check with 259 tests, 2,164 assertions and 40 checked documentation pages each. That source tree equals the previously tested `cfa3e69` tree.
-
-8. **Restart `serve`:**
-
-   ```sh
-   launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus
-   ```
-
-   Expected: no output, and `serve` serving again within about a second. `kickstart -k` kills the running job and starts it at once, even inside the 10-second throttle ([operate](operate.md#restart-serve-fluree-or-the-tunnel)). If step 5 listed the installer, run `bun run install:launch-agents` instead: it also restarts Fluree and rewrites the plists, so the bus pauses a few seconds longer ([install](install.md#rerun-the-installer)). *Observed live 2026-11-01:* both installed `serve` processes were restarted after the pinned activation and full checks.
-
-9. **Check that `serve` restarted:** [the restart check](#check-that-serve-restarted), then [the end-to-end check](#check-the-bus-end-to-end). If either fails, go to step 10.
-
-10. **If anything failed, roll back only to a refusal-preserving commit.** If `$previous` predates public-query containment, do not run the reset below: keep the affected `serve` stopped and prepare a reviewed repair or rollback that retains both the refusal and public response projection. Otherwise reset the primary checkout to the commit you wrote down, put the old code into service the way step 8 did, and run both checks again, whole:
-
-    ```sh
-    git reset --hard "$previous"
-    bun install
-    launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus
-    ```
-
-    Expected: `HEAD is now at …` with the old commit; then the restart check and the end-to-end check pass, and `agent-bus --version` is the old version. `reset --hard` is safe here because the rule keeps the tree free of uncommitted work. The reset moves only this checkout: `main` still holds the change, and the next fast-forward would deploy it again, so fix it on `main`, by a fix or a revert merged through a pull request, before deploying again.
-
-    - **If the deploy changed the installer,** use `bun run install:launch-agents` in place of the `kickstart`. After the reset the checkout holds the previous revision, so this runs the previous revision's installer, which wrote the plists now in place and rewrites them as they were. Don't run the new revision's installer from a reset tree.
-    - **If the deploy changed the plugin,** run [the plugin commands](#when-the-plugin-changed) again so the cache follows the checkout.
-    - **On a disposable instance,** rehearse an installer rollback only when both revisions support the installer's overrides (`AGENT_BUS_DIR`, the two ports, `AGENT_BUS_LABEL` and `AGENT_BUS_LAUNCHER`). An installer from before they existed ignores them and rewrites the real launcher and the real LaunchAgents. With such a revision, don't run it: restore the instance's saved plists and launcher by hand ([operate](operate.md#run-an-isolated-bus-for-checks)).
+8. **On failure, restore the complete approved previous state.** Only use a previous source that preserves public-query refusal and response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, containment, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Unverified*: complete rollback has not been rehearsed on launchd.
 
 ## Public-query containment
 
@@ -154,11 +92,11 @@ Run after every restart and rollback. It only reads.
 ```sh
 for i in $(seq 1 30); do curl -fs http://127.0.0.1:8096/health && break; sleep 1; done; echo
 tail -n 2 ~/.agent-bus/agent-bus.log
-launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E 'state =|pid =|bin.ts'
+launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E 'state =|pid =|agent-bus'
 ps -o lstart= -p "$(launchctl print gui/$(id -u)/ai.rawr.agent-bus | awk '/pid =/{print $3}')"; date
 ```
 
-Expected: `ok`; a last log line `Listening on http://127.0.0.1:8096` stamped just now (the line above it is the previous start); `state = running`, a pid, and a `bin.ts` path inside the primary checkout; a process start time within a few seconds of `date`. *Rehearsed 2026-10-28*
+Expected: `ok`; a recent `Listening on http://127.0.0.1:8096` line, `state = running`, a pid and a recent process start time. Inspect the launcher's exact runtime and source binding and the running process separately; this check alone does not prove their identity. The revised launcher check is *Unverified* on launchd.
 
 ## Check the bus end to end
 
@@ -242,7 +180,7 @@ That a hook already waiting before the restart calls `serve` again by itself (it
 
 ## When the plugin changed
 
-A change under `plugin/` or `.claude-plugin/` isn't deployed by the fast-forward. Claude Code copies the plugin into its cache, so the change reaches sessions only after `claude plugin update` and a restart of each session ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Run this after step 9, so `serve` already has `bus_wake` for the new hook to find:
+A change under `plugin/` or `.claude-plugin/` isn't deployed by the fast-forward. Claude Code copies the plugin into its cache, so the change reaches sessions only after `claude plugin update` and a restart of each session ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Run this after verifying the new `serve`, so it already has `bus_wake` for the new hook to find:
 
 ```sh
 claude plugin marketplace update agent-bus
@@ -266,49 +204,13 @@ Also refresh the Codex plugin on every machine and Codex home with participants,
 
 ## Recover a diverged primary checkout
 
-Use this when step 1 finds a dirty tree or another branch, or step 4 refuses with `Not possible to fast-forward`. The checkout's `HEAD` is then work that isn't on `main`: never use it as the commit to restore. Restore a commit that was deployed.
-
-1. **Keep the work,** on a branch, so nothing is lost. Uncommitted changes go on a stash first.
-
-   ```sh
-   git stash push -u
-   git branch rescue/primary-$(date +%Y%m%d-%H%M) HEAD
-   ```
-
-   Expected: the branch exists (`git branch --list 'rescue/*'`). Move it into a worktree for review later; the primary checkout stays on `main`. (`git stash push -u` says `No local changes to save` when the tree is clean.) *Rehearsed 2026-10-28*
-
-2. **Find the last deployed commit.** Candidates, most reliable first:
-   - the last commit the checkout shared with `main`, which is where its last fast-forward ended: `git merge-base HEAD origin/main`;
-   - the target of the last `merge origin/main: Fast-forward` line in `git reflog`;
-   - the commit `serve` was started from: the checkout's state at `serve`'s start time (`ps -o lstart=` in [the restart check](#check-that-serve-restarted)), read from the reflog's dates (`git reflog --date=iso`).
-
-   ```sh
-   base=$(git merge-base HEAD origin/main)
-   git log --oneline -1 "$base"
-   git reflog --date=iso -n 10
-   ```
-
-   Expected: `$base` is the commit the reflog shows the checkout fast-forwarded to, or cloned at, before the divergent commits. If the three disagree, pick the older and let step 4 deploy the rest. *Rehearsed 2026-10-28*
-
-3. **Restore it, restart, and verify, only if it preserves public-query containment.** If `$base` predates the refusal or public response projection, keep `serve` stopped and prepare a reviewed repair instead of activating it; [the containment rule](#public-query-containment) also applies to recovery.
-
-   ```sh
-   git reset --hard "$base"
-   bun install
-   launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus
-   ```
-
-   Then run [the restart check](#check-that-serve-restarted) and [the end-to-end check](#check-the-bus-end-to-end). If `serve` was running the divergent commits, this also puts it back on deployed code; `agent-bus --version` and the checks show it. *Rehearsed 2026-10-28*
-
-4. **Start the deploy again from step 1.** It records this restored commit as `previous`, and step 4 can now fast-forward. *Rehearsed 2026-10-28*
+Stop if the primary is dirty, attached, divergent or its approved deployed identity is uncertain. Preserve unfamiliar work without overwriting it and consult the deployment owner. A merge-base or reflog can help investigate, but neither proves approval. Do not select current `main` or an arbitrary older commit as a recovery target. Only after identifying the exact approved source and runtime and ensuring public-query containment, use the complete rollback in [Deploy a new version](#deploy-a-new-version). *Unverified* for the revised procedure.
 
 ## If it fails
 
-| Symptom | Check | Fix |
-| --- | --- | --- |
-| Step 1: `status` prints files, or the branch isn't `main` | `git status`, `git log origin/main..HEAD` | The rule was broken. Keep the work (`git stash push -u`, or a branch for commits), then [recover the checkout](#recover-a-diverged-primary-checkout) and start again. Don't deploy over uncommitted work |
-| Step 4: `Not possible to fast-forward` | `git log --oneline origin/main..HEAD` | The primary checkout has a commit that isn't on `main`, so `$previous` is that diverged commit and can't be the recovery target. Follow [Recover a diverged primary checkout](#recover-a-diverged-primary-checkout), then start again from step 1 |
-| `serve` doesn't come back after step 8: the restart check prints nothing | `launchctl print gui/$(id -u)/ai.rawr.agent-bus \| grep -E 'state =\|last exit'` and `tail -n 20 ~/.agent-bus/agent-bus.log` | With a syntax error in `src/`: health refused the connection; `state = spawn scheduled`, `last exit code = 1`; the log ended in the Bun error with the file and line; `agent-bus --version` printed the same error, so the hooks failed too. Roll back (step 10). Hooks that fail retry for ten minutes, then wait for their next arming point. *Rehearsed 2026-10-28* |
-| The restart check's log line is old, or the pid and start time are old | `ps -o lstart= -p <pid>` | The restart didn't happen. Repeat step 8 |
-| The end-to-end check prints `FAIL: the hook never called serve` | `tail -n 30 ~/.agent-bus/agent-bus.log` | A `serve` older than `bus_wake` makes hooks retry until a deploy replaces it. Check that step 4 deployed what you meant, restart, and rerun. See [recover](recover.md) |
-| Any other `FAIL:` | The reason it prints | Roll back (step 10); then [operate](operate.md) and [recover](recover.md) |
+| Symptom | Action |
+| --- | --- |
+| Dirty, attached or divergent primary, or unexpected source identity | Stop and [recover the checkout](#recover-a-diverged-primary-checkout); preserve the work. |
+| Foreign or modified launcher refused | Stop before replacing it. Establish ownership and resolve it explicitly; do not bypass the installer check. |
+| Launcher or plist rename or launchd bootstrap fails | The two file replacements are atomic individually, not together. Inspect both files and the job, then rerun the qualified narrow installer for the intended source and runtime or complete the approved rollback; do not assume either pair is active. *Unverified* on launchd. |
+| Health, process identity, containment or delivery fails | Keep the affected `serve` stopped if containment is uncertain; otherwise use the complete approved rollback above. Consult [operate](operate.md) and [recover](recover.md) for diagnosis. |
