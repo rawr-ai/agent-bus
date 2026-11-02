@@ -440,6 +440,24 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     }
   });
 
+  // query.test.ts covers the validator in depth at the SDK's default version; this keeps
+  // each refusal kind a tool error without structured content at every advertised version.
+  test("bus_query refuses unreadable, outside, malformed and oversized queries as tool errors", async () => {
+    const { refused } = await connect();
+    await refused(
+      "bus_query",
+      { query: "SELECT ?j WHERE { ?m bus:json ?j }" },
+      /bus:json is not readable/
+    );
+    await refused(
+      "bus_query",
+      { query: "SELECT * WHERE { SERVICE <urn:example> { ?s ?p ?o } }" },
+      /^SERVICE is not allowed/
+    );
+    await refused("bus_query", { query: "not SPARQL" }, /^Not valid SPARQL/);
+    await refused("bus_query", { query: "é".repeat(65_536) }, /^A query must be 1-/);
+  });
+
   // The CLI opens a connection per call; agents hold one session and keep calling while they wait.
   test("bus_wait holds its request while the same session publishes", async () => {
     const { succeed } = await connect();
