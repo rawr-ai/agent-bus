@@ -2,7 +2,7 @@
 
 This candidate frame covers the owner-directed product turnaround, its shared state model and real-team acceptance. [Projects](turnaround-projects.md), [topics](turnaround-topics.md) and [bulletins](turnaround-bulletin.md) are facets of one orientation vertical, not independent teams. Related frames cover [queries](turnaround-query.md), [activity](turnaround-activity.md) and [the viewer](turnaround-viewer.md). Current behaviour remains in [messaging](../architecture/messaging.md), [delivery](../architecture/delivery.md), [interfaces](../architecture/interfaces.md) and [viewer](../architecture/viewer.md).
 
-Status: jointly reviewed proposal, not accepted by the owner for implementation or deployment. Opened 2026-11-01. Joint DRAs: the Codex and Claude bus leads, with the accountable vertical split below. Mode: co-framing. Object: objective reframe. Operational correctness is testable; real-team behaviour requires observation.
+Status: owner-accepted for implementation on 2026-11-01; deployment remains separately gated. Opened 2026-11-01. Joint DRAs: the Codex and Claude bus leads, with the accountable vertical split below. Mode: co-framing. Object: objective reframe. Operational correctness is testable; real-team behaviour requires observation.
 
 ## Diagnostic and construction
 
@@ -85,6 +85,12 @@ Query comes first: besides its own customer job, it supplies reproducible fixed-
 Frames precede new vertical teams. Each accepted vertical gets a dedicated concern topic, a bounded write surface, its consumer, a handoff contract and a failure route. Existing viewer corrections remain with their current owner and frame; do not create a competing implementation.
 
 Bring the owner decision-ready checkpoints for this frame, deployment, and irreversible or external changes. Routine sequencing, review disposition and communication stay with the leads. Keep implementation in dedicated worktrees. A development clone whose trunk is not a live installation avoids activating source when Graphite updates its local trunk.
+
+## Acceptance and operational follow-up
+
+On 2026-11-01 the owner accepted the frame set, accountable split, query/shared-viewer/PR15 first release unit without an interim viewer deployment, and draft frame publication after acceptance with merge alongside that first release. This is implementation authority, not deployment approval.
+
+The owner also rejected additional coordination directories and independent project clones: use the single canonical repository and the shared `DEV/worktrees` location for all projects, with agent/project/purpose names. This supersedes the independent-clone isolation option above. Preserve the exact deployed source while using Graphite; do not treat a submit dry run as permission to advance a live primary. If publication cannot preserve that boundary, resolve the specific repository-operation gate rather than creating another clone or bypassing Graphite.
 
 ## Falsifier and lifecycle
 
