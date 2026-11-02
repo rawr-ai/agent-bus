@@ -8,8 +8,9 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { type Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
+import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { CATALOGUE_VERSION, operationNames } from "../src/catalogue.ts";
@@ -19,6 +20,7 @@ import { Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
 import { READABLE_PREDICATES } from "../src/sparql.ts";
+import { boundary, chunked, padded, stallBeforeHeaders, stallMidBody } from "./fluree-boundary.ts";
 import { flureeFetch, freshLedger, insertRaw } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
@@ -42,26 +44,40 @@ const freePort = () => {
 
 type Store = Layer.Layer<Ledger | QueryGateway, unknown, never>;
 
-/** A bus serving MCP over one store, with an official SDK client. */
-const startBus = async (store: Store) => {
+/**
+ * A bus serving MCP over one store, with an official SDK client. With `testClock`, the whole
+ * bus runs on a TestClock that only `adjust` moves, so deadlines pass without waiting.
+ */
+const startBus = async (store: Store, options: { readonly testClock?: boolean } = {}) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-query-"));
   dirs.push(dir);
   const port = freePort();
-  const runtime = ManagedRuntime.make(
-    Serve.layerHttp({ port, version: "test" }).pipe(
-      Layer.provideMerge(
-        Bus.layer.pipe(
-          Layer.provideMerge(store),
-          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-          Layer.provide(platform)
-        )
+  const layer = Serve.layerHttp({ port, version: "test" }).pipe(
+    Layer.provideMerge(
+      Bus.layer.pipe(
+        Layer.provideMerge(store),
+        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
+        Layer.provide(platform)
       )
     )
   );
+  const runtime = ManagedRuntime.make(
+    options.testClock === true
+      ? (layer.pipe(Layer.provideMerge(TestClock.layer())) as unknown as typeof layer)
+      : layer
+  );
   await runtime.runPromise(Effect.void);
-  const client = new Client({ name: "query-test", version: "1" });
-  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  /** A new MCP connection of its own to the same bus. */
+  const connect = async () => {
+    const connection = new Client({ name: "query-test", version: "1" });
+    await connection.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
+    );
+    return connection;
+  };
+  const client = await connect();
   const { tools } = await client.listTools();
+  const adjust = (duration: Duration.Input) => runtime.runPromise(TestClock.adjust(duration));
   const dispose = async () => {
     await client.close();
     await runtime.dispose();
@@ -98,7 +114,21 @@ const startBus = async (store: Store) => {
     }
     return pages;
   };
-  return { runtime, tools, call, ok, refused, append, run, all, dispose };
+  return {
+    runtime,
+    tools,
+    client,
+    connect,
+    adjust,
+    text,
+    call,
+    ok,
+    refused,
+    append,
+    run,
+    all,
+    dispose,
+  };
 };
 
 const flureeStore = (config: Config): Store => layerFluree(config).pipe(Layer.provide(platform));
@@ -538,38 +568,56 @@ describe("aggregates and peers", () => {
 
   test("director-dm-volume counts distinct direct mail per UTC day beside observed traffic", async () => {
     const bus = await startBus(flureeStore(await freshLedger("director")));
+    const director = "lead/d";
+    const at = (ts: string, from: string, to: ReadonlyArray<string>, body = "m") =>
+      message({ from, to, body, ts });
+    // Each branch has a day of its own in the window 2026-12-01 to 2026-12-08 (exclusive).
     await bus.append(
-      // Mixed direct and topic recipients count once.
-      message({
-        from: "lead/d",
-        to: ["codex/w", "codex/x", "#ops"],
-        body: "1",
-        ts: "2026-11-01T10:00:00.000Z",
-      }),
-      message({ from: "lead/d", to: ["#ops"], body: "topic only", ts: "2026-11-01T11:00:00.000Z" }),
-      message({ from: "codex/w", to: ["#ops"], body: "work", ts: "2026-11-02T10:00:00.000Z" }),
-      message({
-        from: "lead/d",
-        to: ["codex/w", "#noise"],
-        body: "excluded",
-        ts: "2026-11-02T12:00:00.000Z",
-      }),
-      message({ from: "lead/d", to: ["codex/w"], body: "outside", ts: "2026-11-04T10:00:00.000Z" })
+      // Before the window, by a millisecond.
+      at("2026-11-30T23:59:59.999Z", director, ["codex/x"]),
+      // 12-01, at the window's first instant: one direct message.
+      at("2026-12-01T00:00:00.000Z", director, ["codex/x"]),
+      // 12-02, several in one day: mixed direct and topic recipients count once each, and the
+      // director's topic-only message is concern traffic, not direct mail.
+      at("2026-12-02T10:00:00.000Z", director, ["codex/w", "codex/x", "#ops"]),
+      at("2026-12-02T11:00:00.000Z", director, ["codex/w"]),
+      at("2026-12-02T12:00:00.000Z", director, ["codex/x", "#other"]),
+      at("2026-12-02T13:00:00.000Z", director, ["codex/w"]),
+      at("2026-12-02T14:00:00.000Z", director, ["#ops"]),
+      // 12-03: an outside sender to a concern topic is observed traffic alone.
+      at("2026-12-03T10:00:00.000Z", "codex/outsider", ["#ops"]),
+      // 12-04: only traffic that reaches an excluded topic, so no row.
+      at("2026-12-04T10:00:00.000Z", director, ["codex/w", "#noise"]),
+      at("2026-12-04T11:00:00.000Z", "codex/x", ["#noise"]),
+      at("2026-12-04T12:00:00.000Z", "codex/outsider", ["#ops", "#noise"]),
+      // 12-05: only unrelated traffic, so no row.
+      at("2026-12-05T10:00:00.000Z", "codex/outsider", ["codex/other"]),
+      at("2026-12-05T11:00:00.000Z", director, ["#elsewhere"]),
+      at("2026-12-05T12:00:00.000Z", director, ["codex/other"]),
+      // 12-06: nothing. 12-07, at its last millisecond: a cohort address to an unrelated topic.
+      at("2026-12-07T23:59:59.999Z", "codex/w", ["#random"]),
+      // At toDay's midnight, outside the window.
+      at("2026-12-08T00:00:00.000Z", director, ["codex/x"])
     );
-    const page = await bus.run("director-dm-volume", {
-      director: "lead/d",
+    const window = {
+      director,
       cohort: ["codex/x", "codex/w"],
       concernTopics: ["#ops"],
-      fromDay: "2026-11-01",
-      toDay: "2026-11-03",
       excludeTopics: ["#noise"],
+    };
+    const page = await bus.run("director-dm-volume", {
+      ...window,
+      fromDay: "2026-12-01",
+      toDay: "2026-12-08",
     });
     expect(page.rows).toEqual([
-      { day: "2026-11-01", directorToCohort: 1, observedTraffic: true },
-      { day: "2026-11-02", directorToCohort: 0, observedTraffic: true },
+      { day: "2026-12-01", directorToCohort: 1, observedTraffic: true },
+      { day: "2026-12-02", directorToCohort: 4, observedTraffic: true },
+      { day: "2026-12-03", directorToCohort: 0, observedTraffic: true },
+      { day: "2026-12-07", directorToCohort: 0, observedTraffic: true },
     ]);
     expect(page).toMatchObject({
-      totals: { directorToCohort: 1, observedTrafficDays: 2, ratio: 0.5 },
+      totals: { directorToCohort: 5, observedTrafficDays: 4, ratio: 1.25 },
       missingJson: 0,
       damage: "not-checked",
       exhausted: true,
@@ -577,6 +625,18 @@ describe("aggregates and peers", () => {
       args: { cohort: ["codex/w", "codex/x"] },
     });
     expect(page.next).toBeUndefined();
+    // A window with no traffic at all has no rows and no ratio.
+    const empty = await bus.run("director-dm-volume", {
+      ...window,
+      fromDay: "2026-12-10",
+      toDay: "2026-12-12",
+    });
+    expect(empty.rows).toEqual([]);
+    expect(empty).toMatchObject({
+      totals: { directorToCohort: 0, observedTrafficDays: 0, ratio: null },
+      missingJson: 0,
+      exhausted: true,
+    });
     expect(
       await bus.refused("bus_run_query", {
         name: "director-dm-volume",
@@ -759,26 +819,50 @@ describe("snapshots and cursors", () => {
   test("pages fit the byte limit by whole rows, resume after the last emitted row, and fail on one oversized row", async () => {
     const config = await freshLedger("bytes");
     const bus = await startBus(flureeStore(config));
-    const big = (body: string) =>
-      message({ from: "claude/a", to: ["*"], body: body.repeat(40_000) });
-    // damaged, valid (fits), damaged, valid (too big to share the page)
+    // 39,000 UTF-8 bytes in 13,000 characters: two such rows exceed 65,536 bytes, though not
+    // 65,536 characters, so a page holds one of them only when the limit counts bytes.
+    const big = (tag: string) =>
+      message({ from: "claude/a", to: ["*"], body: `${tag}${"€".repeat(13_000)}` });
+    // damaged, valid (fits), damaged, valid (too big to share the page), valid
     const before = await damaged(config);
     const fits = big("a");
     await bus.append(fits);
     const between = await damaged(config);
     const crowded = big("b");
-    await bus.append(crowded, big("c"));
-    const first = await bus.run("history", { limit: 10 });
-    expect(ids(first.rows)).toEqual([fits.id]);
-    // Only the damage before the last emitted row is consumed.
-    expect(first).toMatchObject({ damaged: 1, damagedTotal: 1, exhausted: false });
-    const second = await bus.run("history", { limit: 10 }, { cursor: first.next });
-    expect(second.damaged).toBe(1);
-    expect(ids(second.rows)[0]).toBe(crowded.id);
-    const pages = await bus.all("history", { limit: 10 });
-    expect(rowsOf(pages).length).toBe(3);
-    expect(pages.at(-1)).toMatchObject({ damagedTotal: 2, exhausted: true, complete: false });
-    for (const page of pages) expect(JSON.stringify(page).length).toBeLessThanOrEqual(65_536);
+    const last = big("c");
+    await bus.append(crowded, last);
+    const pageIds = (pages: ReadonlyArray<Json>) => pages.map((page) => ids(page.rows));
+    const counts = (pages: ReadonlyArray<Json>) =>
+      pages.map((page) => [page.damaged, page.damagedTotal, page.exhausted]);
+    const fitsTheLimit = (pages: ReadonlyArray<Json>) => {
+      for (const page of pages) {
+        expect(Buffer.byteLength(JSON.stringify(page), "utf8")).toBeLessThanOrEqual(65_536);
+      }
+    };
+
+    // Forward: only the damage before the last emitted row is consumed, and each page resumes
+    // right after that row, so every entry appears once, in order.
+    const forward = await bus.all("history", { limit: 10 });
+    expect(pageIds(forward)).toEqual([[fits.id], [crowded.id], [last.id]]);
+    expect(counts(forward)).toEqual([
+      [1, 1, false],
+      [1, 2, false],
+      [0, 2, true],
+    ]);
+    expect(forward.at(-1)).toMatchObject({ complete: false });
+    fitsTheLimit(forward);
+
+    // Backward: the entry damaged between crowded and fits lies after the second page's last
+    // emitted row, so that page neither counts nor skips it; the third page counts it.
+    const backward = await bus.all("history", { limit: 10, direction: "backward" });
+    expect(pageIds(backward)).toEqual([[last.id], [crowded.id], [fits.id]]);
+    expect(counts(backward)).toEqual([
+      [0, 0, false],
+      [0, 0, false],
+      [2, 2, true],
+    ]);
+    expect(backward.at(-1)).toMatchObject({ complete: false });
+    fitsTheLimit(backward);
 
     // Offset paging consumes the same prefix: the ids after the last emitted row are asked again.
     const lookup = { ids: [before, fits.id, between, crowded.id] };
@@ -789,16 +873,48 @@ describe("snapshots and cursors", () => {
     expect(ids(rest.rows)).toEqual([crowded.id]);
     expect(rest).toMatchObject({ damaged: 1, damagedTotal: 2, exhausted: true, complete: false });
 
+    // One row too large alone fails by name, whether it is 70,000 ASCII bytes or 66,000 UTF-8
+    // bytes in 22,000 characters.
     const huge = message({ from: "claude/a", to: ["*"], body: "x".repeat(70_000) });
-    await bus.append(huge);
-    expect(
-      await bus.refused("bus_run_query", { name: "messages", args: { ids: [huge.id] } })
-    ).toMatch(
-      new RegExp(`^The entry ${huge.id} \\(t=\\d+\\) alone exceeds the 65536-byte result limit`)
-    );
+    const wide = message({ from: "claude/a", to: ["*"], body: "€".repeat(22_000) });
+    await bus.append(huge, wide);
+    for (const entry of [huge, wide]) {
+      expect(
+        await bus.refused("bus_run_query", { name: "messages", args: { ids: [entry.id] } })
+      ).toMatch(
+        new RegExp(`^The entry ${entry.id} \\(t=\\d+\\) alone exceeds the 65536-byte result limit`)
+      );
+    }
     // The presets keep their historical contract: no byte cap.
-    const preset = await bus.ok("bus_history", { limit: 1 });
-    expect(preset.messages.map((m: Json) => m.id)).toEqual([huge.id]);
+    const preset = await bus.ok("bus_history", { limit: 2 });
+    expect(preset.messages.map((m: Json) => m.id)).toEqual([huge.id, wide.id]);
+  });
+
+  test("a byte cut between entries sharing one commit resumes at the next id, in both directions", async () => {
+    const config = await freshLedger("bytes-tie");
+    const bus = await startBus(flureeStore(config));
+    // Two 39,000-byte entries written in one commit, listed out of id order, then a small one.
+    const tie = ["tie-b", "tie-a"].map((name) =>
+      message({ from: "claude/a", to: ["*"], body: "€".repeat(13_000), id: name })
+    );
+    await insertRaw(config, {
+      "@context": toNode(tie[0] as Message, "")["@context"],
+      "@graph": tie.map((m) => {
+        const { "@context": _, ...node } = toNode(m, encodeJson(m));
+        return node;
+      }),
+    });
+    await bus.append(message({ from: "claude/a", to: ["*"], body: "after", id: "tie-c" }));
+    const forward = await bus.all("history", { limit: 10 });
+    expect(forward.map((page) => ids(page.rows))).toEqual([["tie-a"], ["tie-b", "tie-c"]]);
+    const [first, second] = rowsOf(forward);
+    expect(first?.t).toBe(second?.t);
+    const backward = await bus.all("history", { limit: 10, direction: "backward" });
+    expect(backward.map((page) => ids(page.rows))).toEqual([["tie-c", "tie-b"], ["tie-a"]]);
+    for (const page of [...forward, ...backward]) {
+      expect(page).toMatchObject({ damaged: 0, damagedTotal: 0 });
+    }
+    expect(backward.at(-1)).toMatchObject({ exhausted: true, complete: true });
   });
 });
 
@@ -1061,5 +1177,154 @@ describe("raw SPARQL", () => {
     }
     const after = await bus.ok("bus_queries");
     expect(after.headT).toBe(head);
+  });
+});
+
+describe("transport bounds", () => {
+  const DEADLINE = "The query did not finish within 10 seconds; narrow it.";
+  const RAW = "SELECT ?id WHERE { ?m bus:id ?id }";
+  const RAW_BODY = "SELECT ?body WHERE { ?m bus:body ?body }";
+
+  /** A bus whose Fluree requests cross a controlled boundary, with one entry written. */
+  const throughBoundary = async (name: string, options: { readonly testClock?: boolean } = {}) => {
+    const config = await freshLedger(name);
+    const edge = boundary(config.url);
+    disposers.push(async () => edge.stop());
+    const bus = await startBus(flureeStore({ ...config, url: edge.url }), options);
+    await bus.append(message({ from: "claude/a", to: ["*"], body: "seed" }));
+    const history = () => bus.call("bus_run_query", { name: "history", args: { limit: 5 } });
+    const raw = () => bus.call("bus_query", { query: RAW });
+    /** The error text of a call that must fail. */
+    const failure = async (pending: Promise<CallToolResult>) => {
+      const result = await pending;
+      expect(result.isError).toBe(true);
+      return bus.text(result);
+    };
+    /** Holds `n` queries at once, which only a pool with `n` free permits allows, then lets the deadline end them. */
+    const poolHolds = async (n: number) => {
+      const held = Array.from({ length: n }, () => edge.next(stallBeforeHeaders));
+      const calls = Array.from({ length: n }, history);
+      await Promise.all(held);
+      await bus.adjust("10 seconds");
+      for (const call of calls) expect(await failure(call)).toBe(DEADLINE);
+    };
+    return { bus, edge, history, raw, failure, poolHolds };
+  };
+
+  test("a query stalled before headers or mid-body fails at the 10 s deadline, ends its request and returns its permit", async () => {
+    const { bus, edge, history, raw, failure, poolHolds } = await throughBoundary("deadline", {
+      testClock: true,
+    });
+    // Four permits, four held requests: two never send headers, two stop mid-body.
+    const held = [
+      edge.next(stallBeforeHeaders),
+      edge.next(stallBeforeHeaders),
+      edge.next(stallMidBody),
+      edge.next(stallMidBody),
+    ];
+    const calls = [history(), raw(), history(), raw()];
+    let settled = 0;
+    for (const call of calls) call.then(() => (settled += 1));
+    const requests = await Promise.all(held);
+    await bus.adjust("9999 millis");
+    await Bun.sleep(50);
+    expect(settled).toBe(0);
+    expect(requests.map((request) => request.isFinalised())).toEqual([false, false, false, false]);
+    await bus.adjust("1 millis");
+    for (const call of calls) expect(await failure(call)).toBe(DEADLINE);
+    await Promise.all(requests.map((request) => request.finalised));
+    // Every permit came back: four new queries are held at once.
+    await poolHolds(4);
+  });
+
+  test("an MCP cancel ends its query and frees its permit at once; a lost connection's query ends by the deadline", async () => {
+    const { bus, edge, history, raw, failure, poolHolds } = await throughBoundary("cancel", {
+      testClock: true,
+    });
+    const abort = new AbortController();
+    const heldCancelled = edge.next(stallBeforeHeaders);
+    const cancelled = bus.client.callTool(
+      { name: "bus_run_query", arguments: { name: "history", args: { limit: 5 } } },
+      undefined,
+      { signal: abort.signal }
+    );
+    const cancelledRequest = await heldCancelled;
+    const lost = await bus.connect();
+    const heldLost = edge.next(stallBeforeHeaders);
+    const lostCall = lost.callTool({ name: "bus_query", arguments: { query: RAW } });
+    const lostRequest = await heldLost;
+    const heldOthers = [edge.next(stallMidBody), edge.next(stallMidBody)];
+    const others = [history(), raw()];
+    await Promise.all(heldOthers);
+
+    // The pool is full. A cancel sent over MCP ends the request without the clock moving...
+    abort.abort();
+    await expect(cancelled).rejects.toThrow();
+    await cancelledRequest.finalised;
+    // ...and frees its permit: one more query is held while the other three still hold theirs.
+    const heldNext = edge.next(stallBeforeHeaders);
+    const nextCall = history();
+    await heldNext;
+
+    // A dropped connection sends no cancel; for it, only the deadline is promised.
+    await lost.close();
+    await expect(lostCall).rejects.toThrow();
+    await bus.adjust("10 seconds");
+    await lostRequest.finalised;
+    for (const call of [...others, nextCall]) expect(await failure(call)).toBe(DEADLINE);
+    await poolHolds(4);
+  });
+
+  test("responses are read up to their cap in chunks; one byte more is refused at once and its body cancelled", async () => {
+    const { bus, edge, history, raw, failure } = await throughBoundary("response-caps");
+    const agentJson = (t: number) => ({
+      schema: { "?id": "xsd:string" },
+      rows: [{ "?id": "x" }],
+      t,
+    });
+    for (const [cap, call, body] of [
+      [262_144, raw, agentJson],
+      [33_554_432, history, () => []],
+    ] as const) {
+      const exact = edge.next((t, ended) => chunked(padded(body(t), cap))(t, ended));
+      const answered = await call();
+      expect(answered.isError).toBeFalsy();
+      await exact;
+      // Over by one byte, with the stream left open: only the bus's own count can end it.
+      const over = edge.next((t, ended) =>
+        chunked(padded(body(t), cap + 1), { open: true })(t, ended)
+      );
+      expect(await failure(call())).toBe(
+        `Fluree's response exceeded ${cap} bytes; narrow the query.`
+      );
+      await (await over).finalised;
+    }
+    expect((await bus.ok("bus_query", { query: RAW })).rows).toHaveLength(1);
+  });
+
+  test("a raw first row too large for the envelope is refused even when Fluree reports no cut, counting UTF-8 bytes", async () => {
+    const { bus, edge, failure } = await throughBoundary("raw-first-row");
+    const bindings = (t: number, values: ReadonlyArray<string>) =>
+      JSON.stringify({
+        schema: { "?body": "xsd:string" },
+        rows: values.map((value) => ({ "?body": value })),
+        t,
+      });
+    // 70,000 ASCII bytes, and 66,000 UTF-8 bytes in 22,000 characters: neither fits 65,536.
+    for (const value of ["z".repeat(70_000), "€".repeat(22_000)]) {
+      const held = edge.next((t, ended) => chunked(bindings(t, [value]))(t, ended));
+      const refusal = await failure(bus.call("bus_query", { query: RAW_BODY }));
+      expect(refusal).toBe(
+        `The first binding (row 1) at t=${(await held).t} alone exceeds the result byte limit; select fewer or shorter values.`
+      );
+    }
+    // Two rows of 36,001 bytes in 12,001 characters each: one is kept, cut by bytes.
+    const values = ["€".repeat(12_000) + "1", "€".repeat(12_000) + "2"];
+    const held = edge.next((t, ended) => chunked(bindings(t, values))(t, ended));
+    const result = await bus.ok("bus_query", { query: RAW_BODY });
+    await held;
+    expect(result.rows).toEqual([{ "?body": values[0] }]);
+    expect(result).toMatchObject({ complete: false, cut: "bytes" });
+    expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(65_536);
   });
 });
