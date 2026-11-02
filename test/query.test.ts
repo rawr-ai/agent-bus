@@ -359,6 +359,19 @@ describe("entries", () => {
         })
       ).toContain("fromTs must be before toTs");
     }
+    // Spellings the pattern admits but no calendar has; Date.parse would roll each into a
+    // later day, so 24:00 would order before the next midnight it names.
+    for (const bound of ["2026-11-04T24:00:00Z", "2026-02-30T00:00:00Z", "2026-02-29T00:00:00Z"]) {
+      for (const args of [
+        { fromTs: bound },
+        { groupBy: ["sender"], unit: "message", toTs: bound },
+      ] as const) {
+        const name = "groupBy" in args ? "counts" : "history";
+        expect(await bus.refused("bus_run_query", { name, args })).toContain(
+          `${bound} is not a valid instant`
+        );
+      }
+    }
   });
 
   test("entries sharing one commit page by (t, id)", async () => {

@@ -750,9 +750,16 @@ const instantKey = (value: string) => {
   const [seconds, fraction = ""] = value.slice(0, -1).split(".");
   return `${seconds}.${fraction.padEnd(9, "0")}`;
 };
+/** A real calendar instant: Date.parse rolls T24:00 and February 30 into the next day. */
+const realInstant = (value: string) => {
+  const millis = Date.parse(value);
+  return (
+    Number.isFinite(millis) && new Date(millis).toISOString().slice(0, 19) === value.slice(0, 19)
+  );
+};
 const checkWindow = (window: { fromTs?: string | undefined; toTs?: string | undefined }) => {
   for (const value of [window.fromTs, window.toTs]) {
-    if (value !== undefined && !Number.isFinite(Date.parse(value))) {
+    if (value !== undefined && !realInstant(value)) {
       return Effect.fail(invalid(`${value} is not a valid instant.`));
     }
   }
