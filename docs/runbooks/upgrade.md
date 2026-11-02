@@ -23,7 +23,7 @@ When a recheck changes a finding, edit the platform page that owns it (its claim
 
 ## After upgrading Bun
 
-Qualify the exact executable in a development checkout before proposing activation. Recheck the [Bun findings](../platforms/bun.md), all five enhanced type projects, the generated adapter literal oracle, the full mandatory checks and the real launcher, hook and server paths. The selected source and executable must match their exact pins; changing a shell binary or `PATH` does not rebind an installed launcher. Record old and new source, runtime and dependency identities for both machines. Follow the separate approval, launchd rehearsal and complete rollback gate in [deploy](deploy.md). *Unverified* for the selected cohort on live LaunchAgents.
+Qualify the exact executable in a development checkout before proposing activation. Recheck the [Bun findings](../platforms/bun.md), all five enhanced type projects, the generated adapter literal oracle, the full mandatory checks and the real launcher, hook and server paths. The selected source and executable must match their exact pins; changing a shell binary or `PATH` does not rebind an installed launcher. Record old and new source, runtime and dependency identities for both machines. Follow the separate approval, launchd rehearsal and complete rollback gate in [deploy](deploy.md). *Rehearsed 2026-11-02* on a disposable installation, including both crossing-hook directions and complete cohort rollback; live paired activation remains *Unverified* and unapproved.
 
 ## After upgrading Codex (CLI or desktop app)
 

@@ -8,7 +8,7 @@ The primary checkout stays clean and detached at the exact approved deployed com
 
 A source change reaches a newly started hook immediately, but reaches `serve` only on restart; an already-waiting hook retains its loaded code and runtime until it rearms. Restarting `serve` loses its in-memory wake state, not the ledger. Plugin changes require a separate cache refresh ([When the plugin changed](#when-the-plugin-changed)).
 
-**This revised procedure is unverified end to end.** Do not activate on the strength of fixture tests. Before approval, rehearse the exact source, dependency, launcher and launchd transition and rollback on a disposable instance. Verify old hook to new server and new hook to old server; after approved activation verify actual Claude wake on each machine. The existing [end-to-end check](#check-the-bus-end-to-end) uses a stand-in hook and is not a real session wake.
+**Rehearsed 2026-11-02:** the source, frozen-dependency, launcher and launchd transition and complete cohort rollback passed on a disposable same-path installation, including an old waiting hook to the new server and a new waiting hook to the restored server. Configuration, credentials and the Fluree process were unchanged; all owned jobs and processes were removed. This is not approval or a live-primary deployment receipt. After approved activation verify actual Claude wake on each machine. The existing [end-to-end check](#check-the-bus-end-to-end) uses a stand-in hook and is not a real session wake.
 
 The activation decision must name the exact merged source commit and tree, each machine's previous source and Bun executable, the new executable, frozen dependencies, affected services, checks and rollback. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed; no interim real-data viewer deployment is authorized by the toolchain upgrade. [Public-query containment](#public-query-containment) applies to every server and rollback.
 
@@ -36,7 +36,7 @@ The activation decision must name the exact merged source commit and tree, each 
    "$approved_bun" install --frozen-lockfile --ignore-scripts
    ```
 
-   Expected: the locked install completes without changing the lockfile. The development-only Effect vendor preparation is not needed by the running server. A frozen-lockfile mismatch is a failure, not permission to update the lock. *Unverified* for the selected cohort.
+   Expected: the locked install completes without changing the lockfile. The development-only Effect vendor preparation is not needed by the running server. A frozen-lockfile mismatch is a failure, not permission to update the lock. *Rehearsed 2026-11-02* for both selected and previous cohorts on the disposable installation.
 
 6. **Apply the reviewed service change.** If only source changed and the existing launcher and service configuration remain correct, restart just `serve` with `launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus`. If the runtime binding changes, use the retained, qualified upgraded installer, not the old whole installer:
 
@@ -44,11 +44,11 @@ The activation decision must name the exact merged source commit and tree, each 
    AGENT_BUS_REPO="$primary" "$retained_installer" --runtime-only --bun "$approved_bun"
    ```
 
-   Here `primary`, `retained_installer` and `approved_bun` are absolute paths recorded in the decision. This mode updates the launcher and `serve`, not Fluree, the tunnel or credentials. Inspect other installer changes individually: run a full installer only when separately justified and approved, because it reprovisions service configuration and restarts Fluree or the tunnel. *Unverified* on launchd for this release.
+   Here `primary`, `retained_installer` and `approved_bun` are absolute paths recorded in the decision. This mode updates the launcher and `serve`, not Fluree, the tunnel or credentials. Inspect other installer changes individually: run a full installer only when separately justified and approved, because it reprovisions service configuration and restarts Fluree or the tunnel. *Rehearsed 2026-11-02* on the disposable installation: old symlink adoption, exact managed arguments and unchanged Fluree, configuration and credentials.
 
 7. **Verify the activated pair on each machine.** Confirm exact source commit and tree, installed dependency and Bun identities, launcher contents, LaunchAgent arguments, and the running process entrypoint and start time. Run the restart, public-query containment and end-to-end checks, then verify a real Claude wake through an owned participant. Do not restart another owner's session to force its hook to rearm. Refresh the plugin only if its source changed. Record every result; a stand-in hook or a health response alone is insufficient. *Unverified* for this release.
 
-8. **On failure, restore the complete approved previous state.** Only use a previous source that preserves public-query refusal and response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, containment, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Unverified*: complete rollback has not been rehearsed on launchd.
+8. **On failure, restore the complete approved previous state.** Only use a previous source that preserves public-query refusal and response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, containment, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Rehearsed 2026-11-02*: complete source/dependency/runtime rollback under launchd at the same disposable canonical path, with a waiting candidate hook waking against the old server. Live-primary navigation and actual Claude model wake remain *Unverified* until approved activation.
 
 ## Public-query containment
 
@@ -96,7 +96,7 @@ launchctl print gui/$(id -u)/ai.rawr.agent-bus | grep -E 'state =|pid =|agent-bu
 ps -o lstart= -p "$(launchctl print gui/$(id -u)/ai.rawr.agent-bus | awk '/pid =/{print $3}')"; date
 ```
 
-Expected: `ok`; a recent `Listening on http://127.0.0.1:8096` line, `state = running`, a pid and a recent process start time. Inspect the launcher's exact runtime and source binding and the running process separately; this check alone does not prove their identity. The revised launcher check is *Unverified* on launchd.
+Expected: `ok`; a recent `Listening on http://127.0.0.1:8096` line, `state = running`, a pid and a recent process start time. Inspect the launcher's exact runtime and source binding and the running process separately; this check alone does not prove their identity. The revised launcher and process identity were *Rehearsed 2026-11-02* on a disposable launchd installation.
 
 ## Check the bus end to end
 

@@ -4,7 +4,7 @@ Use this to set up the bus host, add another machine, and register the MCP serve
 
 Each step's expected result ends with how it was verified ([runbook shape](../../AGENTS.md#page-shapes)). The rehearsals ran on a disposable instance with its own directory, ports and LaunchAgent labels (the overrides in the installer's header), which behaves as the default install does. The commands here use the default values.
 
-Earlier rehearsal marks refer to the previous installer, not a live run of the managed-launcher version. Treat the revised installation and its launchd checks as *Unverified* until rehearsed.
+Earlier full-install rehearsal marks refer to the previous installer. The managed launcher's narrow runtime update, old-symlink adoption and complete cohort rollback were *Rehearsed 2026-11-02* under disposable launchd jobs ([deploy](deploy.md)); a fresh full install with the revised installer remains *Unverified* on launchd.
 
 ## Before you start
 
@@ -50,7 +50,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    bun install --frozen-lockfile
    ```
 
-   Expected: Bun's package summary, and on the first run Effect's source cloned into `.repos/effect` (the `prepare` script). A rerun reports no changes. The frozen install on the selected new cohort is *Unverified*; development-only vendor preparation may be skipped for deployment as described in [deploy](deploy.md).
+   Expected: Bun's package summary, and on the first run Effect's source cloned into `.repos/effect` (the `prepare` script). A rerun reports no changes. The selected cohort's cold frozen install and existing-vendor update were *Rehearsed 2026-11-02*; development-only vendor preparation may be skipped for deployment as described in [deploy](deploy.md).
 
 2. **Run the installer:**
 
@@ -70,7 +70,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    loaded ai.rawr.agent-bus; log: ~/.agent-bus/agent-bus.log
    ```
 
-   Then the registration commands, which the next sections cover. The managed-launcher installer has only fixture tests so far; live LaunchAgent installation is *Unverified*.
+   Then the registration commands, which the next sections cover. The managed launcher's narrow update was *Rehearsed 2026-11-02* on a disposable installation; a fresh full installation with the revised installer remains *Unverified* on launchd.
 
 3. **Check what it created:**
 
@@ -89,7 +89,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    | The Fluree project and storage | `~/.agent-bus/fluree/` | The ledger lives here |
    | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; `serve` runs the managed launcher with `serve`, so a `.env` file in the state directory is not loaded |
 
-   Expected: the launcher names the selected executable and checkout, the key and token show `-rw-------`, `config.json` names port 8095, and both plists are listed. Both servers listen on loopback only. New launcher and plist: *Unverified* on launchd.
+   Expected: the launcher names the selected executable and checkout, the key and token show `-rw-------`, `config.json` names port 8095, and both plists are listed. Both servers listen on loopback only. New launcher and plist: *Rehearsed 2026-11-02* through the disposable runtime update, not a fresh full installation.
 
 4. **Check that both LaunchAgents run:**
 
