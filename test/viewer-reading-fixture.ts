@@ -7,15 +7,31 @@ import { RPCLink } from "@orpc/client/fetch";
 import { assertPortFree } from "../viewer/server/port.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import type { PublicMessage, PublicPeer } from "../viewer/shared/public.ts";
+import { busPage, type PageOperation, peerRow } from "./bus-pages.ts";
 
 export const FIXTURE_MODES = ["initial", "changed", "empty", "quarantined", "stress"] as const;
 export type FixtureMode = (typeof FIXTURE_MODES)[number];
+/**
+ * Modes whose rows break the catalogue's row contract on purpose (duplicate identities, a bad
+ * kind, an unsupported runtime), so the viewer's projection is seen withholding them. Every
+ * other mode's pages are ones the bus could send.
+ */
+export const MALFORMED_MODES: ReadonlyArray<FixtureMode> = ["quarantined"];
 
 const DEFAULT_VIEWER_PORT = 4390;
 const PROTOCOL = "2026-07-28";
 const QUERY_TOOL = "bus_run_query";
-const OPERATIONS = ["history", "search", "peers", "thread"] as const;
+const OPERATIONS = [
+  "history",
+  "search",
+  "peers",
+  "thread",
+] as const satisfies ReadonlyArray<PageOperation>;
 type Operation = (typeof OPERATIONS)[number];
+/** The bus's result budget per page, as UTF-8 JSON; checked against the catalogue's. */
+export const FIXTURE_PAGE_BYTES = 65_536;
+/** The commit the fixture's current peers joined at. */
+const PEER_T = 1;
 const LEDGER = "fixture-ledger";
 const PEERS_PAGE = 500;
 const THREAD_LIMIT = 200;
@@ -192,7 +208,8 @@ export const CHANGED_MESSAGES: ReadonlyArray<PublicMessage> = [
   NEW_REPLY,
 ];
 
-// Parent-added falsifiers for full-source fallback and metadata-wide control notation.
+// Parent-added falsifiers for a large source, as large as one page of the bus carries, and
+// metadata-wide control notation.
 export const STRESS_MESSAGES: ReadonlyArray<PublicMessage> = [
   ...FIXTURE_MESSAGES,
   msg(
@@ -200,7 +217,7 @@ export const STRESS_MESSAGES: ReadonlyArray<PublicMessage> = [
     at(15),
     "fixture/large",
     ["#large"],
-    `LARGE_SOURCE_BEGIN\n${"full source segment ".repeat(8_000)}\nLARGE_SOURCE_END`,
+    `LARGE_SOURCE_BEGIN\n${"full source segment ".repeat(3_000)}\nLARGE_SOURCE_END`,
     { subject: "Large full-source fixture" }
   ),
   msg(
@@ -374,7 +391,7 @@ const argsOk = (operation: Operation, args: Row): boolean => {
 };
 
 // The fixture's cursor is its own: a row offset, valid only for the operation that issued it.
-const CURSOR = /^fixture:(history|search|peers):(\d{1,6})$/;
+const CURSOR = /^fixture:(history|search|peers|thread):(\d{1,6})$/;
 
 const parseCall = (id: RequestId, params: unknown): Parsed | undefined => {
   if (!isRecord(params) || !onlyKeys(params, ["name", "arguments", "_meta"])) return undefined;
@@ -600,7 +617,13 @@ const replyTree = (log: Log, t: number, focus: string) => {
   };
 };
 
-/** One bus_run_query page: no damage, and a cursor only while rows remain. */
+const pageBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value));
+
+/**
+ * One bus_run_query page: no damage, and a cursor only while rows remain. Like the bus, a page
+ * keeps as many of its `limit` rows as fit the result budget, and refuses (undefined) when
+ * even its first row does not.
+ */
 const page = (
   call: QueryCall,
   t: number,
@@ -609,36 +632,31 @@ const page = (
   limit: number,
   extra: Row = {}
 ) => {
-  const rows = all.slice(call.offset, call.offset + limit);
-  const more = call.offset + rows.length < all.length;
-  return {
-    name: call.operation,
-    catalogueVersion: 1,
-    ledger: LEDGER,
-    t,
-    ...(head > t ? { currentHeadT: head } : {}),
-    unit:
-      call.operation === "search" ? "ranked match" : call.operation === "peers" ? "peer" : "entry",
-    args: call.args,
-    rows,
-    damage: "checked",
-    damaged: 0,
-    damagedTotal: 0,
-    exhausted: !more,
-    complete: !more && call.operation !== "search",
-    ...(more ? { next: `fixture:${call.operation}:${call.offset + rows.length}` } : {}),
-    note: "Synthetic fixture page.",
-    ...extra,
+  const at = (kept: number) => {
+    const rows = all.slice(call.offset, call.offset + kept);
+    const more = call.offset + rows.length < all.length;
+    return busPage({
+      name: call.operation,
+      ledger: LEDGER,
+      t,
+      head,
+      args: call.args,
+      rows,
+      ...(more ? { next: `fixture:${call.operation}:${call.offset + rows.length}` } : {}),
+      extra,
+    });
   };
+  let kept = Math.min(limit, all.length - call.offset);
+  while (kept > 1 && pageBytes(at(kept)) > FIXTURE_PAGE_BYTES) kept -= 1;
+  const result = at(Math.max(kept, 0));
+  return pageBytes(result) > FIXTURE_PAGE_BYTES ? undefined : result;
 };
 
 /** The page a call gets in a mode at the head it arrived at, or undefined to refuse it. */
 const answer = (log: Log, mode: FixtureMode, head: number, call: QueryCall) => {
   const limit = get(call.args, "limit") as number;
   if (call.operation === "peers") {
-    const joined = PEER_ROWS[mode].map((row) =>
-      isRecord(row) ? { ...row, status: "joined" } : row
-    );
+    const joined = PEER_ROWS[mode].map((row) => (isRecord(row) ? peerRow(row, PEER_T) : row));
     return page(call, head, head, joined, limit);
   }
   if (call.operation === "thread") {
@@ -646,7 +664,59 @@ const answer = (log: Log, mode: FixtureMode, head: number, call: QueryCall) => {
     const tree = t > head ? undefined : replyTree(log, t, String(get(call.args, "id")));
     return tree === undefined ? undefined : page(call, t, head, tree.rows, limit, tree.extra);
   }
-  return page(call, head, head, select(log, mode, call.args), limit);
+  const selected = select(log, mode, call.args);
+  // Ranked best first; the synthetic score only falls with rank.
+  const rows =
+    call.operation === "search"
+      ? selected.map((row, rank) =>
+          isRecord(row) ? { ...row, score: selected.length - rank } : row
+        )
+      : selected;
+  return page(call, head, head, rows, limit);
+};
+
+/** The calls the viewer makes, as the fixture validates them, for one operation. */
+const viewerCall = (operation: Operation, args: Row, t?: number): QueryCall => ({
+  operation,
+  args,
+  ...(t === undefined ? {} : { t }),
+  offset: 0,
+});
+
+/**
+ * Every page the fixture serves in a mode, at the head that mode is reached at, read as the
+ * viewer reads it: history, a search, peers, and the reply tree of each entry, each followed
+ * through its cursors. Pure: no server starts. Used to check the fixture against the catalogue.
+ */
+export const fixturePages = (mode: FixtureMode) => {
+  const log: Log = new Map();
+  commit(log, "initial", 0);
+  let head = FIRST_HEAD;
+  if (mode !== "initial") {
+    commit(log, mode, head);
+    head += HEAD_STEP;
+  }
+  const follow = (first: QueryCall) => {
+    const pages: Array<NonNullable<ReturnType<typeof answer>>> = [];
+    let call: QueryCall | undefined = first;
+    while (call !== undefined) {
+      const result = answer(log, mode, head, call);
+      if (result === undefined) throw new Error(`The fixture refused ${call.operation}`);
+      pages.push(result);
+      const next = "next" in result && typeof result.next === "string" ? result.next : undefined;
+      const match = next === undefined ? null : CURSOR.exec(next);
+      call = match === null ? undefined : { ...call, offset: Number(match[2]) };
+    }
+    return pages;
+  };
+  return [
+    ...follow(viewerCall("history", { direction: "backward", limit: MAX_LIMIT })),
+    ...follow(viewerCall("search", { text: "msg", limit: MAX_LIMIT })),
+    ...follow(viewerCall("peers", { limit: PEERS_PAGE })),
+    ...[...log.keys()].flatMap((id) =>
+      follow(viewerCall("thread", { id, limit: THREAD_LIMIT }, head))
+    ),
+  ];
 };
 
 const hostAllowed = (request: Request, port: number): boolean => {

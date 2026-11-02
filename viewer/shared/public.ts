@@ -89,10 +89,11 @@ export const SnapshotSchema = Schema.Struct({
 export type Snapshot = typeof SnapshotSchema.Type;
 
 /**
- * all: every entry matching the criteria at t; latest: the newest entries at t, with
- * older ones left out; ranked: best text matches at t, never a complete answer.
+ * all: every entry matching the criteria at t, all readable; readable: every matching entry
+ * at t was reached, but `damaged` of them could not be read; latest: the newest entries at t,
+ * with older ones left out; ranked: best text matches at t, never a complete answer.
  */
-export const HISTORY_WINDOWS = ["all", "latest", "ranked"] as const;
+export const HISTORY_WINDOWS = ["all", "readable", "latest", "ranked"] as const;
 export type HistoryWindow = (typeof HISTORY_WINDOWS)[number];
 
 // Upstream incompleteness (window, damaged, complete) is reported apart from the viewer's own
@@ -138,7 +139,7 @@ export const ThreadObservationSchema = Schema.Struct({
   /** Replied-to ids that are not entries at t: the bus's answer, not an inference. */
   missingReplyTargets: Strings,
   damaged: Count,
-  /** False when the tree has more than MAX_THREAD_MESSAGES entries; only the first are here. */
+  /** False when the tree has more entries than the viewer read; only the first are here. */
   exhausted: Schema.Boolean,
   complete: Schema.Boolean,
 });
@@ -426,13 +427,14 @@ export const projectHistory = (
     if (ranked && last.complete) return fail();
     const cut = rows.length > copied.limit;
     const { messages, omitted } = entriesInCommitOrder(rows.slice(0, copied.limit), snapshot.t);
+    const whole = last.exhausted && !cut;
     return {
       messages,
       criteria: copied,
       observedAt,
       omitted,
       snapshot,
-      window: ranked ? "ranked" : last.exhausted && !cut ? "all" : "latest",
+      window: ranked ? "ranked" : !whole ? "latest" : last.damagedTotal === 0 ? "all" : "readable",
       damaged: last.damagedTotal,
       complete: last.complete && !cut,
     };
@@ -457,7 +459,11 @@ export const projectPeers = (pages: unknown, observedAt: string): PeersObservati
 
 const decodeThreadInput = Schema.decodeUnknownOption(ThreadInputSchema);
 
-/** `pages` is the first page of a reply tree, read at the request's own commit and ledger. */
+/**
+ * `pages` are the pages of a reply tree the reader followed, at the request's own commit and
+ * ledger, in commit order. The reading keeps the first MAX_THREAD_MESSAGES entries, so a last
+ * page that overshoots is cut here and the tree is then not exhausted.
+ */
 export const projectThread = (
   pages: unknown,
   request: ThreadInput,
@@ -468,16 +474,14 @@ export const projectThread = (
     if (Option.isNone(decoded) || typeof observedAt !== "string") return fail();
     const copied = { id: decoded.value.id, ledger: decoded.value.ledger, t: decoded.value.t };
     const { snapshot, rows, last } = traversal(pages, MAX_THREAD_MESSAGES);
-    if (
-      rows.length > MAX_THREAD_MESSAGES ||
-      snapshot.ledger !== copied.ledger ||
-      snapshot.t !== copied.t
-    ) {
-      return fail();
-    }
+    if (snapshot.ledger !== copied.ledger || snapshot.t !== copied.t) return fail();
     const missingReplyTargets = stringList(own(last.record, "missingReplyTargets"));
     if (missingReplyTargets === undefined) return fail();
-    const { messages, omitted } = entriesInCommitOrder(rows, snapshot.t);
+    const cut = rows.length > MAX_THREAD_MESSAGES;
+    const { messages, omitted } = entriesInCommitOrder(
+      rows.slice(0, MAX_THREAD_MESSAGES),
+      snapshot.t
+    );
     return {
       messages,
       request: copied,
@@ -486,7 +490,7 @@ export const projectThread = (
       snapshot,
       missingReplyTargets,
       damaged: last.damagedTotal,
-      exhausted: last.exhausted,
-      complete: last.complete,
+      exhausted: last.exhausted && !cut,
+      complete: last.complete && !cut,
     };
   });

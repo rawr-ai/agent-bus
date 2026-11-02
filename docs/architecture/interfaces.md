@@ -39,7 +39,7 @@ The normal context-reading request is up to 200 messages. History reads backward
 | Browser resource deadline | 12 seconds independently for history, peers and the selected conversation's tree; late generations cannot replace the current observation |
 | Automatic observation interval | 15 seconds while enabled and visible; one timer, pending resources skipped independently, no catch-up queue |
 | Retained reading | At most one previous conversation or literal context flow, at most 200 messages, frozen at the commit it was read at; original criteria/time, persistent visible state, no union with the current observation. Another ledger or an earlier commit never replaces it |
-| Pages per observation | At most 8 `bus_run_query` pages, all at one commit, under one permit and one deadline; a thread is one page of at most 200 entries |
+| Pages per observation | At most 8 `bus_run_query` pages, all at one commit, under one permit and one deadline covering every page; a thread's pages are followed until 200 entries |
 | Active reads | At most eight; excess intake is refused |
 | MCP message bytes | At most 8 MiB; excess is unavailable, never silently truncated text |
 | Peer records per observation | At most 1,000; excess is unavailable |

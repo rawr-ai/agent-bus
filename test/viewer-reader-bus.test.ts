@@ -7,16 +7,17 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { Message } from "../src/domain.ts";
+import { Message, MessageJson } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
 import { ObservationReader, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
+import { MAX_PAGES, MAX_THREAD_MESSAGES } from "../viewer/shared/public.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-viewer-reader-"));
@@ -229,8 +230,9 @@ test("unreadable entries are counted apart from projection omissions, across pag
   expect(latest.damaged).toBe(1);
   expect(latest.omitted).toBe(0);
   expect(latest.window).toBe("latest");
+  // Every entry was reached, but one could not be read: all readable entries, never all.
   const all = await read((r) => r.history({ limit: 200 }));
-  expect(all.window).toBe("all");
+  expect(all.window).toBe("readable");
   expect(all.damaged).toBe(1);
   expect(all.complete).toBe(false);
   expect(all.messages.map((message) => message.id)).not.toContain(damaged.id);
@@ -259,4 +261,71 @@ test("the whole viewer serves the real bus's observations to a browser client", 
   } finally {
     await viewer.close();
   }
+});
+
+const encodeJson = Schema.encodeSync(MessageJson);
+/**
+ * One reply tree written in a single commit, so its entries page by id: `count` replies to a
+ * root, each with a body of `bodyBytes`. Returns the ids in the bus's page order.
+ */
+const writeTree = async (prefix: string, count: number, bodyBytes: number) => {
+  const ts = new Date().toISOString();
+  const id = (index: number) => `${prefix}-${String(index).padStart(3, "0")}`;
+  const messages = Array.from(
+    { length: count + 1 },
+    (_, index) =>
+      new Message({
+        id: id(index),
+        ts,
+        from: "claude/lead",
+        to: ["#tree"],
+        kind: "message",
+        body: `${id(index)} ${"x".repeat(bodyBytes)}`,
+        ...(index === 0 ? { subject: "Large tree" } : { replyTo: id(0) }),
+      })
+  );
+  await insertRaw(config, {
+    "@context": toNode(messages[0] as Message, "")["@context"],
+    "@graph": messages.map((m) => {
+      const { "@context": _, ...node } = toNode(m, encodeJson(m));
+      return node;
+    }),
+  });
+  return messages.map((m) => m.id);
+};
+
+/** The thread for `id`, read at the current history observation's commit. */
+const treeAtHead = async (id: string) => {
+  const window = await read((r) => r.history({ limit: 1 }));
+  return read((r) => r.thread({ id, ledger: window.snapshot.ledger, t: window.snapshot.t }));
+};
+
+test("a tree larger than the read keeps its first entries, and a late selected entry is beyond it", async () => {
+  // A root and 200 replies: 201 entries, one more than a conversation reads.
+  const ids = await writeTree("wide", MAX_THREAD_MESSAGES, 0);
+  const selected = ids.at(-1) ?? "";
+  const tree = await treeAtHead(selected);
+  expect(tree.messages.map((message) => message.id)).toEqual(ids.slice(0, MAX_THREAD_MESSAGES));
+  expect(tree.exhausted).toBe(false);
+  expect(tree.complete).toBe(false);
+  // The selected entry is in the tree at t, but beyond what was read.
+  expect(tree.messages.some((message) => message.id === selected)).toBe(false);
+});
+
+test("a tree the byte budget trims is followed page by page, within the page bound", async () => {
+  // About 20 KB each, so a 64 KiB page holds three entries.
+  const small = await writeTree("trim", 11, 20_000);
+  const whole = await treeAtHead(small.at(-1) ?? "");
+  // Twelve entries over four pages, all read: the whole tree, the selected entry included.
+  expect(whole.messages.map((message) => message.id)).toEqual(small);
+  expect(whole.exhausted).toBe(true);
+  expect(whole.complete).toBe(true);
+
+  const large = await writeTree("bulk", 29, 20_000);
+  const selected = large.at(-1) ?? "";
+  const cut = await treeAtHead(selected);
+  // MAX_PAGES pages of three: the first entries in order, the selected one excluded.
+  expect(cut.messages.map((message) => message.id)).toEqual(large.slice(0, MAX_PAGES * 3));
+  expect(cut.exhausted).toBe(false);
+  expect(cut.messages.some((message) => message.id === selected)).toBe(false);
 });

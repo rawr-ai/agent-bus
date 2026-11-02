@@ -1,9 +1,16 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
 import type { ViewerClient } from "../viewer/shared/client-types";
-import type { HistoryObservation, PeersObservation, PublicMessage } from "../viewer/shared/public";
+import type {
+  HistoryObservation,
+  PeersObservation,
+  PublicMessage,
+  ThreadInput,
+  ThreadObservation,
+} from "../viewer/shared/public";
 import { App } from "../viewer/src/App";
 import { formatTime } from "../viewer/src/Text";
+import { enterValue } from "./enter-value";
 import { historyOf, peersOf, resetStoryBus, StatusError, threadOf } from "./story-bus";
 
 type Reply<T> = T | StatusError;
@@ -13,8 +20,15 @@ type Reply<T> = T | StatusError;
 const script: {
   history: Reply<HistoryObservation>;
   peers: Reply<PeersObservation>;
+  /** The reply tree read for a request; the story bus's whole tree unless a play changes it. */
+  thread: (input: ThreadInput) => Reply<ThreadObservation>;
   historyCalls: number;
-} = { history: new StatusError(503), peers: new StatusError(503), historyCalls: 0 };
+} = {
+  history: new StatusError(503),
+  peers: new StatusError(503),
+  thread: threadOf,
+  historyCalls: 0,
+};
 const reply = async <T,>(value: Reply<T>): Promise<T> => {
   if (value instanceof StatusError) throw value;
   return value;
@@ -25,7 +39,7 @@ const client: ViewerClient = {
     return reply(script.history);
   },
   peers: async () => reply(script.peers),
-  thread: async (input) => threadOf(input),
+  thread: async (input) => reply(script.thread(input)),
 };
 
 const request: PublicMessage = {
@@ -74,6 +88,7 @@ const meta = {
   beforeEach: () => {
     history.replaceState(null, "", location.pathname + location.search);
     script.historyCalls = 0;
+    script.thread = threadOf;
     resetStoryBus();
   },
 } satisfies Meta<typeof App>;
@@ -258,12 +273,12 @@ export const ConversationFollowsCommits: Story = {
       await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
     );
     await expect(canvas.getByRole("heading", { name: /^Conversation$/ })).toBeVisible();
-    await expect(await canvas.findByText("Whole reply tree at t=1")).toBeVisible();
+    await expect(await canvas.findByText("Whole reply tree at commit 1")).toBeVisible();
     await expect(state()).toBe("");
     // The window moves past the conversation; the bus still holds it, so it is read at t=2.
     script.history = historyOf([unrelated], { observedAt: "2026-01-01T12:05:00Z" });
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
-    await expect(await canvas.findByText("Whole reply tree at t=2")).toBeVisible();
+    await expect(await canvas.findByText("Whole reply tree at commit 2")).toBeVisible();
     await expect(state()).toBe("");
     await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
     const status = canvas.getByRole("button", { name: /Status update/ });
@@ -297,10 +312,10 @@ export const RetainedReading: Story = {
     await waitFor(() => expect(state()).toBe("Outside current observation"));
     await expect(live.history).toHaveTextContent("History: 1 new message.");
     await expect(
-      canvas.getByText(/^Not in the current observation · frozen at t=1 · last observed/)
+      canvas.getByText(/^Not in the current observation · frozen at commit 1 · last observed/)
     ).toBeVisible();
     // The frozen reading keeps the label of the window it was read from.
-    await expect(canvas.getAllByText("All entries at t=1")[0]).toBeVisible();
+    await expect(canvas.getAllByText("All entries at commit 1")[0]).toBeVisible();
     await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
   },
 };
@@ -318,7 +333,7 @@ export const LedgerReplacedFreezesConversation: Story = {
     await userEvent.click(
       await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
     );
-    await expect(await canvas.findByText("Whole reply tree at t=1")).toBeVisible();
+    await expect(await canvas.findByText("Whole reply tree at commit 1")).toBeVisible();
     script.history = historyOf([request, answer, followUp, unrelated], {
       ledger: "story-ledger-replaced",
       t: 1,
@@ -327,7 +342,7 @@ export const LedgerReplacedFreezesConversation: Story = {
     await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
     await waitFor(() => expect(state()).toBe("Outside current observation"));
     await expect(
-      canvas.getByText(/^Not in the current observation · frozen at t=1 · last observed/)
+      canvas.getByText(/^Not in the current observation · frozen at commit 1 · last observed/)
     ).toBeVisible();
     await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
   },
@@ -348,16 +363,150 @@ export const OlderEntriesDamageAndMovedHead: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(
-      (await canvas.findAllByText("Latest 3 entries at t=7; older entries exist"))[0]
+      (await canvas.findAllByText("Latest 3 entries at commit 7; older entries exist"))[0]
     ).toBeVisible();
-    await expect(canvas.getAllByText("2 entries unreadable at t=7")[0]).toBeVisible();
-    await expect(canvas.getAllByText("The bus reached t=9 while this was read")[0]).toBeVisible();
+    await expect(canvas.getAllByText("2 entries unreadable at commit 7")[0]).toBeVisible();
+    await expect(
+      canvas.getAllByText("The bus reached commit 9 while this was read")[0]
+    ).toBeVisible();
     await expect(canvas.getAllByText("1 record omitted")[0]).toBeVisible();
     // The answer's parent is not an entry on this synthetic bus, so the tree is cut there.
     await userEvent.click(canvas.getByRole("button", { name: /Review reply/ }));
     await expect(
-      await canvas.findByText("Reply tree at t=7; cut at 1 missing entry")
+      await canvas.findByText("Reply tree at commit 7; cut at 1 missing entry")
     ).toBeVisible();
-    await expect(canvas.getByText("Target is not an entry at t=7")).toBeVisible();
+    await expect(canvas.getByText("Target is not an entry at commit 7")).toBeVisible();
+  },
+};
+
+const readingPane = (root: HTMLElement) => within(root.querySelector<HTMLElement>(".thread-view")!);
+
+/** A retained flow keeps every caveat it was read with, never the current window's. */
+export const RetainedReadingKeepsCaveats: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp], {
+      t: 3,
+      currentHeadT: 4,
+      window: "latest",
+      damaged: 2,
+      omitted: 1,
+    });
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pane = readingPane(canvasElement);
+    await userEvent.click(await canvas.findByRole("button", { name: "#alpha" }));
+    await userEvent.click(canvas.getByRole("button", { name: "Read context" }));
+    script.history = historyOf([unrelated], { t: 5, observedAt: "2026-01-01T12:05:00Z" });
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
+    await expect(
+      await pane.findByText(/^Not in the current observation · frozen at commit 3 ·/)
+    ).toBeVisible();
+    const label = pane.getByText("Latest 4 entries at commit 3; older entries exist");
+    await expect(label).toHaveAttribute("data-t", "3");
+    await expect(label).toHaveAttribute("title", "Ledger t=3");
+    await expect(pane.getByText("2 entries unreadable at commit 3")).toBeVisible();
+    await expect(pane.getByText("The bus reached commit 4 while this was read")).toBeVisible();
+    await expect(pane.getByText("1 record omitted")).toBeVisible();
+    // No longer being read: no receipt or loading line for the frozen unit.
+    await expect(pane.queryByText(/^Observed /)).toBeNull();
+  },
+};
+
+/**
+ * A tree read under one criteria keeps them: when history under new criteria succeeds and the
+ * tree's reread at that commit fails, the tree stays frozen as it was read.
+ */
+export const TreeKeepsItsCriteria: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp], { observedAt: "2026-01-01T12:00:00Z" });
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pane = readingPane(canvasElement);
+    const state = () =>
+      canvasElement.querySelector(".reading-observation-state")?.textContent?.trim();
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
+    );
+    await expect(await pane.findByText("Whole reply tree at commit 1")).toBeVisible();
+    // New criteria: their history succeeds at commit 2, but the tree cannot be read there.
+    const criteria = { limit: 200, participant: "#alpha" };
+    script.history = historyOf([request, followUp], {
+      criteria,
+      observedAt: "2026-01-01T12:07:00Z",
+    });
+    script.thread = () => new StatusError(503);
+    const participant = canvas.getByRole("textbox", { name: "Exact participant/address" });
+    enterValue(participant, "#alpha");
+    await userEvent.click(canvas.getByRole("button", { name: "Apply search" }));
+    await waitFor(() => expect(state()).toBe("Outside current observation"));
+    await expect(
+      pane.getByText(/^Not in the current observation · frozen at commit 1 · last observed/)
+    ).toHaveTextContent(formatTime("2026-01-01T12:00:02Z"));
+    await expect(pane.getByText("Whole reply tree at commit 1")).toBeVisible();
+    // Labelled with the criteria it was read under, not the ones that replaced them.
+    await expect(pane.getByText("This retained reading uses earlier criteria.")).toBeVisible();
+    await expect(pane.getByText("Confirmed with one note.")).toBeVisible();
+  },
+};
+
+/** A tree read at an earlier commit than the one shown never replaces it. */
+export const EarlierCommitFreezesConversation: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp], { t: 5 });
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pane = readingPane(canvasElement);
+    const state = () =>
+      canvasElement.querySelector(".reading-observation-state")?.textContent?.trim();
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
+    );
+    await expect(await pane.findByText("Whole reply tree at commit 5")).toBeVisible();
+    // The next observation is at an earlier commit, and the tree reads there successfully.
+    script.history = historyOf([request, answer, followUp], {
+      t: 3,
+      observedAt: "2026-01-01T12:08:00Z",
+    });
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
+    await waitFor(() => expect(state()).toBe("Outside current observation"));
+    await expect(
+      pane.getByText(/^Not in the current observation · frozen at commit 5 · last observed/)
+    ).toBeVisible();
+    await expect(pane.getByText("Whole reply tree at commit 5")).toBeVisible();
+    await expect(pane.queryByText("Whole reply tree at commit 3")).toBeNull();
+  },
+};
+
+/**
+ * A tree larger than the viewer reads, with the selected message after its first entries: a
+ * final state, never loading, from which the message opens as history holds it.
+ */
+export const SelectedBeyondTheTreeRead: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp]);
+    script.peers = peersOf(["agent/lead"]);
+    script.thread = (input) => threadOf(input, 2);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pane = readingPane(canvasElement);
+    // Chronology selects one message, not its group's first.
+    await userEvent.click(await canvas.findByRole("button", { name: "Chronology" }));
+    await userEvent.click(await canvas.findByRole("button", { name: /Follow-up/ }));
+    const notice = await pane.findByText(
+      "Conversation larger than 2 entries; the selected message is beyond what was read at commit 1."
+    );
+    await expect(notice).toHaveAttribute("data-t", "1");
+    await expect(pane.queryByText("Loading conversation…")).toBeNull();
+    await expect(pane.queryByText("Thanks for the note.")).toBeNull();
+    await userEvent.click(pane.getByRole("button", { name: "Open it in history" }));
+    await expect(pane.getByText("As the history observation at commit 1 holds it")).toBeVisible();
+    await expect(pane.getByText("Thanks for the note.")).toBeVisible();
   },
 };

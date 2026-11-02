@@ -134,7 +134,7 @@ async function main() {
         () =>
           Array.from(document.querySelectorAll(".observation-scope")).some(
             (node) =>
-              node.textContent?.includes("Best matches at t=") &&
+              node.textContent?.includes("Best matches at commit ") &&
               node.textContent.includes("Synthetic") &&
               node.textContent.includes("#alpha")
           ),
@@ -198,7 +198,7 @@ async function main() {
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll(".observation-scope")).some((node) =>
-            node.textContent?.includes("All entries at t=")
+            node.textContent?.includes("All entries at commit ")
           ),
         undefined,
         { timeout: 5_000 }
@@ -285,7 +285,7 @@ async function main() {
       assert.ok(
         await page.evaluate(() =>
           Array.from(document.querySelectorAll(".thread-scroll .observation-scope")).some((node) =>
-            /^Whole reply tree at t=\d+$/.test(node.textContent ?? "")
+            /^Whole reply tree at commit \d+$/.test(node.textContent ?? "")
           )
         ),
         "the followed tree is labelled with its new commit"
