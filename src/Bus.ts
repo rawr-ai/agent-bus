@@ -16,6 +16,7 @@ import {
   InvalidTopics,
   isFor,
   type LedgerError,
+  latestPresences,
   Message,
   machine,
   NotJoined,
@@ -27,7 +28,7 @@ import {
   topicName,
   validSession,
 } from "./domain.ts";
-import { Ledger, type SearchInput } from "./Ledger.ts";
+import { Ledger } from "./Ledger.ts";
 
 export interface JoinInput {
   readonly address: string;
@@ -128,7 +129,6 @@ export class Bus extends Context.Service<
       session: string | undefined,
       timeoutSeconds?: number
     ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner>;
-    readonly history: (input: SearchInput) => Effect.Effect<ReadonlyArray<Message>, LedgerError>;
     /**
      * Waits until an address `session` owns has unread mail, first to newest,
      * other than what it was last woken for, or the timeout, and returns those
@@ -253,22 +253,7 @@ export const layer = Layer.effect(
     const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
 
     /** Each address's latest presence, joined or left. */
-    const latest = Effect.gen(function* () {
-      const latest = new Map<string, Subscriber>();
-      for (const message of yield* ledger.presence) {
-        // Joins and leaves from before addresses had owners are ignored.
-        if (message.presence?.session === undefined) continue;
-        latest.set(message.from, {
-          address: message.from,
-          presence: message.presence,
-          joinId: message.id,
-          since: message.ts,
-          host: message.origin?.host,
-          cwd: message.origin?.cwd,
-        });
-      }
-      return latest;
-    });
+    const latest = Effect.map(ledger.presence, latestPresences);
 
     const peers = Effect.map(latest, (all) =>
       Array.from(all.values()).filter((peer) => peer.presence.status === "joined")
@@ -564,8 +549,6 @@ export const layer = Layer.effect(
           })
       );
 
-    const history = (input: SearchInput) => ledger.search(input);
-
     /** Per address, the join and the unread mail (first to newest) its owner was last woken for. */
     const woken = new Map<string, Mark>();
     /** Each session's current wake wait; a newer one ends it. */
@@ -685,6 +668,6 @@ export const layer = Layer.effect(
         );
       }).pipe(Effect.withSpan("Bus.wake"));
 
-    return Bus.of({ join, leave, publish, peers, deliver, take, wait, history, wake });
+    return Bus.of({ join, leave, publish, peers, deliver, take, wait, wake });
   })
 );

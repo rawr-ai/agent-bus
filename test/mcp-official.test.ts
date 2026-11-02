@@ -14,16 +14,20 @@ import {
   type JSONRPCMessage,
 } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Message, Origin, Presence } from "../src/domain.ts";
+import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { Messages } from "../src/mcp.ts";
 import * as Serve from "../src/serve.ts";
-import { layerJsonl } from "./jsonl-ledger.ts";
+import { freshLedger } from "./fluree-server.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-official-"));
-const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
+const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
+// The real store: bus_history, bus_peers and the query tools need its query engine.
+const store = layerFluree(await freshLedger("official")).pipe(Layer.provide(platform));
 // A port the OS just handed out, so a concurrent run can't hold it.
 const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
 const port = Number(probe.url.port);
@@ -33,7 +37,7 @@ const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
       Bus.layer.pipe(
-        Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
+        Layer.provideMerge(store),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )
@@ -172,6 +176,8 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_peers: lookup,
       bus_history: lookup,
       bus_query: lookup,
+      bus_run_query: lookup,
+      bus_queries: lookup,
       bus_leave: changes,
     });
   });
@@ -200,7 +206,23 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_wake: ["addresses", "owns", "superseded"],
       bus_peers: ["peers"],
       bus_history: ["messages"],
-      bus_query: undefined,
+      bus_query: ["name", "ledger", "t", "unit", "columns", "rows", "complete", "note"],
+      bus_run_query: [
+        "name",
+        "catalogueVersion",
+        "ledger",
+        "t",
+        "unit",
+        "args",
+        "rows",
+        "damage",
+        "damaged",
+        "damagedTotal",
+        "exhausted",
+        "complete",
+        "note",
+      ],
+      bus_queries: ["catalogueVersion", "ledger", "headT", "operations", "raw"],
       bus_leave: ["address"],
     };
     expect(
@@ -220,7 +242,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     );
   });
 
-  test("tools other than the withdrawn bus_query answer with content their schema accepts", async () => {
+  test("every tool answers with content its schema accepts", async () => {
     const { succeed } = await connect();
     const a = `${version}/a`;
     const b = `${version}/b`;
@@ -246,6 +268,18 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(await succeed("bus_history", { participant: b })).toMatchObject({
       messages: [{ id: published.id }],
     });
+    const raw = await succeed("bus_query", {
+      query: `SELECT ?body WHERE { ?m bus:id "${published.id}" ; bus:body ?body }`,
+    });
+    expect(raw).toMatchObject({ name: "sparql", unit: "binding", rows: [{ "?body": body }] });
+    const page = await succeed("bus_run_query", {
+      name: "messages",
+      args: { ids: [published.id] },
+      t: raw.t,
+    });
+    expect(page).toMatchObject({ t: raw.t, rows: [{ id: published.id, body }], complete: true });
+    const { operations } = await succeed("bus_queries", {});
+    expect(operations.length).toBeGreaterThan(0);
     for (const address of [a, b]) {
       expect(await succeed("bus_leave", { address, session: sid(address) })).toEqual({ address });
     }
@@ -296,9 +330,13 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     }
     // Projection must not rewrite the stored internal representation.
     const internal = await server.runPromise(
-      Effect.flatMap(Ledger, (ledger) => ledger.search({ participant: reader, limit: 1 }))
+      Effect.flatMap(Ledger, (ledger) => ledger.read(0)).pipe(
+        Effect.map(({ entries }) =>
+          entries.filter((entry) => entry.message.to.includes(reader)).map((entry) => entry.message)
+        )
+      )
     );
-    expect(internal[0]?.presence).toEqual(privatePresence);
+    expect(internal.map((message) => message.presence)).toEqual([privatePresence, privatePresence]);
     expect(await succeed("bus_read", { address: reader, session: claim })).toEqual({
       messages: [],
     });

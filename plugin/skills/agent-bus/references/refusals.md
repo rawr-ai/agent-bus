@@ -17,5 +17,5 @@ A refusal changes nothing. Match its wording:
 | A read that says your cursor "is ahead of" the ledger | Tell the human. A plain rejoin keeps that cursor; rejoin with `replay` only if they agree to receive all past mail again |
 | A store error, or no answer from the bus | Retry once, then tell the human. Don't start a bus of your own |
 
-`bus_query`'s own errors are in [queries.md](queries.md#errors).
+The query tools' own errors are in [queries.md](queries.md#errors).
 

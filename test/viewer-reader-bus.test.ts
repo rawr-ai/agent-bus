@@ -8,17 +8,21 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { Effect, Layer, ManagedRuntime } from "effect";
+import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
+import { layerFluree } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
 import { ObservationReader, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
-import { layerJsonl } from "./jsonl-ledger.ts";
+import { freshLedger } from "./fluree-server.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-viewer-reader-"));
 const cwd = mkdtempSync(join(tmpdir(), "agent-bus-viewer-cwd-"));
-const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
+const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
+// The real store: the reader's history and peers run through the bus's query engine.
+const store = layerFluree(await freshLedger("viewer-reader")).pipe(Layer.provide(platform));
 const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
 const busPort = Number(probe.url.port);
 probe.stop(true);
@@ -26,7 +30,7 @@ const bus = ManagedRuntime.make(
   Serve.layerHttp({ port: busPort, version: "test" }).pipe(
     Layer.provideMerge(
       Bus.layer.pipe(
-        Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
+        Layer.provideMerge(store),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )
@@ -125,7 +129,12 @@ test("search and exact participant criteria reach the real bus unchanged", async
   const byParticipant = await read((r) => r.history({ limit: 200, participant: "codex/reviewer" }));
   expect(byParticipant.criteria).toEqual({ limit: 200, participant: "codex/reviewer" });
   expect(byParticipant.messages.map((message) => message.id)).toEqual([sent.reply]);
-  const byText = await read((r) => r.history({ limit: 200, query: "broadcast" }));
+  // A new ledger's full-text index can briefly find nothing, so the text search is retried.
+  let byText = await read((r) => r.history({ limit: 200, query: "broadcast" }));
+  for (let attempt = 0; attempt < 50 && byText.messages.length === 0; attempt++) {
+    await Bun.sleep(100);
+    byText = await read((r) => r.history({ limit: 200, query: "broadcast" }));
+  }
   expect(byText.messages.map((message) => message.id)).toEqual([sent.other]);
   const latest = await read((r) => r.history({ limit: 1 }));
   expect(latest.messages.map((message) => message.id)).toEqual([sent.other]);

@@ -949,7 +949,7 @@ const runSmoke = async (fixture: Fixture): Promise<void> => {
     params: { name, arguments: args },
   });
   const refusals: ReadonlyArray<unknown> = [
-    call("bus_query", {}),
+    call("bus_publish", {}),
     call("bus_history", { limit: 201 }),
     call("bus_history", { limit: 1, extra: true }),
     call("bus_peers", { extra: true }),

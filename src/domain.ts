@@ -91,6 +91,15 @@ export class NotOwner extends Schema.TaggedError<NotOwner>()("NotOwner", {
   message: Schema.String,
 }) {}
 
+/**
+ * A query or its arguments were refused before or instead of reading the
+ * store: a malformed or forbidden query, a stale cursor, a missing record.
+ * The message quotes only the caller's own input.
+ */
+export class InvalidQuery extends Schema.TaggedError<InvalidQuery>()("InvalidQuery", {
+  message: Schema.String,
+}) {}
+
 /** A join's topic list is malformed; no subscription or cursor was changed. */
 export class InvalidTopics extends Schema.TaggedError<InvalidTopics>()("InvalidTopics", {
   message: Schema.String,
@@ -132,3 +141,25 @@ export const isFor = (message: Message, subscriber: Subscriber): boolean =>
 
 /** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
 export const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
+
+/**
+ * Each address's latest presence, joined or left, folded from presence
+ * entries oldest first. Joins and leaves from before addresses had owners
+ * (no session) are ignored. Delivery folds the presences at head; the query
+ * catalogue folds the ones visible at its snapshot, with the same rule.
+ */
+export const latestPresences = (entries: Iterable<Message>): Map<string, Subscriber> => {
+  const latest = new Map<string, Subscriber>();
+  for (const message of entries) {
+    if (message.presence?.session === undefined) continue;
+    latest.set(message.from, {
+      address: message.from,
+      presence: message.presence,
+      joinId: message.id,
+      since: message.ts,
+      host: message.origin?.host,
+      cwd: message.origin?.cwd,
+    });
+  }
+  return latest;
+};

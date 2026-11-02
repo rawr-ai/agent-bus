@@ -38,6 +38,7 @@ import { LedgerError, Message, MessageJson, Origin, Presence } from "../src/doma
 import * as Fluree from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Mcp from "../src/mcp.ts";
+import { QueryGateway } from "../src/Query.ts";
 import {
   eligibility,
   latestSettings,
@@ -47,13 +48,14 @@ import {
 } from "../src/rollout.ts";
 import * as Serve from "../src/serve.ts";
 import { MAX_PAGES } from "../src/timing.ts";
+import { type FlureeServer, flureeServer, ledgerOn } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import { legacyTopicServer } from "./legacy-topic-server.ts";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 
-const busOn = (ledger: Layer.Layer<Ledger.Ledger, unknown, never>, dir: string) =>
+const busOn = (ledger: Layer.Layer<Ledger.Ledger | QueryGateway, unknown, never>, dir: string) =>
   Bus.layer.pipe(
     Layer.provideMerge(ledger),
     Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors")))
@@ -67,15 +69,6 @@ const jsonl = () => {
     layer: busOn(layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(Layer.provide(platform)),
   };
 };
-
-// The Fluree suites run against a throwaway in-memory server when the CLI is installed.
-// Like the installed server, its data and admin APIs require a token signed by a key it trusts.
-const flureeBin = Bun.which("fluree");
-const flureePort = 18_500 + Math.floor(Math.random() * 400);
-const flureeUrl = `http://127.0.0.1:${flureePort}`;
-let flureeServer: ReturnType<typeof Bun.spawn> | undefined;
-let flureeToken: string | undefined;
-let ledgerCount = 0;
 
 const command = (args: ReadonlyArray<string>, stdin?: string) => {
   const result = Bun.spawnSync([...args], {
@@ -108,55 +101,15 @@ const gitRepo = (branch: string, options: { readonly detached?: boolean } = {}) 
   return dir;
 };
 
+// The Fluree suites run on the shared throwaway server; a missing fluree CLI fails them.
+let server: FlureeServer | undefined;
 beforeAll(async () => {
-  if (flureeBin === null) return;
-  const key = JSON.parse(command([flureeBin, "token", "keygen", "--format", "json"])) as {
-    readonly privateKey: { readonly hex: string };
-    readonly did: string;
-  };
-  // No subject: a token naming an identity would be held to identity policies, which deny writes.
-  flureeToken = command(
-    [flureeBin, "token", "create", "--private-key", "@-", "--all", "--read-all", "--write-all"],
-    key.privateKey.hex
-  );
-  const auth = ["data", "admin"].flatMap((scope) => [
-    `--${scope}-auth-mode`,
-    "required",
-    `--${scope}-auth-trusted-issuer`,
-    key.did,
-  ]);
-  flureeServer = Bun.spawn(
-    [
-      flureeBin,
-      "server",
-      "run",
-      "--memory",
-      "--listen-addr",
-      `127.0.0.1:${flureePort}`,
-      "--",
-    ].concat(["--cors-enabled=false", ...auth]),
-    { stdout: "ignore", stderr: "ignore" }
-  );
-  for (let attempt = 0; attempt < 50; attempt++) {
-    const ready = await fetch(`${flureeUrl}/health`).then(
-      (r) => r.ok,
-      () => false
-    );
-    if (ready) return;
-    await Bun.sleep(100);
-  }
-  throw new Error("fluree server did not start");
+  server = await flureeServer();
 });
 
-afterAll(() => flureeServer?.kill());
-
 const fluree = () => {
-  ledgerCount += 1;
-  const config = {
-    url: flureeUrl,
-    ledger: `bus-test-${process.pid}-${ledgerCount}:main`,
-    token: flureeToken,
-  };
+  if (server === undefined) throw new Error("the Fluree server has not started");
+  const config = ledgerOn(server);
   return {
     config,
     layer: busOn(Fluree.layerFluree(config).pipe(Layer.provide(platform)), tempDir()).pipe(
@@ -167,22 +120,8 @@ const fluree = () => {
 
 const backends = [
   { name: "jsonl", make: jsonl, enabled: true },
-  { name: "fluree", make: fluree, enabled: flureeBin !== null },
+  { name: "fluree", make: fluree, enabled: true },
 ] as const;
-
-/**
- * Fluree 4.2.4 applies a new ledger's full-text config at its first index, so a
- * fresh ledger briefly finds nothing (or fails) for text queries. Waits until
- * a search for `word` finds something.
- */
-const searchable = (bus: Bus.Bus["Service"], word: string) =>
-  Effect.gen(function* () {
-    for (let attempt = 0; attempt < 50; attempt++) {
-      const found = yield* Effect.option(bus.history({ query: word, limit: 1 }));
-      if (found._tag === "Some" && found.value.length > 0) return;
-      yield* Effect.sleep("100 millis");
-    }
-  });
 
 /** Each test address's session id. */
 const sid = (address: string) => `session:${address}`;
@@ -194,17 +133,6 @@ for (const backend of backends) {
     Effect.runPromise(Effect.provide(effect, backend.make().layer));
 
   describe.if(backend.enabled)(`delivery (${backend.name})`, () => {
-    test("the retained select capability always refuses", () =>
-      run(
-        Effect.gen(function* () {
-          const ledger = yield* Ledger.Ledger;
-          const error = yield* Effect.flip(ledger.select("SELECT * WHERE { ?s ?p ?o }"));
-          expect(error.message).toBe(
-            "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers."
-          );
-        })
-      ));
-
     test("routes direct, topic and broadcast messages, never back to the sender", () =>
       run(
         Effect.gen(function* () {
@@ -592,7 +520,8 @@ for (const backend of backends) {
         expect(message.origin).toEqual(
           new Origin({ host: hostname(), cwd: repo, repo, branch: "fixture/origin" })
         );
-        const [stored] = yield* bus.history({ limit: 1 });
+        const ledger = yield* Ledger.Ledger;
+        const stored = (yield* ledger.read(0)).entries.at(-1)?.message;
         expect(stored?.origin).toEqual(message.origin);
 
         // A detached checkout records its repo but no branch.
@@ -622,106 +551,9 @@ for (const backend of backends) {
       })
     )
   );
-
-  test.if(backend.enabled)(`history filters by participant and text (${backend.name})`, () =>
-    run(
-      Effect.gen(function* () {
-        const bus = yield* Bus.Bus;
-        yield* bus.join({
-          address: "claude/a",
-          runtime: "claude",
-          session: sid("claude/a"),
-          cwd: process.cwd(),
-        });
-        yield* bus.join({
-          address: "codex/b",
-          runtime: "codex",
-          session: sid("codex/b"),
-          cwd: process.cwd(),
-        });
-        yield* bus.join({
-          address: "claude/c",
-          runtime: "claude",
-          session: sid("claude/c"),
-          cwd: process.cwd(),
-        });
-        yield* bus.publish({
-          from: "claude/a",
-          session: sid("claude/a"),
-          to: ["codex/b"],
-          body: "the ledger adapter is ready",
-        });
-        yield* bus.publish({
-          from: "codex/b",
-          session: sid("codex/b"),
-          to: ["claude/c"],
-          subject: "ledger",
-          body: "noted",
-        });
-        yield* bus.publish({
-          from: "claude/c",
-          session: sid("claude/c"),
-          to: ["*"],
-          body: "lunch?",
-        });
-
-        expect(bodies(yield* bus.history({ limit: 10 }))).toEqual([
-          "the ledger adapter is ready",
-          "noted",
-          "lunch?",
-        ]);
-        expect(bodies(yield* bus.history({ limit: 2 }))).toEqual(["noted", "lunch?"]);
-        expect(bodies(yield* bus.history({ participant: "claude/c", limit: 10 }))).toEqual([
-          "noted",
-          "lunch?",
-        ]);
-        yield* searchable(bus, "ledger");
-        expect(bodies(yield* bus.history({ query: "ledger", limit: 10 }))).toEqual([
-          "the ledger adapter is ready",
-          "noted",
-        ]);
-        expect(
-          bodies(yield* bus.history({ query: "ledger", participant: "claude/a", limit: 10 }))
-        ).toEqual(["the ledger adapter is ready"]);
-      })
-    )
-  );
 }
 
-describe.if(flureeBin !== null)("fluree ledger", () => {
-  test("ranks stemmed full-text matches, with quotes and parentheses kept literal", () =>
-    Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const bus = yield* Bus.Bus;
-          yield* bus.join({
-            address: "claude/a",
-            runtime: "claude",
-            session: sid("claude/a"),
-            cwd: process.cwd(),
-          });
-          yield* bus.publish({
-            from: "claude/a",
-            session: sid("claude/a"),
-            to: ["*"],
-            body: "Deploying the adapters now",
-          });
-          yield* bus.publish({
-            from: "claude/a",
-            session: sid("claude/a"),
-            to: ["*"],
-            body: "unrelated",
-          });
-          yield* searchable(bus, "adapter");
-          expect(bodies(yield* bus.history({ query: "deploy adapter", limit: 5 }))).toEqual([
-            "Deploying the adapters now",
-          ]);
-          expect(yield* bus.history({ query: '") (bind ?x', limit: 5 })).toEqual([]);
-        }),
-        fluree().layer
-      )
-    ));
-
+describe("fluree ledger", () => {
   test("a second process sees appends and is woken by the event stream", async () => {
     const first = fluree();
     const second = busOn(
@@ -3194,7 +3026,9 @@ describe("one session per address", () => {
         yield* Fiber.join(fiber);
         yield* Fiber.join(takeover);
         expect((yield* Fiber.join(send))._tag).toBe("NotOwner");
-        expect(yield* bus.history({ query: "late", limit: 5 })).toEqual([]);
+        const ledger = yield* Ledger.Ledger;
+        const sent = (yield* ledger.read(0)).entries.map((entry) => entry.message.body);
+        expect(sent).not.toContain("late");
       })
     ));
 
@@ -3659,7 +3493,10 @@ describe("claude wake", () => {
             }),
         });
       })
-    ).pipe(Layer.provide(layerJsonl(join(dir, "ledger.jsonl")).pipe(Layer.provide(platform))));
+    ).pipe(
+      Layer.provide(layerJsonl(join(dir, "ledger.jsonl")).pipe(Layer.provide(platform))),
+      Layer.merge(QueryGateway.layerUnavailable)
+    );
     return {
       layer: busOn(ledger, dir).pipe(Layer.provide(platform)),
       plan: (...reads: typeof planned) => {
@@ -3945,12 +3782,14 @@ describe("claude wake hook", () => {
 describe("mcp over http", () => {
   // Each test gets its own server and port; Bun keeps a stopped server's port briefly.
   let nextPort = 19_000 + Math.floor(Math.random() * 500) * 4;
-  const serve = () => {
+  // Lookups (bus_peers, the CLI's runtime lookup) need the query engine, so "fluree" serves them.
+  const serve = (store: "jsonl" | "fluree" = "jsonl") => {
     const port = nextPort++;
+    const backing = store === "jsonl" ? jsonl().layer : fluree().layer;
     return {
       port,
       url: `http://127.0.0.1:${port}/mcp`,
-      layer: Serve.layerHttp({ port, version: "test" }).pipe(Layer.provide(jsonl().layer)),
+      layer: Serve.layerHttp({ port, version: "test" }).pipe(Layer.provide(backing)),
     };
   };
 
@@ -4079,7 +3918,7 @@ describe("mcp over http", () => {
   });
 
   test("the CLI looks up an address's runtime on the bus, and refuses one that hasn't joined", () => {
-    const { url, layer } = serve();
+    const { url, layer } = serve("fluree");
     return Effect.runPromise(
       Effect.gen(function* () {
         yield* Client.call(url)("bus_join", Mcp.Joined, {

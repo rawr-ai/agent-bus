@@ -9,6 +9,11 @@
  * 2. Search across the index boundary: with background indexing held back,
  *    full-text search finds both indexed messages and a fresh unindexed canary,
  *    and finds the same messages once the index catches up.
+ * 3. Snapshot resume: a saved-query traversal pinned at one commit, interrupted
+ *    by a server restart and by later appends, resumes from its cursor with
+ *    exactly the rows a single uninterrupted read at that commit returns.
+ *
+ * The server requires a token, as the installed one does.
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -18,17 +23,41 @@ import { Effect, Fiber, Layer } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
+import * as Catalogue from "../src/catalogue.ts";
 import * as Fluree from "../src/Fluree.ts";
+import type { QueryGateway } from "../src/Query.ts";
 
 const fluree = Bun.which("fluree");
 if (fluree === null) throw new Error("fluree is not on PATH");
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-qualify-"));
 const port = 18_900 + Math.floor(Math.random() * 90);
-const config = { url: `http://127.0.0.1:${port}`, ledger: "agent-bus-qualify:main" };
+const command = (args: ReadonlyArray<string>, stdin?: string) => {
+  const result = Bun.spawnSync([...args], {
+    stdin: stdin === undefined ? "ignore" : Buffer.from(stdin),
+    stderr: "ignore",
+  });
+  if (!result.success) throw new Error(`${args.slice(0, 3).join(" ")} failed`);
+  return result.stdout.toString().trim();
+};
+const key = JSON.parse(command([fluree, "token", "keygen", "--format", "json"])) as {
+  readonly privateKey: { readonly hex: string };
+  readonly did: string;
+};
+const token = command(
+  [fluree, "token", "create", "--private-key", "@-", "--all", "--read-all", "--write-all"],
+  key.privateKey.hex
+);
+const AUTH = ["data", "admin"].flatMap((scope) => [
+  `--${scope}-auth-mode`,
+  "required",
+  `--${scope}-auth-trusted-issuer`,
+  key.did,
+]);
+const config = { url: `http://127.0.0.1:${port}`, ledger: "agent-bus-qualify:main", token };
 const api = `${config.url}/v1/fluree`;
 // Novelty this large is never indexed during the run, holding the index back.
-const HOLD_INDEX = ["--", "--reindex-min-bytes", "1000000000", "--reindex-max-bytes", "2000000000"];
+const HOLD_INDEX = ["--reindex-min-bytes", "1000000000", "--reindex-max-bytes", "2000000000"];
 
 Bun.spawnSync([fluree, "init"], { cwd: dir, stdout: "ignore" });
 
@@ -46,6 +75,8 @@ const start = async (extra: ReadonlyArray<string> = []) => {
       join(dir, "storage"),
       "--listen-addr",
       `127.0.0.1:${port}`,
+      "--",
+      ...AUTH,
       ...extra,
     ],
     { cwd: dir, stdout: "ignore", stderr: "ignore" }
@@ -69,9 +100,9 @@ const stop = async () => {
 };
 
 const indexLag = async () => {
-  const info = (await fetch(`${api}/info/${encodeURIComponent(config.ledger)}`).then((r) =>
-    r.json()
-  )) as { ledger: { "commit-t": number; "index-t": number } };
+  const info = (await fetch(`${api}/info/${encodeURIComponent(config.ledger)}`, {
+    headers: { authorization: `Bearer ${token}` },
+  }).then((r) => r.json())) as { ledger: { "commit-t": number; "index-t": number } };
   return info.ledger["commit-t"] - info.ledger["index-t"];
 };
 
@@ -90,7 +121,7 @@ const busLayer = () =>
     Layer.provide(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
   );
-const withBus = <A, E>(effect: Effect.Effect<A, E, Bus.Bus>) =>
+const withBus = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | QueryGateway>) =>
   Effect.runPromise(Effect.provide(effect, busLayer()));
 
 const check = (label: string, ok: boolean, detail = "") => {
@@ -98,13 +129,12 @@ const check = (label: string, ok: boolean, detail = "") => {
   if (!ok) process.exitCode = 1;
 };
 
-const search = (query: string) =>
-  withBus(
-    Effect.gen(function* () {
-      const bus = yield* Bus.Bus;
-      return yield* bus.history({ query, limit: 10 });
-    })
-  );
+const search = (text: string) =>
+  withBus(Catalogue.search.run({ text, limit: 10 }, {}, undefined)).then((page) => page.rows);
+
+/** One history page at `t`, or the page after `cursor`. */
+const historyPage = (input: { readonly t?: number; readonly cursor?: string }) =>
+  withBus(Catalogue.history.run({ kinds: ["message"], limit: 7 }, input, undefined));
 
 /** The qualification's two sessions. */
 const READER = "qualify-reader";
@@ -215,6 +245,35 @@ try {
     "same matches once indexed",
     JSON.stringify(bodies(searchIndexed)) === JSON.stringify(expected),
     bodies(searchIndexed).join(" | ")
+  );
+
+  // A pinned traversal survives a restart and later appends, resuming at its own t.
+  const first = await historyPage({});
+  const pinned = first.t;
+  const whole = await withBus(
+    Catalogue.history.run({ kinds: ["message"], limit: 200 }, { t: pinned }, undefined)
+  );
+  await stop();
+  await start();
+  await withBus(
+    Effect.gen(function* () {
+      const bus = yield* Bus.Bus;
+      yield* bus.publish({ from: "claude/a", session: SENDER, to: ["*"], body: "after the pin" });
+    })
+  );
+  const resumed = [...first.rows];
+  let next = first.next;
+  let last = first;
+  while (next !== undefined) {
+    last = await historyPage({ cursor: next });
+    resumed.push(...last.rows);
+    next = last.next;
+  }
+  const ids = (rows: ReadonlyArray<{ readonly id: string }>) => rows.map((row) => row.id).join();
+  check(
+    "cursor resumes across restart at its snapshot",
+    ids(resumed) === ids(whole.rows) && whole.complete && last.complete && last.t === pinned,
+    `${resumed.length} rows at t=${pinned}, head now ${last.currentHeadT ?? pinned}`
   );
 } finally {
   await stop();
