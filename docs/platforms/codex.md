@@ -325,6 +325,16 @@ Read in code (versions and paths as above) and checked with `codex debug prompt-
 - The app-server clears the cache when a file changes under a thread's skill roots (recursive, throttled to once in 10 s; plugin and system roots are not watched) and tells clients with `skills/changed`. Whether a root created after the thread started is watched was not checked.
 - A plugin reaches loaded threads only through the app-server: `plugin/install`, or a `config/batchWrite` that asks for a reload, clears the plugin and skill caches and reloads the user config into every loaded thread. No watcher on `config.toml` exists. `codex plugin add` from a shell is a separate process that writes the cache and `config.toml` and tells no daemon, so a thread already loaded in the daemon keeps its plugin set (inferred; a thread loaded or resumed afterwards reads `config.toml` fresh).
 
+## Repository agents
+
+**Documented** in the current [official subagents guide](https://learn.chatgpt.com/docs/agent-configuration/subagents#custom-agents), read 2026-11-02: standalone `.codex/agents/*.toml` files define project-scoped native agents. Each requires `name`, `description` and `developer_instructions`; `name`, not the filename, identifies the role. No separate per-role configuration registry is required. Codex applies the selected definition, so the caller supplies a task prompt rather than parsing and copying its instructions into another agent. Personal agents can instead live under `~/.codex/agents/`.
+
+The same guide says model and effort may be configured in the agent file; those fields take precedence over spawn defaults. Permissions, provider and MCP servers are inherited from the parent, and an instruction to review read-only does not create a separate security sandbox.
+
+**Verified live 2026-11-02**, bundled CLI 0.166.0-alpha.5.1: fresh CLI sessions from the development checkout selected the testing-design, Fluree-query, MCP and steward-designer native roles with task-only prompts and fresh child context. They returned actual source-review findings or a role-design draft; no prompt-copy invocation was used. Submitted model and effort settings were recorded, not independently attested by the children. This does not establish native invocation of every bench role or discovery refresh in an already-loaded thread; those remain **unverified**.
+
+The designer's workspace-write parent refused writes to the authorized `.codex/agents/` path. It returned the draft instead of writing elsewhere; the maintainer applied it for review. This observation does not qualify another permission profile or authorize bypassing a refusal. The contributor procedure is in [stewards](../runbooks/stewards.md).
+
 ## Approvals for MCP tools
 
 Codex decides whether an MCP call needs approval as follows (verified live and read in `core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval` and `maybe_request_mcp_tool_approval`, Codex 0.164):
