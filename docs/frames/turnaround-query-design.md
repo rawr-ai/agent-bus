@@ -2,7 +2,7 @@
 
 2026-11-01, revised 2026-11-02 after cross-review. This note covers the query vertical of the coordination turnaround: the tool surface, the snapshot and continuation contract, the first saved-query catalogue, the raw SPARQL boundary, limits, tests, what the query refusal retires, and how the viewer moves onto the same definitions. Current behaviour stays in [interfaces](../architecture/interfaces.md), [connections](../architecture/connections.md), [Fluree](../platforms/fluree.md) and [viewer](../architecture/viewer.md) until the implementation lands.
 
-Status: the cross-review accepted the three-tool split and a JSONL test store that refuses queries, and selected the revisions below; implementation follows on this branch. Every Fluree claim carries its basis: **verified live** (a disposable Fluree 4.2.4 server with synthetic ledgers, 2026-11-01 and 2026-11-02), **documented** (the installed 4.2.4 CLI's embedded docs, page and anchor named) or **read in code** (this repository, or the local archive MCP server used as prior art). The [evidence register](#evidence-register) lists them together.
+Status: the cross-review accepted the three-tool split and a JSONL test store that refuses queries, and selected the revisions below. The implementation on this branch follows the note as revised during it ([implementation revisions](#implementation-revisions)); current behaviour is now in [interfaces](../architecture/interfaces.md#bus_run_query) and [connections](../architecture/connections.md#rules). Every Fluree claim carries its basis: **verified live** (a disposable Fluree 4.2.4 server with synthetic ledgers, 2026-11-01 and 2026-11-02), **documented** (the installed 4.2.4 CLI's embedded docs, page and anchor named) or **read in code** (this repository, or the local archive MCP server used as prior art). The [evidence register](#evidence-register) lists them together.
 
 ## Decisions at a glance
 
@@ -55,11 +55,13 @@ All three new tools carry the `Lookup` annotations (read-only, not destructive, 
   unit: "entry",                // what one row is
   args: { ... },                // normalized args, defaults included
   rows: [ ... ],
+  damage: "checked",            // or "not-checked": predicate-only aggregates decode no entries
   damaged: 0,                   // damaged candidates passed on this page
   damagedAt?: [ 812 ],          // their commit t, up to 20
   damagedTotal: 0,              // across the traversal so far
   exhausted: false,             // true when no next page exists at t
-  complete: false,              // exhausted, and damagedTotal is 0 (and the operation can be complete)
+  complete: false,              // exhausted, damage checked, damagedTotal 0, entry coverage
+  missingJson?: 0,              // not-checked only: a lower bound, entries in scope without bus:json
   next?: "bq1.…",               // present while the relation continues at t
   note: "…"                     // fixed per operation: scope and labelling limits
 }
@@ -80,14 +82,14 @@ Operations add their own fields (`notFound`, `missingReplyTargets`, `root`, `mem
 | `i` | ledger incarnation | not the current incarnation: the ledger was replaced |
 | `t` | snapshot | above head, or unequal to an explicit `t` |
 | `n` | page size | not the requested limit |
-| `p` | position: `{ after: t }` / `{ before: t }` (keyset) or `{ offset: k }` | wrong form for the operation |
+| `p` | position: `{ after: [t, id] }` / `{ before: [t, id] }` (keyset) or `{ offset: k }` | wrong form for the operation |
 | `u` | damaged candidates met so far | negative or not an integer |
 
 The cursor is not signed: the binding check protects consistency, and a hand-edited cursor can only mislead its own caller. Cursors over 1 KiB, malformed base64 or JSON, or extra keys are refused. One catalogue version covers every operation and is bumped by any change to an operation's rows, order, unit, defaults or arguments; an older cursor is refused, never translated.
 
 ### Damage, exhaustion and completeness
 
-A candidate entry is a node with `@type` `bus:Message` or `bus:Presence` and a `bus:id`; its commit `t` comes from `bus:id`'s `@t`, and `bus:json` is an `optional` pattern (verified live: a node without `bus:json` returns `null` for it). A candidate is damaged when `bus:json` is missing, does not decode as a message, or names a different id. Damaged candidates occupy their place in the order, so keyset and offset positions move past them; each page reports how many it passed and their `t`, and the cursor carries the running total. The last page is `exhausted: true`; it is `complete: true` only when the whole traversal met no damage. `search` is never complete (ranked matches are not a complete relation). `counts` and `director-dm-volume` read predicates only and cannot detect damaged `bus:json`; their `complete` means exhausted, and their note says so.
+A candidate entry is a node with `@type` `bus:Message` or `bus:Presence` and a `bus:id`; its commit `t` comes from `bus:id`'s `@t`, and `bus:json` is an `optional` pattern (verified live: a node without `bus:json` returns `null` for it). A candidate is damaged when `bus:json` is missing, does not decode as a message, or names a different id. Damaged candidates occupy their place in the order, so keyset and offset positions move past them; each page reports how many it passed and their `t`, and the cursor carries the running total. The last page is `exhausted: true`; it is `complete: true` only when the whole traversal met no damage. `search` is never complete (ranked matches are not a complete relation). `counts` and `director-dm-volume` read predicates only and cannot detect damaged `bus:json`: they report `damage: "not-checked"` and are never `complete`, only `exhausted`, with `missingJson` counting entries in scope that have no `bus:json` at all, a lower bound on damage.
 
 ## Catalogue v1
 
@@ -95,9 +97,9 @@ Every user value is bound through JSON-LD `values`, never spliced into query tex
 
 | Operation | Unit | Mechanism | Page size | Position |
 | --- | --- | --- | --- | --- |
-| `history` | entry | candidates by type and id; predicates filter and order; `bus:json` decoded for rows | default 50, max 200 | keyset on `t`, forward or backward |
+| `history` | entry | candidates by type and id; predicates filter and order; `bus:json` decoded for rows | default 50, max 200 | keyset on (`t`, id), forward or backward |
 | `messages` | entry | `bus:id` lookup at `t`; decoded rows; `notFound` ids | 1 to 100 ids | offset into the ids |
-| `thread` | entry | whole reply tree from its root via `bus:replyTo*`; decoded rows; missing targets | default 100, max 200 | keyset on `t` |
+| `thread` | entry | whole reply tree from its root via `bus:replyTo*`; decoded rows; missing targets | default 100, max 200 | keyset on (`t`, id) |
 | `search` | ranked match | full text on `bus:body`/`bus:subject`, best score per message; decoded rows | default 50, max 200 | offset into the ranking |
 | `counts` | group | predicates only; aggregated in Fluree with distinct counts | default 200, max 1000 groups | offset |
 | `peers` | address | decodes every presence at `t`; the fold delivery uses | default 100, max 500 | offset by address |
@@ -130,7 +132,7 @@ Args: `ids` (1 to 100, unique). Each id is looked up at `t` with `values` and an
 
 ### thread
 
-Args: `id`, `limit`. The id is resolved at `t` first; an id absent at `t` is an explicit error. The thread is the whole reply tree from its root: every entry that shares a reply ancestor with `id` along `bus:replyTo*`, which is the root's whole tree (verified live, with `{"@path": "bus:replyTo*"}` in the context). A membership query returns each member and its reply target as IRIs (capped at 10,000 members; beyond that the call fails), so the page reports `root` (the member without a reply link, absent when the tree hangs from a missing message), `members`, and `missingReplyTargets`: targets that are not entries at `t` (verified live: the dangling target appears as a node without `bus:id`). Rows page by keyset on `t`. The note says that related mail without reply links is outside this relation; whole-job coverage pairs `thread` with `history`.
+Args: `id`, `limit`. The id is resolved at `t` first; an id absent at `t` is an explicit error. The thread is the whole reply tree from its root: every entry that shares a reply ancestor with `id` along `bus:replyTo*`, which is the root's whole tree (verified live, with `{"@path": "bus:replyTo*"}` in the context). A membership query returns each member and its reply target as IRIs (capped at 10,000 members; beyond that the call fails), so the page reports `root` (the member without a reply link, absent when the tree hangs from a missing message), `members`, and `missingReplyTargets`: targets that are not entries at `t` (verified live: the dangling target appears as a node without `bus:id`). Rows page by keyset on (`t`, id). The note says that related mail without reply links is outside this relation; whole-job coverage pairs `thread` with `history`.
 
 ### search
 
@@ -202,7 +204,7 @@ Head `t` was unchanged after all of these. `SERVICE SILENT` and `GRAPH` return a
 
 ## Limits
 
-- **Envelope cap: 65,536 bytes** of UTF-8 JSON for every `bus_run_query` and `bus_query` result, on top of Fluree's own sizing. Whole rows are trimmed from the end until the envelope fits, and the next page starts after the last emitted row. A single row that cannot fit alone fails with an error naming its `id` and `t`; nothing is truncated. The presets keep their historical contracts and are not trimmed.
+- **Envelope cap: 65,536 bytes** of UTF-8 JSON for every `bus_run_query` and `bus_query` result, on top of Fluree's own sizing. Whole rows are trimmed from the end until the envelope fits, then back to the last emitted row (damaged candidates after it are neither counted nor passed), and the next page starts after the last emitted row. A single row that cannot fit alone fails with an error naming its `id` and `t`; nothing is truncated. The presets keep their historical contracts and are not trimmed.
 - **Page sizes** are in the catalogue table; requests above a maximum are refused, not clamped.
 - **Fluree responses** for catalogue queries are refused above 32 MiB, raw responses above 256 KiB.
 - **Concurrency and time:** 4 permits across all query operations, 10 s per Fluree request, interruption on timeout.
@@ -236,6 +238,18 @@ The viewer branch stacks on the query branch and changes only the viewer and its
 - **Bounded-window disclosure** (PR 15's first deferred item, confirmed). The window follows `next` at one `t` until it holds 200 entries or the relation is exhausted, and says which: "latest 200 entries at t=…; older entries exist" or "all entries at t=…". A search window says "best matches at t=…; ranked, not complete". The label never infers completeness from the row count.
 - **Retained-flow freezing** (the second deferred item, confirmed). A retained conversation or context flow records the `ledger` and `t` of the observation it came from and stays frozen there: rereading it uses `thread` (or `history` with its criteria) at that explicit `t`, so a retained unit never mixes rows from two snapshots, and `missingReplyTargets` replaces inferred missing anchors. Accepting the current unit moves to the current `t`.
 - **Verification.** The reader test on the throwaway server, server tests for the envelope mapping, Storybook plays for older-entries, damaged and moved-head states, and the connected browser lane where it applies.
+
+## Implementation revisions
+
+Settled during implementation with the coordinator and the cross-reviewer; the sections above are revised to match.
+
+- **Keyset on (t, id).** Several entries can share a commit, so history and thread order by `t` then id, and positions and cursors carry both: `(or (> ?t ?bt) (and (= ?t ?bt) (> ?id ?bid)))`, and its mirror with descending order for `backward` (verified live).
+- **Consumed prefix.** A page trimmed for bytes ends at its last emitted row. Damage counts and the next position cover only the candidates up to that row: with damaged@11, valid@12, damaged@13 and valid@14 where only valid@12 fits, the page counts damage@11 and resumes after @12. A page of damaged candidates alone still advances. A first row that cannot fit alone fails, naming it.
+- **Aggregates are never complete.** `counts` and `director-dm-volume` report `damage: "not-checked"`, `exhausted` and an optional `missingJson` lower bound, never `complete: true`.
+- **Raw zero-binding failure.** A raw result where no binding fits, including Agent JSON `hasMore` with no rows, fails as an oversized first row, naming `t` and the row position; an empty preview is never returned. Exactly 500 rows without the sentinel or a byte cut can be complete.
+- **Ids by subject IRI.** Binding `?id` with `values` before `bus:id {"@value": "?id", "@t": "?t"}` returns a null `t` (verified live), so `messages` and `thread` bind the subject IRI (`urn:agent-bus:message:<id>`) instead; an id outside the IRI-safe character set is treated as absent at `t`.
+- **Mixed column types.** Agent JSON's `schema` gives an array of datatypes for a variable whose values vary, so `columns` accepts either.
+- **Authenticated qualification.** `scripts/qualify-fluree.ts` starts its server with required data and admin authentication, and resumes a traversal across a restart from its cursor with identical rows.
 
 ## Evidence register
 
