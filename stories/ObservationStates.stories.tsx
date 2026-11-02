@@ -291,6 +291,56 @@ export const ConversationFollowsCommits: Story = {
   },
 };
 
+/** A failed tree read is retried at the same commit, by its own action or by Refresh all. */
+export const ThreadRetriedAtSameCommit: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request, answer, followUp, unrelated]);
+    script.peers = peersOf(["agent/lead"]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const reads: Array<readonly [string, number]> = [];
+    let failure: StatusError | null = new StatusError(504);
+    script.thread = (input) => {
+      reads.push([input.id, input.t]);
+      return failure ?? threadOf(input);
+    };
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review request.*3 observed messages/ })
+    );
+    await expect(await canvas.findByText("Conversation timed out.")).toBeVisible();
+    failure = new StatusError(503);
+    await userEvent.click(canvas.getByRole("button", { name: "Retry conversation" }));
+    await expect(await canvas.findByText("Conversation unavailable.")).toBeVisible();
+    // Service returns while the bus stays at commit 1: the retry reads that commit again.
+    failure = null;
+    await userEvent.click(canvas.getByRole("button", { name: "Retry conversation" }));
+    await expect(await canvas.findByText("Whole reply tree at commit 1")).toBeVisible();
+    await expect(canvas.getByText("Confirmed with one note.")).toBeVisible();
+    await expect(reads).toEqual([
+      ["a", 1],
+      ["a", 1],
+      ["a", 1],
+    ]);
+    // Refresh all retries a failed read at the unchanged commit, and leaves a good one alone.
+    failure = new StatusError(503);
+    await userEvent.click(canvas.getByRole("button", { name: /Status update/ }));
+    await expect(await canvas.findByText("Conversation unavailable.")).toBeVisible();
+    failure = null;
+    const historyCalls = script.historyCalls;
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh all" }));
+    await expect(await canvas.findByText("Deployment window moved.")).toBeVisible();
+    await waitFor(() => expect(script.historyCalls).toBe(historyCalls + 1));
+    await expect(reads.slice(3)).toEqual([
+      ["d", 1],
+      ["d", 1],
+    ]);
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh all" }));
+    await waitFor(() => expect(script.historyCalls).toBe(historyCalls + 2));
+    await expect(reads).toHaveLength(5);
+  },
+};
+
 /** A context flow whose messages leave the window is frozen at the commit it was read at. */
 export const RetainedReading: Story = {
   beforeEach: () => {

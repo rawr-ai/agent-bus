@@ -335,10 +335,16 @@ export function App({ client }: { client: ViewerClient }) {
   const thread = useObservation(resources.thread);
   const historyAnnouncement = useAnnouncement(resources.history, historyAnnouncer);
   const peersAnnouncement = useAnnouncement(resources.peers, peersAnnouncer);
+  // A tree read at one commit answers the same each time, so an unchanged key is not read
+  // again; only a failed read is retried, and any retained tree stays until a retry succeeds.
+  const retryThread = useCallback(() => {
+    if (resources.thread.getSnapshot().error !== null) resources.thread.refresh();
+  }, [resources]);
   const automaticRead = useCallback(() => {
     resources.history.refresh({ replacePending: false });
     resources.peers.refresh({ replacePending: false });
-  }, [resources]);
+    retryThread();
+  }, [resources, retryThread]);
   const automatic = useAutomaticRefresh(automaticRead);
   const applyCriteria = (input: HistoryInput) => {
     const next = canonicalHistoryInput(input);
@@ -567,6 +573,7 @@ export function App({ client }: { client: ViewerClient }) {
             onClick={() => {
               history.refresh();
               peers.refresh();
+              retryThread();
             }}
           />
         </div>
@@ -964,7 +971,16 @@ export function App({ client }: { client: ViewerClient }) {
                     </section>
                   </div>
                 ) : nav.message !== null && thread.error !== null ? (
-                  <p className="empty">Conversation unavailable.</p>
+                  <div className="empty">
+                    <p>
+                      {thread.error === "timeout"
+                        ? "Conversation timed out."
+                        : "Conversation unavailable."}
+                    </p>
+                    <button className="text-action" type="button" onClick={retryThread}>
+                      Retry conversation
+                    </button>
+                  </div>
                 ) : nav.message !== null && tree !== null && treeCurrent ? (
                   <SelectedBeyondTree
                     key={nav.message}
