@@ -75,18 +75,19 @@ const refused = async (name: string, args: Record<string, unknown>, expected: st
   expect(JSON.stringify(result)).not.toContain(marker);
 };
 
-test.each([400, 401, 403, 409, 500, 503])(
-  "HTTP %s exposes only its status class, never its body",
-  async (status) => {
-    failure = { body: JSON.stringify({ session: marker, nested: { raw: marker } }), status };
-    for (const [name, args] of [
-      ["bus_history", {}],
-      ["bus_peers", {}],
-    ] as const) {
-      await refused(name, args, `Fluree request failed (HTTP ${status}).`);
-    }
+test.each([
+  400, 401, 403, 409, 500, 503,
+])("HTTP %s exposes only its status class, never its body", async (status) => {
+  failure = { body: JSON.stringify({ session: marker, nested: { raw: marker } }), status };
+  for (const [name, args] of [
+    ["bus_history", {}],
+    ["bus_peers", {}],
+    ["bus_query", { query: "SELECT ?s WHERE { ?s ?p ?o }" }],
+    ["bus_run_query", { name: "history" }],
+  ] as const) {
+    await refused(name, args, `Fluree request failed (HTTP ${status}).`);
   }
-);
+});
 
 test("malformed JSON and schema failures omit source values", async () => {
   failure = { body: marker, status: 200 };
@@ -95,18 +96,21 @@ test("malformed JSON and schema failures omit source values", async () => {
   await refused("bus_history", {}, "Fluree returned an invalid response.");
 });
 
-test("Fluree select itself refuses without parsing, reading head or querying upstream", async () => {
+test("bus_query refuses forbidden and malformed queries before reading head or querying upstream", async () => {
   failure = { body: marker, status: 500 };
   const before = storeRequests.length;
-  for (const query of ["SELECT ?m WHERE { ?m a bus:Message }", "", marker.repeat(4096)]) {
-    for (const t of [undefined, 1, 2, 0, -1, Number.MAX_SAFE_INTEGER]) {
-      const error = await server.runPromise(
-        Effect.flatMap(Ledger, (ledger) => Effect.flip(ledger.select(query, t)))
-      );
-      expect(error.message).toBe(
-        "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers."
-      );
-    }
+  for (const query of [
+    "",
+    "INSERT DATA { <urn:x> <urn:p> 1 }",
+    "ASK { ?s ?p ?o }",
+    "SELECT * FROM <urn:other> WHERE { ?s ?p ?o }",
+    "SELECT * WHERE { SERVICE SILENT <urn:other> { ?s ?p ?o } }",
+    "SELECT * WHERE { GRAPH <urn:other> { ?s ?p ?o } }",
+    "SELECT * WHERE {",
+    marker.repeat(4096),
+  ]) {
+    const result = await client.callTool({ name: "bus_query", arguments: { query } });
+    expect(result).toMatchObject({ isError: true });
   }
   expect(storeRequests.length).toBe(before);
 });

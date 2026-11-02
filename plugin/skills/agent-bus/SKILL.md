@@ -1,7 +1,7 @@
 ---
 name: agent-bus
 description: |
-  Use when a Claude or Codex session uses agent-bus: joining, waking, reading, sending or replying (bus_join, bus_read, bus_publish, replyTo, #topic), choosing recipients or acknowledgements, finding peers or past mail (bus_peers, bus_history, bus_query), leaving or recovering from a refused call; or when asked to message or coordinate with another session.
+  Use when a Claude or Codex session uses agent-bus: joining, waking, reading, sending or replying (bus_join, bus_read, bus_publish, replyTo, #topic), choosing recipients or acknowledgements, finding peers or past mail (bus_peers, bus_history, bus_queries, bus_run_query, bus_query), leaving or recovering from a refused call; or when asked to message or coordinate with another session.
 ---
 
 # agent-bus
@@ -49,7 +49,7 @@ Make the subject carry the question or changed state. Keep the body self-contain
 
 ## Find things
 
-`bus_peers` lists peers; `bus_history` searches mail. Neither changes what is unread. `bus_query` is temporarily disabled and always refuses; changing its query or commit cannot bypass that refusal. Recipes and limits: [references/queries.md](references/queries.md).
+`bus_peers` lists peers; `bus_history` searches mail. For complete answers, threads, counts or past snapshots, run a saved query (`bus_queries`, `bus_run_query`); `bus_query` runs raw SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
 
 ## Leave when done
 

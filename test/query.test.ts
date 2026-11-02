@@ -1,0 +1,834 @@
+// The read-only query tools (bus_query, bus_run_query, bus_queries) and the presets built on
+// them, driven through the real McpServer on the shared throwaway Fluree server.
+import { afterAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { BunFileSystem, BunPath } from "@effect/platform-bun";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { FetchHttpClient } from "effect/http";
+import * as Bus from "../src/Bus.ts";
+import * as Cursors from "../src/Cursors.ts";
+import { CATALOGUE_VERSION, operationNames } from "../src/catalogue.ts";
+import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
+import { layerFluree, toNode } from "../src/Fluree.ts";
+import { Ledger } from "../src/Ledger.ts";
+import { QueryGateway } from "../src/Query.ts";
+import * as Serve from "../src/serve.ts";
+import { flureeFetch, freshLedger, insertRaw } from "./fluree-server.ts";
+import { layerJsonl } from "./jsonl-ledger.ts";
+
+type Config = Awaited<ReturnType<typeof freshLedger>>;
+type Json = Record<string, any>;
+
+const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
+const dirs: Array<string> = [];
+const disposers: Array<() => Promise<void>> = [];
+afterAll(async () => {
+  for (const dispose of disposers.splice(0).reverse()) await dispose();
+  for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+});
+
+const freePort = () => {
+  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  const port = Number(probe.url.port);
+  probe.stop(true);
+  return port;
+};
+
+type Store = Layer.Layer<Ledger | QueryGateway, unknown, never>;
+
+/** A bus serving MCP over one store, with an official SDK client. */
+const startBus = async (store: Store) => {
+  const dir = mkdtempSync(join(tmpdir(), "agent-bus-query-"));
+  dirs.push(dir);
+  const port = freePort();
+  const runtime = ManagedRuntime.make(
+    Serve.layerHttp({ port, version: "test" }).pipe(
+      Layer.provideMerge(
+        Bus.layer.pipe(
+          Layer.provideMerge(store),
+          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
+          Layer.provide(platform)
+        )
+      )
+    )
+  );
+  await runtime.runPromise(Effect.void);
+  const client = new Client({ name: "query-test", version: "1" });
+  await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`)));
+  const { tools } = await client.listTools();
+  const dispose = async () => {
+    await client.close();
+    await runtime.dispose();
+  };
+  disposers.push(dispose);
+  const call = async (name: string, args: Json) =>
+    (await client.callTool({ name, arguments: args })) as CallToolResult;
+  const text = (result: CallToolResult) => {
+    const [first] = result.content;
+    return first?.type === "text" ? first.text : "";
+  };
+  const ok = async (name: string, args: Json = {}): Promise<Json> => {
+    const result = await call(name, args);
+    if (result.isError) throw new Error(`${name} refused: ${text(result)}`);
+    expect(result.structuredContent).toEqual(JSON.parse(text(result)));
+    return result.structuredContent as Json;
+  };
+  const refused = async (name: string, args: Json): Promise<string> => {
+    const result = await call(name, args);
+    if (!result.isError) throw new Error(`${name} answered: ${text(result)}`);
+    return text(result);
+  };
+  const append = (...messages: ReadonlyArray<Message>) =>
+    runtime.runPromise(
+      Effect.flatMap(Ledger, (ledger) => Effect.forEach(messages, (m) => ledger.append(m)))
+    );
+  const run = (name: string, args: Json, extra: Json = {}) =>
+    ok("bus_run_query", { name, args, ...extra });
+  /** Every page of a traversal at one t. */
+  const all = async (name: string, args: Json, extra: Json = {}) => {
+    const pages = [await run(name, args, extra)];
+    while (pages.at(-1)?.next !== undefined) {
+      pages.push(await run(name, args, { cursor: pages.at(-1)?.next }));
+    }
+    return pages;
+  };
+  return { runtime, tools, call, ok, refused, append, run, all, dispose };
+};
+
+const flureeStore = (config: Config): Store => layerFluree(config).pipe(Layer.provide(platform));
+
+let clock = Date.parse("2026-11-01T09:00:00.000Z");
+const nextTs = () => {
+  clock += 60_000;
+  return new Date(clock).toISOString();
+};
+let serial = 0;
+const id = (label: string) => {
+  serial += 1;
+  return `${label}-${String(serial).padStart(4, "0")}`;
+};
+const message = (fields: {
+  readonly from: string;
+  readonly to: ReadonlyArray<string>;
+  readonly body: string;
+  readonly id?: string;
+  readonly ts?: string;
+  readonly subject?: string;
+  readonly replyTo?: string;
+}) =>
+  new Message({
+    id: fields.id ?? id("m"),
+    ts: fields.ts ?? nextTs(),
+    from: fields.from,
+    to: [...fields.to],
+    kind: "message",
+    body: fields.body,
+    ...(fields.subject === undefined ? {} : { subject: fields.subject }),
+    ...(fields.replyTo === undefined ? {} : { replyTo: fields.replyTo }),
+    origin: new Origin({ host: "fixture-host", cwd: "/workspace" }),
+  });
+const presence = (
+  from: string,
+  status: "joined" | "left",
+  extra: { readonly session?: string; readonly topics?: ReadonlyArray<string> } = {}
+) =>
+  new Message({
+    id: id("p"),
+    ts: nextTs(),
+    from,
+    to: ["*"],
+    kind: "presence",
+    body: `${from} ${status}`,
+    presence: new Presence({
+      runtime: "codex",
+      status,
+      topics: [...(extra.topics ?? [])],
+      ...(extra.session === undefined ? {} : { session: extra.session }),
+      note: "public note",
+    }),
+  });
+const encodeJson = Schema.encodeSync(MessageJson);
+/** A damaged entry: typed and identified like any other, without bus:json or with junk in it. */
+const damaged = (config: Config, json?: string) => {
+  const m = message({ from: "claude/damaged", to: ["#damaged"], body: "damaged entry" });
+  const { "bus:json": _, ...node } = toNode(m, "");
+  return insertRaw(config, json === undefined ? node : { ...node, "bus:json": json }).then(
+    () => m.id
+  );
+};
+const ids = (rows: ReadonlyArray<Json>) => rows.map((row) => row.id);
+const rowsOf = (pages: ReadonlyArray<Json>) => pages.flatMap((page) => page.rows as Array<Json>);
+
+describe("catalogue", () => {
+  test("bus_queries, the bus_run_query enum and dispatch name the same operations, and every example runs", async () => {
+    const bus = await startBus(flureeStore(await freshLedger("catalogue")));
+    const root = message({ from: "claude/a", to: ["codex/b"], body: "root" });
+    await bus.append(root);
+    const listing = await bus.ok("bus_queries");
+    expect(listing.catalogueVersion).toBe(CATALOGUE_VERSION);
+    expect(listing.headT).toBeGreaterThan(0);
+    expect(listing.operations.map((operation: Json) => operation.name)).toEqual([
+      ...operationNames,
+    ]);
+    const tool = bus.tools.find((candidate) => candidate.name === "bus_run_query");
+    expect((tool?.inputSchema.properties?.name as Json | undefined)?.enum).toEqual([
+      ...operationNames,
+    ]);
+    for (const operation of listing.operations as Array<Json>) {
+      expect(operation.args.type).toBe("object");
+      expect(operation.row.type).toBe("object");
+      expect(operation.note.length).toBeGreaterThan(0);
+      // Placeholders name a real message where the operation needs one.
+      const args = JSON.parse(
+        JSON.stringify(operation.example.args).replaceAll("<message id>", root.id)
+      );
+      const page = await bus.run(operation.example.name, args);
+      expect(page.name).toBe(operation.name);
+      expect(page.unit).toBe(operation.unit);
+      expect(page.note).toBe(operation.note);
+    }
+    expect(listing.raw.tool).toBe("bus_query");
+    expect(await bus.refused("bus_run_query", { name: "nonsense" })).toContain("name");
+    expect(
+      await bus.refused("bus_run_query", { name: "history", args: { surprise: true } })
+    ).toContain("Invalid args for history");
+    expect(await bus.refused("bus_run_query", { name: "history", args: { limit: 201 } })).toContain(
+      "Invalid args for history"
+    );
+  });
+
+  test("a JSONL store refuses every query, and its presets, explicitly", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "agent-bus-query-jsonl-"));
+    dirs.push(dir);
+    const bus = await startBus(layerJsonl(join(dir, "ledger.jsonl")).pipe(Layer.provide(platform)));
+    for (const [name, args] of [
+      ["bus_run_query", { name: "history" }],
+      ["bus_query", { query: "SELECT ?s WHERE { ?s ?p ?o }" }],
+      ["bus_queries", {}],
+      ["bus_history", {}],
+      ["bus_peers", {}],
+    ] as const) {
+      expect(await bus.refused(name, args)).toBe("Queries need the Fluree ledger.");
+    }
+  });
+});
+
+describe("entries", () => {
+  test("history orders by commit, one row per entry, and pages forward and backward at one t", async () => {
+    const config = await freshLedger("history");
+    const bus = await startBus(flureeStore(config));
+    const ts = nextTs();
+    const first = message({ from: "claude/a", to: ["codex/b", "#review"], body: "one", ts });
+    // The same ts: the commit decides the order, and the later write comes later.
+    const second = message({ from: "codex/b", to: ["claude/a"], body: "two", ts });
+    const third = message({ from: "claude/c", to: ["*"], body: "three" });
+    await bus.append(first, presence("claude/a", "joined", { session: "s" }), second, third);
+
+    const forward = await bus.all("history", { limit: 2 });
+    expect(forward.map((page) => page.rows.length)).toEqual([2, 1]);
+    expect(ids(rowsOf(forward))).toEqual([first.id, second.id, third.id]);
+    expect(new Set(forward.map((page) => page.t)).size).toBe(1);
+    expect(forward.map((page) => [page.exhausted, page.complete])).toEqual([
+      [false, false],
+      [true, true],
+    ]);
+    const [firstRow] = rowsOf(forward);
+    expect(firstRow).toEqual({
+      t: expect.any(Number),
+      id: first.id,
+      ts,
+      from: "claude/a",
+      to: ["codex/b", "#review"],
+      kind: "message",
+      body: "one",
+      origin: { host: "fixture-host", cwd: "/workspace" },
+    });
+
+    const backward = await bus.all("history", { direction: "backward", limit: 2 });
+    expect(ids(rowsOf(backward))).toEqual([third.id, second.id, first.id]);
+
+    // A multi-recipient entry matched through two participants is still one row.
+    const both = await bus.run("history", { participants: ["#review", "codex/b"] });
+    expect(ids(both.rows)).toEqual([first.id, second.id]);
+    const withPresence = await bus.run("history", { kinds: ["presence", "message"] });
+    expect(withPresence.rows.map((row: Json) => row.kind)).toEqual([
+      "message",
+      "presence",
+      "message",
+      "message",
+    ]);
+    // Saved rows carry the public presence fields, never the session claim.
+    expect(withPresence.rows[1].presence).toEqual({
+      runtime: "codex",
+      status: "joined",
+      topics: [],
+      note: "public note",
+    });
+    expect(JSON.stringify(withPresence)).not.toContain('"session"');
+    const windowed = await bus.run("history", { fromTs: third.ts, toTs: nextTs() });
+    expect(ids(windowed.rows)).toEqual([third.id]);
+    expect(windowed.args).toEqual({
+      fromTs: third.ts,
+      toTs: expect.any(String),
+      kinds: ["message"],
+      direction: "forward",
+      limit: 50,
+    });
+  });
+
+  test("entries sharing one commit page by (t, id)", async () => {
+    const config = await freshLedger("same-commit");
+    const bus = await startBus(flureeStore(config));
+    const pair = [
+      message({ from: "claude/a", to: ["*"], body: "pair b", id: "pair-b" }),
+      message({ from: "claude/a", to: ["*"], body: "pair a", id: "pair-a" }),
+    ];
+    await insertRaw(config, {
+      "@context": toNode(pair[0] as Message, "")["@context"],
+      "@graph": pair.map((m) => {
+        const { "@context": _, ...node } = toNode(m, encodeJson(m));
+        return node;
+      }),
+    });
+    await bus.append(message({ from: "claude/a", to: ["*"], body: "after", id: "pair-c" }));
+    const forward = await bus.all("history", { limit: 1 });
+    expect(ids(rowsOf(forward))).toEqual(["pair-a", "pair-b", "pair-c"]);
+    expect(rowsOf(forward)[0]?.t).toBe(rowsOf(forward)[1]?.t);
+    const backward = await bus.all("history", { limit: 1, direction: "backward" });
+    expect(ids(rowsOf(backward))).toEqual(["pair-c", "pair-b", "pair-a"]);
+  });
+
+  test("damaged entries are counted in place; an exhausted traversal that met one is not complete", async () => {
+    const config = await freshLedger("damage");
+    const bus = await startBus(flureeStore(config));
+    const missing = await damaged(config);
+    const junk = await damaged(config, "{not json");
+    const clean = message({ from: "claude/a", to: ["#damaged"], body: "clean" });
+    await bus.append(clean);
+    const pages = await bus.all("history", { limit: 2 });
+    expect(pages.map((page) => [page.rows.length, page.damaged, page.damagedTotal])).toEqual([
+      [0, 2, 2],
+      [1, 0, 2],
+    ]);
+    // A page of only damaged entries still advances.
+    expect(pages[0]?.next).toBeDefined();
+    expect(pages[0]?.damagedAt).toHaveLength(2);
+    expect(pages.at(-1)).toMatchObject({ exhausted: true, complete: false, damage: "checked" });
+    const lookup = await bus.run("messages", { ids: [clean.id, missing, junk, "absent-id"] });
+    expect(ids(lookup.rows)).toEqual([clean.id]);
+    expect(lookup).toMatchObject({ damaged: 2, notFound: ["absent-id"], complete: false });
+    const counted = await bus.run("counts", { groupBy: ["sender"], unit: "message" });
+    expect(counted).toMatchObject({
+      damage: "not-checked",
+      exhausted: true,
+      complete: false,
+      missingJson: 1,
+      total: 3,
+    });
+  });
+
+  test("messages keeps the asked order and resolves each id at t", async () => {
+    const config = await freshLedger("messages");
+    const bus = await startBus(flureeStore(config));
+    const a = message({ from: "claude/a", to: ["codex/b"], body: "a" });
+    const b = message({ from: "codex/b", to: ["claude/a"], body: "b" });
+    await bus.append(a, b);
+    const pinned = (await bus.run("messages", { ids: [a.id] })).t;
+    const later = message({ from: "claude/a", to: ["codex/b"], body: "later" });
+    await bus.append(later);
+    const page = await bus.run("messages", { ids: [b.id, later.id, a.id] }, { t: pinned });
+    expect(ids(page.rows)).toEqual([b.id, a.id]);
+    expect(page).toMatchObject({ notFound: [later.id], complete: true, currentHeadT: pinned + 1 });
+    expect(
+      await bus.refused("bus_run_query", { name: "messages", args: { ids: [a.id, a.id] } })
+    ).toBe("ids has duplicates.");
+  });
+
+  test("thread is the whole reply tree from its root, with missing reply targets", async () => {
+    const config = await freshLedger("thread");
+    const bus = await startBus(flureeStore(config));
+    const root = message({ from: "claude/a", to: ["#t"], body: "root" });
+    const reply = message({ from: "codex/b", to: ["claude/a"], body: "reply", replyTo: root.id });
+    const nested = message({
+      from: "claude/a",
+      to: ["codex/b"],
+      body: "nested",
+      replyTo: reply.id,
+    });
+    const sibling = message({
+      from: "claude/c",
+      to: ["claude/a"],
+      body: "sibling",
+      replyTo: root.id,
+    });
+    const unrelated = message({ from: "claude/c", to: ["*"], body: "unrelated" });
+    const orphan = message({ from: "claude/c", to: ["*"], body: "orphan", replyTo: "never-sent" });
+    const orphanReply = message({ from: "claude/a", to: ["*"], body: "o2", replyTo: orphan.id });
+    await bus.append(root, reply, unrelated, nested, sibling, orphan, orphanReply);
+    const pages = await bus.all("thread", { id: nested.id, limit: 2 });
+    expect(ids(rowsOf(pages))).toEqual([root.id, reply.id, nested.id, sibling.id]);
+    expect(pages[0]).toMatchObject({ root: root.id, members: 4, missingReplyTargets: [] });
+    expect(pages.at(-1)).toMatchObject({ exhausted: true, complete: true });
+    const dangling = await bus.run("thread", { id: orphanReply.id });
+    expect(ids(dangling.rows)).toEqual([orphan.id, orphanReply.id]);
+    expect(dangling).toMatchObject({ members: 2, missingReplyTargets: ["never-sent"] });
+    expect(dangling.root).toBeUndefined();
+    const before = dangling.t;
+    const late = message({ from: "claude/a", to: ["*"], body: "late" });
+    await bus.append(late);
+    expect(
+      await bus.refused("bus_run_query", { name: "thread", args: { id: late.id }, t: before })
+    ).toBe(`Message ${late.id} is not in the ledger at t=${before}.`);
+  });
+
+  test("search ranks matches at one t and is never complete", async () => {
+    const config = await freshLedger("search");
+    const bus = await startBus(flureeStore(config));
+    await bus.append(
+      message({ from: "claude/a", to: ["*"], body: "Deploying the adapters now" }),
+      message({ from: "claude/a", to: ["*"], body: "unrelated", subject: "adapter" }),
+      message({ from: "codex/b", to: ["*"], body: "lunch" })
+    );
+    let page = await bus.run("search", { text: "deploy adapter" });
+    for (let attempt = 0; attempt < 50 && page.rows.length < 2; attempt++) {
+      await Bun.sleep(100);
+      page = await bus.run("search", { text: "deploy adapter" });
+    }
+    expect(page.rows.map((row: Json) => row.body)).toEqual([
+      "Deploying the adapters now",
+      "unrelated",
+    ]);
+    expect(page.rows[0].score).toBeGreaterThan(page.rows[1].score);
+    expect(page).toMatchObject({ unit: "ranked match", exhausted: true, complete: false });
+    const literal = await bus.run("search", { text: '") (bind ?x' });
+    expect(literal.rows).toEqual([]);
+    const narrowed = await bus.run("search", { text: "deploy adapter", participants: ["codex/b"] });
+    expect(narrowed.rows).toEqual([]);
+  });
+});
+
+describe("aggregates and peers", () => {
+  test("counts groups distinct messages or recipient pairs and never claims completeness", async () => {
+    const bus = await startBus(flureeStore(await freshLedger("counts")));
+    await bus.append(
+      message({
+        from: "claude/a",
+        to: ["codex/b", "#t"],
+        body: "1",
+        ts: "2026-11-02T23:59:00.000Z",
+      }),
+      message({ from: "claude/a", to: ["codex/b"], body: "2", ts: "2026-11-03T00:01:00.000Z" }),
+      message({ from: "codex/b", to: ["*"], body: "3", ts: "2026-11-03T08:00:00.000Z" })
+    );
+    const byDay = await bus.run("counts", { groupBy: ["day", "sender"], unit: "message" });
+    expect(byDay.rows).toEqual([
+      { sender: "claude/a", day: "2026-11-02", count: 1 },
+      { sender: "claude/a", day: "2026-11-03", count: 1 },
+      { sender: "codex/b", day: "2026-11-03", count: 1 },
+    ]);
+    expect(byDay).toMatchObject({
+      args: { groupBy: ["sender", "day"], unit: "message", limit: 200 },
+      total: 3,
+      missingJson: 0,
+      damage: "not-checked",
+      exhausted: true,
+      complete: false,
+    });
+    const pairs = await bus.run("counts", {
+      groupBy: ["recipient"],
+      unit: "recipient-pair",
+      participants: ["codex/b", "#t"],
+    });
+    // Participants match senders too: codex/b's broadcast is in scope.
+    expect(pairs.rows).toEqual([
+      { recipient: "#t", count: 1 },
+      { recipient: "*", count: 1 },
+      { recipient: "codex/b", count: 2 },
+    ]);
+    expect(pairs.total).toBe(4);
+    const paged = await bus.all("counts", {
+      groupBy: ["sender", "day"],
+      unit: "message",
+      limit: 2,
+    });
+    expect(rowsOf(paged)).toEqual(byDay.rows);
+  });
+
+  test("peers folds the presences visible at t, ignoring those without a session", async () => {
+    const bus = await startBus(flureeStore(await freshLedger("peers")));
+    await bus.append(
+      presence("claude/a", "joined", { session: "sa", topics: ["review"] }),
+      presence("codex/legacy", "joined"),
+      presence("codex/b", "joined", { session: "sb" })
+    );
+    const before = (await bus.run("peers", {})).t;
+    await bus.append(presence("claude/a", "left", { session: "sa" }));
+    const now = await bus.run("peers", {});
+    expect(now.rows.map((row: Json) => row.address)).toEqual(["codex/b"]);
+    const everyone = await bus.run("peers", { includeLeft: true });
+    expect(everyone.rows.map((row: Json) => [row.address, row.status])).toEqual([
+      ["claude/a", "left"],
+      ["codex/b", "joined"],
+    ]);
+    // A historical cut decodes the presences of that cut, never today's.
+    const then = await bus.run("peers", {}, { t: before });
+    expect(then.rows).toEqual([
+      {
+        address: "claude/a",
+        runtime: "codex",
+        status: "joined",
+        topics: ["review"],
+        since: expect.any(String),
+        t: expect.any(Number),
+        note: "public note",
+      },
+      expect.objectContaining({ address: "codex/b", status: "joined" }),
+    ]);
+    expect(then).toMatchObject({ complete: true, currentHeadT: before + 1 });
+    const preset = await bus.ok("bus_peers");
+    expect(preset.peers.map((peer: Json) => peer.address)).toEqual(["codex/b"]);
+  });
+
+  test("director-dm-volume counts distinct direct mail per UTC day beside observed traffic", async () => {
+    const bus = await startBus(flureeStore(await freshLedger("director")));
+    await bus.append(
+      // Mixed direct and topic recipients count once.
+      message({
+        from: "lead/d",
+        to: ["codex/w", "codex/x", "#ops"],
+        body: "1",
+        ts: "2026-11-01T10:00:00.000Z",
+      }),
+      message({ from: "lead/d", to: ["#ops"], body: "topic only", ts: "2026-11-01T11:00:00.000Z" }),
+      message({ from: "codex/w", to: ["#ops"], body: "work", ts: "2026-11-02T10:00:00.000Z" }),
+      message({
+        from: "lead/d",
+        to: ["codex/w", "#noise"],
+        body: "excluded",
+        ts: "2026-11-02T12:00:00.000Z",
+      }),
+      message({ from: "lead/d", to: ["codex/w"], body: "outside", ts: "2026-11-04T10:00:00.000Z" })
+    );
+    const page = await bus.run("director-dm-volume", {
+      director: "lead/d",
+      cohort: ["codex/x", "codex/w"],
+      concernTopics: ["#ops"],
+      fromDay: "2026-11-01",
+      toDay: "2026-11-03",
+      excludeTopics: ["#noise"],
+    });
+    expect(page.rows).toEqual([
+      { day: "2026-11-01", directorToCohort: 1, observedTraffic: true },
+      { day: "2026-11-02", directorToCohort: 0, observedTraffic: true },
+    ]);
+    expect(page).toMatchObject({
+      totals: { directorToCohort: 1, observedTrafficDays: 2, ratio: 0.5 },
+      missingJson: 0,
+      damage: "not-checked",
+      exhausted: true,
+      complete: false,
+      args: { cohort: ["codex/w", "codex/x"] },
+    });
+    expect(page.next).toBeUndefined();
+    expect(
+      await bus.refused("bus_run_query", {
+        name: "director-dm-volume",
+        args: {
+          director: "lead/d",
+          cohort: ["lead/d"],
+          concernTopics: [],
+          fromDay: "2026-11-01",
+          toDay: "2026-11-02",
+        },
+      })
+    ).toBe("The director cannot be in the cohort.");
+  });
+});
+
+describe("snapshots and cursors", () => {
+  test("appends between pages and during input resolution leave the snapshot unchanged", async () => {
+    const config = await freshLedger("snapshot");
+    const late = message({ from: "claude/a", to: ["*"], body: "written mid-resolution" });
+    // A gateway that, once armed, appends before its next query, as a concurrent writer would.
+    let armed = false;
+    const store = flureeStore(config);
+    const decorated = Layer.effect(
+      QueryGateway,
+      Effect.gen(function* () {
+        const inner = yield* QueryGateway;
+        const ledger = yield* Ledger;
+        return QueryGateway.of({
+          ...inner,
+          jsonld: (t, body) =>
+            Effect.suspend(() => {
+              if (!armed) return inner.jsonld(t, body);
+              armed = false;
+              return Effect.andThen(Effect.orDie(ledger.append(late)), inner.jsonld(t, body));
+            }),
+        });
+      })
+    ).pipe(Layer.provide(store));
+    const bus = await startBus(Layer.merge(store, decorated));
+    const seed = Array.from({ length: 5 }, (_, i) =>
+      message({ from: "claude/a", to: ["*"], body: `s${i}` })
+    );
+    await bus.append(...seed);
+    const first = await bus.run("history", { limit: 2 });
+    await bus.append(message({ from: "claude/a", to: ["*"], body: "between pages" }));
+    const rest = [first];
+    while (rest.at(-1)?.next !== undefined) {
+      rest.push(await bus.run("history", { limit: 2 }, { cursor: rest.at(-1)?.next }));
+    }
+    expect(ids(rowsOf(rest))).toEqual(ids(seed));
+    expect(rest.at(-1)).toMatchObject({ t: first.t, currentHeadT: first.t + 1, complete: true });
+
+    // The pin comes before any input is resolved: an id written meanwhile is not found.
+    armed = true;
+    const resolved = await bus.run("messages", { ids: [seed[0]?.id, late.id] });
+    expect(armed).toBe(false);
+    expect(ids(resolved.rows)).toEqual([seed[0]?.id]);
+    expect(resolved).toMatchObject({ notFound: [late.id], currentHeadT: resolved.t + 1 });
+  });
+
+  test("cursors are bound to their operation, args, page size, snapshot and ledger", async () => {
+    const config = await freshLedger("cursor");
+    const bus = await startBus(flureeStore(config));
+    await bus.append(
+      ...Array.from({ length: 4 }, (_, i) =>
+        message({ from: "claude/a", to: ["*"], body: `c${i}` })
+      )
+    );
+    const first = await bus.run("history", { limit: 2 });
+    const cursor = first.next as string;
+    const head = first.t;
+    const reject = (name: string, args: Json, extra: Json) =>
+      bus.refused("bus_run_query", { name, args, ...extra });
+    expect(await reject("search", { text: "c", limit: 2 }, { cursor })).toBe(
+      "The cursor belongs to history, not search."
+    );
+    expect(await reject("history", { limit: 2, direction: "backward" }, { cursor })).toBe(
+      "The cursor was issued for different args; resend the same args."
+    );
+    expect(await reject("history", { limit: 3 }, { cursor })).toBe(
+      "The cursor was issued for page size 2, not 3."
+    );
+    expect(await reject("history", { limit: 2 }, { cursor, t: head - 1 })).toBe(
+      `t=${head - 1} differs from the cursor's t=${head}.`
+    );
+    expect(await reject("history", { limit: 2 }, { t: 0 })).toBe(
+      `t must be a commit from 1 to ${head}.`
+    );
+    expect(await reject("history", { limit: 2 }, { t: head + 1 })).toBe(
+      `t must be a commit from 1 to ${head}.`
+    );
+    const decoded = JSON.parse(Buffer.from(cursor.slice(4), "base64url").toString());
+    const forge = (value: unknown) =>
+      `bq1.${Buffer.from(JSON.stringify(value)).toString("base64url")}`;
+    expect(await reject("history", { limit: 2 }, { cursor: forge({ ...decoded, extra: 1 }) })).toBe(
+      "The cursor is not one this bus issued."
+    );
+    expect(await reject("history", { limit: 2 }, { cursor: "bq1.%%%" })).toBe(
+      "The cursor is not one this bus issued."
+    );
+    expect(await reject("history", { limit: 2 }, { cursor: forge({ ...decoded, cv: 0 }) })).toBe(
+      `The cursor is from catalogue version 0; this bus runs version ${CATALOGUE_VERSION}. Start again, passing t=${head} to keep the snapshot.`
+    );
+    expect(
+      await reject("history", { limit: 2 }, { cursor: forge({ ...decoded, t: head + 5 }) })
+    ).toBe(`The cursor's t=${head + 5} is ahead of the ledger (t=${head}).`);
+    expect(await reject("director-dm-volume", {}, { cursor })).toContain("Invalid args");
+
+    // The same alias, replaced: the old cursor names another incarnation.
+    await bus.dispose();
+    const dropped = await flureeFetch("/v1/fluree/drop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ledger: config.ledger.replace(/:main$/, ""), hard: true }),
+    });
+    expect(dropped.ok).toBe(true);
+    const replaced = await startBus(flureeStore(config));
+    await replaced.append(
+      ...Array.from({ length: 4 }, (_, i) =>
+        message({ from: "claude/a", to: ["*"], body: `r${i}` })
+      )
+    );
+    expect(
+      await replaced.refused("bus_run_query", { name: "history", args: { limit: 2 }, cursor })
+    ).toBe("The ledger was replaced since this cursor was issued; start the traversal again.");
+  });
+
+  test("pages fit the byte limit by whole rows, resume after the last emitted row, and fail on one oversized row", async () => {
+    const config = await freshLedger("bytes");
+    const bus = await startBus(flureeStore(config));
+    const big = (body: string) =>
+      message({ from: "claude/a", to: ["*"], body: body.repeat(40_000) });
+    // damaged, valid (fits), damaged, valid (too big to share the page)
+    await damaged(config);
+    const fits = big("a");
+    await bus.append(fits);
+    await damaged(config);
+    const crowded = big("b");
+    await bus.append(crowded, big("c"));
+    const first = await bus.run("history", { limit: 10 });
+    expect(ids(first.rows)).toEqual([fits.id]);
+    // Only the damage before the last emitted row is consumed.
+    expect(first).toMatchObject({ damaged: 1, damagedTotal: 1, exhausted: false });
+    const second = await bus.run("history", { limit: 10 }, { cursor: first.next });
+    expect(second.damaged).toBe(1);
+    expect(ids(second.rows)[0]).toBe(crowded.id);
+    const pages = await bus.all("history", { limit: 10 });
+    expect(rowsOf(pages).length).toBe(3);
+    expect(pages.at(-1)).toMatchObject({ damagedTotal: 2, exhausted: true, complete: false });
+    for (const page of pages) expect(JSON.stringify(page).length).toBeLessThanOrEqual(65_536);
+
+    const huge = message({ from: "claude/a", to: ["*"], body: "x".repeat(70_000) });
+    await bus.append(huge);
+    expect(
+      await bus.refused("bus_run_query", { name: "messages", args: { ids: [huge.id] } })
+    ).toMatch(
+      new RegExp(`^The entry ${huge.id} \\(t=\\d+\\) alone exceeds the 65536-byte result limit`)
+    );
+    // The presets keep their historical contract: no byte cap.
+    const preset = await bus.ok("bus_history", { limit: 1 });
+    expect(preset.messages.map((m: Json) => m.id)).toEqual([huge.id]);
+  });
+});
+
+describe("presets", () => {
+  test("bus_history is the newest window or ranked text, shown newest last", async () => {
+    const bus = await startBus(flureeStore(await freshLedger("presets")));
+    await bus.append(
+      message({ from: "claude/a", to: ["codex/b"], body: "the ledger adapter is ready" }),
+      message({ from: "codex/b", to: ["claude/c"], subject: "ledger", body: "noted" }),
+      message({ from: "claude/c", to: ["*"], body: "lunch?" })
+    );
+    const bodies = async (args: Json) =>
+      (await bus.ok("bus_history", args)).messages.map((m: Json) => m.body);
+    expect(await bodies({ limit: 10 })).toEqual(["the ledger adapter is ready", "noted", "lunch?"]);
+    expect(await bodies({ limit: 2 })).toEqual(["noted", "lunch?"]);
+    expect(await bodies({ limit: 1 })).toEqual(["lunch?"]);
+    expect(await bodies({ participant: "claude/c", limit: 10 })).toEqual(["noted", "lunch?"]);
+    let ranked = await bodies({ query: "ledger", limit: 10 });
+    for (let attempt = 0; attempt < 50 && ranked.length < 2; attempt++) {
+      await Bun.sleep(100);
+      ranked = await bodies({ query: "ledger", limit: 10 });
+    }
+    expect(ranked).toEqual(["the ledger adapter is ready", "noted"]);
+    expect(await bodies({ query: "ledger", participant: "claude/a", limit: 10 })).toEqual([
+      "the ledger adapter is ready",
+    ]);
+  });
+});
+
+describe("raw SPARQL", () => {
+  const forbidden = [
+    ["INSERT DATA { <urn:x> <urn:p> 1 }", "Only SELECT queries are allowed."],
+    ["DELETE WHERE { ?s ?p ?o }", "Only SELECT queries are allowed."],
+    ["SELECT * WHERE {", "Not valid SPARQL"],
+    ["ASK { ?s ?p ?o }", "Only SELECT queries are allowed."],
+    ["CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }", "Only SELECT queries are allowed."],
+    ["SELECT * FROM <urn:other> WHERE { ?s ?p ?o }", "FROM and FROM NAMED is not allowed"],
+    ["SELECT * FROM NAMED <urn:other> WHERE { ?s ?p ?o }", "FROM and FROM NAMED is not allowed"],
+    ["SELECT * WHERE { GRAPH <urn:other> { ?s ?p ?o } }", "GRAPH is not allowed"],
+    ["SELECT * WHERE { SERVICE <urn:other> { ?s ?p ?o } }", "SERVICE is not allowed"],
+    ["SELECT * WHERE { SERVICE SILENT <urn:other> { ?s ?p ?o } }", "SERVICE is not allowed"],
+    ["SELECT * WHERE { { SELECT * WHERE { GRAPH ?g { ?s ?p ?o } } } }", "GRAPH is not allowed"],
+  ] as const;
+
+  test("reads bindings at one t, with a row sentinel, caller limits, byte cuts and no Fluree text", async () => {
+    const config = await freshLedger("raw");
+    const bus = await startBus(flureeStore(config));
+    const seed = Array.from({ length: 80 }, (_, i) =>
+      message({ from: "claude/a", to: ["codex/b", "#raw"], body: `entry ${i} ${"y".repeat(800)}` })
+    );
+    await bus.append(...seed);
+    const counted = await bus.ok("bus_query", {
+      query: "SELECT (COUNT(?m) AS ?n) WHERE { ?m a bus:Message } # PRAGMA ignored",
+    });
+    expect(counted).toMatchObject({
+      name: "sparql",
+      unit: "binding",
+      rows: [{ "?n": 80 }],
+      complete: true,
+    });
+    const commits = await bus.ok("bus_query", {
+      query: "SELECT ?id ?t WHERE { << ?m bus:id ?id >> f:t ?t } ORDER BY ?t LIMIT 2",
+    });
+    expect(commits.rows.map((row: Json) => row["?id"])).toEqual(seed.slice(0, 2).map((m) => m.id));
+    expect(commits).toMatchObject({ complete: true, limitReached: true });
+    const wide = await bus.ok("bus_query", {
+      query: "SELECT ?m WHERE { ?m a bus:Message ; ?p ?o }",
+    });
+    expect(wide).toMatchObject({ complete: false, cut: "rows" });
+    expect(wide.rows.length).toBe(500);
+    const bulky = await bus.ok("bus_query", {
+      query: "SELECT ?json WHERE { ?m bus:json ?json } LIMIT 200",
+    });
+    expect(bulky).toMatchObject({ complete: false, cut: "bytes" });
+    expect(bulky.rows.length).toBeGreaterThan(0);
+    const pinned = await bus.ok("bus_query", {
+      query: "SELECT (COUNT(?m) AS ?n) WHERE { ?m a bus:Message }",
+      t: counted.t - 10,
+    });
+    expect(pinned).toMatchObject({ t: counted.t - 10, rows: [{ "?n": 70 }] });
+
+    for (const [query, reason] of forbidden) {
+      expect(await bus.refused("bus_query", { query })).toContain(reason);
+    }
+    expect(
+      await bus.refused("bus_query", {
+        query: "SELECT ?x WHERE { BIND(<urn:no-such-fn>(1) AS ?x) }",
+      })
+    ).toMatch(/^Fluree request failed \(HTTP \d+\)\.$/);
+    expect(await bus.refused("bus_query", { query: "SELECT ?s WHERE { ?s ?p ?o }", t: 0 })).toBe(
+      `t must be a commit from 1 to ${counted.t}.`
+    );
+
+    const oversized = message({ from: "claude/a", to: ["*"], body: "z".repeat(70_000) });
+    await bus.append(oversized);
+    const at = counted.t + 1;
+    expect(
+      await bus.refused("bus_query", {
+        query: `SELECT ?json WHERE { ?m bus:id "${oversized.id}" ; bus:json ?json }`,
+      })
+    ).toBe(
+      `The first binding (row 1) at t=${at} alone exceeds the result byte limit; select fewer or shorter values.`
+    );
+  });
+
+  test("the server's own route refuses or empties what the parser refuses, without moving head", async () => {
+    const config = await freshLedger("raw-bypass");
+    const bus = await startBus(flureeStore(config));
+    await bus.append(message({ from: "claude/a", to: ["*"], body: "seed" }));
+    const head = (await bus.ok("bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?id }" })).t;
+    const send = (query: string, type = "application/sparql-query") =>
+      flureeFetch(`/v1/fluree/query/${encodeURIComponent(`${config.ledger}@t:${head}`)}`, {
+        method: "POST",
+        headers: { "content-type": type, accept: "application/vnd.fluree.agent+json" },
+        body: query,
+      });
+    const bypass = [
+      'PREFIX bus: <https://rawr.ai/ns/agent-bus#> INSERT DATA { <urn:x> bus:body "x" }',
+      "SELECT * FROM <other:main> WHERE { ?s ?p ?o }",
+      "SELECT * FROM NAMED <other:main> WHERE { ?s ?p ?o }",
+      "SELECT * WHERE { SERVICE <fluree:ledger:other:main> { ?s ?p ?o } }",
+    ];
+    for (const query of bypass) expect((await send(query)).status).toBe(400);
+    expect((await send(bypass[0] as string, "application/sparql-update")).status).toBe(400);
+    for (const query of [
+      "SELECT * WHERE { SERVICE SILENT <fluree:ledger:other:main> { ?s ?p ?o } }",
+      "SELECT * WHERE { GRAPH <other:main> { ?s ?p ?o } }",
+    ]) {
+      const response = await send(query);
+      expect(response.status).toBe(200);
+      expect(((await response.json()) as Json).rows).toEqual([]);
+    }
+    const after = await bus.ok("bus_queries");
+    expect(after.headT).toBe(head);
+  });
+});

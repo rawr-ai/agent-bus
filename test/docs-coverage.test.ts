@@ -85,9 +85,18 @@ const parameterNames = new Set(tools.flatMap((tool) => Object.keys(parametersOf(
  * interpolation stays as written, for a `<placeholder>` or ellipsis in the page to stand for.
  */
 const SOURCES = (() => {
-  const files = ["Bus", "mcp", "Ledger", "Fluree", "Cursors", "client", "bin"].map((file) =>
-    read(`src/${file}.ts`).replaceAll('\\"', '"')
-  );
+  const files = [
+    "Bus",
+    "mcp",
+    "Ledger",
+    "Fluree",
+    "Cursors",
+    "client",
+    "bin",
+    "Query",
+    "catalogue",
+    "sparql",
+  ].map((file) => read(`src/${file}.ts`).replaceAll('\\"', '"'));
   const constants = new Map(
     files.flatMap((text) =>
       [...text.matchAll(/^(?:export )?const ([A-Z_]+) = ("[^"]*"|[\d_]+);$/gm)].map(
