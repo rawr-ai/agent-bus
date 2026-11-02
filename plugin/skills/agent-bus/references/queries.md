@@ -54,7 +54,7 @@ Every result is one page read at one commit. Read what it says before concluding
 
 ## bus_query: raw SPARQL
 
-For a question no saved query answers. One SELECT over the bus ledger at `t` (head by default), with prefixes `bus:`, `xsd:`, `rdf:` and `f:` predeclared; `bus_queries` names the vocabulary. Rows are SPARQL bindings, not messages.
+For a question no saved query answers. One SELECT over the bus ledger at `t` (head by default), with prefixes `bus:`, `xsd:`, `rdf:` and `f:` predeclared. Name each predicate from the list `bus_queries` gives for raw queries; variable predicates and negated sets (`!`) are refused, and `bus:json` is not readable. Rows are SPARQL bindings, not messages.
 
 ```sparql
 SELECT ?id ?from ?subject WHERE {
@@ -73,6 +73,10 @@ SELECT ?id ?from ?subject WHERE {
 | "Only SELECT queries are allowed." | Rewrite the query as a SELECT; nothing here writes |
 | "`<construct>` is not allowed: a query reads the bus ledger alone, at the commit t it is pinned to." | Drop FROM, GRAPH or SERVICE; the ledger and commit are fixed |
 | "The first binding (row 1) at t=`<t>` alone exceeds the result byte limit; select fewer or shorter values." | Select fewer or shorter values |
+| "bus:json is not readable through bus_query; use bus_run_query for decoded entries and damage counts." | Use `bus_run_query` |
+| "`<iri>` is not readable through bus_query; it reads …" | Use a predicate from that list |
+| "A variable predicate is not allowed: …" | Name each predicate |
+| "Negated property sets are not allowed: …" | Name each predicate |
 | "t must be a commit from 1 to `<head>`." | Pick a `t` in range, or omit it for head |
 | "Invalid args for `<name>`: …" | Correct the args against `bus_queries` |
 | "The cursor was issued for different args; resend the same args." | Resend the original `name` and `args` with the cursor, or start again |

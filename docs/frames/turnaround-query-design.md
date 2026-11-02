@@ -67,7 +67,7 @@ All three new tools carry the `Lookup` annotations (read-only, not destructive, 
 }
 ```
 
-Operations add their own fields (`notFound`, `missingReplyTargets`, `root`, `members`, `total`, `totals`). An entry row is `{ t, id, ts, from, to: [...], kind, subject?, body, replyTo?, origin?, presence?: { runtime, status, topics, note? } }`: one row per entry with distinct logical ids, `to` as the recorded array, never one row per recipient or join match. `session`, `codexThreadId`, `takeover` and `rejoinOf` are not in saved-query rows; raw SPARQL can read `bus:json`. The MCP success schema is one object schema (MCP requires an object at the top), with `rows` described per operation in `bus_queries`.
+Operations add their own fields (`notFound`, `missingReplyTargets`, `root`, `members`, `total`, `totals`). An entry row is `{ t, id, ts, from, to: [...], kind, subject?, body, replyTo?, origin?, presence?: { runtime, status, topics, note? } }`: one row per entry with distinct logical ids, `to` as the recorded array, never one row per recipient or join match. `session`, `codexThreadId`, `takeover` and `rejoinOf` are not in saved-query rows; raw SPARQL can read `bus:json` (reversed during implementation: raw SPARQL reads only the projected predicates; see [implementation revisions](#implementation-revisions)). The MCP success schema is one object schema (MCP requires an object at the top), with `rows` described per operation in `bus_queries`.
 
 ### Cursor
 
@@ -249,6 +249,7 @@ Settled during implementation with the coordinator and the cross-reviewer; the s
 - **Raw zero-binding failure.** A raw result where no binding fits, including Agent JSON `hasMore` with no rows, fails as an oversized first row, naming `t` and the row position; an empty preview is never returned. Exactly 500 rows without the sentinel or a byte cut can be complete.
 - **Ids by subject IRI.** Binding `?id` with `values` before `bus:id {"@value": "?id", "@t": "?t"}` returns a null `t` (verified live), so `messages` and `thread` bind the subject IRI (`urn:agent-bus:message:<id>`) instead; an id outside the IRI-safe character set is treated as absent at `t`.
 - **Mixed column types.** Agent JSON's `schema` gives an array of datatypes for a variable whose values vary, so `columns` accepts either.
+- **Raw predicate allowlist.** Raw SPARQL reads only `rdf:type`, `f:t` and the `bus:` predicates `toNode` writes, minus `bus:json`, so session claims, Codex thread ids and wake state stay off every query surface, as response projection already keeps them off the others. Variable predicates anywhere (subqueries, `OPTIONAL`, `MINUS`, `FILTER EXISTS`, quoted triples) and negated property sets are refused; paths must be built from listed IRIs; IRIs are compared as parsed, after prefixes and `BASE`, and the text sent is regenerated with absolute IRIs. Raw damage visibility lives in the saved operations' `damage`, `damaged` and `missingJson`.
 - **Authenticated qualification.** `scripts/qualify-fluree.ts` starts its server with required data and admin authentication, and resumes a traversal across a restart from its cursor with identical rows.
 
 ## Evidence register
@@ -273,4 +274,4 @@ All live checks ran on disposable servers with no authentication, synthetic ledg
 
 ## Settled in cross-review
 
-SELECT only for raw SPARQL; no `txn-meta`; parser errors only; session fields out of saved rows while raw SPARQL may read `bus:json`; a missing `fluree` binary fails the check; a read-only Fluree token deferred to the owner; the whole reply tree from the root plus missing targets; predicate-only aggregates accepted with their note; one catalogue version; a fixed byte cap; presets stay; the reading of PR 15's deferred items confirmed; `sparqljs` re-added; `search` in catalogue v1; UTC day boundaries for `director-dm-volume`, with the observed-traffic label above.
+SELECT only for raw SPARQL; no `txn-meta`; parser errors only; session fields out of saved rows (raw SPARQL reading `bus:json` was accepted here and reversed during implementation: see [implementation revisions](#implementation-revisions)); a missing `fluree` binary fails the check; a read-only Fluree token deferred to the owner; the whole reply tree from the root plus missing targets; predicate-only aggregates accepted with their note; one catalogue version; a fixed byte cap; presets stay; the reading of PR 15's deferred items confirmed; `sparqljs` re-added; `search` in catalogue v1; UTC day boundaries for `director-dm-volume`, with the observed-traffic label above.
