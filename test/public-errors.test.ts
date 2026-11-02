@@ -75,19 +75,20 @@ const refused = async (name: string, args: Record<string, unknown>, expected: st
   expect(JSON.stringify(result)).not.toContain(marker);
 };
 
-test.each([
-  400, 401, 403, 409, 500, 503,
-])("HTTP %s exposes only its status class, never its body", async (status) => {
-  failure = { body: JSON.stringify({ session: marker, nested: { raw: marker } }), status };
-  for (const [name, args] of [
-    ["bus_history", {}],
-    ["bus_peers", {}],
-    ["bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?o }" }],
-    ["bus_run_query", { name: "history" }],
-  ] as const) {
-    await refused(name, args, `Fluree request failed (HTTP ${status}).`);
+test.each([400, 401, 403, 409, 500, 503])(
+  "HTTP %s exposes only its status class, never its body",
+  async (status) => {
+    failure = { body: JSON.stringify({ session: marker, nested: { raw: marker } }), status };
+    for (const [name, args] of [
+      ["bus_history", {}],
+      ["bus_peers", {}],
+      ["bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?o }" }],
+      ["bus_run_query", { name: "history" }],
+    ] as const) {
+      await refused(name, args, `Fluree request failed (HTTP ${status}).`);
+    }
   }
-});
+);
 
 test("malformed JSON and schema failures omit source values", async () => {
   failure = { body: marker, status: 200 };
