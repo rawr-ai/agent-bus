@@ -64,6 +64,36 @@ The Codex lead owns one orientation vertical and the shared relationship model. 
 
 One orientation operation composes project, concerns, members, current bulletin and the query-owned saved catalogue with usable examples. It labels pinned evidence versus live/current state and missing associations rather than silently combining them. The query vertical owns query definitions; orientation references that catalogue rather than cloning it. Exact names and storage remain design decisions.
 
+## Orientation contract proposal
+
+Dated 2026-11-01, for counterpart cross-review. This is a consumer-grounded contract proposal, not an implemented API, an adopted consumer policy or an agreed trial.
+
+### Discovery result
+
+The largest consumer confirms no eligible forthcoming orientation handoff, incoming participant, coordinator or bulletin maintainer yet (C4 below). Its agreement to a future query acceptance over the completed historical job remains separate; that acceptance has not yet been performed. This is not a new prerequisite for the query release or a reason to manufacture an onboarding job.
+
+Its demonstrated grouping is one repository with explicitly identified checkout/worktree aliases. A broad development parent, consulted media or other systems, and removed transfer scratch do not establish membership. A directory linking concerns and their current summaries is the smaller candidate; no additional project-wide bulletin or blanket subscription has demonstrated value there.
+
+### Narrowed relationships
+
+Persist one stable directory identity, explicit aliases and registered concern links, without adding independent project lifecycle, authorisation roles or a second membership registry. This is server-owned state, not a naming convention. Concerns remain discoverable when their last subscriber leaves. Alias matching may return candidates and its selection basis; it never silently enrols an address. Keep explicit association, subscription, responsibility and activity separate.
+
+A concern's current bulletin is explicitly designated, replaced by an identified successor, and retains its history. It links authoritative direction, source and delivery evidence rather than superseding those sources or authorising replay. Review-due means recheck requested; expired means currentness is unverified and requires reconciliation before reliance. Those are consumer design inputs, not maintenance commitments.
+
+The Codex programme/orientation DRA owns bus-wide guidance publication for the current release and handover, using release-owned source and an explicit successor handoff rather than a perpetual dependency on one chat. Delivery to running and late sessions remains to be specified and qualified. This ownership establishes neither an orientation-trial commitment nor adoption proof; the lack of a consumer project-wide bulletin does not remove the programme's running-and-late-session guidance requirement.
+
+### Composed result and currentness
+
+One join/orient result returns the selected directory or unresolved candidates, registered concerns, explicitly associated members, separately labelled subscriptions/activity, current scoped bulletins and a reference to the query-owned catalogue. Its operation names, schemas, units, executable examples and catalogue revision come from that registry, not copied definitions or a second query gateway.
+
+Label the investigation's pinned evidence cut, the current orientation-state cut, any subsequently observed head and the evaluation time used for review/expiry separately. A historical message cut does not make today's membership or bulletin designation historical; current enrichment is not fixed-cut evidence. Catalogue/code revision is not a ledger transaction.
+
+Orient is read-only and consumes no inbox state. Join establishes its presence before reporting orientation. If that later read fails, report the committed join and orientation unavailability separately with an explicit retry route; do not disguise the successful join as a refusal. Preserve unread cursors. Replacing a bulletin must not lose or duplicate its ordinary update notification, and must not introduce two deliverable messages at one transaction while cursors still advance by transaction.
+
+### Open validation
+
+Confirm a real join/return job, its participant/coordinator and baseline, plus the actual bulletin maintainer and scope before counting adoption. A naturally occurring Agent Bus release handoff may be another customer, but an invented test role or coached author is not proof. Settle additive join/CLI decoding, ambiguous aliases, replacement conflicts/retries, mixed-cut labelling, expiry and missing state in maintained tests. An older or unavailable orientation capability is reported honestly, never replaced by ranked-message reconstruction. No orientation implementation begins ahead of the agreed query-first real-use outcome without a coordinated sequence change.
+
 ## First customer job and measures
 
 Two representatives of the largest consumer supplied and consolidated one recent preview-delivery job, not two independent discoveries or nominal trials (C1-C3 below). It involved a source owner, submitter and publisher; blockers, candidate eligibility and actual publication were scattered through direct mail.
@@ -111,6 +141,7 @@ These identifiers preserve the provenance of owner decisions and consumer offers
 - C1: executor's preview-delivery offer.
 - C2: coordinator's offer.
 - C3: consolidation and acceptance of one whole-job reconstruction, with the narrower interval only a control slice.
+- C4: consolidated orientation discovery: no eligible upcoming job or accepted maintainer; explicit repository grouping, concern audience and review/expiry interpretation are design inputs, not adopted policy.
 
 ## Moved into current docs
 
