@@ -1,7 +1,7 @@
 // The shared Fluree server's lifecycle, observed from outside a `bun test` process: two files
 // share one server, it serves both, and it has exited by the time that process has. Its stop
 // resolves only once the server process has exited.
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -11,15 +11,34 @@ const files = ["./test/fluree-lifecycle/first-file.ts", "./test/fluree-lifecycle
 const owned: number[] = [];
 const scratch: string[] = [];
 
+/**
+ * The pid itself, when it names one process this file may signal. Anything else is refused
+ * before any signal: 0 and negative pids address process groups, 1 is init, and a value read
+ * from malformed child output must fail the test rather than pass as a dead process.
+ */
+const signalable = (pid: unknown): number => {
+  if (typeof pid !== "number" || !Number.isSafeInteger(pid) || pid <= 1) {
+    throw new Error(`refusing to signal pid ${String(pid)}`);
+  }
+  return pid;
+};
+
 /** Whether a process with this pid exists: signal 0 checks without signalling. */
-const alive = (pid: number) => {
+const alive = (pid: unknown) => {
+  const target = signalable(pid);
   try {
-    process.kill(pid, 0);
+    process.kill(target, 0);
     return true;
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
     throw error;
   }
+};
+
+/** Kills a server this file's own child left behind, if it is still running. */
+const killOwned = (pid: unknown) => {
+  const target = signalable(pid);
+  if (alive(target)) process.kill(target, "SIGKILL");
 };
 
 /** One `bun test` child over both files, in the repository so its bunfig preload applies. */
@@ -52,7 +71,7 @@ const run = async (env: Record<string, string> = {}) => {
 
 afterEach(() => {
   // A failing check must not leave its own server behind: stop only what this test started.
-  for (const pid of owned.splice(0)) if (alive(pid)) process.kill(pid, "SIGKILL");
+  for (const pid of owned.splice(0)) killOwned(pid);
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
 });
 
@@ -91,3 +110,17 @@ test("the stop resolves only once the server process has exited", async () => {
   // Checked inside the child the moment the stop resolved: an unawaited exit leaves it present.
   expect(exists).toBe(false);
 }, 60_000);
+
+test("a pid that is not one process above init is refused without any signal", () => {
+  // Never calls through, so even a broken guard sends no real signal here.
+  const kill = spyOn(process, "kill").mockImplementation(() => true);
+  try {
+    for (const pid of [Number.NaN, 0, 1, -5, 1.5, "4242"]) {
+      expect(() => alive(pid)).toThrow("refusing to signal");
+      expect(() => killOwned(pid)).toThrow("refusing to signal");
+    }
+    expect(kill).not.toHaveBeenCalled();
+  } finally {
+    kill.mockRestore();
+  }
+});
