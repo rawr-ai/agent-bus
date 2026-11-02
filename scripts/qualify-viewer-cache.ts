@@ -106,6 +106,13 @@ try {
   await Bun.write(schemaPath, `${schema}\n// schema cache sentinel\n`);
   await expectRun("public schema invalidates units", unitTarget, "miss");
   await Bun.write(schemaPath, schema);
+  // bunfig.toml preloads this into every bun test run, the units included.
+  const preloadPath = join(sandbox, "test/preload.ts");
+  const preload = await Bun.file(preloadPath).text();
+  await Bun.write(preloadPath, `${preload}\nthrow new Error("synthetic preload falsifier");\n`);
+  await expectRun("test preload change misses and fails units", unitTarget, "fail");
+  await Bun.write(preloadPath, preload);
+  await expectRun("restored preload reuses correct prior result", unitTarget, "hit");
   const storyTarget = ["run", "agent-bus:storybook-build", "--output-style=static"];
   await expectRun("Storybook cold miss", storyTarget, "miss");
   await expectRun("Storybook warm hit", storyTarget, "hit");
