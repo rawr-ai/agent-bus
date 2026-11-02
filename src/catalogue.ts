@@ -9,7 +9,13 @@ import {
   Runtime,
 } from "./domain.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
-import { MAX_QUERY_LENGTH, MAX_SPARQL_ROWS, PREFIXES } from "./sparql.ts";
+import {
+  largestFitting,
+  MAX_QUERY_LENGTH,
+  MAX_SPARQL_ROWS,
+  PREFIXES,
+  READABLE_PREDICATES,
+} from "./sparql.ts";
 
 /**
  * The saved-query catalogue: each operation's metadata, argument and row
@@ -514,9 +520,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
     // Trimmed: the page consumes candidates only up to its last emitted row, so a
     // damaged candidate after it is neither counted nor skipped, and the next page
     // starts right after that row.
-    let fits = all - 1;
-    while (fits > 0 && bytes(envelope(fits)) > budget) fits -= 1;
-    let consumed = fits;
+    let consumed = largestFitting(all - 1, (k) => bytes(envelope(k)) <= budget);
     while (consumed > 0 && fetched.items[consumed - 1]?.kind !== "row") consumed -= 1;
     if (consumed === 0) {
       const first = fetched.items.find((item) => item.kind === "row");
@@ -1375,6 +1379,7 @@ export const listing = (pin: Pin) => ({
     prefixes: PREFIXES,
     maxRows: MAX_SPARQL_ROWS,
     maxQueryLength: MAX_QUERY_LENGTH,
-    note: "One SPARQL SELECT over the bus ledger at t: no FROM, GRAPH or SERVICE. Entries are bus:Message and bus:Presence nodes with bus:id, bus:ts, bus:from, bus:to, bus:subject, bus:body, bus:replyTo and bus:json (the whole stored entry); a predicate's commit is readable with RDF-star, e.g. << ?m bus:id ?id >> f:t ?t.",
+    predicates: READABLE_PREDICATES,
+    note: "One SPARQL SELECT over the bus ledger at t: no FROM, GRAPH or SERVICE, and only the listed predicates, each named (no variable predicates or negated property sets). Entries are bus:Message and bus:Presence nodes; bus:json is not readable here, so use bus_run_query for decoded entries and damage counts. A predicate's commit is readable with RDF-star, e.g. << ?m bus:id ?id >> f:t ?t.",
   },
 });

@@ -454,6 +454,7 @@ const Queries = Tool.make("bus_queries", {
     raw: Schema.Struct({
       tool: Schema.Literal("bus_query"),
       prefixes: Schema.Record(Schema.String, Schema.String),
+      predicates: Schema.Array(Schema.String),
       maxRows: Schema.Int,
       maxQueryLength: Schema.Int,
       note: Schema.String,

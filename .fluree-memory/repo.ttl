@@ -57,6 +57,15 @@ mem:fact-01m5y26y5y9r72px418615x6tq a mem:Fact ;
     mem:branch "claude-host-wake" ;
     mem:createdAt "2026-10-27T06:54:21.886327Z"^^xsd:dateTime .
 
+mem:constraint-01m6d1r49k07g6h4s6v9d7rkfj a mem:Constraint ;
+    mem:content "Raw bus_query reads only an allowlist of predicates (READABLE_PREDICATES in src/sparql.ts: rdf:type, f:t and the bus: predicates toNode writes, minus bus:json), checked on the parsed tree after prefixes and BASE resolve; variable predicates anywhere (subqueries, OPTIONAL, MINUS, FILTER EXISTS, quoted triples) and negated property sets are refused. bus:json carries session claims, so it stays off every query surface; saved queries decode it and project it, and report damage via damage/missingJson. A new predicate in toNode must be added to the list deliberately." ;
+    mem:tag "privacy" ;
+    mem:tag "query" ;
+    mem:tag "sparql" ;
+    mem:scope mem:repo ;
+    mem:branch "claude/bus-query" ;
+    mem:createdAt "2026-11-02T02:34:53.107116+00:00"^^xsd:dateTime .
+
 mem:fact-01m6d10bq173j9s6ra81qkn1je a mem:Fact ;
     mem:content "Fluree 4.2.4 JSON-LD query: binding ?id with values before a pattern bus:id {\"@value\": \"?id\", \"@t\": \"?t\"} returns a null ?t, so look entries up by binding the subject IRI (urn:agent-bus:message:<id>, values typed @id) and read bus:id with @t from it. Agent JSON's schema gives an array of datatypes for a variable whose values vary. SPARQL SERVICE SILENT and GRAPH <other> answer an empty success on the pinned query route, which would pass for a complete result, so bus_query refuses both at parse time." ;
     mem:tag "fluree" ;

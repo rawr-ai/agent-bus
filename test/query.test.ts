@@ -208,7 +208,7 @@ describe("catalogue", () => {
     const bus = await startBus(layerJsonl(join(dir, "ledger.jsonl")).pipe(Layer.provide(platform)));
     for (const [name, args] of [
       ["bus_run_query", { name: "history" }],
-      ["bus_query", { query: "SELECT ?s WHERE { ?s ?p ?o }" }],
+      ["bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?o }" }],
       ["bus_queries", {}],
       ["bus_history", {}],
       ["bus_peers", {}],
@@ -823,12 +823,12 @@ describe("raw SPARQL", () => {
     expect(commits.rows.map((row: Json) => row["?id"])).toEqual(seed.slice(0, 2).map((m) => m.id));
     expect(commits).toMatchObject({ complete: true, limitReached: true });
     const wide = await bus.ok("bus_query", {
-      query: "SELECT ?m WHERE { ?m a bus:Message ; ?p ?o }",
+      query: "SELECT ?m WHERE { ?m a bus:Message ; bus:to ?to . ?n a bus:Message }",
     });
     expect(wide).toMatchObject({ complete: false, cut: "rows" });
     expect(wide.rows.length).toBe(500);
     const bulky = await bus.ok("bus_query", {
-      query: "SELECT ?json WHERE { ?m bus:json ?json } LIMIT 200",
+      query: "SELECT ?body WHERE { ?m bus:body ?body } LIMIT 200",
     });
     expect(bulky).toMatchObject({ complete: false, cut: "bytes" });
     expect(bulky.rows.length).toBeGreaterThan(0);
@@ -846,20 +846,84 @@ describe("raw SPARQL", () => {
         query: "SELECT ?x WHERE { BIND(<urn:no-such-fn>(1) AS ?x) }",
       })
     ).toMatch(/^Fluree request failed \(HTTP \d+\)\.$/);
-    expect(await bus.refused("bus_query", { query: "SELECT ?s WHERE { ?s ?p ?o }", t: 0 })).toBe(
-      `t must be a commit from 1 to ${counted.t}.`
-    );
+    expect(
+      await bus.refused("bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?o }", t: 0 })
+    ).toBe(`t must be a commit from 1 to ${counted.t}.`);
 
     const oversized = message({ from: "claude/a", to: ["*"], body: "z".repeat(70_000) });
     await bus.append(oversized);
     const at = counted.t + 1;
     expect(
       await bus.refused("bus_query", {
-        query: `SELECT ?json WHERE { ?m bus:id "${oversized.id}" ; bus:json ?json }`,
+        query: `SELECT ?body WHERE { ?m bus:id "${oversized.id}" ; bus:body ?body }`,
       })
     ).toBe(
       `The first binding (row 1) at t=${at} alone exceeds the result byte limit; select fewer or shorter values.`
     );
+  });
+
+  test("raw queries read only the projected predicates, so session claims stay off every query surface", async () => {
+    const config = await freshLedger("raw-allowlist");
+    const bus = await startBus(flureeStore(config));
+    const claim = "session-claim-0f3c";
+    await bus.append(
+      presence("claude/a", "joined", { session: claim }),
+      message({ from: "claude/a", to: ["codex/b"], body: "hello" })
+    );
+    const json =
+      "bus:json is not readable through bus_query; use bus_run_query for decoded entries and damage counts.";
+    const variable =
+      "A variable predicate is not allowed: name each predicate (bus_queries lists them).";
+    const negated =
+      "Negated property sets are not allowed: name each predicate (bus_queries lists them).";
+    const shapes = [
+      ["SELECT * WHERE { ?s ?p ?o }", variable],
+      ["SELECT ?j WHERE { ?m bus:json ?j }", json],
+      ["SELECT ?j WHERE { ?m <https://rawr.ai/ns/agent-bus#json> ?j }", json],
+      ["PREFIX x: <https://rawr.ai/ns/agent-bus#> SELECT ?j WHERE { ?m x:json ?j }", json],
+      ["BASE <https://rawr.ai/ns/agent-bus> SELECT ?j WHERE { ?m <#json> ?j }", json],
+      ["BASE <https://rawr.ai/ns/> SELECT ?j WHERE { ?m <agent-bus#json> ?j }", json],
+      ["SELECT ?j WHERE { ?m bus:replyTo*/bus:json ?j }", json],
+      ["SELECT ?j WHERE { ?j ^bus:json ?m }", json],
+      ["SELECT ?j WHERE { ?m bus:id|bus:json ?j }", json],
+      ["SELECT ?j WHERE { ?m !bus:id ?j }", negated],
+      ["SELECT ?j WHERE { ?m !(bus:id|^bus:ts) ?j }", negated],
+      ["SELECT ?j WHERE { { SELECT ?j WHERE { ?m bus:json ?j } } }", json],
+      ["SELECT ?m WHERE { ?m bus:id ?id OPTIONAL { ?m bus:json ?j } }", json],
+      ["SELECT ?m WHERE { ?m bus:id ?id MINUS { ?m bus:json ?j } }", json],
+      ["SELECT ?m WHERE { ?m bus:id ?id FILTER EXISTS { ?m ?p ?j } }", variable],
+      ["SELECT ?m WHERE { ?m bus:id ?id FILTER NOT EXISTS { ?m bus:json ?j } }", json],
+      ["SELECT ?t WHERE { << ?m bus:json ?j >> f:t ?t }", json],
+      ["SELECT ?t WHERE { << ?m ?p ?j >> f:t ?t }", variable],
+      ["SELECT ?m WHERE { VALUES ?p { bus:json } ?m ?p ?j }", variable],
+      [
+        "SELECT ?m WHERE { ?m bus:id ?id ; <urn:example:session> ?s }",
+        "<urn:example:session> is not readable through bus_query",
+      ],
+    ] as const;
+    for (const [query, reason] of shapes) {
+      expect([query, await bus.refused("bus_query", { query })]).toEqual([
+        query,
+        expect.stringContaining(reason),
+      ]);
+    }
+    // Every readable predicate, read whole: the claim is in bus:json alone, so it never appears.
+    const listing = await bus.ok("bus_queries");
+    const named = (listing.raw.predicates as Array<string>).filter((name) => name !== "f:t");
+    const everything = await bus.ok("bus_query", {
+      query: `SELECT ?s ?o WHERE { ?s ${named.join("|")} ?o }`,
+    });
+    expect(everything.complete).toBe(true);
+    expect(everything.rows.length).toBeGreaterThan(10);
+    expect(JSON.stringify(everything)).not.toContain(claim);
+    // The saved operations project too (rule 13).
+    for (const [name, args] of [
+      ["history", { kinds: ["message", "presence"] }],
+      ["peers", { includeLeft: true }],
+      ["search", { text: "hello" }],
+    ] as const) {
+      expect(JSON.stringify(await bus.run(name, args))).not.toContain(claim);
+    }
   });
 
   test("the server's own route refuses or empties what the parser refuses, without moving head", async () => {

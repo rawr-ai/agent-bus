@@ -82,7 +82,7 @@ test.each([
   for (const [name, args] of [
     ["bus_history", {}],
     ["bus_peers", {}],
-    ["bus_query", { query: "SELECT ?s WHERE { ?s ?p ?o }" }],
+    ["bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?o }" }],
     ["bus_run_query", { name: "history" }],
   ] as const) {
     await refused(name, args, `Fluree request failed (HTTP ${status}).`);
@@ -107,6 +107,8 @@ test("bus_query refuses forbidden and malformed queries before reading head or q
     "SELECT * WHERE { SERVICE SILENT <urn:other> { ?s ?p ?o } }",
     "SELECT * WHERE { GRAPH <urn:other> { ?s ?p ?o } }",
     "SELECT * WHERE {",
+    "SELECT ?j WHERE { ?m bus:json ?j }",
+    "SELECT * WHERE { ?s ?p ?o }",
     marker.repeat(4096),
   ]) {
     const result = await client.callTool({ name: "bus_query", arguments: { query } });
