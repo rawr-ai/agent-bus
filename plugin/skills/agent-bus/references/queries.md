@@ -39,7 +39,7 @@ Call `bus_queries` first: it lists each saved query with its purpose, argument a
 | Messages on a topic since a time, oldest first | `{"name": "history", "args": {"participants": ["#<topic>"], "fromTs": "<UTC instant>"}}` |
 | The newest messages naming one peer | `{"name": "history", "args": {"participants": ["<address>"], "direction": "backward", "limit": 20}}` |
 | Particular messages by id | `{"name": "messages", "args": {"ids": ["<id>", "<id>"]}}` |
-| A whole reply tree | `{"name": "thread", "args": {"id": "<any message in it>"}}` |
+| A reply tree | `{"name": "thread", "args": {"id": "<any message in it>"}}` |
 | Ranked text matches | `{"name": "search", "args": {"text": "rollback"}}` |
 | Message counts per sender per day | `{"name": "counts", "args": {"groupBy": ["sender", "day"], "unit": "message"}}` |
 | Who was joined at a past commit | `{"name": "peers", "t": <t>}` |
@@ -50,7 +50,7 @@ Every result is one page read at one commit. Read what it says before concluding
 - **To page, pass the result's next back as `cursor`** with the same `name` and `args`. The next page reads the same `t`, so mail sent meanwhile neither shifts nor repeats rows. Keep paging until exhausted is true.
 - **complete is the only claim of a whole answer:** exhausted, with every entry decoded and none damaged. Ranked search and the predicate counts (counts, director-dm-volume) never claim it; their damage is "not-checked" and missingJson is only a lower bound.
 - **damaged and damagedTotal count unreadable entries** passed on this page and so far. Report them rather than treating the answer as whole.
-- **A thread follows replyTo links only.** Related mail sent without a reply link is outside it; pair thread with history when the whole job matters. missingReplyTargets are replies to ids that aren't entries at `t`.
+- **A thread follows replyTo links only.** Related mail sent without a reply link is outside it; pair thread with history when the whole job matters. It runs from the nearest top those links reach at `t`; a reply to an id that isn't an entry at `t` cuts it there, missingReplyTargets lists those ids, and root is then absent.
 
 ## bus_query: raw SPARQL
 

@@ -333,6 +333,47 @@ describe("entries", () => {
     });
   });
 
+  test("an entry with two stored encodings is damaged once, and neither copy is chosen", async () => {
+    const config = await freshLedger("two-json");
+    const bus = await startBus(flureeStore(config));
+    /** One node holding two different encodings of the same entry. */
+    const doubled = async (first: Message, second: Message) => {
+      const node = toNode(first, encodeJson(first));
+      await insertRaw(config, { ...node, "bus:json": [encodeJson(first), encodeJson(second)] });
+    };
+    const twin = message({ from: "claude/a", to: ["#twin"], body: "twin doubled original" });
+    const forged = message({ ...twin, to: [...twin.to], body: "twin doubled forgery" });
+    await doubled(twin, forged);
+    const clean = message({ from: "claude/b", to: ["#twin"], body: "clean", replyTo: twin.id });
+    await bus.append(clean);
+    const joined = presence("codex/twin", "joined", { session: "s-1" });
+    const leaving = presence("codex/twin", "left", { session: "s-1" });
+    const left = new Message({ ...leaving, id: joined.id, ts: joined.ts, to: [...leaving.to] });
+    await doubled(joined, left);
+
+    const history = await bus.all("history", { participants: ["#twin"], limit: 1 });
+    expect(ids(rowsOf(history))).toEqual([clean.id]);
+    expect(history.at(-1)).toMatchObject({ damagedTotal: 1, exhausted: true, complete: false });
+    const backward = await bus.all("history", { participants: ["#twin"], direction: "backward" });
+    expect(ids(rowsOf(backward))).toEqual([clean.id]);
+    expect(backward.at(-1)).toMatchObject({ damagedTotal: 1, complete: false });
+    const lookup = await bus.run("messages", { ids: [twin.id, clean.id] });
+    expect(ids(lookup.rows)).toEqual([clean.id]);
+    expect(lookup).toMatchObject({ damaged: 1, complete: false });
+    const tree = await bus.run("thread", { id: clean.id });
+    expect(ids(tree.rows)).toEqual([clean.id]);
+    expect(tree).toMatchObject({ damaged: 1, members: 2, complete: false });
+    let found = await bus.run("search", { text: "twin doubled" });
+    for (let attempt = 0; attempt < 50 && found.damaged === 0; attempt++) {
+      await Bun.sleep(100);
+      found = await bus.run("search", { text: "twin doubled" });
+    }
+    expect(found).toMatchObject({ rows: [], damaged: 1 });
+    const peers = await bus.run("peers", { includeLeft: true });
+    expect(peers.rows).toEqual([]);
+    expect(peers).toMatchObject({ damaged: 1, complete: false });
+  });
+
   test("messages keeps the asked order and resolves each id at t", async () => {
     const config = await freshLedger("messages");
     const bus = await startBus(flureeStore(config));
@@ -350,7 +391,7 @@ describe("entries", () => {
     ).toBe("ids has duplicates.");
   });
 
-  test("thread is the whole reply tree from its root, with missing reply targets", async () => {
+  test("thread is the reply tree from its nearest reachable top; a missing target cuts it", async () => {
     const config = await freshLedger("thread");
     const bus = await startBus(flureeStore(config));
     const root = message({ from: "claude/a", to: ["#t"], body: "root" });
@@ -948,7 +989,14 @@ describe("raw SPARQL", () => {
       ["SELECT ?m WHERE { ?m bus:id ?id FILTER NOT EXISTS { ?m bus:json ?j } }", json],
       ["SELECT ?t WHERE { << ?m bus:json ?j >> f:t ?t }", json],
       ["SELECT ?t WHERE { << ?m ?p ?j >> f:t ?t }", variable],
-      ["SELECT ?m WHERE { VALUES ?p { bus:json } ?m ?p ?j }", variable],
+      ["SELECT ?m WHERE { VALUES ?p { bus:json } ?m ?p ?j }", json],
+      ["SELECT ?q WHERE { ?m a bus:Message . BIND(TRIPLE(?m, bus:json, ?j) AS ?q) }", json],
+      ["SELECT ?m WHERE { ?m bus:id ?id FILTER(isIRI(bus:json)) }", json],
+      ["SELECT ?o WHERE { VALUES ?o { <https://rawr.ai/ns/agent-bus#json> } }", json],
+      [
+        "SELECT ?m WHERE { ?m bus:id ?id FILTER(?id != bus:session) }",
+        "<https://rawr.ai/ns/agent-bus#session> is not readable through bus_query",
+      ],
       [
         "SELECT ?m WHERE { ?m bus:id ?id ; <urn:example:session> ?s }",
         "<urn:example:session> is not readable through bus_query",
@@ -960,6 +1008,11 @@ describe("raw SPARQL", () => {
         expect.stringContaining(reason),
       ]);
     }
+    // The entry classes are bus: terms a query may name.
+    const typed = await bus.ok("bus_query", {
+      query: "SELECT ?m WHERE { VALUES ?c { bus:Message bus:Presence } ?m a ?c }",
+    });
+    expect(typed.rows.length).toBeGreaterThan(0);
     // Every readable predicate, read whole: the claim is in bus:json alone, so it never appears.
     const listing = await bus.ok("bus_queries");
     const named = (listing.raw.predicates as Array<string>).filter((name) => name !== "f:t");
