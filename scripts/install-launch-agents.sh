@@ -335,3 +335,4 @@ echo "  claude mcp add --scope user --transport http agent-bus http://127.0.0.1:
 echo "  claude plugin marketplace add '$repo_dir' && claude plugin install agent-bus@agent-bus"
 echo "  (after a change to plugin/: claude plugin marketplace update agent-bus && claude plugin update agent-bus@agent-bus)"
 echo "  codex mcp add agent-bus --url http://127.0.0.1:$bus_port/mcp"
+echo "  Codex skill plugin (separate from MCP): follow docs/runbooks/install.md#install-the-codex-skill-plugin"
