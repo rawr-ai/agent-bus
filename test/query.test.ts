@@ -18,6 +18,7 @@ import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
+import { READABLE_PREDICATES } from "../src/sparql.ts";
 import { flureeFetch, freshLedger, insertRaw } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
@@ -787,6 +788,58 @@ describe("presets", () => {
 });
 
 describe("raw SPARQL", () => {
+  test("every predicate toNode writes is readable by raw SPARQL or explicitly excluded", () => {
+    // Every optional field set, so each conditional predicate is written.
+    const origin = new Origin({ host: "h", cwd: "/c", repo: "/r", branch: "b" });
+    const written = [
+      new Message({
+        id: "m",
+        ts: "2026-11-01T00:00:00.000Z",
+        from: "claude/a",
+        to: ["#t"],
+        kind: "message",
+        subject: "s",
+        body: "b",
+        replyTo: "r",
+        origin,
+      }),
+      new Message({
+        id: "p",
+        ts: "2026-11-01T00:00:00.000Z",
+        from: "claude/a",
+        to: ["*"],
+        kind: "presence",
+        body: "joined",
+        origin,
+        presence: new Presence({
+          runtime: "codex",
+          status: "joined",
+          topics: ["#t"],
+          session: "s",
+          takeover: "x",
+          rejoinOf: "y",
+          codexThreadId: "s",
+          note: "n",
+        }),
+      }),
+    ].flatMap((entry) =>
+      Object.keys(toNode(entry, "{}")).flatMap((key) =>
+        key === "@type" ? ["rdf:type"] : key.startsWith("bus:") ? [key] : []
+      )
+    );
+    const excluded = ["bus:json"];
+    const unlisted = [...new Set(written)].filter(
+      (predicate) => !READABLE_PREDICATES.includes(predicate) && !excluded.includes(predicate)
+    );
+    expect(unlisted).toEqual([]);
+    // And the list names nothing the bus does not write, except f:t, a commit read through RDF-star.
+    const stale = READABLE_PREDICATES.filter(
+      (predicate) => predicate !== "f:t" && !written.includes(predicate)
+    );
+    expect(stale).toEqual([]);
+    expect(excluded.filter((predicate) => READABLE_PREDICATES.includes(predicate))).toEqual([]);
+  });
+
   const forbidden = [
     ["INSERT DATA { <urn:x> <urn:p> 1 }", "Only SELECT queries are allowed."],
     ["DELETE WHERE { ?s ?p ?o }", "Only SELECT queries are allowed."],
