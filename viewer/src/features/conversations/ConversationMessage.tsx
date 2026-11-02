@@ -55,10 +55,15 @@ export function ConversationMessage({
               <span>
                 <Text value={message.replyTo} />
               </span>
-              <span className="reply-unresolved">
+              <span
+                className="reply-unresolved"
+                {...(missingAt === undefined
+                  ? {}
+                  : { title: `Ledger t=${missingAt}`, "data-t": missingAt })}
+              >
                 {missingAt === undefined
                   ? "Target not in this observation"
-                  : `Target is not an entry at t=${missingAt}`}
+                  : `Target is not an entry at commit ${missingAt}`}
               </span>
             </>
           )}

@@ -24,7 +24,9 @@ export interface ReplyTree {
 
 /**
  * One bounded reading, frozen at the commit it was read at: a conversation is the reply tree
- * read at `snapshot`; a flow is the matching part of the history window read there.
+ * read at `snapshot`; a flow is the matching part of the history window read there. Each
+ * keeps the criteria, receipt time and caveats of the observation it came from, so a retained
+ * unit is labelled as it was read.
  */
 export type ReadingUnit = ReadingIntent & {
   readonly messages: readonly PublicMessage[];
@@ -42,6 +44,10 @@ export type ReadingUnit = ReadingIntent & {
         readonly window: HistoryWindow;
         /** Every entry in the window the flow came from, omitted ones included. */
         readonly count: number;
+        /** The window's caveats, frozen with it: unreadable entries, omissions, completeness. */
+        readonly damaged: number;
+        readonly omitted: number;
+        readonly complete: boolean;
       }
   );
 

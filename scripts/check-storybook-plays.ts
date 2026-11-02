@@ -134,6 +134,10 @@ async function main() {
         "viewer-observation-states--retained-reading",
         "viewer-observation-states--ledger-replaced-freezes-conversation",
         "viewer-observation-states--older-entries-damage-and-moved-head",
+        "viewer-observation-states--retained-reading-keeps-caveats",
+        "viewer-observation-states--tree-keeps-its-criteria",
+        "viewer-observation-states--earlier-commit-freezes-conversation",
+        "viewer-observation-states--selected-beyond-the-tree-read",
         "viewer-stopped--render-defect",
       ];
   assert.ok(

@@ -1,5 +1,11 @@
-import { expect, test } from "bun:test";
-import type { HistoryInput, PublicMessage, Snapshot } from "../viewer/shared/public";
+import { describe, expect, test } from "bun:test";
+import {
+  type HistoryInput,
+  type PublicMessage,
+  projectHistory,
+  projectThread,
+  type Snapshot,
+} from "../viewer/shared/public";
 import type { ConversationContext } from "../viewer/src/features/conversations/model";
 import {
   EMPTY_READING_SNAPSHOT,
@@ -8,6 +14,7 @@ import {
   reconcileReadingUnit,
 } from "../viewer/src/reading-unit";
 import { treeLabel, upstreamNotes, windowLabel } from "../viewer/src/snapshot-labels";
+import { busPage, entryRow } from "./bus-pages";
 
 const message = (id: string): PublicMessage => ({
   id,
@@ -32,6 +39,9 @@ const flow = (
   snapshot,
   window: "latest",
   count: ids.length,
+  damaged: 0,
+  omitted: 0,
+  complete: false,
 });
 const conversation = (
   ids: readonly string[],
@@ -227,33 +237,128 @@ test("a reading stays frozen at its snapshot: another ledger or an earlier commi
   }
 });
 
-test("window labels come from the bus's exhaustion and ranking, not from the row count", () => {
+test("labels name the commit and come from the bus's exhaustion, damage and ranking", () => {
   const at: Snapshot = { ledger: "l", t: 812 };
-  expect(windowLabel("latest", at, 200, { limit: 200 })).toBe(
-    "Latest 200 entries at t=812; older entries exist"
+  const all = { limit: 200 };
+  expect(windowLabel("latest", at, 200, all, 0)).toBe(
+    "Latest 200 entries at commit 812; older entries exist"
   );
-  expect(windowLabel("latest", at, 1, { limit: 200 })).toBe(
-    "Latest 1 entry at t=812; older entries exist"
+  expect(windowLabel("latest", at, 1, all, 0)).toBe(
+    "Latest 1 entry at commit 812; older entries exist"
   );
   // 200 rows that are every entry are all of them, not "latest 200".
-  expect(windowLabel("all", at, 200, { limit: 200 })).toBe("All entries at t=812");
-  expect(windowLabel("all", at, 3, { limit: 200, participant: "#x" })).toBe(
-    "All entries naming this participant at t=812"
+  expect(windowLabel("all", at, 200, all, 0)).toBe("All entries at commit 812");
+  expect(windowLabel("all", at, 3, { limit: 200, participant: "#x" }, 0)).toBe(
+    "All entries naming this participant at commit 812"
   );
-  expect(windowLabel("ranked", at, 3, { limit: 200, query: "q" })).toBe(
-    "Best matches at t=812; ranked, not complete"
+  expect(windowLabel("readable", at, 3, all, 2)).toBe(
+    "All readable entries at commit 812; 2 unreadable"
   );
-  expect(treeLabel(true, at, 4, 0)).toBe("Whole reply tree at t=812");
-  expect(treeLabel(true, at, 2, 1)).toBe("Reply tree at t=812; cut at 1 missing entry");
-  expect(treeLabel(false, at, 200, 0)).toBe(
-    "First 200 entries of the reply tree at t=812; more exist"
+  expect(windowLabel("readable", at, 3, { limit: 200, participant: "#x" }, 1)).toBe(
+    "All readable entries naming this participant at commit 812; 1 unreadable"
   );
-  expect(treeLabel(false, at, 200, 2)).toBe(
-    "First 200 entries of the reply tree at t=812; more exist; cut at 2 missing entries"
+  expect(windowLabel("ranked", at, 3, { limit: 200, query: "q" }, 0)).toBe(
+    "Best matches at commit 812; ranked, not complete"
+  );
+  const tree = (exhausted: boolean, damaged: number, missing: number) => ({
+    exhausted,
+    damaged,
+    missingReplyTargets: Array.from({ length: missing }, (_, index) => `gone-${index}`),
+  });
+  expect(treeLabel(tree(true, 0, 0), at, 4)).toBe("Whole reply tree at commit 812");
+  expect(treeLabel(tree(true, 3, 0), at, 4)).toBe(
+    "All readable entries of the reply tree at commit 812; 3 unreadable"
+  );
+  expect(treeLabel(tree(true, 0, 1), at, 2)).toBe(
+    "Reply tree at commit 812; cut at 1 missing entry"
+  );
+  expect(treeLabel(tree(true, 1, 2), at, 2)).toBe(
+    "Reply tree at commit 812; cut at 2 missing entries; 1 unreadable"
+  );
+  expect(treeLabel(tree(false, 0, 0), at, 200)).toBe(
+    "First 200 entries of the reply tree at commit 812; more exist"
+  );
+  expect(treeLabel(tree(false, 1, 2), at, 200)).toBe(
+    "First 200 entries of the reply tree at commit 812; more exist; cut at 2 missing entries; 1 unreadable"
   );
   expect(upstreamNotes(at, 0)).toEqual([]);
+  // Visible text says "commit N"; each note keeps the raw t it names for its tooltip.
   expect(upstreamNotes({ ...at, currentHeadT: 815 }, 2)).toEqual([
-    "2 entries unreadable at t=812",
-    "The bus reached t=815 while this was read",
+    { text: "2 entries unreadable at commit 812", t: 812 },
+    { text: "The bus reached commit 815 while this was read", t: 815 },
   ]);
+});
+
+describe("from the bus's pages to the label a reader sees", () => {
+  const LEDGER = "ledger-a";
+  const T = 40;
+  const row = (id: string, t: number, replyTo?: string) =>
+    entryRow(
+      {
+        id,
+        ts: "opaque time",
+        from: "sender",
+        to: ["#alpha"],
+        kind: "message",
+        body: id,
+        ...(replyTo === undefined ? {} : { replyTo }),
+      },
+      t
+    );
+  const window = (page: Parameters<typeof busPage>[0]) => {
+    const observation = projectHistory([busPage(page)], { limit: 50 }, "at");
+    return windowLabel(
+      observation.window,
+      observation.snapshot,
+      observation.messages.length + observation.omitted,
+      observation.criteria,
+      observation.damaged
+    );
+  };
+  const tree = (page: Omit<Parameters<typeof busPage>[0], "name" | "args" | "ledger" | "t">) => {
+    const observation = projectThread(
+      [busPage({ name: "thread", args: { id: "a", limit: 200 }, ledger: LEDGER, t: T, ...page })],
+      { id: "a", ledger: LEDGER, t: T },
+      "at"
+    );
+    return treeLabel(
+      observation,
+      observation.snapshot,
+      observation.messages.length + observation.omitted
+    );
+  };
+  const history = { name: "history", args: { limit: 50 }, ledger: LEDGER, t: T } as const;
+  const rows = [row("a", 1), row("b", 2, "a")];
+
+  test("clean and exhausted: all entries, the whole tree", () => {
+    expect(window({ ...history, rows })).toBe("All entries at commit 40");
+    expect(tree({ rows, extra: { missingReplyTargets: [] } })).toBe(
+      "Whole reply tree at commit 40"
+    );
+  });
+
+  test("not exhausted: the latest entries, the first of the tree", () => {
+    expect(window({ ...history, rows, next: "more" })).toBe(
+      "Latest 2 entries at commit 40; older entries exist"
+    );
+    expect(tree({ rows, next: "more", extra: { missingReplyTargets: [] } })).toBe(
+      "First 2 entries of the reply tree at commit 40; more exist"
+    );
+  });
+
+  test("damaged and exhausted: all readable entries, never all or whole", () => {
+    expect(window({ ...history, rows, damaged: 1 })).toBe(
+      "All readable entries at commit 40; 1 unreadable"
+    );
+    expect(tree({ rows, damaged: 1, extra: { missingReplyTargets: [] } })).toBe(
+      "All readable entries of the reply tree at commit 40; 1 unreadable"
+    );
+  });
+
+  test("a missing target, exhausted: the tree is cut there, never whole", () => {
+    const cut = [row("a", 1, "gone"), row("b", 2, "a")];
+    expect(tree({ rows: cut, extra: { missingReplyTargets: ["gone"] } })).toBe(
+      "Reply tree at commit 40; cut at 1 missing entry"
+    );
+  });
 });

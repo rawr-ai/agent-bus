@@ -116,12 +116,14 @@ export const readerLayer = (options: {
 
       /**
        * Follows `next` with the same name and args, so every page reads the first page's
-       * commit, until `enough` rows or the traversal ends; at most MAX_PAGES pages.
+       * commit (or `t`, when given), until `enough` rows or the traversal ends; at most
+       * MAX_PAGES pages.
        */
       const traverse = (
-        name: "history" | "search" | "peers",
+        name: "history" | "search" | "peers" | "thread",
         args: Record<string, unknown>,
-        enough: number
+        enough: number,
+        t?: number
       ) =>
         Effect.gen(function* () {
           const pages: unknown[] = [];
@@ -131,6 +133,7 @@ export const readerLayer = (options: {
             const page = yield* runQuery({
               name,
               args,
+              ...(t === undefined ? {} : { t }),
               ...(cursor === undefined ? {} : { cursor }),
             });
             pages.push(page);
@@ -187,13 +190,14 @@ export const readerLayer = (options: {
         thread: (request) =>
           observe(
             Effect.gen(function* () {
-              const page = yield* runQuery({
-                name: "thread",
-                args: { id: request.id, limit: MAX_THREAD_MESSAGES },
-                t: request.t,
-              });
+              const pages = yield* traverse(
+                "thread",
+                { id: request.id, limit: MAX_THREAD_MESSAGES },
+                MAX_THREAD_MESSAGES,
+                request.t
+              );
               return yield* projected(() =>
-                projectThread([page], request, new Date().toISOString())
+                projectThread(pages, request, new Date().toISOString())
               );
             })
           ),

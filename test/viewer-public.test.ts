@@ -414,6 +414,11 @@ describe("history projection", () => {
     );
     expect(short.window).toBe("latest");
     expect(short.damaged).toBe(3);
+    // Exhausted, but with unreadable entries met: every readable entry, never all of them.
+    const readable = projectHistory(hist([message("a")], { damagedTotal: 2 }), base, AT);
+    expect(readable.window).toBe("readable");
+    expect(readable.damaged).toBe(2);
+    expect(readable.complete).toBe(false);
     const ranked = projectHistory(hist([message("a")]), { query: "q", limit: 5 }, AT);
     expect(ranked.window).toBe("ranked");
     expectGeneric(() => projectHistory(hist([], { complete: true }), { query: "q", limit: 5 }, AT));
@@ -748,6 +753,28 @@ describe("thread projection", () => {
     );
     expect(result.exhausted).toBe(false);
     expect(result.complete).toBe(false);
+  });
+
+  test("a tree read over several pages keeps its first entries, and is exhausted only when all fit", () => {
+    const rows = (count: number, prefix: string) =>
+      Array.from({ length: count }, (_, index) => message(`${prefix}-${index}`));
+    const first = rows(150, "first");
+    const second = rows(100, "second");
+    const pages = (last: unknown[]) => [
+      page(first, { name: "thread", exhausted: false, next: "n1" }),
+      page(last, { name: "thread", missingReplyTargets: [], complete: true }),
+    ];
+    // 250 entries: the reading keeps the first MAX_THREAD_MESSAGES, and more exist.
+    const cut = projectThread(pages(second), request, AT);
+    expect(cut.messages).toHaveLength(200);
+    expect(cut.messages.at(-1)?.id).toBe("second-49");
+    expect(cut.exhausted).toBe(false);
+    expect(cut.complete).toBe(false);
+    // Exactly 200 entries over two pages: the whole tree.
+    const whole = projectThread(pages(second.slice(0, 50)), request, AT);
+    expect(whole.messages).toHaveLength(200);
+    expect(whole.exhausted).toBe(true);
+    expect(whole.complete).toBe(true);
   });
 
   test("refuses a tree read at another commit or ledger than requested", () => {

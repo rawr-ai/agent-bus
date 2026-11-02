@@ -80,8 +80,12 @@ const setup = (timeoutMillis = 1_000) => {
     | "paged"
     | "endless"
     | "other-ledger"
-    | "no-query-tool" = "normal";
+    | "no-query-tool"
+    | "gated"
+    | "sized" = "normal";
   let peersFail = false;
+  /** The exact response body size, in bytes, that "sized" answers every call with. */
+  let sizedBytes = 0;
   let remoteAborts = 0;
   const release = new Set<() => void>();
   const upstream = Bun.serve({
@@ -124,7 +128,7 @@ const setup = (timeoutMillis = 1_000) => {
       if (input.method !== "tools/call") return new Response("Unexpected method", { status: 400 });
       const call = Schema.decodeUnknownSync(CallSchema)(input.params);
       calls.push(call);
-      if (mode === "hang") {
+      if (mode === "hang" || mode === "gated") {
         await new Promise<void>((resolve) => {
           const finish = () => {
             release.delete(finish);
@@ -142,6 +146,35 @@ const setup = (timeoutMillis = 1_000) => {
         });
       }
       const query = Schema.decodeUnknownSync(QueryCallSchema)(call.arguments);
+      if (mode === "gated") {
+        // Two pages, each held until the test releases it: the first leads on to the second.
+        const first = query.cursor === undefined;
+        return respond({
+          content: [],
+          structuredContent: envelope(
+            query.name,
+            [first ? message : { ...message, id: "second-page" }],
+            first ? { exhausted: false, complete: false, next: "page-2" } : {}
+          ),
+        });
+      }
+      if (mode === "sized") {
+        // A page padded with trailing JSON whitespace to exactly sizedBytes; "€" makes the
+        // count bytes, not characters.
+        const json = JSON.stringify({
+          jsonrpc: "2.0",
+          id: input.id,
+          result: {
+            content: [],
+            structuredContent: envelope(query.name, [{ ...message, body: "€ sized" }]),
+          },
+        });
+        const pad = sizedBytes - Buffer.byteLength(json);
+        if (pad < 0) throw new Error("sized page is larger than its target");
+        return new Response(json + " ".repeat(pad), {
+          headers: { "content-type": "application/json" },
+        });
+      }
       if (mode === "tool-error" || (peersFail && query.name === "peers")) {
         return respond({ isError: true, content: [{ type: "text", text: marker }] });
       }
@@ -225,6 +258,9 @@ const setup = (timeoutMillis = 1_000) => {
     },
     failPeers: () => {
       peersFail = true;
+    },
+    size: (bytes: number) => {
+      sizedBytes = bytes;
     },
     abortCount: () => remoteAborts,
     release: () => {
@@ -319,7 +355,7 @@ test("a window follows next with the same args at one commit, and stops at the p
     expect(paged.messages.map((item) => item.id)).toEqual([message.id]);
     expect(paged.damaged).toBe(1);
     expect(paged.omitted).toBe(0);
-    expect(paged.window).toBe("all");
+    expect(paged.window).toBe("readable");
     expect(paged.complete).toBe(false);
     const args = { direction: "backward", limit: 50 };
     expect(fixture.calls).toEqual([
@@ -551,6 +587,128 @@ test("whole-operation deadline and real client cancellation close upstream work"
     for (let attempt = 0; attempt < 100 && fixture.abortCount() < 2; attempt++) await Bun.sleep(2);
     expect(fixture.abortCount()).toBe(2);
   } finally {
+    await fixture.close();
+  }
+});
+
+/** Waits, within a bound, until the upstream has received `count` tool calls. */
+const callsReach = async (fixture: ReturnType<typeof setup>, count: number) => {
+  for (let attempt = 0; attempt < 500 && fixture.calls.length < count; attempt++)
+    await Bun.sleep(2);
+  return fixture.calls.length;
+};
+
+/**
+ * Eight concurrent reads all reach the upstream only if every earlier read returned its permit
+ * (and, through the host, its active-request slot).
+ */
+const permitsReturned = async (
+  fixture: ReturnType<typeof setup>,
+  read: () => Promise<unknown> = () => fixture.client.history({ limit: 50 })
+) => {
+  const before = fixture.calls.length;
+  fixture.mode("hang");
+  const pending = Array.from({ length: 8 }, read);
+  const reached = (await callsReach(fixture, before + 8)) - before;
+  fixture.release();
+  await Promise.allSettled(pending);
+  return reached;
+};
+
+/** The reader alone, without the host's own request deadline in front of it. */
+const readerFor = (
+  fixture: ReturnType<typeof setup>,
+  scope: Scope.Closeable,
+  timeoutMillis?: number
+) =>
+  Effect.runPromise(
+    Layer.buildWithScope(
+      readerLayer({
+        busPort: fixture.busPort,
+        ...(timeoutMillis === undefined ? {} : { timeoutMillis }),
+      }),
+      scope
+    ).pipe(Effect.map((context) => Context.get(context, ObservationReader)))
+  );
+
+test("the deadline covers the whole traversal: two pages each within it fail together", async () => {
+  // Each page is answered well inside the 600 ms deadline; only their sum crosses it.
+  const fixture = setup();
+  const scope = Scope.makeUnsafe();
+  try {
+    const reader = await readerFor(fixture, scope, 600);
+    const history = () => Effect.runPromise(Effect.exit(reader.history({ limit: 50 })));
+    fixture.mode("gated");
+    const answer = async (holdMillis: number, page: number) => {
+      await callsReach(fixture, page);
+      await Bun.sleep(holdMillis);
+      fixture.release();
+    };
+    // Control: two pages of 150 ms read within the deadline.
+    const quick = history();
+    await answer(150, 1);
+    await answer(150, 2);
+    const observed = await quick;
+    expect(Exit.isSuccess(observed) && observed.value.messages.map((item) => item.id)).toEqual([
+      "fixture-message",
+      "second-page",
+    ]);
+
+    // Page 1 at 400 ms, page 2 held 400 ms more: neither alone reaches 600 ms, together they do.
+    const slow = history();
+    await answer(400, 3);
+    await answer(400, 4);
+    const failed = await slow;
+    expect(Exit.isFailure(failed) && JSON.stringify(failed.cause)).toContain("ObservationTimeout");
+    // The deadline aborted page 2 upstream and started no third page.
+    expect(fixture.abortCount()).toBe(1);
+    expect(fixture.calls).toHaveLength(4);
+    expect(await permitsReturned(fixture, history)).toBe(8);
+  } finally {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    await fixture.close();
+  }
+});
+
+test("cancelling a read during its second page aborts that page, starts no third and frees its permit", async () => {
+  const fixture = setup(5_000);
+  fixture.mode("gated");
+  try {
+    const controller = new AbortController();
+    const pending = fixture.client.history({ limit: 50 }, { signal: controller.signal }).then(
+      () => "observed",
+      () => "cancelled"
+    );
+    await callsReach(fixture, 1);
+    fixture.release();
+    await callsReach(fixture, 2);
+    controller.abort();
+    expect(await pending).toBe("cancelled");
+    for (let attempt = 0; attempt < 250 && fixture.abortCount() < 1; attempt++) await Bun.sleep(2);
+    expect(fixture.abortCount()).toBe(1);
+    expect(fixture.calls.map((call) => call.arguments.cursor)).toEqual([undefined, "page-2"]);
+    expect(await permitsReturned(fixture)).toBe(8);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a response body of exactly the byte cap is read, and one byte more is refused", async () => {
+  const fixture = setup();
+  const scope = Scope.makeUnsafe();
+  try {
+    const reader = await readerFor(fixture, scope);
+    fixture.mode("sized");
+    fixture.size(MAX_MESSAGE_BYTES);
+    const atCap = await Effect.runPromise(Effect.exit(reader.history({ limit: 50 })));
+    expect(Exit.isSuccess(atCap) && atCap.value.messages[0]?.body).toBe("€ sized");
+    fixture.size(MAX_MESSAGE_BYTES + 1);
+    const overCap = await Effect.runPromise(Effect.exit(reader.history({ limit: 50 })));
+    expect(Exit.isFailure(overCap) && JSON.stringify(overCap.cause)).toContain(
+      "ObservationUnavailable"
+    );
+  } finally {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     await fixture.close();
   }
 });
