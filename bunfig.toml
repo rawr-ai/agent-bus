@@ -2,3 +2,6 @@ env = false
 
 [install]
 linker = "isolated"
+
+[test]
+preload = ["./test/preload.ts"]
