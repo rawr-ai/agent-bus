@@ -1,6 +1,6 @@
 # Upgrade
 
-Use this after upgrading Codex, Claude Code, Fluree or the agent-bus plugin: what to recheck, and how running sessions pick up new guidance. Installed versions and the findings to recheck are in [platforms](../platforms/README.md). Putting a new agent-bus version into service is in [deploy](deploy.md).
+Use this after upgrading Bun, Codex, Claude Code, Fluree or the agent-bus plugin: what to recheck, and how running sessions pick up new guidance. Installed versions and the findings to recheck are in [platforms](../platforms/README.md). Putting a new agent-bus version into service is in [deploy](deploy.md).
 
 Each step's expected result ends with how it was verified ([runbook shape](../../AGENTS.md#page-shapes)). The upgrade itself is the owner's act: nothing here installs a new Codex, Claude Code or Fluree. Steps that only read were run on the bus host on 2026-10-28; steps that depend on what an upgrade changes are *Unverified* until one has been followed through, and the guidance section is still to be qualified.
 
@@ -14,11 +14,16 @@ rows() { sed -n '/^## Version-sensitive findings/,/^## How claims/p' docs/platfo
 rows 'Codex|daemon|desktop app is|bundled CLI'
 rows 'Claude Code'
 rows 'Fluree'
+rows 'Bun'
 ```
 
 Run it from the repo root. Expected: the rows for each platform, 19 for Codex, 8 for Claude Code and 3 for Fluree at the time of writing. *Checked read-only 2026-10-28*
 
 When a recheck changes a finding, edit the platform page that owns it (its claim, its basis and the version it was observed on), the findings row, and the installed-versions table; this page doesn't change.
+
+## After upgrading Bun
+
+Qualify the exact executable in a development checkout before proposing activation. Recheck the [Bun findings](../platforms/bun.md), all five enhanced type projects, the generated adapter literal oracle, the full mandatory checks and the real launcher, hook and server paths. The selected source and executable must match their exact pins; changing a shell binary or `PATH` does not rebind an installed launcher. Record old and new source, runtime and dependency identities for both machines. Follow the separate approval, launchd rehearsal and complete rollback gate in [deploy](deploy.md). *Rehearsed 2026-11-02* on a disposable installation, including both crossing-hook directions and complete cohort rollback; live paired activation remains *Unverified* and unapproved.
 
 ## After upgrading Codex (CLI or desktop app)
 

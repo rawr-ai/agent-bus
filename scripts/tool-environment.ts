@@ -1,4 +1,14 @@
 import { readdir } from "node:fs/promises";
+import { join } from "node:path";
+
+export async function requirePinnedBun(root: string): Promise<void> {
+  const manifest = await Bun.file(join(root, "package.json")).json();
+  if (Bun.version !== manifest.engines.bun) {
+    throw new Error(
+      `Tool requires Bun ${manifest.engines.bun}; running ${Bun.version}. Put the pinned Bun first on PATH before running package scripts.`
+    );
+  }
+}
 
 // Nx loads root dotenv before interpreting its task-level dotenv switch.
 export async function refuseDotEnv(root: string): Promise<void> {

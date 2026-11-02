@@ -3708,43 +3708,43 @@ describe("claude wake", () => {
     );
   });
 
-  test.each([
-    false,
-    true,
-  ])("a scan outrun by a takeover preserves the new owner's mark (fresh=%s)", (fresh) => {
-    const { layer, plan } = unreliable();
-    return Effect.runPromise(
-      Effect.gen(function* () {
-        const bus = yield* Bus.Bus;
-        yield* joinBoth(bus);
-        yield* bus.join({
-          address: "claude/a2",
-          runtime: "claude",
-          session: a,
-          cwd: process.cwd(),
-        });
-        yield* send(bus, "first");
-        yield* send(bus, "second", "claude/a2");
-        // The old owner's scan reads claude/a, then stalls on claude/a2.
-        const stall = yield* Deferred.make<void>();
-        plan("read", stall);
-        const old = yield* Effect.forkChild(bus.wake(a, 5, fresh));
-        yield* Effect.sleep("50 millis");
-        const holder = (yield* bus.peers).find((peer) => peer.address === "claude/a");
-        yield* bus.join({
-          address: "claude/a",
-          runtime: "claude",
-          session: "session:new",
-          takeover: holder?.joinId,
-          cwd: process.cwd(),
-        });
-        expect((yield* soon(bus, "session:new")).addresses).toEqual(["claude/a"]);
-        yield* Deferred.succeed(stall, undefined);
-        expect((yield* Fiber.join(old)).addresses).toEqual(["claude/a2"]);
-        expect(yield* quiet(bus, "session:new")).toEqual(nothing);
-      }).pipe(Effect.provide(layer))
-    );
-  });
+  test.each([false, true])(
+    "a scan outrun by a takeover preserves the new owner's mark (fresh=%s)",
+    (fresh) => {
+      const { layer, plan } = unreliable();
+      return Effect.runPromise(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          yield* joinBoth(bus);
+          yield* bus.join({
+            address: "claude/a2",
+            runtime: "claude",
+            session: a,
+            cwd: process.cwd(),
+          });
+          yield* send(bus, "first");
+          yield* send(bus, "second", "claude/a2");
+          // The old owner's scan reads claude/a, then stalls on claude/a2.
+          const stall = yield* Deferred.make<void>();
+          plan("read", stall);
+          const old = yield* Effect.forkChild(bus.wake(a, 5, fresh));
+          yield* Effect.sleep("50 millis");
+          const holder = (yield* bus.peers).find((peer) => peer.address === "claude/a");
+          yield* bus.join({
+            address: "claude/a",
+            runtime: "claude",
+            session: "session:new",
+            takeover: holder?.joinId,
+            cwd: process.cwd(),
+          });
+          expect((yield* soon(bus, "session:new")).addresses).toEqual(["claude/a"]);
+          yield* Deferred.succeed(stall, undefined);
+          expect((yield* Fiber.join(old)).addresses).toEqual(["claude/a2"]);
+          expect(yield* quiet(bus, "session:new")).toEqual(nothing);
+        }).pipe(Effect.provide(layer))
+      );
+    }
+  );
 
   test("a stalled read doesn't outlast the timeout or a newer wait, and moves no mark", () => {
     const { layer, plan } = unreliable();

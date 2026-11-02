@@ -1,8 +1,9 @@
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { localToolEnvironment, refuseDotEnv } from "./tool-environment.ts";
+import { localToolEnvironment, refuseDotEnv, requirePinnedBun } from "./tool-environment.ts";
 
 const root = resolve(import.meta.dir, "..");
+await requirePinnedBun(root);
 await refuseDotEnv(root);
 const [tool, ...args] = process.argv.slice(2);
 let cmd: string[];

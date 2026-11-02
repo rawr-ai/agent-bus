@@ -77,54 +77,53 @@ class Offering extends StreamableHTTPClientTransport {
   }
 }
 
-test.each([
-  "2025-11-25",
-  "2025-06-18",
-  "2025-03-26",
-])("public queries over %s refuse every schema-valid input before any store operation", async (version) => {
-  const client = new Client({ name: "query-refusal", version: "test" });
-  try {
-    const transport = new Offering(version);
-    await client.connect(transport);
-    expect(transport.protocolVersion).toBe(version);
-    const { tools } = await client.listTools();
-    const tool = tools.find(({ name }) => name === "bus_query");
-    expect(tool?.description).toContain(refusal);
-    expect(tool?.inputSchema.required).toEqual(["query"]);
-    expect(Object.keys(tool?.inputSchema.properties ?? {}).sort()).toEqual(["query", "t"]);
-    expect(tool?.inputSchema.properties).toMatchObject({
-      query: { type: "string" },
-      t: { type: "integer" },
-    });
-    // Includes public and internal predicates, aggregates, federation, mutation,
-    // parser errors and strings beyond the retired parser's length/byte budget.
-    const queries = [
-      "SELECT ?body WHERE { ?m a bus:Message ; bus:body ?body }",
-      `SELECT ?json WHERE { ?m bus:json ?json } # ${marker}`,
-      "SELECT (?value AS ?body) WHERE { ?m bus:json ?value }",
-      "SELECT (COUNT(?m) AS ?n) WHERE { ?m a bus:Message FILTER EXISTS { ?p bus:json ?private FILTER EXISTS { ?p bus:body ?body } } }",
-      "# PRAGMA reasoning:none\nSELECT (COUNT(?body) AS ?n) WHERE { ?m a bus:Presence ; bus:body ?body }",
-      "SELECT * FROM <other:main> WHERE { SERVICE <https://example.invalid> { ?s ?p ?o } }",
-      "DELETE WHERE { ?s ?p ?o }",
-      "",
-      `not SPARQL: ${marker}\u0000`,
-      marker.repeat(4096),
-      "\u00e9".repeat(65_536),
-    ];
-    for (const query of queries) {
-      for (const t of [undefined, 1, 2, 0, -1, Number.MAX_SAFE_INTEGER]) {
-        const result = await client.callTool({
-          name: "bus_query",
-          arguments: { query, ...(t === undefined ? {} : { t }) },
-        });
-        expect(result.isError).toBe(true);
-        expect(result.content).toEqual([{ type: "text", text: refusal }]);
-        expect(result.structuredContent).toBeUndefined();
-        expect(JSON.stringify(result)).not.toContain(marker);
-        expect(accesses).toEqual([]);
+test.each(["2025-11-25", "2025-06-18", "2025-03-26"])(
+  "public queries over %s refuse every schema-valid input before any store operation",
+  async (version) => {
+    const client = new Client({ name: "query-refusal", version: "test" });
+    try {
+      const transport = new Offering(version);
+      await client.connect(transport);
+      expect(transport.protocolVersion).toBe(version);
+      const { tools } = await client.listTools();
+      const tool = tools.find(({ name }) => name === "bus_query");
+      expect(tool?.description).toContain(refusal);
+      expect(tool?.inputSchema.required).toEqual(["query"]);
+      expect(Object.keys(tool?.inputSchema.properties ?? {}).sort()).toEqual(["query", "t"]);
+      expect(tool?.inputSchema.properties).toMatchObject({
+        query: { type: "string" },
+        t: { type: "integer" },
+      });
+      // Includes public and internal predicates, aggregates, federation, mutation,
+      // parser errors and strings beyond the retired parser's length/byte budget.
+      const queries = [
+        "SELECT ?body WHERE { ?m a bus:Message ; bus:body ?body }",
+        `SELECT ?json WHERE { ?m bus:json ?json } # ${marker}`,
+        "SELECT (?value AS ?body) WHERE { ?m bus:json ?value }",
+        "SELECT (COUNT(?m) AS ?n) WHERE { ?m a bus:Message FILTER EXISTS { ?p bus:json ?private FILTER EXISTS { ?p bus:body ?body } } }",
+        "# PRAGMA reasoning:none\nSELECT (COUNT(?body) AS ?n) WHERE { ?m a bus:Presence ; bus:body ?body }",
+        "SELECT * FROM <other:main> WHERE { SERVICE <https://example.invalid> { ?s ?p ?o } }",
+        "DELETE WHERE { ?s ?p ?o }",
+        "",
+        `not SPARQL: ${marker}\u0000`,
+        marker.repeat(4096),
+        "\u00e9".repeat(65_536),
+      ];
+      for (const query of queries) {
+        for (const t of [undefined, 1, 2, 0, -1, Number.MAX_SAFE_INTEGER]) {
+          const result = await client.callTool({
+            name: "bus_query",
+            arguments: { query, ...(t === undefined ? {} : { t }) },
+          });
+          expect(result.isError).toBe(true);
+          expect(result.content).toEqual([{ type: "text", text: refusal }]);
+          expect(result.structuredContent).toBeUndefined();
+          expect(JSON.stringify(result)).not.toContain(marker);
+          expect(accesses).toEqual([]);
+        }
       }
+    } finally {
+      await client.close();
     }
-  } finally {
-    await client.close();
   }
-});
+);

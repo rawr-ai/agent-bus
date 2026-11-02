@@ -181,7 +181,7 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 | `RECONNECT_INTERVAL` | 5 s | `src/Fluree.ts` | The pause before reconnecting Fluree's event stream; each reconnection wakes readers once |
 | `MAX_WAIT_SECONDS` | 50 s | `src/mcp.ts` | How long one `bus_wake` call waits, and the longest `bus_wait` |
 | `DEFAULT_HISTORY_LIMIT` | 50 | `src/mcp.ts` | `bus_history`'s default number of messages |
-| `IDLE_TIMEOUT_SECONDS` | 65 s | `src/serve.ts` | The HTTP server's `idleTimeout`, `MAX_WAIT_SECONDS` + 15, so a long `bus_wake` or `bus_wait` isn't closed. Bun's default is 10 s |
+| `IDLE_TIMEOUT_SECONDS` | 65 s | `src/serve.ts` | The HTTP server's explicit `idleTimeout`, `MAX_WAIT_SECONDS` + 15, so a long `bus_wake` or `bus_wait` isn't closed while idle connections remain bounded |
 | `CALL_TIMEOUT_SECONDS` | 30 s | `src/client.ts` | The deadline of one CLI call to `serve` |
 | `WAKE_CALL_TIMEOUT_SECONDS` | 55 s | `src/claude.ts` | The hook's deadline for one `bus_wake` call: `MAX_WAIT_SECONDS` + 5 |
 | `WAKE_RETRY` | 5 s | `src/claude.ts` | The pause between the hook's failing calls |

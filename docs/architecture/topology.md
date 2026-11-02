@@ -80,7 +80,7 @@ The transports, in short:
 | Codex desktop app-server | Every machine with the desktop app | The ChatGPT desktop app | stdio, from the app | The app's logs |
 | Codex daemon | Any machine with Codex | Codex itself ([how](../platforms/codex.md#the-daemon)), or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | Codex's own log ([platforms: Codex](../platforms/codex.md#the-daemon)) |
 
-Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 10 s) and sets `AGENT_BUS_DIR` and `AGENT_BUS_PORT`. `scripts/install-launch-agents.sh` writes them ([install](../runbooks/install.md)). `serve` runs the code of the checkout the installer was run from, and so does the hook, through the `~/.local/bin/agent-bus` link; a deploy is a fast-forward of that checkout and a restart of `serve` ([deploy](../runbooks/deploy.md)). How to restart a process and read its log is in [operate](../runbooks/operate.md).
+Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 10 s) and sets `AGENT_BUS_DIR` and `AGENT_BUS_PORT`. `scripts/install-launch-agents.sh` writes them ([install](../runbooks/install.md)). The managed `~/.local/bin/agent-bus` launcher binds an exact Bun executable to the canonical checkout's entry point. Both the hook and the `serve` LaunchAgent invoke it; a deploy controls source, dependencies and runtime together ([deploy](../runbooks/deploy.md)). How to restart a process and read its log is in [operate](../runbooks/operate.md).
 
 ### Where state lives
 
@@ -91,7 +91,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | `config.json` | Each machine: `~/.agent-bus/config.json` | The installer, only when absent | The Fluree URL and ledger. `serve` won't start without it |
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |
 | `fluree-key.json` | Bus host: `~/.agent-bus/fluree-key.json`, mode 0600 | The installer | The key the Fluree server trusts tokens from |
-| The launcher | Each machine: `~/.local/bin/agent-bus`, a link to the checkout's `src/bin.ts` | The installer | What the Claude Code plugin's hook runs |
+| The launcher | Each machine: `~/.local/bin/agent-bus` | The installer | Managed executable binding Bun and the checkout's `src/bin.ts`; used by the hook and `serve` |
 | The plugin | Each machine: Claude Code's plugin cache | `claude plugin install` | The manifest, `plugin/.claude-plugin/plugin.json`, and the `agent-bus` skill, `plugin/skills/agent-bus/` |
 | `serve`'s memory | Each machine | `serve` | Two locks per address (one for reads and deliveries, one for ownership and sends); which sessions' hooks have called (`hooked`); each address's last call and open waits; the marks of what each session was last woken for, and each session's current wake wait; and, for Codex peers, the back-off, refused joins, covered mail, logged reason and recorded nudge. Lost on restart, which costs at most one extra wake per address |
 | Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only lists, adds to and deletes its own nudges from the queue, and reads a thread's record | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
@@ -106,7 +106,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 4. **Another machine reaches Fluree only through an SSH tunnel,** on the same local port, so its `config.json` names the same URL as the bus host's.
 5. **A `serve` wakes only the peers that joined from its own machine.** Each machine's Codex queues and Claude sessions are its own; no wake crosses machines.
 6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail.
-7. **`serve` and the hook run the installing checkout's code,** the first through its LaunchAgent and the second through the `~/.local/bin/agent-bus` link. That checkout changes only by a fast-forward at a deploy ([deploy](../runbooks/deploy.md)).
+7. **`serve` and the hook use the same managed launcher** and canonical checkout. Source and runtime changes are controlled together at deploy ([deploy](../runbooks/deploy.md)). Already-running hooks retain their loaded code and runtime until they rearm.
 8. **Each ledger instance has its own cursor directory.** The path names the ledger and its first commit ([messaging rule 11](messaging.md#rules) says what follows).
 9. **`serve` won't start without a `config.json` that names a Fluree ledger.** There is no fallback store.
 
@@ -115,7 +115,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 - **One ledger on one transaction server.** The server orders every commit, so all machines share one log and a cursor is the last commit `t` read. Internal readers use commit history; public mail lookup uses `bus_history`. Public SPARQL is temporarily withdrawn ([interfaces](interfaces.md#bus_query)). The other machine needs only a tunnel.
 - **One `serve` per machine.** Locks and the marks of what was last woken live in the process, and the deliverer can move a cursor past mail that isn't the subscriber's. A second `serve` on the same machine and ledger could add duplicate nudges or move a cursor back, so the design has one.
 - **Loopback and a tunnel.** Nothing needs to listen beyond its own machine, so nothing does. SSH authenticates the other machine, and the Fluree token still applies on top ([connections](connections.md)).
-- **The checkout is the install.** The launcher link makes the hook run the checkout's code and dependencies, so one fast-forward and a restart of `serve` deploy both.
+- **The checkout is the install.** One managed launcher binds both entrypoints to the same source and exact runtime, independent of their ambient `PATH`.
 - **Rejected: JSONL, or SQLite, as a second production store.** Once every machine ran on Fluree, a fallback store doubled what had to stay correct, for a fallback nothing used. JSONL stays only as test support (see Limits).
 
 ## Limits
@@ -131,6 +131,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 
 - [Fluree: the transaction server](../platforms/fluree.md#the-transaction-server) (one server orders the commits; restart and catch-up) and [the event stream](../platforms/fluree.md#the-event-stream) (what wakes each `serve`).
 - [Codex: the app-servers on a machine](../platforms/codex.md#the-app-servers-on-a-machine), [what Codex keeps where](../platforms/codex.md#what-codex-keeps-where), [the daemon](../platforms/codex.md#the-daemon) and [SSH projects](../platforms/codex.md#across-machines-ssh-projects).
+- [Bun: runtime and TOML](../platforms/bun.md) (runtime selection and parsing behavior).
 - [Claude Code: hooks](../platforms/claude-code.md#hooks) and [plugins](../platforms/claude-code.md#plugins) (where the hook runs and what a plugin copies).
 
 ## History
@@ -140,3 +141,4 @@ The frames that made these choices are indexed in [frames](../frames/README.md):
 - [one-codex-route](../frames/one-codex-route.md): one `serve` per machine, and `serve` no longer connecting to the daemon to deliver.
 - [claude-wake](../frames/claude-wake.md) and [finish-swap](../frames/finish-swap.md): the hook, the launcher link and the one-file plugin.
 - [codex-wake](../frames/codex-wake.md): the two Codex app-servers on a machine, and SSH projects.
+- [agent-bus-toolchain-upgrade](../frames/agent-bus-toolchain-upgrade.md): the managed runtime binding and its qualification.

@@ -11,7 +11,16 @@
     "noEmit": true,
     "allowImportingTsExtensions": true,
     "verbatimModuleSyntax": true,
-    "types": ["bun"]
+    "types": ["bun"],
+    "plugins": [
+      {
+        "name": "@effect/language-service",
+        "includeSuggestionsInTsc": false,
+        "ignoreEffectWarningsInTscExitCode": true,
+        "ignoreEffectErrorsInTscExitCode": false,
+        "diagnosticSeverity": { "floatingEffect": "error" }
+      }
+    ]
   },
   "include": ["src", "test", "scripts"],
   "exclude": ["scripts/check-storybook-plays.ts"]

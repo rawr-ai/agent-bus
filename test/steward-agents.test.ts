@@ -48,6 +48,19 @@ afterEach(async () => {
 });
 
 describe("native steward translation", () => {
+  test("multiline literal bodies trim only the TOML opening newline", async () => {
+    const root = await fixture();
+    await put(
+      root,
+      ".codex/agents/one.toml",
+      "name = \"test-role\"\ndescription = \"A: role #1\"\ndeveloper_instructions = '''\n\n  Body\n\n'''\n"
+    );
+    await syncStewards(root);
+    const output = await Bun.file(join(root, ".claude/agents/test-role.md")).text();
+    expect(output).toBe(expected.replace("Body\n", "\n  Body\n\n"));
+    expect(decode(output).body).toBe("\n  Body\n\n");
+  });
+
   test("renders literal bytes and preserves hostile metadata and complete bodies", async () => {
     const root = await fixture();
     await put(root, ".codex/agents/one.toml", source);
@@ -184,6 +197,7 @@ describe("native steward translation", () => {
       "agent-bus-fluree-query-steward",
       "agent-bus-mcp-steward",
       "agent-bus-orpc-steward",
+      "agent-bus-simplicity-steward",
       "agent-bus-sparql-steward",
       "agent-bus-state-machine-steward",
       "agent-bus-steward-designer",
