@@ -10,13 +10,13 @@ A source change reaches a newly started hook immediately, but reaches `serve` on
 
 **Rehearsed 2026-11-02:** the source, frozen-dependency, launcher and launchd transition and complete cohort rollback passed on a disposable same-path installation, including an old waiting hook to the new server and a new waiting hook to the restored server. Configuration, credentials and the Fluree process were unchanged; all owned jobs and processes were removed. This is not approval or a live-primary deployment receipt. After approved activation verify actual Claude wake on each machine. The existing [end-to-end check](#check-the-bus-end-to-end) uses a stand-in hook and is not a real session wake.
 
-The activation decision must name the exact merged source commit and tree, each machine's previous source and Bun executable, the new executable, frozen dependencies, affected services, checks and rollback. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed; no interim real-data viewer deployment is authorized by the toolchain upgrade. [Public-query containment](#public-query-containment) applies to every server and rollback.
+The activation decision must name the exact merged source commit and tree, each machine's previous source and Bun executable, the new executable, frozen dependencies, affected services, checks and rollback. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed; no interim real-data viewer deployment is authorized by the toolchain upgrade. The [query tools' check and rollback constraint](#query-tools) applies to every server and rollback: every `serve` fronting the shared ledger answers queries against it, so one machine's upgrade says nothing about another's.
 
 ## Deploy a new version
 
 1. **Identify the primary explicitly** from the deployment record, not from `readlink`: the launcher may be a regular managed file. In that checkout record `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, the running `serve` process and its launcher/runtime binding. Stop if the tree is dirty, attached to a branch, or its identity differs from the approved record. Preserve both old source and exact runtime for rollback. *Unverified* for the revised procedure.
 
-2. **Check the existing service** with [containment](#public-query-containment), [the restart check](#check-that-serve-restarted) and [the end-to-end check](#check-the-bus-end-to-end) on each machine. Record results and arrange an owned real Claude participant for the later wake check. *Unverified* for this release.
+2. **Check the existing service** with [the query tools' check](#query-tools), [the restart check](#check-that-serve-restarted) and [the end-to-end check](#check-the-bus-end-to-end) on each machine. Record results and arrange an owned real Claude participant for the later wake check. *Unverified* for this release.
 
 3. **Merge and pin only after separate approval.** Verify the intended PR sequence merged through Graphite, fetch remote `main`, and confirm the approved candidate is on it and descends from the recorded previous commit. Compare the exact candidate commit and tree with the approval, and inspect the full delta before activating. A newer remote head is not automatic approval. *Unverified* for this release.
 
@@ -46,44 +46,48 @@ The activation decision must name the exact merged source commit and tree, each 
 
    Here `primary`, `retained_installer` and `approved_bun` are absolute paths recorded in the decision. This mode updates the launcher and `serve`, not Fluree, the tunnel or credentials. Inspect other installer changes individually: run a full installer only when separately justified and approved, because it reprovisions service configuration and restarts Fluree or the tunnel. *Rehearsed 2026-11-02* on the disposable installation: old symlink adoption, exact managed arguments and unchanged Fluree, configuration and credentials.
 
-7. **Verify the activated pair on each machine.** Confirm exact source commit and tree, installed dependency and Bun identities, launcher contents, LaunchAgent arguments, and the running process entrypoint and start time. Run the restart, public-query containment and end-to-end checks, then verify a real Claude wake through an owned participant. Do not restart another owner's session to force its hook to rearm. Refresh the plugin only if its source changed. Record every result; a stand-in hook or a health response alone is insufficient. *Unverified* for this release.
+7. **Verify the activated pair on each machine.** Confirm exact source commit and tree, installed dependency and Bun identities, launcher contents, LaunchAgent arguments, and the running process entrypoint and start time. Run the restart, query tools and end-to-end checks, then verify a real Claude wake through an owned participant. Do not restart another owner's session to force its hook to rearm. Refresh the plugin only if its source changed. Record every result; a stand-in hook or a health response alone is insufficient. *Unverified* for this release.
 
-8. **On failure, restore the complete approved previous state.** Only use a previous source that preserves public-query refusal and response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, containment, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Rehearsed 2026-11-02*: complete source/dependency/runtime rollback under launchd at the same disposable canonical path, with a waiting candidate hook waking against the old server. Live-primary navigation and actual Claude model wake remain *Unverified* until approved activation.
+8. **On failure, restore the complete approved previous state.** Only use a previous source that keeps queries refused or validated, and public response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, query tools, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Rehearsed 2026-11-02*: complete source/dependency/runtime rollback under launchd at the same disposable canonical path, with a waiting candidate hook waking against the old server. Live-primary navigation and actual Claude model wake remain *Unverified* until approved activation.
 
-## Public-query containment
+## Query tools
 
-For the containment release and every later deployment or rollback, enumerate every `serve` that can front the shared ledger. Activate a reviewed refusal-preserving commit and restart each one using the steps above; no Fluree credential change, reindex, migration or rejoin is needed. Do not widen credentials or change governance to make a public query succeed. Refresh cached tool/skill guidance as described in [upgrade](upgrade.md#refreshing-guidance-in-running-sessions); stale descriptions do not bypass the updated handler.
+For every deployment or rollback, enumerate every `serve` that can front the shared ledger. Each must run a commit that either refuses public queries (public-query containment) or validates them ([connections rule 6](../architecture/connections.md#rules)); a commit from before containment runs SPARQL unvalidated. No Fluree credential change, reindex, migration or rejoin is needed. Do not widen credentials or change governance to make a query succeed. Refresh cached tool and skill guidance as described in [upgrade](upgrade.md#refreshing-guidance-in-running-sessions). This check is about the endpoint: a session that connected before the restart keeps the tool list it was given, so it says nothing about what running sessions can call.
 
-From each machine's activated checkout, verify its local endpoint with this bounded check. It prints no result data and changes no bus state:
+From each machine's activated checkout, verify its local endpoint with this bounded check. It reads the head commit, runs one pinned query and one forbidden one, prints no result data and changes no bus state:
 
 ```sh
 bun --no-env-file -e '
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-const client = new Client({ name: "query-containment-check", version: "1" });
-const expected = "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers.";
+const client = new Client({ name: "query-tools-check", version: "1" });
+const fail = (what) => { throw new Error(`Query tools check failed: ${what}.`); };
 try {
   await client.connect(new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${process.env.AGENT_BUS_PORT ?? 8096}/mcp`)));
-  await client.listTools();
-  for (const t of [undefined, 1, Number.MAX_SAFE_INTEGER]) {
-    const result = await client.callTool({ name: "bus_query", arguments: {
-      query: "SELECT (1 AS ?probe) WHERE {}", ...(t === undefined ? {} : { t })
-    } });
-    if (result.isError !== true || result.structuredContent !== undefined ||
-        JSON.stringify(result.content) !== JSON.stringify([{ type: "text", text: expected }])) {
-      throw new Error("Public-query containment check failed; do not claim containment.");
-    }
-  }
-  console.log("PASS: fixed public-query refusal");
+  const names = (await client.listTools()).tools.map((tool) => tool.name);
+  for (const name of ["bus_queries", "bus_run_query", "bus_query"]) if (!names.includes(name)) fail(`${name} is not listed`);
+  const listing = await client.callTool({ name: "bus_queries", arguments: {} });
+  const head = listing.structuredContent?.headT;
+  if (listing.isError === true || !Number.isInteger(head)) fail("bus_queries gave no head");
+  const pinned = await client.callTool({ name: "bus_query", arguments: {
+    query: "SELECT ?id WHERE { ?m a bus:Message ; bus:id ?id } LIMIT 1", t: head
+  } });
+  if (pinned.isError === true || pinned.structuredContent?.t !== head) fail("a pinned bus_query did not answer at its t");
+  const forbidden = await client.callTool({ name: "bus_query", arguments: {
+    query: "SELECT * WHERE { SERVICE <urn:example> { ?s ?p ?o } }"
+  } });
+  const text = forbidden.content?.[0]?.text ?? "";
+  if (forbidden.isError !== true || !text.startsWith("SERVICE is not allowed")) fail("a SERVICE query was not refused");
+  console.log("PASS: pinned query answers, forbidden query refused");
 } finally {
   await client.close();
 }
 '
 ```
 
-Expected: `PASS: fixed public-query refusal` on every machine, then the existing end-to-end message check passes. The HTTP refusal contract is *Rehearsed 2026-11-01* on disposable fixtures by `test/public-query.test.ts`. *Checked read-only 2026-11-01:* this exact operator command returned `PASS: fixed public-query refusal` from both installed endpoints after both `serve` processes restarted at `0202499`; the end-to-end check below also passed on each. Record which exact reviewed commit each restarted process runs before claiming containment.
+Expected: `PASS: pinned query answers, forbidden query refused` on every machine, then the existing end-to-end message check passes. Record which exact reviewed commit each restarted process runs. *Rehearsed 2026-11-01:* this exact command passed against a disposable `serve` on an authenticated throwaway Fluree; it has not been run against an installed endpoint. The query contract itself is checked on disposable servers by `test/query.test.ts` and `bun run qualify:fluree`.
 
-If one endpoint still returns rows or any different error, treat rollout as incomplete. Keep that affected `serve` stopped until a reviewed repair is ready; a rollback that restores the old SELECT implementation reopens the route, even if another machine remains patched. Stopping `serve` interrupts that machine's delivery and hooks, but preserves the ledger and cursors. After any refusal-preserving rollback, rerun this check and the ordinary end-to-end check on each affected machine. A successful query requires a separately reviewed replacement under [connections rule 6](../architecture/connections.md#rules), not an operator bypass.
+If an endpoint fails the check, treat rollout as incomplete and keep that `serve` stopped until a reviewed repair is ready, or roll it back to a commit that keeps queries refused or validated. Stopping `serve` interrupts that machine's delivery and hooks, but preserves the ledger and cursors. After any rollback, rerun the end-to-end check on each affected machine; a commit with the refusal answers `bus_query` with "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers." rather than passing this check.
 
 ## Check that `serve` restarted
 
@@ -213,4 +217,4 @@ Stop if the primary is dirty, attached, divergent or its approved deployed ident
 | Dirty, attached or divergent primary, or unexpected source identity | Stop and [recover the checkout](#recover-a-diverged-primary-checkout); preserve the work. |
 | Foreign or modified launcher refused | Stop before replacing it. Establish ownership and resolve it explicitly; do not bypass the installer check. |
 | Launcher or plist rename or launchd bootstrap fails | The two file replacements are atomic individually, not together. Inspect both files and the job, then rerun the qualified narrow installer for the intended source and runtime or complete the approved rollback; do not assume either pair is active. *Unverified* on launchd. |
-| Health, process identity, containment or delivery fails | Keep the affected `serve` stopped if containment is uncertain; otherwise use the complete approved rollback above. Consult [operate](operate.md) and [recover](recover.md) for diagnosis. |
+| Health, process identity, query tools or delivery fails | Keep the affected `serve` stopped if query guarding is uncertain; otherwise use the complete approved rollback above. Consult [operate](operate.md) and [recover](recover.md) for diagnosis. |

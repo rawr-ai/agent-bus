@@ -1,6 +1,6 @@
 # Public query containment
 
-2026-11-01. Temporary capability-withdrawal decision and qualification, following the separate public response projection in [bus-design-query](bus-design-query.md). Current contracts belong to [interfaces](../architecture/interfaces.md#bus_query), trust rules to [connections](../architecture/connections.md), and operational activation to [deploy](../runbooks/deploy.md#public-query-containment).
+2026-11-01. Temporary capability-withdrawal decision and qualification, following the separate public response projection in [bus-design-query](bus-design-query.md). Current contracts belong to [interfaces](../architecture/interfaces.md#bus_query), trust rules to [connections](../architecture/connections.md), and operational activation to [deploy](../runbooks/deploy.md#query-tools).
 
 ## Decision
 
@@ -72,4 +72,4 @@ There is no automatic reopen after a platform upgrade or an apparently clean sna
 - [x] Rule: [connections](../architecture/connections.md#rules) and internal representation in [messaging](../architecture/messaging.md#fluree-as-the-one-store).
 - [x] Agent guidance: [query reference](../../plugin/skills/agent-bus/references/queries.md) withdraws SPARQL recipes and names bounded alternatives.
 - [x] Platform claim: [Fluree](../platforms/fluree.md#query-limits) and the [findings register](../platforms/README.md).
-- [x] Procedure: [deploy](../runbooks/deploy.md#public-query-containment) requires every server, explicit verification and refusal-preserving rollback.
+- [x] Procedure: [deploy](../runbooks/deploy.md#query-tools) requires every server, explicit verification and refusal-preserving rollback.

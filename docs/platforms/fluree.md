@@ -1,6 +1,6 @@
 # Fluree
 
-What agent-bus rests on in Fluree, observed on Fluree 4.2.4 on the bus host (the other machine reaches it through the tunnel and runs none). What agent-bus does with it (CORS off, the token, the 15 s poll and public-query withdrawal) is in [connections](../architecture/connections.md) and [topology](../architecture/topology.md). Each claim is marked with its basis, as [platforms](README.md#how-claims-are-marked) defines. After upgrading Fluree, follow the installed version's docs (`fluree docs search`, `fluree docs get`) and run `bun run qualify:fluree`, which rechecks the claims it names below.
+What agent-bus rests on in Fluree, observed on Fluree 4.2.4 on the bus host (the other machine reaches it through the tunnel and runs none). What agent-bus does with it (CORS off, the token, the 15 s poll and the read-only query gateway) is in [connections](../architecture/connections.md) and [topology](../architecture/topology.md). Each claim is marked with its basis, as [platforms](README.md#how-claims-are-marked) defines. After upgrading Fluree, follow the installed version's docs (`fluree docs search`, `fluree docs get`) and run `bun run qualify:fluree`, which rechecks the claims it names below.
 
 ## The transaction server
 
