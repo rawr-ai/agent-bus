@@ -82,6 +82,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Putting a new version into service | [Deploy](runbooks/deploy.md) |
 | Starting sessions the bus can wake | [Launch agents](runbooks/launch-agents.md) |
 | Upgrading a platform or the plugin | [Upgrade](runbooks/upgrade.md) |
+| Invoking repository-local domain stewards and maintaining their definitions | [Stewards](runbooks/stewards.md) |
 | Symptoms and fixes | [Recover](runbooks/recover.md) |
 | Using the bus as an agent: joining, reading on a wake, replying, leaving | The [`agent-bus` skill](../plugin/skills/agent-bus/SKILL.md), which ships with the plugin |
 | Contributing: the toolkit, the `Ledger` service, `bun run check`, repo memory, and where a new fact goes | [AGENTS.md](../AGENTS.md) |

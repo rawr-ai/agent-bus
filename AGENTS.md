@@ -79,7 +79,11 @@ When a decision, constraint or trap changes, `update` its memory instead of addi
 
 ## Verification
 
-`bun run check` must pass before committing. It runs `typecheck`, `lint`, `test` and `check:docs`, each also a script of its own. `bun run lint:effect` (stricter Effect rules) and `bunx knip` (unused files, exports and dependencies) are advisory.
+Use the repository's domain stewards when their judgment is relevant, in both Codex and Claude. Canonical definitions live in `.codex/agents/`, with native Claude counterparts in `.claude/agents/`; select the named role and supply the task's outcome and context rather than copying its foundation into a generic agent. [Stewards](docs/runbooks/stewards.md) describes native invocation, available domains and maintenance.
+
+Every lane touching code and writing tests invokes `agent-bus-testing-design-steward` early enough to shape meaningful coverage, and re-engages it when material assumptions or implementation change. Implementation owns production decisions and integrated checks; resolve findings or explicitly decline them with a reason, not a second approval chain. Invocation is not itself qualification or adoption.
+
+`bun run check` must pass before committing. It runs `typecheck`, `lint`, `test`, `check:docs` and `check:stewards`, each also a script of its own. `bun run lint:effect` (stricter Effect rules) and `bunx knip` (unused files, exports and dependencies) are advisory.
 
 Viewer changes use the [viewer verification lanes](docs/runbooks/viewer.md#verify-the-viewer): direct Bun pure tests for the tight loop, production-component Storybook plays for UI, native local Stagehand for representative connected journeys, and Nx for deterministic local check/build reuse. Never cache browser, integration, live-data or full qualification outcomes. The root tool launcher refuses dotenv before invocation and strips provider/cloud credentials; use the package commands rather than bypassing it. Browser tests have their own [instructions](tests/browser/AGENTS.md). Load the ignored local `agent-bus-workbench` skill where installed; it routes the actual workbench and upstream Browse skill, not the generic resource's older Stagehand API. No upstream skill cache is vendored or edited by this repository.
 
