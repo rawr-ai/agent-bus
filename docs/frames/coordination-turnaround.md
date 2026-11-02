@@ -84,11 +84,13 @@ The Codex programme/orientation DRA owns bus-wide guidance publication for the c
 
 ### Composed result and currentness
 
-One join/orient result returns the selected directory or unresolved candidates, registered concerns, explicitly associated members, separately labelled subscriptions/activity, current scoped bulletins and a reference to the query-owned catalogue. Its operation names, schemas, units, executable examples and catalogue revision come from that registry, not copied definitions or a second query gateway.
+One join/orient result returns the selected directory or unresolved candidates, registered concerns, explicitly associated members, separately labelled subscriptions/activity, current scoped bulletins and a reference to the query-owned catalogue. Each associated member's activity is its own field, distinct from subscription. Inactivity pauses only project/topic notifications: direct mail still reaches a member in every activity state, and explicit reactivation remains available through direct contact or a command. Its operation names, schemas, units, executable examples and catalogue revision come from that registry, not copied definitions or a second query gateway.
 
 Label the investigation's pinned evidence cut, the current orientation-state cut, any subsequently observed head and the evaluation time used for review/expiry separately. A historical message cut does not make today's membership or bulletin designation historical; current enrichment is not fixed-cut evidence. Catalogue/code revision is not a ledger transaction.
 
-Orient is read-only and consumes no inbox state. Join establishes its presence before reporting orientation. If that later read fails, report the committed join and orientation unavailability separately with an explicit retry route; do not disguise the successful join as a refusal. Preserve unread cursors. Replacing a bulletin must not lose or duplicate its ordinary update notification, and must not introduce two deliverable messages at one transaction while cursors still advance by transaction.
+Orient is read-only and consumes no inbox state. Join establishes its presence before reporting orientation. If that later read fails, report the committed join and orientation unavailability separately with an explicit retry route; do not disguise the successful join as a refusal. Preserve unread cursors. Replacing a bulletin must not lose or duplicate its ordinary update notification. At most one `bus:Message` or `bus:Presence` entry may be committed per transaction: delivery advances by transaction, and query ordering must remain compatible with that invariant.
+
+Non-entry orientation state may share a transaction with that entry, but its nodes must not carry `bus:json` or either entry type; delivery and entry queries must not mistake them for mail or damaged entries. Expose the named state vocabulary in the query-owned catalogue listing for deliberate raw queries rather than adding another read gateway.
 
 ### Open validation
 
