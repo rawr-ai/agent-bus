@@ -1,12 +1,28 @@
 import { Option, Schema } from "effect";
-import { MAX_HISTORY_LIMIT, MAX_PARTICIPANT_LENGTH, MAX_QUERY_LENGTH } from "./limits.ts";
+import {
+  MAX_HISTORY_LIMIT,
+  MAX_ID_LENGTH,
+  MAX_PAGES,
+  MAX_PARTICIPANT_LENGTH,
+  MAX_PEERS,
+  MAX_PEERS_PAGE,
+  MAX_QUERY_LENGTH,
+  MAX_THREAD_MESSAGES,
+} from "./limits.ts";
 
-export { DEFAULT_HISTORY_LIMIT, MAX_HISTORY_LIMIT } from "./limits.ts";
+export {
+  DEFAULT_HISTORY_LIMIT,
+  MAX_HISTORY_LIMIT,
+  MAX_PAGES,
+  MAX_PEERS,
+  MAX_PEERS_PAGE,
+  MAX_THREAD_MESSAGES,
+} from "./limits.ts";
 
-// Public projection of the bus's already-decoded history and peers results. Records are
-// validated by hand so no input value can reach an error, and every output is rebuilt.
+// Public projection of the bus's saved-query pages (bus_run_query envelopes). Envelopes and
+// records are validated by hand so no input value can reach an error, and every output is
+// rebuilt.
 
-const MAX_PEERS = 1000;
 const RUNTIMES = ["claude", "codex", "human", "other"] as const;
 const FAILURE = "Public observation rejected";
 
@@ -57,11 +73,41 @@ export const HistoryInputSchema = Schema.Struct({
 });
 export type HistoryInput = typeof HistoryInputSchema.Type;
 
+const Count = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const Commit = Schema.Int.check(Schema.isGreaterThanOrEqualTo(1));
+
+/**
+ * The ledger commit an observation was read at. `ledger` is the incarnation (a ledger
+ * replaced under the same name has another); `currentHeadT` is the head when the read
+ * finished, present only when it had moved past `t`.
+ */
+export const SnapshotSchema = Schema.Struct({
+  ledger: Schema.String,
+  t: Commit,
+  currentHeadT: Schema.optionalKey(Commit),
+});
+export type Snapshot = typeof SnapshotSchema.Type;
+
+/**
+ * all: every entry matching the criteria at t; latest: the newest entries at t, with
+ * older ones left out; ranked: best text matches at t, never a complete answer.
+ */
+export const HISTORY_WINDOWS = ["all", "latest", "ranked"] as const;
+export type HistoryWindow = (typeof HISTORY_WINDOWS)[number];
+
+// Upstream incompleteness (window, damaged, complete) is reported apart from the viewer's own
+// projection omissions (omitted): records its public projection rejected.
 export const HistoryObservationSchema = Schema.Struct({
   messages: Schema.mutable(Schema.Array(PublicMessageSchema)),
   criteria: HistoryInputSchema,
   observedAt: Schema.String,
   omitted: Omitted,
+  snapshot: SnapshotSchema,
+  window: Schema.Literals(HISTORY_WINDOWS),
+  /** Unreadable entries the bus met while reading this window. */
+  damaged: Count,
+  /** The bus's own claim: every matching entry at t, all decoded. */
+  complete: Schema.Boolean,
 });
 export type HistoryObservation = typeof HistoryObservationSchema.Type;
 
@@ -69,8 +115,34 @@ export const PeersObservationSchema = Schema.Struct({
   peers: Schema.mutable(Schema.Array(PublicPeerSchema)),
   observedAt: Schema.String,
   omitted: Omitted,
+  snapshot: SnapshotSchema,
+  damaged: Count,
+  complete: Schema.Boolean,
 });
 export type PeersObservation = typeof PeersObservationSchema.Type;
+
+/** A reply tree read at an explicit commit of one ledger incarnation. */
+export const ThreadInputSchema = Schema.Struct({
+  id: Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(MAX_ID_LENGTH)),
+  ledger: Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(MAX_ID_LENGTH)),
+  t: Commit,
+});
+export type ThreadInput = typeof ThreadInputSchema.Type;
+
+export const ThreadObservationSchema = Schema.Struct({
+  messages: Schema.mutable(Schema.Array(PublicMessageSchema)),
+  request: ThreadInputSchema,
+  observedAt: Schema.String,
+  omitted: Omitted,
+  snapshot: SnapshotSchema,
+  /** Replied-to ids that are not entries at t: the bus's answer, not an inference. */
+  missingReplyTargets: Strings,
+  damaged: Count,
+  /** False when the tree has more than MAX_THREAD_MESSAGES entries; only the first are here. */
+  exhausted: Schema.Boolean,
+  complete: Schema.Boolean,
+});
+export type ThreadObservation = typeof ThreadObservationSchema.Type;
 
 type Raw = Readonly<Record<string, unknown>>;
 type PublicOrigin = NonNullable<PublicMessage["origin"]>;
@@ -181,6 +253,7 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
     address === undefined ||
     runtime === undefined ||
     topics === undefined ||
+    own(raw, "status") !== "joined" ||
     host === null ||
     note === null
   ) {
@@ -195,10 +268,89 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
   };
 };
 
-const collection = (value: unknown, key: string): ReadonlyArray<unknown> => {
+const isCommit = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 1;
+const isCount = (value: unknown): value is number =>
+  typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
+
+/** One bus_run_query result page, as far as the viewer relies on it. */
+interface Page {
+  readonly record: Raw;
+  readonly ledger: string;
+  readonly t: number;
+  readonly currentHeadT: number | undefined;
+  readonly rows: ReadonlyArray<unknown>;
+  readonly damagedTotal: number;
+  readonly exhausted: boolean;
+  readonly complete: boolean;
+}
+
+const pageOf = (value: unknown, maxRows: number): Page => {
   if (!isRecord(value)) return fail();
-  const items = own(value, key);
-  return Array.isArray(items) ? items : fail();
+  const ledger = text(value, "ledger");
+  const t = own(value, "t");
+  const currentHeadT = own(value, "currentHeadT");
+  const rows = own(value, "rows");
+  const damagedTotal = own(value, "damagedTotal");
+  const exhausted = own(value, "exhausted");
+  const complete = own(value, "complete");
+  const next = optionalText(value, "next");
+  if (
+    ledger === undefined ||
+    !isCommit(t) ||
+    (currentHeadT !== undefined && (!isCommit(currentHeadT) || currentHeadT <= t)) ||
+    !Array.isArray(rows) ||
+    // Never truncate a page: more rows than asked for means the source broke its bound.
+    rows.length > maxRows ||
+    !isCount(damagedTotal) ||
+    typeof exhausted !== "boolean" ||
+    typeof complete !== "boolean" ||
+    next === null ||
+    exhausted !== (next === undefined) ||
+    (complete && (!exhausted || damagedTotal > 0))
+  ) {
+    return fail();
+  }
+  return { record: value, ledger, t, currentHeadT, rows, damagedTotal, exhausted, complete };
+};
+
+/**
+ * A traversal: pages read in order at one commit of one ledger, each but the last pointing
+ * at the next. Its snapshot is that commit, with the furthest head reported while reading.
+ */
+const traversal = (value: unknown, maxRows: number) => {
+  if (!Array.isArray(value) || value.length === 0 || value.length > MAX_PAGES) return fail();
+  const pages: Page[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const page = pageOf(value[index], maxRows);
+    const previous = pages[index - 1];
+    if (
+      previous !== undefined &&
+      (page.ledger !== previous.ledger ||
+        page.t !== previous.t ||
+        previous.exhausted ||
+        page.damagedTotal < previous.damagedTotal)
+    ) {
+      return fail();
+    }
+    pages.push(page);
+  }
+  const last = pages[pages.length - 1] ?? fail();
+  let head: number | undefined;
+  for (const page of pages) {
+    if (page.currentHeadT !== undefined && (head === undefined || page.currentHeadT > head))
+      head = page.currentHeadT;
+  }
+  const snapshot: Snapshot = {
+    ledger: last.ledger,
+    t: last.t,
+    ...(head === undefined ? {} : { currentHeadT: head }),
+  };
+  // Index by index, so a hole is a row (and is counted as omitted), never skipped.
+  const rows: unknown[] = [];
+  for (const page of pages)
+    for (let index = 0; index < page.rows.length; index++) rows.push(page.rows[index]);
+  return { snapshot, rows, last };
 };
 
 const identityOf = (raw: unknown, key: string): string | undefined =>
@@ -227,6 +379,22 @@ const project = <T>(
   return { items, omitted: raw.length - items.length };
 };
 
+/**
+ * Messages in the bus's own order: commit t, then id (several entries can share a commit).
+ * A row without a commit at or before the snapshot is invalid. Timestamps are never parsed.
+ */
+const entriesInCommitOrder = (raw: ReadonlyArray<unknown>, snapshotT: number) => {
+  const { items, omitted } = project(raw, "id", (record) => {
+    const message = toMessage(record);
+    const t = isRecord(record) ? own(record, "t") : undefined;
+    return message === undefined || !isCommit(t) || t > snapshotT ? undefined : { message, t };
+  });
+  items.sort((a, b) =>
+    a.t !== b.t ? a.t - b.t : a.message.id < b.message.id ? -1 : a.message.id > b.message.id ? 1 : 0
+  );
+  return { messages: items.map((item) => item.message), omitted };
+};
+
 const decodeCriteria = Schema.decodeUnknownOption(HistoryInputSchema);
 
 const validCriteria = (value: unknown): HistoryInput => {
@@ -240,26 +408,85 @@ const validCriteria = (value: unknown): HistoryInput => {
   };
 };
 
+/**
+ * `pages` are the history (newest first) or search (best first) pages the reader followed
+ * at one commit. The window keeps the first `limit` rows, so a last page that overshoots is
+ * cut here and the window is then the latest, not all. Messages are shown in commit order.
+ */
 export const projectHistory = (
-  value: unknown,
+  pages: unknown,
   criteria: HistoryInput,
   observedAt: string
 ): HistoryObservation =>
   guarded(() => {
     const copied = validCriteria(criteria);
     if (typeof observedAt !== "string") return fail();
-    const raw = collection(value, "messages");
-    // Never truncate: more rows than requested means the source broke its bound.
-    if (raw.length > copied.limit) return fail();
-    const { items, omitted } = project(raw, "id", toMessage);
-    return { messages: items, criteria: copied, observedAt, omitted };
+    const { snapshot, rows, last } = traversal(pages, copied.limit);
+    const ranked = copied.query !== undefined;
+    if (ranked && last.complete) return fail();
+    const cut = rows.length > copied.limit;
+    const { messages, omitted } = entriesInCommitOrder(rows.slice(0, copied.limit), snapshot.t);
+    return {
+      messages,
+      criteria: copied,
+      observedAt,
+      omitted,
+      snapshot,
+      window: ranked ? "ranked" : last.exhausted && !cut ? "all" : "latest",
+      damaged: last.damagedTotal,
+      complete: last.complete && !cut,
+    };
   });
 
-export const projectPeers = (value: unknown, observedAt: string): PeersObservation =>
+/** `pages` are every page of current (joined) peers at one commit. */
+export const projectPeers = (pages: unknown, observedAt: string): PeersObservation =>
   guarded(() => {
     if (typeof observedAt !== "string") return fail();
-    const raw = collection(value, "peers");
-    if (raw.length > MAX_PEERS) return fail();
-    const { items, omitted } = project(raw, "address", toPeer);
-    return { peers: items, observedAt, omitted };
+    const { snapshot, rows, last } = traversal(pages, MAX_PEERS_PAGE);
+    if (rows.length > MAX_PEERS || !last.exhausted) return fail();
+    const { items, omitted } = project(rows, "address", toPeer);
+    return {
+      peers: items,
+      observedAt,
+      omitted,
+      snapshot,
+      damaged: last.damagedTotal,
+      complete: last.complete,
+    };
+  });
+
+const decodeThreadInput = Schema.decodeUnknownOption(ThreadInputSchema);
+
+/** `pages` is the first page of a reply tree, read at the request's own commit and ledger. */
+export const projectThread = (
+  pages: unknown,
+  request: ThreadInput,
+  observedAt: string
+): ThreadObservation =>
+  guarded(() => {
+    const decoded = decodeThreadInput(request, { onExcessProperty: "error" });
+    if (Option.isNone(decoded) || typeof observedAt !== "string") return fail();
+    const copied = { id: decoded.value.id, ledger: decoded.value.ledger, t: decoded.value.t };
+    const { snapshot, rows, last } = traversal(pages, MAX_THREAD_MESSAGES);
+    if (
+      rows.length > MAX_THREAD_MESSAGES ||
+      snapshot.ledger !== copied.ledger ||
+      snapshot.t !== copied.t
+    ) {
+      return fail();
+    }
+    const missingReplyTargets = stringList(own(last.record, "missingReplyTargets"));
+    if (missingReplyTargets === undefined) return fail();
+    const { messages, omitted } = entriesInCommitOrder(rows, snapshot.t);
+    return {
+      messages,
+      request: copied,
+      observedAt,
+      omitted,
+      snapshot,
+      missingReplyTargets,
+      damaged: last.damagedTotal,
+      exhausted: last.exhausted,
+      complete: last.complete,
+    };
   });

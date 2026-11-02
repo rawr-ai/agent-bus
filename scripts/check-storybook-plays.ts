@@ -130,7 +130,10 @@ async function main() {
         "viewer-observation-states--unavailable-then-observed",
         "viewer-observation-states--failed-refresh-keeps-last-good",
         "viewer-observation-states--refresh-announces-arrivals",
+        "viewer-observation-states--conversation-follows-commits",
         "viewer-observation-states--retained-reading",
+        "viewer-observation-states--ledger-replaced-freezes-conversation",
+        "viewer-observation-states--older-entries-damage-and-moved-head",
         "viewer-stopped--render-defect",
       ];
   assert.ok(

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { HistoryInput, PublicMessage } from "../viewer/shared/public";
+import type { HistoryInput, PublicMessage, Snapshot } from "../viewer/shared/public";
 import type { ConversationContext } from "../viewer/src/features/conversations/model";
 import {
   EMPTY_READING_SNAPSHOT,
@@ -7,6 +7,7 @@ import {
   type ReadingUnit,
   reconcileReadingUnit,
 } from "../viewer/src/reading-unit";
+import { treeLabel, upstreamNotes, windowLabel } from "../viewer/src/snapshot-labels";
 
 const message = (id: string): PublicMessage => ({
   id,
@@ -16,21 +17,27 @@ const message = (id: string): PublicMessage => ({
   kind: "message",
   body: id,
 });
+const AT: Snapshot = { ledger: "ledger-a", t: 10 };
 const flow = (
   ids: readonly string[],
   context: ConversationContext = { kind: "topic", value: "#alpha" },
-  criteria: HistoryInput = { limit: 200 }
+  criteria: HistoryInput = { limit: 200 },
+  snapshot: Snapshot = AT
 ): ReadingUnit => ({
   kind: "flow",
   context,
   messages: ids.map(message),
   criteria,
   observedAt: "older observation",
+  snapshot,
+  window: "latest",
+  count: ids.length,
 });
 const conversation = (
   ids: readonly string[],
   selectedMessageId = "C",
-  criteria: HistoryInput = { limit: 200 }
+  criteria: HistoryInput = { limit: 200 },
+  snapshot: Snapshot = AT
 ): ReadingUnit => {
   const messages = ids.map(message);
   return {
@@ -39,6 +46,8 @@ const conversation = (
     messages,
     criteria,
     observedAt: "older observation",
+    snapshot,
+    tree: { missingReplyTargets: [], exhausted: true, damaged: 0, complete: true, omitted: 0 },
     conversation: {
       anchorMessageId: ids[0] ?? "",
       messages,
@@ -184,4 +193,67 @@ test("mismatched candidates and over-bound units refuse without reflecting value
       flow(Array.from({ length: 201 }, (_, i) => `private-${i}`))
     )
   ).toThrow("Reading observation rejected");
+});
+
+test("a reading stays frozen at its snapshot: another ledger or an earlier commit is never mixed in", () => {
+  for (const [intent, make] of [
+    [selected, (snapshot: Snapshot) => conversation(["A", "C"], "C", { limit: 200 }, snapshot)],
+    [
+      alpha,
+      (snapshot: Snapshot) =>
+        flow(["A", "C"], { kind: "topic", value: "#alpha" }, { limit: 200 }, snapshot),
+    ],
+  ] as const) {
+    const before = make(AT);
+    // The same messages from a replaced ledger are not the same reading.
+    const replaced = reconcileReadingUnit(initial(before), intent, make({ ...AT, ledger: "b" }));
+    expect(replaced).toEqual({ unit: before, retained: true });
+    // An answer from an earlier commit never replaces a later one.
+    const earlier = reconcileReadingUnit(initial(before), intent, make({ ...AT, t: 9 }));
+    expect(earlier).toEqual({ unit: before, retained: true });
+    // A later commit holding every displayed message advances, carrying its own t.
+    const later = make({ ...AT, t: 11, currentHeadT: 12 });
+    const advanced = reconcileReadingUnit(initial(before), intent, later);
+    expect(advanced).toEqual({ unit: later, retained: false });
+    expect(advanced.unit?.snapshot.t).toBe(11);
+    // Accepting the current unit (explicit selection) moves to the current commit.
+    const accepted = reconcileReadingUnit(
+      EMPTY_READING_SNAPSHOT,
+      intent,
+      make({ ...AT, ledger: "b" })
+    );
+    expect(accepted.unit?.snapshot.ledger).toBe("b");
+    expect(accepted.retained).toBe(false);
+  }
+});
+
+test("window labels come from the bus's exhaustion and ranking, not from the row count", () => {
+  const at: Snapshot = { ledger: "l", t: 812 };
+  expect(windowLabel("latest", at, 200, { limit: 200 })).toBe(
+    "Latest 200 entries at t=812; older entries exist"
+  );
+  expect(windowLabel("latest", at, 1, { limit: 200 })).toBe(
+    "Latest 1 entry at t=812; older entries exist"
+  );
+  // 200 rows that are every entry are all of them, not "latest 200".
+  expect(windowLabel("all", at, 200, { limit: 200 })).toBe("All entries at t=812");
+  expect(windowLabel("all", at, 3, { limit: 200, participant: "#x" })).toBe(
+    "All entries naming this participant at t=812"
+  );
+  expect(windowLabel("ranked", at, 3, { limit: 200, query: "q" })).toBe(
+    "Best matches at t=812; ranked, not complete"
+  );
+  expect(treeLabel(true, at, 4, 0)).toBe("Whole reply tree at t=812");
+  expect(treeLabel(true, at, 2, 1)).toBe("Reply tree at t=812; cut at 1 missing entry");
+  expect(treeLabel(false, at, 200, 0)).toBe(
+    "First 200 entries of the reply tree at t=812; more exist"
+  );
+  expect(treeLabel(false, at, 200, 2)).toBe(
+    "First 200 entries of the reply tree at t=812; more exist; cut at 2 missing entries"
+  );
+  expect(upstreamNotes(at, 0)).toEqual([]);
+  expect(upstreamNotes({ ...at, currentHeadT: 815 }, 2)).toEqual([
+    "2 entries unreadable at t=812",
+    "The bus reached t=815 while this was read",
+  ]);
 });

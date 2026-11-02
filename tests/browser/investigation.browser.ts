@@ -57,11 +57,18 @@ function installClock() {
 }
 
 type Control = {
-  counters: { history: number; peers: number };
+  counters: { history: number; peers: number; thread: number };
   calls: Array<{
-    tool: string;
-    arguments: { query?: string; participant?: string; limit?: number };
+    operation: "history" | "search" | "peers" | "thread";
+    arguments: Record<string, unknown>;
   }>;
+};
+/** The last history or search call, as [operation, args]: the window asked of the bus. */
+const asked = (state: Control) => {
+  const call = state.calls
+    .filter((each) => each.operation === "history" || each.operation === "search")
+    .at(-1);
+  return [call?.operation, call?.arguments];
 };
 let stage = "arguments";
 async function main() {
@@ -113,9 +120,7 @@ async function main() {
         { timeout: 5_000 }
       );
       let state = await control();
-      assert.deepEqual(state.calls.find((call) => call.tool === "bus_history")?.arguments, {
-        limit: 200,
-      });
+      assert.deepEqual(asked(state), ["history", { direction: "backward", limit: 200 }]);
       assert.ok(
         await page.evaluate(() => Reflect.get(window, "__INVESTIGATION_TEST_CLOCK__").seen >= 1),
         "15s scheduler requested"
@@ -129,7 +134,7 @@ async function main() {
         () =>
           Array.from(document.querySelectorAll(".observation-scope")).some(
             (node) =>
-              node.textContent?.includes("Server matches") &&
+              node.textContent?.includes("Best matches at t=") &&
               node.textContent.includes("Synthetic") &&
               node.textContent.includes("#alpha")
           ),
@@ -137,10 +142,10 @@ async function main() {
         { timeout: 5_000 }
       );
       state = await control();
-      assert.deepEqual(
-        state.calls.filter((call) => call.tool === "bus_history").at(-1)?.arguments,
-        { query: "Synthetic", participant: "#alpha", limit: 200 }
-      );
+      assert.deepEqual(asked(state), [
+        "search",
+        { participants: ["#alpha"], text: "Synthetic", limit: 200 },
+      ]);
 
       stage = "failed criteria and separate peers";
       await configure({ historyError: true });
@@ -185,22 +190,21 @@ async function main() {
         "peers remain available during history failure"
       );
 
-      stage = "clear and pin";
+      // A conversation is the bus's reply tree, which outlives the history window: when the
+      // window moves on, the tree is read again at the new commit and keeps the reader's place.
+      stage = "clear and follow";
       await configure({ historyError: false });
       await page.locator('[aria-label="Clear search"]').click({ timeout: 5_000 });
       await page.waitForFunction(
         () =>
           Array.from(document.querySelectorAll(".observation-scope")).some((node) =>
-            node.textContent?.includes("Latest messages")
+            node.textContent?.includes("All entries at t=")
           ),
         undefined,
         { timeout: 5_000 }
       );
       state = await control();
-      assert.deepEqual(
-        state.calls.filter((call) => call.tool === "bus_history").at(-1)?.arguments,
-        { limit: 200 }
-      );
+      assert.deepEqual(asked(state), ["history", { direction: "backward", limit: 200 }]);
       await clickText(page, ".context-item", "#alpha");
       const row = await page.evaluate(() =>
         Array.from(document.querySelectorAll(".conversation-row")).findIndex((node) =>
@@ -235,14 +239,7 @@ async function main() {
         await page.evaluate(() => Reflect.get(window, "__INVESTIGATION_TEST_CLOCK__").fire()),
         true
       );
-      await page.waitForFunction(
-        () =>
-          Array.from(document.querySelectorAll(".notice")).some((node) =>
-            node.textContent?.includes("Not in the current observation")
-          ),
-        undefined,
-        { timeout: 5_000 }
-      );
+      await waitFor(page, '[data-message-id="msg-g-new-reply"]');
       const after = await page.evaluate(() => {
         const area = document.querySelector<HTMLElement>(".thread-scroll")!;
         const anchor = document.querySelector<HTMLElement>('[data-message-id="msg-a-root"]')!;
@@ -282,10 +279,18 @@ async function main() {
             insideScroll: Boolean(indicator.closest(".thread-scroll")),
           };
         }),
-        { text: "Outside current observation", withinViewport: true, insideScroll: false },
-        "retained indicator remains visible outside reading scroller"
+        { text: "", withinViewport: true, insideScroll: false },
+        "a followed conversation is not retained"
       );
-      if (capture) await page.screenshot({ path: join(capture, "investigation-retained.png") });
+      assert.ok(
+        await page.evaluate(() =>
+          Array.from(document.querySelectorAll(".thread-scroll .observation-scope")).some((node) =>
+            /^Whole reply tree at t=\d+$/.test(node.textContent ?? "")
+          )
+        ),
+        "the followed tree is labelled with its new commit"
+      );
+      if (capture) await page.screenshot({ path: join(capture, "investigation-followed.png") });
 
       stage = "pause, visibility and manual refresh";
       await page.waitForFunction(

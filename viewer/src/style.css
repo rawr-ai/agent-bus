@@ -177,10 +177,12 @@ bdi {
   border-bottom: 1px solid var(--border);
 }
 .observation-error,
-.omitted {
+.omitted,
+.upstream {
   color: var(--warning);
 }
-.omitted {
+.omitted,
+.upstream {
   font-weight: 650;
 }
 .activity-list {
