@@ -10,6 +10,7 @@ import {
 } from "../stories/story-bus.ts";
 import type { PublicMessage } from "../viewer/shared/public.ts";
 import { PAGE_CATALOGUE_VERSION, PAGE_UNITS } from "./bus-pages.ts";
+import { PRESENCE_TREE, presenceTreePage } from "./presence-tree.ts";
 import {
   FIXTURE_MODES,
   FIXTURE_PAGE_BYTES,
@@ -94,6 +95,24 @@ test("the shared page builder claims the catalogue's version, units and budget",
   expect(FIXTURE_PAGE_BYTES).toBe(MAX_ENVELOPE_BYTES);
   for (const [name, unit] of Object.entries(PAGE_UNITS))
     expect(operations.find((operation) => operation.name === name)?.unit).toBe(unit);
+});
+
+test("the presence-tree fixture is a page the bus could send: exhausted, complete, whole", () => {
+  const page = record(presenceTreePage("ledger-a"));
+  expectEnvelope(page);
+  // Every row, the presence included, decodes with the catalogue's thread row.
+  expect(refusedRows(page)).toEqual([]);
+  expect((page.rows as Array<{ id: string }>).map((row) => row.id)).toEqual([
+    PRESENCE_TREE.root,
+    PRESENCE_TREE.presence,
+    PRESENCE_TREE.selected,
+  ]);
+  expect([page.exhausted, page.complete, page.damagedTotal, page.missingReplyTargets]).toEqual([
+    true,
+    true,
+    0,
+    [],
+  ]);
 });
 
 describe("the browser fixture", () => {

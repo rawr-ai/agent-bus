@@ -1,19 +1,24 @@
 import { ArrowUpRight } from "lucide-react";
 import type { PublicMessage } from "../../../shared/public";
 import { MessageBody } from "../../MessageBody";
+import { commitAttributes, commitLabel } from "../../snapshot-labels";
 import { Audience, formatTime, safeText, Text } from "../../Text";
 
 export function ConversationMessage({
   message,
   messages,
-  missingAt,
+  target,
   focusMessage,
   register,
 }: {
   message: PublicMessage;
   messages: readonly PublicMessage[];
-  /** The commit at which the bus reported this message's reply target as not an entry. */
-  missingAt?: number | undefined;
+  /**
+   * For a message read in a reply tree at commit `t`: whether the bus reported its reply
+   * target as not an entry there. A target that is not missing is in that tree, so when it is
+   * not shown, the viewer withheld it or the bus could not read it. Absent outside a tree.
+   */
+  target?: { readonly t: number; readonly missing: boolean } | undefined;
   focusMessage: (id: string) => void;
   register: (id: string, node: HTMLElement | null) => void;
 }) {
@@ -57,13 +62,13 @@ export function ConversationMessage({
               </span>
               <span
                 className="reply-unresolved"
-                {...(missingAt === undefined
-                  ? {}
-                  : { title: `Ledger t=${missingAt}`, "data-t": missingAt })}
+                {...(target === undefined ? {} : commitAttributes(target.t))}
               >
-                {missingAt === undefined
+                {target === undefined
                   ? "Target not in this observation"
-                  : `Target is not an entry at commit ${missingAt}`}
+                  : target.missing
+                    ? `Target is not an entry at ${commitLabel(target.t)}`
+                    : `Target is in the reply tree at ${commitLabel(target.t)} but not shown`}
               </span>
             </>
           )}

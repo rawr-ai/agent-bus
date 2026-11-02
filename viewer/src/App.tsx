@@ -116,12 +116,14 @@ interface WindowInfo {
   readonly snapshot: Snapshot;
   readonly count: number;
   readonly damaged: number;
+  readonly omitted: number;
 }
 const windowOf = (observation: HistoryObservation): WindowInfo => ({
   window: observation.window,
   snapshot: observation.snapshot,
   count: observation.messages.length + observation.omitted,
   damaged: observation.damaged,
+  omitted: observation.omitted,
 });
 /** A reply tree read for a selected message, with the criteria it was opened under. */
 interface ThreadRead {
@@ -142,7 +144,14 @@ function CriteriaScope({
   return (
     <p className="observation-scope" {...(window ? commitAttributes(window.snapshot.t) : {})}>
       {window
-        ? windowLabel(window.window, window.snapshot, window.count, criteria, window.damaged)
+        ? windowLabel(
+            window.window,
+            window.snapshot,
+            window.count,
+            criteria,
+            window.damaged,
+            window.omitted
+          )
         : `${isHistoryInvestigation(criteria) ? "Server matches" : "Latest messages"} · limit ${criteria.limit}`}
       {criteria.query !== undefined && (
         <>
@@ -374,11 +383,23 @@ export function App({ client }: { client: ViewerClient }) {
     thread.data !== null && thread.data.observation.request.id === nav.message ? thread.data : null;
   const tree = treeReading?.observation ?? null;
   const treeCurrent = treeReading !== null && thread.observation?.key === thread.key;
-  const treeGroup = useMemo(
-    () =>
-      tree === null ? undefined : buildConversationIndex(tree).byMessageId.get(tree.request.id),
-    [tree]
-  );
+  // The bus's tree is one conversation. Reply groups are rebuilt from it only to find the
+  // selected entry and any cycle: a reply whose target the projection withheld would
+  // otherwise start a group of its own and hide the readable entries above it.
+  const treeConversation = useMemo<ObservedConversation | undefined>(() => {
+    if (tree === null) return undefined;
+    const index = buildConversationIndex(tree);
+    const selected = index.byMessageId.get(tree.request.id);
+    return selected === undefined
+      ? undefined
+      : {
+          ...selected,
+          messages: tree.messages,
+          // Missing anchors are the bus's answer at t, not inferred from what loaded.
+          missingTargetIds: tree.missingReplyTargets,
+          cyclic: index.conversations.some((group) => group.cyclic),
+        };
+  }, [tree]);
   useEffect(() => {
     const change = () => setNav(parseHash());
     window.addEventListener("popstate", change);
@@ -457,21 +478,21 @@ export function App({ client }: { client: ViewerClient }) {
   );
   // A conversation candidate is built from the tree reading alone, so it keeps that reading's
   // criteria, commit and receipt time, and stays the same object while a newer read is
-  // pending. A failed read, or a current tree without the selected entry, offers none.
+  // pending. It shows every message the tree's projection emitted, in the bus's order. A
+  // failed read, or a current tree without the selected entry, offers none.
   const treeCandidate = useMemo<ReadingUnit | null>(
     () =>
       readingIntent?.kind === "conversation" &&
       treeReading !== null &&
       tree !== null &&
-      treeGroup !== undefined
+      treeConversation !== undefined
         ? {
             ...readingIntent,
             criteria: treeReading.criteria,
             observedAt: tree.observedAt,
             snapshot: tree.snapshot,
-            // Missing anchors are the bus's answer at t, not inferred from what loaded.
-            conversation: { ...treeGroup, missingTargetIds: tree.missingReplyTargets },
-            messages: treeGroup.messages,
+            conversation: treeConversation,
+            messages: tree.messages,
             tree: {
               missingReplyTargets: tree.missingReplyTargets,
               exhausted: tree.exhausted,
@@ -481,7 +502,7 @@ export function App({ client }: { client: ViewerClient }) {
             },
           }
         : null,
-    [readingIntent, treeReading, tree, treeGroup]
+    [readingIntent, treeReading, tree, treeConversation]
   );
   const flowCandidate = useMemo<ReadingUnit | null>(
     () =>
@@ -504,7 +525,7 @@ export function App({ client }: { client: ViewerClient }) {
   const candidate =
     readingIntent?.kind === "flow"
       ? flowCandidate
-      : thread.error !== null || (treeCurrent && treeGroup === undefined)
+      : thread.error !== null || (treeCurrent && treeConversation === undefined)
         ? null
         : treeCandidate;
   const reading = useMemo(
@@ -858,6 +879,7 @@ export function App({ client }: { client: ViewerClient }) {
                           snapshot: unit.snapshot,
                           count: unit.count,
                           damaged: unit.damaged,
+                          omitted: unit.omitted,
                         }}
                       />
                     )}
@@ -917,11 +939,15 @@ export function App({ client }: { client: ViewerClient }) {
                         key={message.id}
                         message={message}
                         messages={readMessages}
-                        missingAt={
-                          unit?.kind === "conversation" &&
-                          unit.tree.missingReplyTargets.includes(message.replyTo ?? "")
-                            ? unit.snapshot.t
-                            : undefined
+                        target={
+                          unit?.kind !== "conversation"
+                            ? undefined
+                            : {
+                                t: unit.snapshot.t,
+                                missing: unit.tree.missingReplyTargets.includes(
+                                  message.replyTo ?? ""
+                                ),
+                              }
                         }
                         focusMessage={focusMessage}
                         register={(id, node) => {

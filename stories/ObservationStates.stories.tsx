@@ -1,5 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { expect, userEvent, waitFor, within } from "storybook/test";
+import { PRESENCE_TREE_ENTRIES, presenceTreePage } from "../test/presence-tree";
 import type { ViewerClient } from "../viewer/shared/client-types";
 import type {
   HistoryObservation,
@@ -8,6 +9,7 @@ import type {
   ThreadInput,
   ThreadObservation,
 } from "../viewer/shared/public";
+import { projectThread } from "../viewer/shared/public";
 import { App } from "../viewer/src/App";
 import { formatTime } from "../viewer/src/Text";
 import { enterValue } from "./enter-value";
@@ -363,7 +365,11 @@ export const OlderEntriesDamageAndMovedHead: Story = {
   play: async ({ canvasElement }) => {
     const canvas = within(canvasElement);
     await expect(
-      (await canvas.findAllByText("Latest 3 entries at commit 7; older entries exist"))[0]
+      (
+        await canvas.findAllByText(
+          "Latest 3 entries at commit 7; older entries exist; 1 omitted by the viewer"
+        )
+      )[0]
     ).toBeVisible();
     await expect(canvas.getAllByText("2 entries unreadable at commit 7")[0]).toBeVisible();
     await expect(
@@ -403,7 +409,9 @@ export const RetainedReadingKeepsCaveats: Story = {
     await expect(
       await pane.findByText(/^Not in the current observation · frozen at commit 3 ·/)
     ).toBeVisible();
-    const label = pane.getByText("Latest 4 entries at commit 3; older entries exist");
+    const label = pane.getByText(
+      "Latest 4 entries at commit 3; older entries exist; 1 omitted by the viewer"
+    );
     await expect(label).toHaveAttribute("data-t", "3");
     await expect(label).toHaveAttribute("title", "Ledger t=3");
     await expect(pane.getByText("2 entries unreadable at commit 3")).toBeVisible();
@@ -450,6 +458,79 @@ export const TreeKeepsItsCriteria: Story = {
     // Labelled with the criteria it was read under, not the ones that replaced them.
     await expect(pane.getByText("This retained reading uses earlier criteria.")).toBeVisible();
     await expect(pane.getByText("Confirmed with one note.")).toBeVisible();
+
+    // Recovery: the next observation, at commit 3 under the same criteria, reads the tree.
+    const reads: number[] = [];
+    script.thread = (input) => {
+      const tree = threadOf(input);
+      reads.push(input.t);
+      return tree;
+    };
+    script.history = historyOf([request, followUp], {
+      criteria,
+      observedAt: "2026-01-01T12:09:00Z",
+    });
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh activity" }));
+    await waitFor(() => expect(reads).toContain(3));
+    // A successful reread does not replace a retained reading: only the reader's action does.
+    await expect(state()).toBe("Outside current observation");
+    await expect(pane.getByText("Whole reply tree at commit 1")).toBeVisible();
+    await expect(pane.getByText("This retained reading uses earlier criteria.")).toBeVisible();
+    await expect(pane.queryByText("Whole reply tree at commit 3")).toBeNull();
+
+    // Acceptance: selecting the conversation again replaces it with the current reading.
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Review request.*1 observed message/ })
+    );
+    await expect(await pane.findByText("Whole reply tree at commit 3")).toBeVisible();
+    await expect(state()).toBe("");
+    await expect(pane.queryByText("Whole reply tree at commit 1")).toBeNull();
+    await expect(pane.queryByText(/^Not in the current observation/)).toBeNull();
+    await expect(pane.queryByText("This retained reading uses earlier criteria.")).toBeNull();
+    await expect(pane.getByText("Confirmed with one note.")).toBeVisible();
+  },
+};
+
+/**
+ * A presence the viewer withholds in the middle of the bus's whole tree: every message the
+ * tree's projection emitted is read, and the label never calls it whole.
+ */
+export const WithheldPresenceKeepsTree: Story = {
+  beforeEach: () => {
+    script.history = historyOf([PRESENCE_TREE_ENTRIES.root, PRESENCE_TREE_ENTRIES.selected], {
+      t: 3,
+    });
+    script.peers = peersOf(["agent/lead"]);
+    script.thread = (input) =>
+      projectThread([presenceTreePage(input.ledger, input.t)], input, "2026-01-01T12:00:02Z");
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const pane = readingPane(canvasElement);
+    // The window shows the reply apart from the root: its target is not in the window.
+    await userEvent.click(
+      await canvas.findByRole("button", { name: /Tree reply.*1 observed message/ })
+    );
+    await expect(
+      await pane.findByText("All entries of the reply tree at commit 3; 1 omitted by the viewer")
+    ).toBeVisible();
+    await expect(pane.queryByText(/^Whole reply tree/)).toBeNull();
+    // Both readable messages are read, in the bus's order; the presence is not shown.
+    const shown = Array.from(
+      canvasElement.querySelectorAll<HTMLElement>(".thread-view article[data-message-id]"),
+      (node) => node.dataset.messageId
+    );
+    await expect(shown).toEqual(["tree-root", "tree-selected"]);
+    await expect(canvasElement.querySelector(".thread-view .thread-scope")).toHaveTextContent(
+      "2 observed messages"
+    );
+    await expect(pane.getByText("The readable root.")).toBeVisible();
+    // The reply's target is in the tree but withheld, not missing from the ledger.
+    await expect(
+      pane.getByText("Target is in the reply tree at commit 3 but not shown")
+    ).toBeVisible();
+    await expect(pane.queryByText(/Target is not an entry/)).toBeNull();
+    await expect(pane.getByText("1 record omitted")).toBeVisible();
   },
 };
 
