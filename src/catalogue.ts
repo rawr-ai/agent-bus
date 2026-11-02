@@ -281,6 +281,8 @@ interface Spec<S extends Schema.Top & { readonly DecodingServices: never }, Row>
   readonly purpose: string;
   readonly unit: string;
   readonly paging: "keyset" | "offset" | "none";
+  /** Without pages: what a caller narrows when the whole result is over the byte limit. */
+  readonly narrow?: string;
   /**
    * entries: complete when exhausted with no damage met; ranked: never
    * complete; predicates: never complete, since damaged bus:json is not checked.
@@ -517,6 +519,13 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
 
     const all = fetched.items.length;
     if (budget === undefined || bytes(envelope(all)) <= budget) return envelope(all);
+    // Without pages, a result is whole or refused: a trimmed one would pair some rows with
+    // totals over all of them, and offer a cursor that nothing accepts.
+    if (spec.paging === "none") {
+      return yield* invalid(
+        `The ${spec.name} result exceeds the ${budget}-byte limit and has no pages; narrow ${spec.narrow ?? "the arguments"}.`
+      );
+    }
     // Trimmed: the page consumes candidates only up to its last emitted row, so a
     // damaged candidate after it is neither counted nor skipped, and the next page
     // starts right after that row.
@@ -692,6 +701,23 @@ const groupCandidates = <R extends Candidate>(
   const whole = rows.length > size && groups.length > 1 ? groups.slice(0, -1) : groups;
   return whole.slice(0, size);
 };
+
+const TotalRows = Schema.Array(Schema.Tuple([Schema.Number]));
+
+/** How many bus:json values one entry holds at t (search's rows for it, one per copy). */
+const storedCopies = (t: number, id: string) =>
+  Effect.flatMap(QueryGateway, (gateway) =>
+    gateway
+      .jsonld(t, {
+        select: ["(as (count-distinct ?json) ?n)"],
+        values: [["?m"], [[entryIri(id)]]],
+        where: [{ "@id": "?m", "bus:json": "?json" }],
+      })
+      .pipe(
+        Effect.flatMap(decodeRows(TotalRows)),
+        Effect.map((rows) => rows[0]?.[0] ?? 0)
+      )
+  );
 
 /** A grouped candidate's entry, or nothing when it is damaged or stored more than once. */
 const decodeGroup = <R extends Candidate>(group: Group<R>) =>
@@ -1000,8 +1026,16 @@ export const search = define({
           offset,
         })
         .pipe(Effect.flatMap(decodeRows(SearchRows)));
-      // Offsets count result rows, so a position is just past the group's last row.
-      const items = groupCandidates(rows, size).map((group): Item<SearchRow> => {
+      const groups = groupCandidates(rows, size);
+      // Offsets count result rows (one per stored copy), so a position is just past the
+      // group's last row. A lone group that filled the page may continue past it: its copies
+      // are counted at the same t, so the next page starts after the whole entry and never
+      // decodes the rest of it as an entry of its own.
+      const lone = rows.length > size && groups.length === 1 ? groups[0] : undefined;
+      if (lone !== undefined) {
+        lone.last = Math.max(lone.last, (yield* storedCopies(at.t, lone.first[1])) - 1);
+      }
+      const items = groups.map((group): Item<SearchRow> => {
         const [t, id, , score] = group.first;
         const position = { offset: offset + group.last + 1 };
         const message = decodeGroup(group);
@@ -1020,7 +1054,6 @@ export const search = define({
 
 const GROUP_VARS = { sender: "?from", recipient: "?r", day: "?day" } as const;
 const CountRows = Schema.Array(Schema.Array(Schema.Union([Schema.String, Schema.Number])));
-const TotalRows = Schema.Array(Schema.Tuple([Schema.Number]));
 
 /** The messages in scope of a predicate-only measure, as where-clauses over ?m. */
 const scopeOf = (args: {
@@ -1239,6 +1272,7 @@ export const directorDmVolume = define({
     "Per UTC day: the director's direct messages to a cohort, beside whether the day had observed cohort or concern-topic traffic.",
   unit: "UTC day",
   paging: "none",
+  narrow: "the window, cohort or topics",
   coverage: "predicates",
   note: "directorToCohort counts distinct messages from the director with at least one cohort address literally among the recipients, mixed topic recipients included. An observed-traffic day is any UTC day with a message from or to a cohort address, or to a concern topic: observed traffic, not evidence of eligible concern work, and unrelated cohort or outsider topic traffic moves it. The predeclared comparable-window, workload and coverage checks still apply; a falling ratio alone never passes adoption. Counted from graph predicates: damage is not checked (missingJson is a lower bound).",
   Args: DirectorArgs,

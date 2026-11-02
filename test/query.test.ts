@@ -404,6 +404,81 @@ describe("entries", () => {
     expect(peers).toMatchObject({ damaged: 1, complete: false });
   });
 
+  for (const copies of [3, 4]) {
+    test(`an entry with ${copies} stored encodings is damaged once at limit 1, never split across pages`, async () => {
+      const config = await freshLedger(`copies-${copies}`);
+      const bus = await startBus(flureeStore(config));
+      /** One node holding `copies` decodable encodings of the same entry. */
+      const stored = async (variants: ReadonlyArray<Message>) => {
+        const [first] = variants as [Message];
+        await insertRaw(config, {
+          ...toNode(first, encodeJson(first)),
+          "bus:json": variants.map((variant) => encodeJson(variant)),
+        });
+      };
+      const range = Array.from({ length: copies }, (_, k) => k);
+      const before = message({ from: "claude/a", to: ["#copies"], body: "copied entry before" });
+      await bus.append(before);
+      const multi = message({ from: "claude/a", to: ["#copies"], body: "copied entry multi" });
+      await stored(
+        range.map((k) => message({ ...multi, to: [...multi.to], body: `${multi.body} ${k}` }))
+      );
+      const after = message({
+        from: "claude/b",
+        to: ["#copies"],
+        body: "copied entry after",
+        replyTo: multi.id,
+      });
+      await bus.append(after);
+      const joined = presence("codex/copies", "joined", { session: "s-1" });
+      await stored(
+        range.map(
+          (k) =>
+            new Message({
+              ...joined,
+              to: [...joined.to],
+              body: `${joined.body} ${k}`,
+            })
+        )
+      );
+      const traversal = (pages: ReadonlyArray<Json>) => ({
+        ids: ids(rowsOf(pages)),
+        damaged: pages.map((page) => page.damaged).reduce((a: number, b: number) => a + b, 0),
+        damagedTotal: pages.at(-1)?.damagedTotal,
+        exhausted: pages.at(-1)?.exhausted,
+      });
+      const once = (order: Array<string>) => ({
+        ids: order,
+        damaged: 1,
+        damagedTotal: 1,
+        exhausted: true,
+      });
+
+      const args = { participants: ["#copies"], limit: 1 };
+      expect(traversal(await bus.all("history", args))).toEqual(once([before.id, after.id]));
+      expect(traversal(await bus.all("history", { ...args, direction: "backward" }))).toEqual(
+        once([after.id, before.id])
+      );
+      expect(traversal(await bus.all("thread", { id: after.id, limit: 1 }))).toEqual(
+        once([after.id])
+      );
+      expect(traversal([await bus.run("messages", { ids: [multi.id, before.id] })])).toEqual(
+        once([before.id])
+      );
+      const peers = await bus.run("peers", { includeLeft: true, limit: 1 });
+      expect(peers).toMatchObject({ rows: [], damaged: 1, exhausted: true });
+
+      // Search pages by offset over stored copies: the entry's copies are consumed together.
+      let found = traversal(await bus.all("search", { text: "copied entry", limit: 1 }));
+      for (let attempt = 0; attempt < 50 && found.ids.length + found.damaged < 3; attempt++) {
+        await Bun.sleep(100);
+        found = traversal(await bus.all("search", { text: "copied entry", limit: 1 }));
+      }
+      expect([...found.ids].sort()).toEqual([before.id, after.id].sort());
+      expect(found).toMatchObject({ damaged: 1, damagedTotal: 1, exhausted: true });
+    });
+  }
+
   test("messages keeps the asked order and resolves each id at t", async () => {
     const config = await freshLedger("messages");
     const bus = await startBus(flureeStore(config));
@@ -649,6 +724,54 @@ describe("aggregates and peers", () => {
         },
       })
     ).toBe("The director cannot be in the cohort.");
+  });
+
+  test("director-dm-volume answers whole or refuses: never trimmed rows or a cursor", async () => {
+    const config = await freshLedger("director-oversize");
+    const bus = await startBus(flureeStore(config));
+    // 50 cohort addresses and 50 topics of 450 characters each, and traffic on all 366 days.
+    const long = (prefix: string, i: number) =>
+      `${prefix}${"q".repeat(450 - prefix.length - 3)}${String(i).padStart(3, "0")}`;
+    const cohort = Array.from({ length: 50 }, (_, i) => long("codex/", i));
+    const concernTopics = Array.from({ length: 50 }, (_, i) => long("#", i));
+    const first = Date.parse("2027-01-01T12:00:00.000Z");
+    const daily = Array.from({ length: 366 }, (_, day) =>
+      message({
+        from: cohort[0] as string,
+        to: ["#daily"],
+        body: `day ${day}`,
+        ts: new Date(first + day * 86_400_000).toISOString(),
+      })
+    );
+    await insertRaw(config, {
+      "@context": toNode(daily[0] as Message, "")["@context"],
+      "@graph": daily.map((m) => {
+        const { "@context": _, ...node } = toNode(m, encodeJson(m));
+        return node;
+      }),
+    });
+    const args = { director: "lead/d", cohort, concernTopics, fromDay: "2027-01-01" };
+    expect(
+      await bus.refused("bus_run_query", {
+        name: "director-dm-volume",
+        args: { ...args, toDay: "2028-01-02" },
+      })
+    ).toBe(
+      "The director-dm-volume result exceeds the 65536-byte limit and has no pages; narrow the window, cohort or topics."
+    );
+    // A narrower window answers whole: every day's row, with totals over exactly those rows.
+    const month = await bus.run("director-dm-volume", { ...args, toDay: "2027-01-31" });
+    expect(month.rows).toHaveLength(30);
+    expect(month.rows[29]).toEqual({
+      day: "2027-01-30",
+      directorToCohort: 0,
+      observedTraffic: true,
+    });
+    expect(month).toMatchObject({
+      totals: { directorToCohort: 0, observedTrafficDays: 30, ratio: 0 },
+      exhausted: true,
+    });
+    expect(month.next).toBeUndefined();
   });
 });
 
