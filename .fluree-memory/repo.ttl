@@ -17,7 +17,7 @@ mem:constraint-01m5y26y2g6hjydmb652z0sb3w a mem:Constraint ;
     mem:createdAt "2026-10-27T06:54:21.776907Z"^^xsd:dateTime .
 
 mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
-    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/: one hook manifest, beside the agent-bus skill): an asyncRewake hook on SessionStart, Stop and StopFailure runs ~/.local/bin/agent-bus claude-wake, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
+    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/: one hook manifest, beside the agent-bus skill): an asyncRewake hook on SessionStart, Stop and StopFailure runs the installer's managed launcher as `agent-bus claude-wake`, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
     mem:tag "claude" ;
     mem:tag "hooks" ;
     mem:tag "plugin" ;
@@ -29,7 +29,7 @@ mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
     mem:artifactRef "src/claude.ts" ;
     mem:branch "claude-host-wake" ;
     mem:createdAt "2026-10-27T06:54:21.716683Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-29T01:15:19.803056Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T02:48:01.291538+00:00"^^xsd:dateTime ;
     mem:rationale "The host re-arms the wake at session start and every turn end, so the model starts nothing, in the desktop app (stream-json mode) and the terminal alike." ;
     mem:alternatives "a plugin monitor running a streaming watch (never starts in stream-json mode; desktop sessions run that way),serve posting into the session inbox socket (held for sessions that bypass permissions; the desktop drops held messages after five minutes),channels (terminal only)" .
 
@@ -332,17 +332,19 @@ mem:decision-01m5y0xfnyv3fhekaj29gcg196 a mem:Decision ;
     mem:alternatives "deleting the command at once (recorded failures until each app-server restarts),two deploys with the no-op first (guards only against one recorded failure),keeping the hook (message text in the turn and an extra empty turn)" .
 
 mem:decision-01m5zvh3qar2276yby9g3xqbmd a mem:Decision ;
-    mem:content "The Claude Code plugin's hook runs the checkout through the link ~/.local/bin/agent-bus -> src/bin.ts, not through ${CLAUDE_PLUGIN_ROOT}: claude plugin install from a local-directory marketplace copies the plugin into ~/.claude/plugins/cache/<marketplace>/<plugin>/<sha>, so a path inside the plugin root is a stale copy. The installer makes the link and checks it runs with a launchd-style PATH from /." ;
+    mem:content "The Claude Code plugin's hook runs the deployed checkout through the installer's managed launcher (`agent-bus claude-wake`), not through ${CLAUDE_PLUGIN_ROOT}: claude plugin install from a local-directory marketplace copies the plugin into Claude Code's per-version plugin cache, so a path inside the plugin root is a stale copy. The launcher is a regular file the installer writes, binding the exact pinned Bun and the canonical checkout's src/bin.ts, and the installer checks it runs with a launchd-style PATH from /." ;
     mem:tag "claude" ;
     mem:tag "deploy" ;
     mem:tag "hooks" ;
     mem:tag "plugin" ;
     mem:scope mem:repo ;
     mem:artifactRef "docs/frames/finish-swap.md" ;
+    mem:artifactRef "docs/runbooks/install.md" ;
     mem:artifactRef "plugin/.claude-plugin/plugin.json" ;
     mem:artifactRef "scripts/install-launch-agents.sh" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T23:36:04.074554Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T02:48:01.246773+00:00"^^xsd:dateTime ;
     mem:rationale "One stable manifest, and the hook always runs the deployed checkout without a plugin update per release" ;
     mem:alternatives "${CLAUDE_PLUGIN_ROOT}/src/bin.ts (a cached copy, stale after each deploy); per-machine path configuration" .
 
