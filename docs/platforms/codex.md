@@ -338,7 +338,7 @@ The designer's workspace-write parent refused writes to the authorized `.codex/a
 
 ## Commission models
 
-**Documented, read 2026-11-02:** OpenAI's API documentation identifies [Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra) as `gpt-6.1-terra`, [Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) as `gpt-6.1-sol`, [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) as `gpt-6-astra`, and [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) as `gpt-6-luna`. The API model pages document available reasoning levels; API `reasoning.effort` is not evidence of a particular Codex host's controls or access. Consult [current prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices) for model-specific behavior.
+**Documented, read 2026-11-02:** OpenAI's API documentation identifies [Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra) as `gpt-6.1-terra`, [Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) as `gpt-6.1-sol`, [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) as `gpt-6-astra`, and [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) as `gpt-6-luna`. The API model pages document available reasoning levels; API `reasoning.effort` is not evidence of a particular Codex host's controls or access. OpenAI's [prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices) notes that Astra is more likely to pause for questions and suggests making authorized follow-through clear; evaluate the guidance on the selected model and workload.
 
 ## Approvals for MCP tools
 

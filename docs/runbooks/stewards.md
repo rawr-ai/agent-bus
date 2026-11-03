@@ -45,7 +45,7 @@ These local per-task starting heuristics are not fixed assignments, rankings, re
 
 Set model and effort using the current runtime's supported per-commission controls. Published capabilities do not establish host availability, authentication, effort, modalities or tools; check those for the task. Report an explicitly required provider or model review as incomplete if unavailable, rather than silently substituting. On capacity failure, the owner may reassign coherent remaining work with relevant receipts and bounded context; preserve completed work and its evidence.
 
-Give each worker the outcome, relevant source, permitted actions, evidence and uncertainty handling. Supply actual candidate views for visual work; give helpers bounded criteria and a route for uncertainty. State Sonnet's completion and scope together; state Fable's whole deliverable and useful progress and final reporting. Astra's current guide notes a tendency to pause for questions: make authorized follow-through clear, and evaluate guidance on the selected workload. Retain owner judgment, skill routing and resource discovery where the task needs them.
+Give each worker the outcome, relevant source, permitted actions, completion and scope, evidence and uncertainty handling. Supply actual candidate views for visual work; give helpers bounded criteria and a route for uncertainty. Make authorized follow-through and useful progress and final reporting clear. Consult the linked provider guidance for the selected model and evaluate it on the workload. Retain owner judgment, skill routing and resource discovery where the task needs them.
 
 ## Maintain the roles
 
