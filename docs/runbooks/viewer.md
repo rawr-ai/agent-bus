@@ -15,7 +15,7 @@ Expected: the pinned dependencies install without changing the lockfile. `--igno
 
 ## Build and start
 
-1. From the development checkout root, create the production artifacts. Do not rebuild over artifacts used by a running viewer; coordinate a deliberate stop and rebuild with its owner or use a separate authorized development checkout:
+1. From the development checkout root, create the production artifacts. Do not rebuild over artifacts used by a running viewer; coordinate a deliberate stop and rebuild with its owner or use another suitable development checkout:
 
    ```sh
    bun --no-env-file run viewer:build
