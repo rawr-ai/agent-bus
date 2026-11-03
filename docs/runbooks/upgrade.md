@@ -17,7 +17,7 @@ rows 'Fluree'
 rows 'Bun'
 ```
 
-Run it from the repo root. Expected: the rows for each platform, 19 for Codex, 8 for Claude Code and 3 for Fluree at the time of writing. *Checked read-only 2026-10-28*
+Run it from the repo root. Expected: the rows whose recheck conditions match each pattern; the number changes as findings are added. *Checked read-only 2026-10-28*
 
 When a recheck changes a finding, edit the platform page that owns it (its claim, its basis and the version it was observed on), the findings row, and the installed-versions table; this page doesn't change.
 
@@ -105,7 +105,7 @@ Follow the new version's own documentation first: it is installed with the CLI, 
 
 ## After a change to the plugin
 
-The agent-bus plugin (its hook manifest and the `agent-bus` skill) is copied into Claude Code's cache, so a change under `plugin/` or `.claude-plugin/` reaches sessions only through an update and a restart of each session. Deploy `serve` first ([deploy](deploy.md)), so the hook finds `bus_wake`.
+The agent-bus plugin (its hook manifest and the `agent-bus` skill) is copied into Claude Code's cache, so a change under `plugin/` or `.claude-plugin/` reaches sessions only through an update and a restart of each session. Deploy `serve` first ([deploy](deploy.md)), so the hook finds `bus_wake`. Refresh the Codex plugin separately on each participating home as [install](install.md#install-the-codex-skill-plugin) describes; an installed copy does not refresh a loaded thread's MCP schemas.
 
 ```sh
 claude plugin marketplace update agent-bus
@@ -113,7 +113,7 @@ claude plugin update agent-bus@agent-bus
 claude plugin list
 ```
 
-Expected: `agent-bus@agent-bus` enabled, at a new version. Then restart the sessions that need the change, or run `/reload-plugins` in them. The hook runs the checkout's code through `~/.local/bin/agent-bus`, so a change to `src/` reaches it at once without any of this. `claude plugin update --help` says a restart is required to apply it; that `/reload-plugins` does the second step wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#plugins)). *Unverified*: it would change the owner's installed plugin.
+Expected: `agent-bus@agent-bus` enabled, at a new version. Then restart the sessions that need the change, or run `/reload-plugins` in them. The hook runs the checkout's code through `~/.local/bin/agent-bus`, so a change to `src/` reaches it at once without any of this. `claude plugin update --help` says a restart is required to apply it; that `/reload-plugins` does the second step wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#plugins)). *Observed live 2026-11-02:* native refresh on both hosts produced complete Claude and Codex plugin copies byte-equal to deployed source. This does not prove already-loaded sessions received new schemas.
 
 ## Refreshing guidance in running sessions
 

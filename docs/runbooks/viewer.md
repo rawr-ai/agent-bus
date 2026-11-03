@@ -15,7 +15,7 @@ Expected: the pinned dependencies install without changing the lockfile. `--igno
 
 ## Build and start
 
-1. From the development checkout root, create the production artifacts:
+1. From the development checkout root, create the production artifacts. Do not rebuild over artifacts used by a running viewer; coordinate a deliberate stop and rebuild with its owner or use a separate authorized development checkout:
 
    ```sh
    bun --no-env-file run viewer:build
@@ -37,7 +37,7 @@ Expected: the pinned dependencies install without changing the lockfile. `--igno
 
    Use an unused viewer port rather than stopping an unrelated process. When another process already holds the port on `127.0.0.1`, `0.0.0.0` or `[::]`, the viewer prints `Viewer port <port> is already in use on 127.0.0.1, 0.0.0.0 or [::]. Choose an unused port with AGENT_BUS_VIEWER_PORT.` and exits with status 1, leaving that process's traffic alone. The source entry is also available with `bun --no-env-file run viewer` after building assets. The outer `--no-env-file` matters: an ordinary `bun run` can load an environment file before a child command starts. No LaunchAgent or persistent service is installed. *Rehearsed 2026-11-01 with the cold compiled artifact and the actual local viewer; no bus service changed. The port refusal was rehearsed 2026-11-01 with the compiled artifact against a scratch holder on each address, which kept answering its own requests.*
 
-3. Check actual data, not merely the HTML response. Wait for a successful independently timed history observation, choose an observed topic/address and read its context flow. Open a reply group and inspect each message's full Markdown/Source body, literal audience, reply reference and recorded origin. Cross-audience replies keep their actual recipients; unresolved targets remain explicit. Open Current peers and check its separate observation time. A successful zero-record response is valid; an unavailable region is not an empty success. The theme switch changes light/dark appearance without fetching messages. No send control or editable draft is available. *Checked read-only 2026-11-01: successful history, observed context flow, full unclamped Source, literal audiences, theme change and separately observed peers passed in the native local browser.*
+3. Check actual data, not merely the HTML response. Wait for a successful independently timed history observation, choose an observed topic/address and read its context flow. Open a reply group and inspect each message's full Markdown/Source body, literal audience, reply reference and recorded origin. Cross-audience replies keep their actual recipients; unresolved targets remain explicit. Open Current peers and check its separate observation time. A successful zero-record response is valid; an unavailable region is not an empty success. The theme switch changes light/dark appearance without fetching messages. No send control or editable draft is available. *Checked read-only 2026-11-02:* a first-start compiled viewer on loopback against the installed bus showed nonempty history, context flow, full Source, literal audiences, theme change and independently observed peers in the native local browser. This checks operability, not customer adoption.
 
 ## Stop and rebuild
 
