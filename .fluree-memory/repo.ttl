@@ -64,7 +64,7 @@ mem:constraint-01m6d1r49k07g6h4s6v9d7rkfj a mem:Constraint ;
     mem:tag "sparql" ;
     mem:scope mem:repo ;
     mem:branch "claude/bus-query" ;
-    mem:createdAt "2026-11-02T02:34:53.107116+00:00"^^xsd:dateTime .
+    mem:createdAt "2026-11-02T02:34:53.107116Z"^^xsd:dateTime .
 
 mem:fact-01m6d10bq173j9s6ra81qkn1je a mem:Fact ;
     mem:content "Fluree 4.2.4 JSON-LD query: binding ?id with values before a pattern bus:id {\"@value\": \"?id\", \"@t\": \"?t\"} returns a null ?t, so look entries up by binding the subject IRI (urn:agent-bus:message:<id>, values typed @id) and read bus:id with @t from it. Agent JSON's schema gives an array of datatypes for a variable whose values vary. SPARQL SERVICE SILENT and GRAPH <other> answer an empty success on the pinned query route, which would pass for a complete result, so bus_query refuses both at parse time." ;
@@ -76,7 +76,34 @@ mem:fact-01m6d10bq173j9s6ra81qkn1je a mem:Fact ;
     mem:artifactRef "src/catalogue.ts" ;
     mem:artifactRef "src/sparql.ts" ;
     mem:branch "claude/bus-query" ;
-    mem:createdAt "2026-11-02T02:21:54.273183+00:00"^^xsd:dateTime .
+    mem:createdAt "2026-11-02T02:21:54.273183Z"^^xsd:dateTime .
+
+mem:decision-01m6ckr5x5hqpc9c1hqgyg9j4h a mem:Decision ;
+    mem:content "The query trust model is local trusted actors: restore useful read-only SPARQL and shared saved analyses rather than proving a separate public-only graph against local agents. Read-only execution, address ownership and cursor delivery remain operational contracts; they are not reasons to remove analysis capability." ;
+    mem:tag "product" ;
+    mem:tag "query" ;
+    mem:tag "trust" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/coordination-turnaround.md" ;
+    mem:artifactRef "docs/frames/turnaround-query.md" ;
+    mem:branch "codex/bus-turnaround-frame" ;
+    mem:createdAt "2026-11-01T22:30:14.695167Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T04:45:34.735153+00:00"^^xsd:dateTime ;
+    mem:rationale "Adversarial local-process containment displaced the actual coordination and analysis job; the owner explicitly withdrew that premise." ;
+    mem:alternatives "Keep all public queries disabled,Build a confidentiality grammar or separate public mirror" .
+
+mem:decision-01m6ckr6afeymecqy7zf66cac2 a mem:Decision ;
+    mem:content "Product acceptance requires a real team outcome measured against an agreed pre-rollout baseline, not merged PRs or an answered guidance announcement. Complete evidence retrieval without a human export and reduced director relay are distinct outcomes. Discoverability failures and repeated coaching count against adoption; synthetic checks qualify mechanisms only." ;
+    mem:tag "adoption" ;
+    mem:tag "measurement" ;
+    mem:tag "product" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/frames/coordination-turnaround.md" ;
+    mem:branch "codex/bus-turnaround-frame" ;
+    mem:createdAt "2026-11-01T22:30:15.119294Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T04:45:34.991697+00:00"^^xsd:dateTime ;
+    mem:rationale "Artifact-level closure concealed the absence of useful operating change; each feature must complete discovery through real adoption and iteration." ;
+    mem:alternatives "Count shipped artifacts as completion,Count synthetic pilot success as real adoption" .
 
 mem:constraint-01m5x9h52psxmgtkmg6pxw27q8 a mem:Constraint ;
     mem:content "A process started from a session's shell inherits that session's runtime id (codex exec from Claude inherits CLAUDE_CODE_SESSION_ID), so the CLI acts as the parent when it defaults --runtime to the address's runtime. Give delegates that need an inbox their own address." ;
@@ -269,7 +296,7 @@ mem:decision-01m5y0xfhgx4cre4rg53xnyzwh a mem:Decision ;
     mem:artifactRef "test/jsonl-ledger.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T06:31:43.408992Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-11-02T02:21:40.274939+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T02:21:40.274939Z"^^xsd:dateTime ;
     mem:rationale "The ledger is queryable (SPARQL SELECT and full-text through bus_query and bus_history), readable as of any t, and shared by every machine through one transaction server. A second production store doubled what had to stay correct, for a fallback nothing used once every machine had Fluree." ;
     mem:alternatives "JSONL as a fallback production store (unused once every machine had Fluree),SQLite" .
 
