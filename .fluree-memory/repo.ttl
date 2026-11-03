@@ -196,7 +196,7 @@ mem:constraint-01m5zvh3rypm1qrxpmr95bc8y8 a mem:Constraint ;
     mem:createdAt "2026-10-27T23:36:04.126583Z"^^xsd:dateTime .
 
 mem:constraint-01m62kk2wvxhmka4gq0fk694x7 a mem:Constraint ;
-    mem:content "Run scripts/install-launch-agents.sh outside a real install only with all five overrides set (AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL, AGENT_BUS_LAUNCHER), in a subshell: without them it rewrites the live LaunchAgents and the ~/.local/bin/agent-bus link and restarts the live bus. An installer from a revision before the overrides ignores them." ;
+    mem:content "Run scripts/install-launch-agents.sh outside a real install only with all five overrides set (AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL, AGENT_BUS_LAUNCHER), in a subshell: without them it rewrites the live LaunchAgents and the installed managed launcher and restarts the live bus. An installer from a revision before the overrides ignores them." ;
     mem:tag "installer" ;
     mem:tag "launchd" ;
     mem:tag "operations" ;
@@ -207,7 +207,8 @@ mem:constraint-01m62kk2wvxhmka4gq0fk694x7 a mem:Constraint ;
     mem:artifactRef "docs/runbooks/operate.md" ;
     mem:artifactRef "scripts/install-launch-agents.sh" ;
     mem:branch "main" ;
-    mem:createdAt "2026-10-29T01:15:03.451116Z"^^xsd:dateTime .
+    mem:createdAt "2026-10-29T01:15:03.451116Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T03:15:21.490916+00:00"^^xsd:dateTime .
 
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
