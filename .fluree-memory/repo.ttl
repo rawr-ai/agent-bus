@@ -88,7 +88,7 @@ mem:decision-01m6ckr5x5hqpc9c1hqgyg9j4h a mem:Decision ;
     mem:artifactRef "docs/frames/turnaround-query.md" ;
     mem:branch "codex/bus-turnaround-frame" ;
     mem:createdAt "2026-11-01T22:30:14.695167Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-11-02T04:45:34.735153+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T04:45:34.735153Z"^^xsd:dateTime ;
     mem:rationale "Adversarial local-process containment displaced the actual coordination and analysis job; the owner explicitly withdrew that premise." ;
     mem:alternatives "Keep all public queries disabled,Build a confidentiality grammar or separate public mirror" .
 
@@ -101,7 +101,7 @@ mem:decision-01m6ckr6afeymecqy7zf66cac2 a mem:Decision ;
     mem:artifactRef "docs/frames/coordination-turnaround.md" ;
     mem:branch "codex/bus-turnaround-frame" ;
     mem:createdAt "2026-11-01T22:30:15.119294Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-11-02T04:45:34.991697+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T04:45:34.991697Z"^^xsd:dateTime ;
     mem:rationale "Artifact-level closure concealed the absence of useful operating change; each feature must complete discovery through real adoption and iteration." ;
     mem:alternatives "Count shipped artifacts as completion,Count synthetic pilot success as real adoption" .
 
@@ -130,18 +130,20 @@ mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
     mem:createdAt "2026-10-27T03:05:13.982763Z"^^xsd:dateTime .
 
 mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
-    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve runs src/bin.ts from it, and every Claude session's wake hook runs it through the installer's link ~/.local/bin/agent-bus. A half-edited tree breaks serve at its next restart and the hooks at their next run. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
+    mem:content "Never edit, branch or switch the primary agent-bus checkout: it stays clean and detached at the exact reviewed deployed commit, leaving main free for Graphite. The LaunchAgent's serve runs src/bin.ts from it, and every Claude session's wake hook runs it through the installer's managed launcher, so a half-edited or switched tree breaks serve at its next restart and the hooks at their next run. Develop in a worktree; the primary moves only when a reviewed deploy activates a new commit." ;
     mem:tag "hooks" ;
     mem:tag "operations" ;
     mem:tag "serve" ;
     mem:tag "worktree" ;
     mem:scope mem:repo ;
     mem:severity "must" ;
+    mem:artifactRef "AGENTS.md" ;
     mem:artifactRef "docs/runbooks/deploy.md" ;
+    mem:artifactRef "docs/runbooks/install.md" ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:32:00.198214Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-29T01:15:03.153294Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T02:35:11.670017+00:00"^^xsd:dateTime ;
     mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
 
 mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
