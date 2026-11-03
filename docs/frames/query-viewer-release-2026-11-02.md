@@ -1,6 +1,6 @@
 # Query and viewer release qualification
 
-This dated record distinguishes deployment, controlled checks, native client usability, real viewer reading and customer acceptance. Current procedures are in [deploy](../runbooks/deploy.md), [upgrade](../runbooks/upgrade.md) and [viewer](../runbooks/viewer.md); query and viewer contracts are in [interfaces](../architecture/interfaces.md).
+This dated record distinguishes deployment, controlled checks, native client usability, real viewer reading and customer acceptance; dates use US Eastern time. Current procedures are in [deploy](../runbooks/deploy.md), [upgrade](../runbooks/upgrade.md) and [viewer](../runbooks/viewer.md); query and viewer contracts are in [interfaces](../architecture/interfaces.md).
 
 ## Activation
 
