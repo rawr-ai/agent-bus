@@ -5,6 +5,8 @@
  * stream a chosen body in chunks, and the boundary reports when the bus ended that request
  * (the request's signal aborted or the response stream was cancelled). It shows what the bus
  * does with its own request; it says nothing about whether Fluree's computation would stop.
+ * It can also lose the acknowledgement of an update: the update reaches Fluree, and the
+ * client gets a gateway timeout instead of Fluree's response.
  */
 
 /** A query request the boundary answered, and when the bus let go of it. */
@@ -76,13 +78,20 @@ export interface Boundary {
   readonly next: (reply: Reply) => Promise<Held>;
   /** Pinned query requests that passed through to Fluree. */
   readonly passed: () => number;
+  /**
+   * Forwards the next update to Fluree and answers it with a 504 once Fluree has responded;
+   * resolves with Fluree's status.
+   */
+  readonly loseNextUpdate: () => Promise<number>;
   readonly stop: () => void;
 }
 
 const PINNED = /^\/v1\/fluree\/query\/([^/]+)$/;
+const UPDATE = "/v1/fluree/update";
 
 export const boundary = (upstream: string): Boundary => {
   const queued: Array<{ readonly reply: Reply; readonly arrived: (held: Held) => void }> = [];
+  const lostUpdates: Array<(status: number) => void> = [];
   let passed = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -115,18 +124,26 @@ export const boundary = (upstream: string): Boundary => {
         request.method === "GET" || request.method === "HEAD"
           ? undefined
           : await request.arrayBuffer();
-      return fetch(`${upstream}${url.pathname}${url.search}`, {
+      const lost = url.pathname === UPDATE ? lostUpdates.shift() : undefined;
+      const forwarded = fetch(`${upstream}${url.pathname}${url.search}`, {
         method: request.method,
         headers,
         body,
-        signal: request.signal,
+        // A lost acknowledgement must still reach Fluree after the client gives up.
+        ...(lost === undefined ? { signal: request.signal } : {}),
       });
+      if (lost === undefined) return forwarded;
+      const response = await forwarded;
+      await response.arrayBuffer();
+      lost(response.status);
+      return new Response(null, { status: 504 });
     },
   });
   return {
     url: server.url.origin,
     next: (reply) => new Promise<Held>((arrived) => queued.push({ reply, arrived })),
     passed: () => passed,
+    loseNextUpdate: () => new Promise<number>((forwarded) => lostUpdates.push(forwarded)),
     stop: () => server.stop(true),
   };
 };
