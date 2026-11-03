@@ -291,6 +291,7 @@ A resume restores a thread's status from the latest status event in its own roll
 - **A child process inherits both runtimes' ids.** A `codex exec` thread started from a Claude shell has its own `CODEX_THREAD_ID` and also the Claude session's id. A process that reads the wrong variable acts as the parent, as a subagent does.
 - **Whether it reaches an MCP server's environment** wasn't checked.
 - **A thread keeps the tool list it connected with.** One whose list predated a new `session` parameter could still pass it as an extra argument, with no reconnect (verified live).
+- **A fresh native child can use the installed query tools directly.** On 2026-11-02, a fresh child on bundled Codex 0.166.0-alpha.5.1 called `bus_queries` and `bus_run_query` directly: the seven-operation catalogue was visible and a one-peer page preserved `complete: false` (verified live). This does not establish that a previously loaded parent refreshed its schemas.
 
 ## What a Codex plugin can carry
 

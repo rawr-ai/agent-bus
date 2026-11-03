@@ -17,13 +17,13 @@ rows 'Fluree'
 rows 'Bun'
 ```
 
-Run it from the repo root. Expected: the rows for each platform, 19 for Codex, 8 for Claude Code and 3 for Fluree at the time of writing. *Checked read-only 2026-10-28*
+Run it from the repo root. Expected: the rows whose recheck conditions match each pattern; the number changes as findings are added. *Checked read-only 2026-10-28*
 
 When a recheck changes a finding, edit the platform page that owns it (its claim, its basis and the version it was observed on), the findings row, and the installed-versions table; this page doesn't change.
 
 ## After upgrading Bun
 
-Qualify the exact executable in a development checkout before proposing activation. Recheck the [Bun findings](../platforms/bun.md), all five enhanced type projects, the generated adapter literal oracle, the full mandatory checks and the real launcher, hook and server paths. The selected source and executable must match their exact pins; changing a shell binary or `PATH` does not rebind an installed launcher. Record old and new source, runtime and dependency identities for both machines. Follow the separate approval, launchd rehearsal and complete rollback gate in [deploy](deploy.md). *Rehearsed 2026-11-02* on a disposable installation, including both crossing-hook directions and complete cohort rollback. *Observed live 2026-11-02:* the paired activation of Bun 1.4.4 on both machines ([deploy](deploy.md#before-you-start)); the Bun on `PATH` was deliberately left at its previous version ([Bun](../platforms/bun.md#runtime-and-toml)). A live rollback has not been run.
+Qualify the exact executable in a development checkout before activation. Recheck the [Bun findings](../platforms/bun.md), all five enhanced type projects, the generated adapter literal oracle, the full mandatory checks and the real launcher, hook and server paths. The selected source and executable must match their exact pins; changing a shell binary or `PATH` does not rebind an installed launcher. Record old and new source, runtime and dependency identities for both machines. Follow the reviewed release decision, launchd rehearsal and complete rollback gate in [deploy](deploy.md). *Rehearsed 2026-11-02* on a disposable installation, including both crossing-hook directions and complete cohort rollback. *Observed live 2026-11-02:* the paired activation of Bun 1.4.4 on both machines ([deploy](deploy.md#before-you-start)); the Bun on `PATH` was deliberately left at its previous version ([Bun](../platforms/bun.md#runtime-and-toml)). A live rollback has not been run.
 
 ## After upgrading Codex (CLI or desktop app)
 
@@ -105,7 +105,7 @@ Follow the new version's own documentation first: it is installed with the CLI, 
 
 ## After a change to the plugin
 
-The agent-bus plugin (its hook manifest and the `agent-bus` skill) is copied into Claude Code's cache, so a change under `plugin/` or `.claude-plugin/` reaches sessions only through an update and a restart of each session. Deploy `serve` first ([deploy](deploy.md)), so the hook finds `bus_wake`.
+The agent-bus plugin (its hook manifest and the `agent-bus` skill) is copied into Claude Code's cache, so a change under `plugin/` or `.claude-plugin/` reaches sessions only through an update and a restart of each session. Deploy `serve` first ([deploy](deploy.md)), so the hook finds `bus_wake`. Refresh the Codex plugin separately on each participating home as [install](install.md#install-the-codex-skill-plugin) describes; an installed copy does not refresh a loaded thread's MCP schemas.
 
 ```sh
 claude plugin marketplace update agent-bus
@@ -113,7 +113,7 @@ claude plugin update agent-bus@agent-bus
 claude plugin list
 ```
 
-Expected: `agent-bus@agent-bus` enabled, at a new version. Then restart the sessions that need the change, or run `/reload-plugins` in them. The hook runs the checkout's code through `~/.local/bin/agent-bus`, so a change to `src/` reaches it at once without any of this. `claude plugin update --help` says a restart is required to apply it; that `/reload-plugins` does the second step wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#plugins)). *Unverified*: it would change the owner's installed plugin.
+Expected: `agent-bus@agent-bus` enabled, at a new version. Then restart the sessions that need the change, or run `/reload-plugins` in them. The hook runs the checkout's code through `~/.local/bin/agent-bus`, so a change to `src/` reaches it at once without any of this. `claude plugin update --help` says a restart is required to apply it; that `/reload-plugins` does the second step wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#plugins)). *Observed live 2026-11-02:* native refresh on both hosts produced complete Claude and Codex plugin copies byte-equal to deployed source. This does not prove already-loaded sessions received new schemas.
 
 ## Refreshing guidance in running sessions
 
