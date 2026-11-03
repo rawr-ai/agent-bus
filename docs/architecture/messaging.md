@@ -107,7 +107,7 @@ In Fluree, each entry is a node `urn:agent-bus:message:<id>`, typed `bus:Message
 - for presence, `bus:runtime` and `bus:status`;
 - `bus:json`, the exact encoded entry, which is what the bus reads back. The rest of a presence (its owning session, topics, `takeover`, `rejoinOf`, `codexThreadId` and note) is only there.
 
-The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`. `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter"). A new ledger's text search finds nothing at first ([platforms: Fluree](../platforms/fluree.md#full-text-search)). Public SPARQL is temporarily refused; this stored representation is not a public query contract ([interfaces](interfaces.md#bus_query)).
+The ledger's config graph enables inline full-text scoring on `bus:body` and `bus:subject`. `bus_history` ranks stemmed matches (`deploy adapters` finds "Deploying the adapter"). A new ledger's text search finds nothing at first ([platforms: Fluree](../platforms/fluree.md#full-text-search)). Saved queries decode entries into rows of their own, so this stored representation is not their contract; raw `bus_query` reads its projected predicates but not `bus:json`, so stored session claims stay off every query surface ([interfaces](interfaces.md#bus_query)).
 
 ## Rules
 
@@ -143,7 +143,7 @@ Naming the holder's current join id means a takeover can't race a newer join, an
 
 ### Fluree as the one store
 
-One shared, ordered log across machines, with history and full-text search. Each message is one commit, so a cursor is a commit number and every machine sees the same order. Richer queryable properties remain a possible extension, but public SPARQL is unavailable until its boundary is qualified ([connections](connections.md#rules)). Its refusal does not change the internal representation or the private reads used by ownership and delivery.
+One shared, ordered log across machines, with history and full-text search. Each message is one commit, so a cursor is a commit number and every machine sees the same order. Queries read the same log at a pinned commit through a read-only gateway ([interfaces](interfaces.md#bus_queries)); they do not change the internal representation or the reads used by ownership and delivery.
 - **JSONL is test support only.** The unit tests' ledger (`test/jsonl-ledger.ts`) has byte-offset cursors, file watching and substring search. Like Fluree, its retained `select` capability refuses.
 - **Rejected: JSONL as a second production store.** Both machines already ran on Fluree, so a second path had no use ([retired mechanisms](../frames/README.md#retired-mechanisms)).
 
@@ -184,4 +184,5 @@ Indexed in [frames](../frames/README.md).
 - [simplification-pass](../frames/simplification-pass.md): Fluree as the only production store, owner-less presences ignored, origin repo and branch kept, and `bus_query` and two locks per address kept.
 - [nudge-hygiene](../frames/nudge-hygiene.md): runs of joins (`rejoinOf`), topics kept on a rejoin, and takeover as `bus_takeover`.
 - [bus-design-query](../frames/bus-design-query.md): keep full internal presence for ownership and delivery while projecting ordinary public responses.
-- [public-query-containment](../frames/public-query-containment.md): withdraw only public SPARQL, retaining internal reads, representation and delivery.
+- [public-query-containment](../frames/public-query-containment.md): withdrew only public SPARQL, retaining internal reads, representation and delivery; retired by turnaround-query-design.
+- [turnaround-query-design](../frames/turnaround-query-design.md): saved queries and raw SPARQL at a pinned commit, through a gateway separate from delivery's ledger.

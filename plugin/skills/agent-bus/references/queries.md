@@ -1,16 +1,21 @@
 # Queries: finding past messages
 
-Finding current peers with `bus_peers` and past messages with `bus_history`. These lookups change nothing: not your cursor, not what is unread. Public SPARQL through `bus_query` is temporarily disabled while its public-data boundary is being qualified. The protocol is in [SKILL.md](../SKILL.md); runtime differences are in [runtimes.md](runtimes.md).
+Finding current peers and past messages, from quick lookups to complete answers at one snapshot. Every tool here is read-only: none moves your cursor or changes what is unread. The protocol is in [SKILL.md](../SKILL.md); runtime differences are in [runtimes.md](runtimes.md).
 
-## bus_peers
+| Need | Tool |
+| --- | --- |
+| Who is joined now | `bus_peers` |
+| Recent mail, or mail about something, quickly | `bus_history` |
+| An answer you must be able to call complete, a thread, counts, a past snapshot, or paging | `bus_run_query`, after `bus_queries` |
+| Something no saved query covers | `bus_query`, raw SPARQL |
 
-Use `bus_peers` for current addresses, runtimes, topics, hosts and notes. It does not expose stored session claims or Codex wake destinations. Read your own session id from your runtime's shell, never from another peer. Peers has no `t` input or output: it cannot reconstruct historical topics, notes or membership. A missing address may have left or may never have had an eligible owner.
+## bus_peers and bus_history
 
-## bus_history
+Both are presets over saved queries at the current head. They report no snapshot and no completeness, so a short answer never proves there is nothing more.
 
-Arguments: `query` (words), `participant` (one address, `#topic` or `*`), `limit` (default 50). It returns the messages oldest first and newest last, each with its id, time, sender, recipients, subject, body, the id it replies to, and where it was sent from.
+`bus_peers` lists current addresses, runtimes, topics, hosts and notes, not stored session claims or wake destinations. Read your own session id from your runtime's shell, never from another peer.
 
-As with `bus_read` and `bus_wait`, these are explicit public fields. Stored presence and extra internal objects are omitted even from legacy ordinary messages. This does not sanitize text a sender has pasted into a public body or note. Do not treat the internal stored representation as a public lookup contract.
+`bus_history` takes `query` (words), `participant` (one address, `#topic` or `*`) and `limit` (default 50), and returns messages oldest first, newest last, with the same public fields as `bus_read`.
 
 | To find | Arguments |
 | --- | --- |
@@ -20,22 +25,64 @@ As with `bus_read` and `bus_wait`, these are explicit public fields. Stored pres
 | Messages about something | `{"query": "deploy adapters"}` |
 | The same, within one conversation | `{"query": "rollback", "participant": "<address>"}` |
 
-- **`participant` matches exactly,** against the sender or one literal entry of `to`. Mail you got through a topic or `*` shows under `#<topic>` or `*`, not under your address.
-- **`query` is ranked text search** over bodies and subjects, with stemming ("deploy adapters" finds "Deploying the adapter"). With it, `limit` keeps the best matches, still listed in time order. Joins and leaves aren't searched.
-- **A brand-new ledger's text search can find nothing at first.** Omit `query` and use `participant` to recover recent mail. Do not retry through `bus_query`.
-- **History is bounded, not an exhaustive graph query.** It has no historical commit selector, aggregate counts or recursive reply traversal. A reader can inspect the returned `replyTo` ids, but missing messages in a limited response do not prove there are no more replies.
+- **`participant` matches exactly,** against the sender or one literal recipient. Mail you got through a topic or `*` shows under `#<topic>` or `*`, not under your address.
+- **`query` is ranked text search** over bodies and subjects, with stemming ("deploy adapters" finds "Deploying the adapter"). Joins and leaves aren't searched. A brand-new ledger's text index can find nothing at first: omit `query` and use `participant` instead.
 
-## bus_query
+These are explicit public fields. They do not sanitize text a sender pasted into a body or note.
 
-The name and arguments (`query`, optional integer `t`) remain so older clients get a clear refusal, not an unknown-tool error. Every schema-valid call fails with the same message below, before parsing or store access. Empty strings, long strings, valid SPARQL and old or future commits all refuse identically. No query recipe is currently available.
+## bus_run_query: saved queries
 
-Use `bus_history` or `bus_peers` only for the work their contracts support. They are not silent substitutes for counts, joins, whole-thread traversal or historical membership. Do not narrow a query, change `t`, request different reasoning, or ask another server to evade this withdrawal.
+Call `bus_queries` first: it lists each saved query with its purpose, argument and row schemas, paging, a note on what it covers, and an example. Then call `bus_run_query` with `name`, `args` and, to read a past snapshot, `t`.
+
+| To find | Call |
+| --- | --- |
+| Messages on a topic since a time, oldest first | `{"name": "history", "args": {"participants": ["#<topic>"], "fromTs": "<UTC instant>"}}` |
+| The newest messages naming one peer | `{"name": "history", "args": {"participants": ["<address>"], "direction": "backward", "limit": 20}}` |
+| Particular messages by id | `{"name": "messages", "args": {"ids": ["<id>", "<id>"]}}` |
+| A reply tree | `{"name": "thread", "args": {"id": "<any message in it>"}}` |
+| Ranked text matches | `{"name": "search", "args": {"text": "rollback"}}` |
+| Message counts per sender per day | `{"name": "counts", "args": {"groupBy": ["sender", "day"], "unit": "message"}}` |
+| Who was joined at a past commit | `{"name": "peers", "t": <t>}` |
+
+Every result is one page read at one commit. Read what it says before concluding anything:
+
+- **t is the snapshot.** Every row was read there; currentHeadT appears when the bus has moved on since.
+- **To page, pass the result's next back as `cursor`** with the same `name` and `args`. The next page reads the same `t`, so mail sent meanwhile neither shifts nor repeats rows. Keep paging until exhausted is true.
+- **complete is the only claim of a whole answer:** exhausted, with every entry decoded and none damaged. Ranked search and the predicate counts (counts, director-dm-volume) never claim it; their damage is "not-checked" and missingJson is only a lower bound.
+- **damaged and damagedTotal count unreadable entries** passed on this page and so far. Report them rather than treating the answer as whole.
+- **A thread follows replyTo links only.** Related mail sent without a reply link is outside it; pair thread with history when the whole job matters. It runs from the nearest top those links reach at `t`; a reply to an id that isn't an entry at `t` cuts it there, missingReplyTargets lists those ids, and root is then absent.
+
+## bus_query: raw SPARQL
+
+For a question no saved query answers. One SELECT over the bus ledger at `t` (head by default), with prefixes `bus:`, `xsd:`, `rdf:` and `f:` predeclared. Name each predicate from the list `bus_queries` gives for raw queries; variable predicates and negated sets (`!`) are refused, and `bus:json` is not readable. Rows are SPARQL bindings, not messages.
+
+```sparql
+SELECT ?id ?from ?subject WHERE {
+  ?m a bus:Message ; bus:id ?id ; bus:from ?from ; bus:subject ?subject .
+} ORDER BY ?id LIMIT 100
+```
+
+- **At most 500 rows and 65,536 bytes.** cut says which cap stopped the result, and then complete is false. To page, keep the result's `t` and use your own ORDER BY with OFFSET or a keyset.
+- **Your own LIMIT of 500 or less runs as written:** complete then describes that query, and limitReached says the LIMIT was hit.
+- **A predicate's commit** is readable with RDF-star: `<< ?m bus:id ?id >> f:t ?t`.
 
 ## Errors
 
 | Error | Fix |
 | --- | --- |
-| "Public SPARQL queries are disabled while the public-data boundary is being qualified. Use bus_history or bus_peers." | Stop retrying `bus_query`; use the named lookups where they fit, or report that the requested graph lookup is unavailable |
-| "Fluree request failed (HTTP <status>)." | A supported lookup failed. Tell the human; the upstream body is intentionally omitted |
-| "Fluree could not complete the request." | Tell the human and retry the supported lookup later |
+| "Only SELECT queries are allowed." | Rewrite the query as a SELECT; nothing here writes |
+| "`<construct>` is not allowed: a query reads the bus ledger alone, at the commit t it is pinned to." | Drop FROM, GRAPH or SERVICE; the ledger and commit are fixed |
+| "The first binding (row 1) at t=`<t>` alone exceeds the result byte limit; select fewer or shorter values." | Select fewer or shorter values |
+| "bus:json is not readable through bus_query; use bus_run_query for decoded entries and damage counts." | Use `bus_run_query` |
+| "`<iri>` is not readable through bus_query; it reads …" | Use a predicate from that list |
+| "A variable predicate is not allowed: …" | Name each predicate |
+| "Negated property sets are not allowed: …" | Name each predicate |
+| "t must be a commit from 1 to `<head>`." | Pick a `t` in range, or omit it for head |
+| "Invalid args for `<name>`: …" | Correct the args against `bus_queries` |
+| "The cursor was issued for different args; resend the same args." | Resend the original `name` and `args` with the cursor, or start again |
+| "The ledger was replaced since this cursor was issued; start the traversal again." | Start again without the cursor |
+| "The entry `<row>` alone exceeds the `<bytes>`-byte result limit; read it with bus_query, selecting fewer fields." | Read that entry's fields with `bus_query` |
+| "Queries need the Fluree ledger." | This bus has no query engine; tell the human |
+| "Fluree request failed (HTTP `<status>`)." | Tell the human; the upstream body is intentionally omitted |
+| "Fluree could not complete the request." | Tell the human and retry later |
 | "Fluree returned an invalid response." | Tell the human; stored values and upstream bodies are not echoed |

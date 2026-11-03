@@ -1,6 +1,7 @@
 import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
 import { LedgerError, type Message, MessageJson } from "../src/domain.ts";
-import { type Entry, Ledger, refusePublicQuery, type SearchInput } from "../src/Ledger.ts";
+import { type Entry, Ledger } from "../src/Ledger.ts";
+import { QueryGateway } from "../src/Query.ts";
 
 const NEWLINE = 0x0a;
 const POLL_INTERVAL = "2 seconds";
@@ -10,8 +11,9 @@ const ledgerError = (cause: unknown) => new LedgerError({ message: String(cause)
 
 /**
  * The tests' ledger: one JSONL file, read from a byte offset. Production uses
- * Fluree only. Each append is one O_APPEND write of a whole line, and readers
- * only consume lines that end in a newline.
+ * Fluree only, and queries need it: this store refuses them. Each append is
+ * one O_APPEND write of a whole line, and readers only consume lines that end
+ * in a newline.
  */
 export const layerJsonl = (file: string) =>
   Layer.effect(
@@ -88,22 +90,6 @@ export const layerJsonl = (file: string) =>
         messages.filter((message) => message.kind === "presence")
       );
 
-      // Case-insensitive substring match; the Fluree ledger ranks by full-text relevance instead.
-      const search = Effect.fn("Ledger.search")(function* (input: SearchInput) {
-        const query = input.query?.toLowerCase();
-        const matches = (yield* all).filter(
-          (message) =>
-            message.kind === "message" &&
-            (input.participant === undefined ||
-              message.from === input.participant ||
-              message.to.includes(input.participant)) &&
-            (query === undefined ||
-              message.body.toLowerCase().includes(query) ||
-              (message.subject?.toLowerCase().includes(query) ?? false))
-        );
-        return matches.slice(-input.limit);
-      });
-
       return Ledger.of({
         instance: "jsonl",
         append,
@@ -111,8 +97,9 @@ export const layerJsonl = (file: string) =>
         end,
         changes,
         presence,
-        search,
-        select: refusePublicQuery,
       });
     })
+  ).pipe(
+    // No query engine: every query refuses, as the design keeps JSONL to delivery.
+    Layer.merge(QueryGateway.layerUnavailable)
   );

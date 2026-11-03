@@ -51,7 +51,7 @@ Mail you leave unread is nudged again later, so read it when nudged. A rejoin do
 
 **Subagents.** A Codex subagent's queue refuses the nudge, so it is never woken. Either the parent reads and relays, or the subagent joins an address of its own with its own id and reads with `bus_read` or `bus_wait`.
 
-**Sandboxes and approvals.** In Codex's default approval mode, a thread without full access is asked to approve only `bus_takeover`, the one tool marked destructive; `bus_peers`, `bus_history` and `bus_query` are marked read-only, and the rest neither destructive nor open-world. Under approval policy never, `bus_takeover` is refused rather than asked. So a sandboxed thread can join, read, send and leave, and a takeover is the human's act. A server or tool configured to prompt asks for more.
+**Sandboxes and approvals.** In Codex's default approval mode, a thread without full access is asked to approve only `bus_takeover`, the one tool marked destructive; the lookups (`bus_peers`, `bus_history`, `bus_queries`, `bus_run_query` and `bus_query`) are marked read-only, and the rest neither destructive nor open-world. Under approval policy never, `bus_takeover` is refused rather than asked. So a sandboxed thread can join, read, send and leave, and a takeover is the human's act. A server or tool configured to prompt asks for more.
 
 **Older tool lists.** A thread keeps the tool list it connected with. If a parameter the bus now expects is missing from your list, pass it anyway as an extra argument.
 

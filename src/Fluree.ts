@@ -1,8 +1,9 @@
-import { Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
-import { Ledger, refusePublicQuery, type SearchInput, type Slice } from "./Ledger.ts";
+import { Ledger, type Slice } from "./Ledger.ts";
+import { QueryGateway } from "./Query.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
 export interface FlureeConfig {
@@ -18,6 +19,20 @@ const BUS = "https://rawr.ai/ns/agent-bus#";
 const context = { bus: BUS, xsd: "http://www.w3.org/2001/XMLSchema#" };
 /** Commits read per query, so no response is large enough to be cut short. */
 const READ_WINDOW = 500;
+/** Agent JSON: a self-describing result envelope that Fluree trims to a byte budget. */
+const AGENT_JSON = "application/vnd.fluree.agent+json";
+/** Fluree's row budget for raw SPARQL; the bus's own envelope cap applies on top. */
+const SPARQL_MAX_BYTES = 49_152;
+/** The largest raw SPARQL response read; anything larger is refused unparsed. */
+const SPARQL_RESPONSE_BYTES = 256 * 1024;
+/** The largest catalogue query response read; page sizes and caps keep real ones far smaller. */
+const JSONLD_RESPONSE_BYTES = 32 * 1024 * 1024;
+/**
+ * Each query request's deadline; the request is interrupted after it. A fuel
+ * limit would not help: in Fluree 4.2.4 it switches on fuel tracking, which
+ * replaces Agent JSON with an unbudgeted result.
+ */
+const QUERY_TIMEOUT = "10 seconds";
 
 /** Messages are immutable, so each one is a subject named by its id. */
 const messageIri = (id: string) => `urn:agent-bus:message:${id}`;
@@ -31,6 +46,15 @@ const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
 const Commit = Schema.Struct({ id: Schema.String });
 const Rows = Schema.Array(Schema.Tuple([Schema.String, Schema.Number]));
 const JsonRows = Schema.Array(Schema.Tuple([Schema.String]));
+const AgentJson = Schema.Struct({
+  // A column whose values have several datatypes lists them all.
+  schema: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.Union([Schema.String, Schema.Array(Schema.String)]))
+  ),
+  rows: Schema.Array(Schema.Record(Schema.String, Schema.Unknown)),
+  t: Schema.Number,
+  hasMore: Schema.optionalKey(Schema.Boolean),
+});
 
 const optional = <K extends string, V>(key: K, value: V | undefined) =>
   value === undefined ? {} : { [key]: value };
@@ -41,7 +65,7 @@ const optional = <K extends string, V>(key: K, value: V | undefined) =>
  * ledger can be queried, searched and joined (replies link to the message they
  * answer).
  */
-const toNode = (message: Message, json: string) => ({
+export const toNode = (message: Message, json: string) => ({
   "@context": context,
   "@id": messageIri(message.id),
   "@type": message.kind === "presence" ? "bus:Presence" : "bus:Message",
@@ -96,8 +120,7 @@ const fullTextConfig = (ledger: string) => ({
  * readers: reading from the cursor decides what is delivered.
  */
 export const layerFluree = (config: FlureeConfig) =>
-  Layer.effect(
-    Ledger,
+  Layer.effectContext(
     Effect.gen(function* () {
       const base = yield* HttpClient.HttpClient;
       const client =
@@ -124,6 +147,53 @@ export const layerFluree = (config: FlureeConfig) =>
             )
           ),
           Effect.scoped
+        );
+
+      /**
+       * A pinned query: at most `maxBytes` of response are read, and the request
+       * is interrupted after QUERY_TIMEOUT. Upstream error bodies are never read.
+       */
+      const sendBounded = (request: HttpClientRequest.HttpClientRequest, maxBytes: number) =>
+        Effect.gen(function* () {
+          const response = yield* client.execute(request);
+          if (response.status >= 400) {
+            return yield* httpFailure(response.status);
+          }
+          const chunks = yield* response.stream.pipe(
+            Stream.runFoldEffect(
+              () => ({ parts: [] as Array<Uint8Array>, size: 0 }),
+              (acc, chunk) => {
+                acc.parts.push(chunk);
+                acc.size += chunk.length;
+                return acc.size > maxBytes
+                  ? Effect.fail(
+                      new LedgerError({
+                        message: `Fluree's response exceeded ${maxBytes} bytes; narrow the query.`,
+                      })
+                    )
+                  : Effect.succeed(acc);
+              }
+            )
+          );
+          const text = new TextDecoder().decode(Buffer.concat(chunks.parts));
+          return yield* Effect.try({
+            try: (): unknown => JSON.parse(text),
+            catch: invalidResponse,
+          });
+        }).pipe(
+          Effect.catchTag("HttpClientError", () =>
+            Effect.fail(new LedgerError({ message: "Fluree could not complete the request." }))
+          ),
+          Effect.scoped,
+          Effect.timeoutOrElse({
+            duration: QUERY_TIMEOUT,
+            orElse: () =>
+              Effect.fail(
+                new LedgerError({
+                  message: `The query did not finish within ${QUERY_TIMEOUT}; narrow it.`,
+                })
+              ),
+          })
         );
 
       const decode =
@@ -165,12 +235,13 @@ export const layerFluree = (config: FlureeConfig) =>
       // A creator that stopped before writing the config leaves an empty ledger; finish it.
       if ((yield* end) === 0) yield* writeConfig;
       // The first commit's id names this incarnation of the ledger.
-      const instance = yield* send(
+      const incarnation = send(
         HttpClientRequest.get(`${api}/show/${ledger}?commit=${encodeURIComponent("t:1")}`)
       ).pipe(
         Effect.flatMap(decode(Commit)),
         Effect.map((commit) => commit.id)
       );
+      const instance = yield* incarnation;
 
       const encode = Schema.encodeEffect(MessageJson);
       const decodeMessage = Schema.decodeUnknownEffect(MessageJson);
@@ -232,57 +303,6 @@ export const layerFluree = (config: FlureeConfig) =>
         Effect.withSpan("Ledger.presence")
       );
 
-      // Search text and participant are bound with `values`, never spliced into the query.
-      const search = Effect.fn("Ledger.search")(function* (input: SearchInput) {
-        const where: Array<unknown> = [
-          {
-            "@id": "?m",
-            "@type": "bus:Message",
-            "bus:json": "?json",
-            "bus:ts": "?ts",
-            "bus:id": "?id",
-          },
-        ];
-        const vars: Array<string> = [];
-        const values: Array<string> = [];
-        if (input.participant !== undefined) {
-          vars.push("?p");
-          values.push(input.participant);
-          where.push(["union", { "@id": "?m", "bus:from": "?p" }, { "@id": "?m", "bus:to": "?p" }]);
-        }
-        if (input.query !== undefined) {
-          vars.push("?q");
-          values.push(input.query);
-          where.push(
-            [
-              "union",
-              { "@id": "?m", "bus:body": "?text" },
-              { "@id": "?m", "bus:subject": "?text" },
-            ],
-            ["bind", "?score", "(fulltext ?text ?q)"],
-            ["filter", "(> ?score 0)"]
-          );
-        }
-        const rows = yield* query({
-          select: ["?json"],
-          ...(vars.length === 0 ? {} : { values: [vars, [values]] }),
-          where,
-          // Unions can repeat a message, so ask for spare rows and deduplicate.
-          orderBy:
-            input.query === undefined
-              ? [
-                  ["desc", "?ts"],
-                  ["desc", "?id"],
-                ]
-              : [["desc", "?score"]],
-          limit: input.limit * 2,
-        }).pipe(Effect.flatMap(decode(JsonRows)));
-        const unique = [...new Set(rows.map(([json]) => json))].slice(0, input.limit);
-        const messages = yield* decodeAll(unique);
-        // Ids are time-ordered UUIDv7s, which break ties between messages sent in the same millisecond.
-        return messages.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
-      });
-
       // Each (re)connection wakes readers once, since commits may have landed while disconnected.
       const events = HttpClientResponse.stream(
         // The event stream needs no token (it only carries change notices), so none is sent.
@@ -303,15 +323,51 @@ export const layerFluree = (config: FlureeConfig) =>
         strategy: "sliding",
       });
 
-      return Ledger.of({
-        instance,
-        append,
-        read,
-        end,
-        changes,
-        presence,
-        search,
-        select: refusePublicQuery,
+      const pinned = (t: number) => `${api}/query/${encodeURIComponent(`${config.ledger}@t:${t}`)}`;
+
+      const gateway = QueryGateway.of({
+        // The incarnation first: a head read after it belongs to that incarnation or a later
+        // one, and a later one is caught by the incarnation check that follows every read.
+        pin: Effect.gen(function* () {
+          const id = yield* incarnation;
+          const head = yield* end;
+          return { head, incarnation: id };
+        }).pipe(Effect.withSpan("QueryGateway.pin")),
+        jsonld: (t, body) =>
+          sendBounded(
+            HttpClientRequest.post(pinned(t)).pipe(
+              HttpClientRequest.bodyJsonUnsafe({
+                ...body,
+                "@context": { ...context, ...(body["@context"] as object | undefined) },
+              })
+            ),
+            JSONLD_RESPONSE_BYTES
+          ).pipe(Effect.withSpan("QueryGateway.jsonld")),
+        sparql: (t, text) =>
+          sendBounded(
+            HttpClientRequest.post(pinned(t)).pipe(
+              HttpClientRequest.setHeaders({
+                accept: AGENT_JSON,
+                "fluree-max-bytes": `${SPARQL_MAX_BYTES}`,
+              }),
+              HttpClientRequest.bodyText(text, "application/sparql-query")
+            ),
+            SPARQL_RESPONSE_BYTES
+          ).pipe(
+            Effect.flatMap(decode(AgentJson)),
+            Effect.map((result) => ({
+              columns: result.schema ?? {},
+              rows: result.rows,
+              t: result.t,
+              truncated: result.hasMore === true,
+            })),
+            Effect.withSpan("QueryGateway.sparql")
+          ),
       });
+
+      return Context.make(
+        Ledger,
+        Ledger.of({ instance, append, read, end, changes, presence })
+      ).pipe(Context.add(QueryGateway, gateway));
     })
   );
