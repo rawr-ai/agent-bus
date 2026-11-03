@@ -1,9 +1,11 @@
+export type ObservationFailure = "unavailable" | "timeout";
+
 export interface ObservationSnapshot<I, T> {
   readonly input: I;
   readonly key: string;
   readonly observation: { readonly input: I; readonly key: string; readonly value: T } | null;
   readonly loading: boolean;
-  readonly error: null | "unavailable" | "timeout";
+  readonly error: null | ObservationFailure;
 }
 
 export interface ObservationResource<I, T> {
@@ -14,6 +16,12 @@ export interface ObservationResource<I, T> {
   readonly cancel: () => void;
   readonly dispose: () => void;
 }
+
+/** A rejection carrying HTTP status 504 is a timeout; any other rejection is unavailability. */
+export const failureFromStatus = (cause: unknown): ObservationFailure =>
+  typeof cause === "object" && cause !== null && Reflect.get(cause, "status") === 504
+    ? "timeout"
+    : "unavailable";
 
 const scheduleDeadline = (run: () => void, millis: number): (() => void) => {
   const timer = setTimeout(run, millis);
@@ -27,6 +35,8 @@ export const createObservationResource = <I, T>(options: {
   readonly load: (input: I, signal: AbortSignal) => Promise<T>;
   readonly timeoutMillis?: number;
   readonly schedule?: (run: () => void, millis: number) => () => void;
+  /** Names a rejected load; without it every rejection is unavailability. */
+  readonly classifyFailure?: (cause: unknown) => ObservationFailure;
 }): ObservationResource<I, T> => {
   const timeout = options.timeoutMillis ?? 12_000;
   if (!Number.isFinite(timeout) || timeout <= 0) throw new Error("Invalid observation deadline");
@@ -51,6 +61,13 @@ export const createObservationResource = <I, T>(options: {
       }
     | undefined;
 
+  const failure = (cause: unknown): ObservationFailure => {
+    try {
+      return options.classifyFailure?.(cause) ?? "unavailable";
+    } catch {
+      return "unavailable";
+    }
+  };
   const notify = () => {
     for (const listener of [...listeners]) {
       if (disposed) break;
@@ -78,11 +95,11 @@ export const createObservationResource = <I, T>(options: {
     pending = request;
     snapshot = { ...snapshot, loading: true, error: null };
     const current = () => !disposed && pending === request && generation === request.generation;
-    const unavailable = () => {
+    const unavailable = (cause?: unknown) => {
       if (!current()) return;
       pending = undefined;
       request.cancelDeadline();
-      snapshot = { ...snapshot, loading: false, error: "unavailable" };
+      snapshot = { ...snapshot, loading: false, error: failure(cause) };
       notify();
     };
     try {
@@ -111,8 +128,8 @@ export const createObservationResource = <I, T>(options: {
         };
         notify();
       }, unavailable);
-    } catch {
-      unavailable();
+    } catch (cause) {
+      unavailable(cause);
       return;
     }
     notify();

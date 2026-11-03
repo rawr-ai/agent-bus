@@ -1,10 +1,13 @@
+import { heapStats } from "bun:jsc";
 import { expect, test } from "bun:test";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
-import { Schema } from "effect";
+import { Context, Effect, Exit, Layer, Schema, Scope } from "effect";
 import { createViewer } from "../viewer/server/host.ts";
-import { MAX_MESSAGE_BYTES } from "../viewer/server/reader.ts";
+import { ViewerPortInUse } from "../viewer/server/port.ts";
+import { MAX_MESSAGE_BYTES, ObservationReader, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
+import { failureFromStatus } from "../viewer/src/observation-resource.ts";
 
 const marker = "private-fixture-value-never-disclosed";
 const message = {
@@ -32,8 +35,15 @@ const setup = (timeoutMillis = 1_000) => {
   const methods: string[] = [];
   const calls: Array<{ name: string; arguments: Record<string, unknown> }> = [];
   const capturedHeaders: Array<Headers> = [];
-  let mode: "normal" | "tool-error" | "outage" | "hang" | "oversized" | "malformed" | "quarantine" =
-    "normal";
+  let mode:
+    | "normal"
+    | "tool-error"
+    | "outage"
+    | "hang"
+    | "oversized"
+    | "malformed"
+    | "quarantine"
+    | "no-peers-tool" = "normal";
   let peersFail = false;
   let remoteAborts = 0;
   const release = new Set<() => void>();
@@ -58,7 +68,10 @@ const setup = (timeoutMillis = 1_000) => {
         return respond({
           ttlMs: 0,
           cacheScope: "private",
-          tools: ["bus_history", "bus_peers", "bus_publish"].map((name) => ({
+          tools: (mode === "no-peers-tool"
+            ? ["bus_history", "bus_publish"]
+            : ["bus_history", "bus_peers", "bus_publish"]
+          ).map((name) => ({
             name,
             inputSchema: { type: "object", properties: {} },
           })),
@@ -139,6 +152,7 @@ const setup = (timeoutMillis = 1_000) => {
     viewer,
     client,
     direct,
+    busPort: upstream.port ?? 0,
     calls,
     methods,
     capturedHeaders,
@@ -182,9 +196,10 @@ test("viewer calls only fixed modern public tools and explicitly projects nested
       { name: "bus_history", arguments: { limit: 50 } },
       { name: "bus_peers", arguments: {} },
     ]);
-    expect(new Set(fixture.methods)).toEqual(
-      new Set(["server/discover", "tools/list", "tools/call"])
-    );
+    // One client and its discovered tools serve every read.
+    expect(fixture.methods).toEqual(["server/discover", "tools/list", "tools/call", "tools/call"]);
+    await fixture.client.history({ limit: 50 });
+    expect(fixture.methods.slice(4)).toEqual(["tools/call"]);
     expect(
       fixture.capturedHeaders.every(
         (headers) => headers.get("mcp-protocol-version") === "2026-07-28"
@@ -296,11 +311,98 @@ test("tool, transport, invalid-root and byte-cap failures are safe and independe
   }
 });
 
+test("a failed discovery is not kept, and a missing tool is discovered again", async () => {
+  const fixture = setup();
+  try {
+    fixture.mode("outage");
+    const outage = fixture.client.history({ limit: 50 });
+    await expect(outage).rejects.toMatchObject({ status: 503 });
+    // The browser labels this rejection as unavailability, not a timeout.
+    expect(await outage.catch(failureFromStatus)).toBe("unavailable");
+    fixture.mode("no-peers-tool");
+    expect((await fixture.client.history({ limit: 50 })).messages).toHaveLength(1);
+    await expect(fixture.client.peers({})).rejects.toMatchObject({ status: 503 });
+    fixture.mode("normal");
+    expect((await fixture.client.peers({})).peers).toHaveLength(1);
+    expect(fixture.methods).toEqual([
+      "server/discover",
+      "server/discover",
+      "tools/list",
+      "tools/call",
+      "server/discover",
+      "tools/list",
+      "tools/call",
+    ]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+/** Objects still reachable after full collections: what a long-running reader keeps. */
+const liveObjects = () => {
+  Bun.gc(true);
+  Bun.gc(true);
+  return heapStats().objectCount;
+};
+
+test("a superseded client is released once its last concurrent read finishes", async () => {
+  const fixture = setup();
+  const scope = Scope.makeUnsafe();
+  try {
+    const reader = await Effect.runPromise(
+      Layer.buildWithScope(readerLayer({ busPort: fixture.busPort }), scope).pipe(
+        Effect.map((context) => Context.get(context, ObservationReader))
+      )
+    );
+    const read = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.exit(effect));
+    // Each peers read discovers a client without bus_peers, which that read then supersedes.
+    fixture.mode("no-peers-tool");
+    const failPeers = async (reads: number) => {
+      for (let attempt = 0; attempt < reads; attempt++) {
+        expect(Exit.isFailure(await read(reader.peers()))).toBe(true);
+      }
+    };
+    await failPeers(50);
+    const before = liveObjects();
+    await failPeers(200);
+    expect(fixture.methods.filter((method) => method === "server/discover")).toHaveLength(250);
+    // A retained client keeps about 300 objects alive; this bound admits only fixture records.
+    expect((liveObjects() - before) / 200).toBeLessThan(50);
+
+    // A read still using the client when a missing tool supersedes it is neither cancelled nor
+    // failed.
+    expect(Exit.isSuccess(await read(reader.history({ limit: 50 })))).toBe(true);
+    fixture.mode("hang");
+    const pending = read(reader.history({ limit: 50 }));
+    while (fixture.calls.length < 2) await Bun.sleep(2);
+    expect(Exit.isFailure(await read(reader.peers()))).toBe(true);
+    fixture.release();
+    expect(Exit.isSuccess(await pending)).toBe(true);
+    expect(fixture.abortCount()).toBe(0);
+
+    // The next read discovers a current client.
+    fixture.mode("normal");
+    const discovered = fixture.methods.length;
+    expect(Exit.isSuccess(await read(reader.peers()))).toBe(true);
+    expect(fixture.methods.slice(discovered)).toEqual([
+      "server/discover",
+      "tools/list",
+      "tools/call",
+    ]);
+  } finally {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    await fixture.close();
+  }
+});
+
 test("whole-operation deadline and real client cancellation close upstream work", async () => {
   const fixture = setup(100);
   fixture.mode("hang");
   try {
-    await expect(fixture.client.history({ limit: 50 })).rejects.toMatchObject({ status: 504 });
+    const deadline = fixture.client.history({ limit: 50 });
+    await expect(deadline).rejects.toMatchObject({ status: 504 });
+    // The browser labels this rejection as a timeout, not as unavailability.
+    expect(await deadline.catch(failureFromStatus)).toBe("timeout");
     const controller = new AbortController();
     const pending = fixture.client
       .history({ limit: 50 }, { signal: controller.signal })
@@ -384,4 +486,26 @@ test("close cancels stalled intake and active calls, is idempotent and prevents 
   expect((await fixture.direct("/rpc/history", post({ limit: 50 }))).status).toBe(503);
   expect(fixture.calls).toHaveLength(1);
   await fixture.close();
+});
+
+test("a port another owner holds on any interface is refused, leaving that owner's traffic", async () => {
+  const assets = new Map();
+  for (const hostname of ["0.0.0.0", "::", "127.0.0.1"]) {
+    const holder = Bun.serve({ hostname, port: 0, fetch: () => new Response("holder") });
+    const port = holder.port ?? 0;
+    try {
+      expect(() => createViewer({ port, busPort: 1, assets })).toThrow(ViewerPortInUse);
+      const answer = await fetch(`http://127.0.0.1:${port}/`, { headers: { host: "holder" } });
+      expect(await answer.text()).toBe("holder");
+    } finally {
+      await holder.stop(true);
+    }
+  }
+  // Once released, the same port is accepted.
+  const released = Bun.serve({ hostname: "0.0.0.0", port: 0, fetch: () => new Response() });
+  const port = released.port ?? 0;
+  await released.stop(true);
+  const viewer = createViewer({ port, busPort: 1, assets });
+  expect(viewer.url.port).toBe(String(port));
+  await viewer.close();
 });

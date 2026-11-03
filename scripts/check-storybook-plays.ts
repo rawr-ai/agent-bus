@@ -126,6 +126,12 @@ async function main() {
         "viewer-investigation--exact-search-and-clear",
         "viewer-investigation--dark-narrow",
         "viewer-automatic-refresh--pause-and-resume",
+        "viewer-observation-states--empty-and-all-omitted",
+        "viewer-observation-states--unavailable-then-observed",
+        "viewer-observation-states--failed-refresh-keeps-last-good",
+        "viewer-observation-states--refresh-announces-arrivals",
+        "viewer-observation-states--retained-reading",
+        "viewer-stopped--render-defect",
       ];
   assert.ok(
     ids.every((id) => /^[a-zA-Z0-9_-]+$/.test(id)),

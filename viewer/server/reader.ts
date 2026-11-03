@@ -1,4 +1,4 @@
-import { Context, Data, Effect, Layer, Schema, Semaphore } from "effect";
+import { Context, Data, Duration, Effect, Layer, RcRef, Schema, Semaphore } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import {
@@ -34,56 +34,73 @@ export const readerLayer = (options: {
   readonly busPort: number;
   readonly timeoutMillis?: number;
 }) =>
-  Layer.sync(ObservationReader)(() => {
-    const permits = Semaphore.makeUnsafe(MAX_CONCURRENT_READS);
-    const timeout = options.timeoutMillis ?? OPERATION_TIMEOUT_MILLIS;
-    const clientLayer = McpClient.layerHttp({
-      name: "agent-bus-viewer",
-      version: "1.0.0",
-      url: `http://127.0.0.1:${options.busPort}/mcp`,
-      protocol: McpProtocol.v2026_07_28,
-      timeout,
-      maxMessageBytes: MAX_MESSAGE_BYTES,
-    }).pipe(Layer.provide(FetchHttpClient.layer));
+  Layer.effect(ObservationReader)(
+    Effect.gen(function* () {
+      const permits = Semaphore.makeUnsafe(MAX_CONCURRENT_READS);
+      const timeout = options.timeoutMillis ?? OPERATION_TIMEOUT_MILLIS;
+      const clientLayer = McpClient.layerHttp({
+        name: "agent-bus-viewer",
+        version: "1.0.0",
+        url: `http://127.0.0.1:${options.busPort}/mcp`,
+        protocol: McpProtocol.v2026_07_28,
+        timeout,
+        maxMessageBytes: MAX_MESSAGE_BYTES,
+      }).pipe(Layer.provide(FetchHttpClient.layer));
 
-    const lookup = (name: "bus_history" | "bus_peers", args: Record<string, unknown>) =>
-      Effect.gen(function* () {
-        const client = yield* McpClient.McpClient;
-        const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
-        if (tool === undefined) return yield* new ObservationUnavailable();
-        return yield* client.callTool({ tool, schema: Schema.Unknown, arguments: args });
-      }).pipe(
-        Effect.provide(clientLayer),
-        Effect.mapError(() => new ObservationUnavailable()),
-        permits.withPermits(1),
-        Effect.timeoutOrElse({
-          duration: timeout,
-          orElse: () => Effect.fail(new ObservationTimeout()),
-        })
-      );
+      // The stateless protocol keeps no session, so one client and its discovered tools serve
+      // every read: each observation is one tools/call. The reference-counted client is kept only
+      // once discovery succeeds. A missing tool invalidates it, so the next read discovers again;
+      // reads still holding the invalidated client finish with it, and the last one closes it.
+      const connection = yield* RcRef.make({
+        acquire: Effect.gen(function* () {
+          const client = Context.get(yield* Layer.build(clientLayer), McpClient.McpClient);
+          return { client, tools: yield* client.listTools() };
+        }),
+        idleTimeToLive: Duration.infinity,
+      });
 
-    return {
-      history: (criteria) =>
-        lookup("bus_history", {
-          limit: criteria.limit,
-          ...(criteria.query === undefined ? {} : { query: criteria.query }),
-          ...(criteria.participant === undefined ? {} : { participant: criteria.participant }),
+      const lookup = (name: "bus_history" | "bus_peers", args: Record<string, unknown>) =>
+        Effect.gen(function* () {
+          const { client, tools } = yield* RcRef.get(connection);
+          const tool = tools.find((candidate) => candidate.name === name);
+          if (tool === undefined) {
+            yield* RcRef.invalidate(connection);
+            return yield* new ObservationUnavailable();
+          }
+          return yield* client.callTool({ tool, schema: Schema.Unknown, arguments: args });
         }).pipe(
-          Effect.flatMap((value) =>
-            Effect.try({
-              try: () => projectHistory(value, criteria, new Date().toISOString()),
-              catch: () => new ObservationUnavailable(),
-            })
-          )
-        ),
-      peers: () =>
-        lookup("bus_peers", {}).pipe(
-          Effect.flatMap((value) =>
-            Effect.try({
-              try: () => projectPeers(value, new Date().toISOString()),
-              catch: () => new ObservationUnavailable(),
-            })
-          )
-        ),
-    };
-  });
+          Effect.scoped,
+          Effect.mapError(() => new ObservationUnavailable()),
+          permits.withPermits(1),
+          Effect.timeoutOrElse({
+            duration: timeout,
+            orElse: () => Effect.fail(new ObservationTimeout()),
+          })
+        );
+
+      return {
+        history: (criteria) =>
+          lookup("bus_history", {
+            limit: criteria.limit,
+            ...(criteria.query === undefined ? {} : { query: criteria.query }),
+            ...(criteria.participant === undefined ? {} : { participant: criteria.participant }),
+          }).pipe(
+            Effect.flatMap((value) =>
+              Effect.try({
+                try: () => projectHistory(value, criteria, new Date().toISOString()),
+                catch: () => new ObservationUnavailable(),
+              })
+            )
+          ),
+        peers: () =>
+          lookup("bus_peers", {}).pipe(
+            Effect.flatMap((value) =>
+              Effect.try({
+                try: () => projectPeers(value, new Date().toISOString()),
+                catch: () => new ObservationUnavailable(),
+              })
+            )
+          ),
+      };
+    })
+  );

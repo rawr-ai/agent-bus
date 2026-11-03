@@ -42,12 +42,14 @@
         "{workspaceRoot}/viewer/src/auto-refresh.ts",
         "{workspaceRoot}/viewer/src/history-criteria.ts",
         "{workspaceRoot}/viewer/src/reading-unit.ts",
+        "{workspaceRoot}/viewer/src/announcements.ts",
         "{workspaceRoot}/test/viewer-public.test.ts",
         "{workspaceRoot}/test/viewer-conversations.test.ts",
         "{workspaceRoot}/test/viewer-markdown-policy.test.ts",
         "{workspaceRoot}/test/viewer-observation-resource.test.ts",
         "{workspaceRoot}/test/viewer-investigation.test.ts",
         "{workspaceRoot}/test/viewer-reading-unit.test.ts",
+        "{workspaceRoot}/test/viewer-announcements.test.ts",
         "{workspaceRoot}/tsconfig.json"
       ],
       "outputs": [],
@@ -92,7 +94,7 @@
       "executor": "nx:run-commands",
       "cache": false,
       "options": {
-        "command": "bun --no-env-file test test/viewer-server.test.ts",
+        "command": "bun --no-env-file test test/viewer-server.test.ts test/viewer-reader-bus.test.ts",
         "env": { "FORCE_COLOR": "0" }
       }
     },

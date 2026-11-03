@@ -1,5 +1,6 @@
 import { RPCHandler } from "@orpc/server/fetch";
 import { ManagedRuntime } from "effect";
+import { assertPortFree, isAddressInUse, ViewerPortInUse } from "./port.ts";
 import { MAX_CONCURRENT_READS, OPERATION_TIMEOUT_MILLIS, readerLayer } from "./reader.ts";
 import { createRouter, type ViewerRuntime } from "./router.ts";
 
@@ -35,6 +36,7 @@ export const createViewer = (options: {
   readonly timeoutMillis?: number;
   readonly runtime?: ViewerRuntime;
 }) => {
+  assertPortFree(options.port);
   const runtime = options.runtime ?? ManagedRuntime.make(readerLayer(options));
   const handler = new RPCHandler(createRouter(runtime));
   const active = new Set<AbortController>();
@@ -149,14 +151,20 @@ export const createViewer = (options: {
   };
 
   const fetch = async (request: Request) => secure(await fetchRequest(request));
-  const server = Bun.serve({
-    hostname: "127.0.0.1",
-    port: options.port,
-    development: false,
-    maxRequestBodySize: MAX_REQUEST_BYTES,
-    fetch,
-    error: () => secure(error(500, "Viewer unavailable")),
-  });
+  let server: ReturnType<typeof Bun.serve>;
+  try {
+    server = Bun.serve({
+      hostname: "127.0.0.1",
+      port: options.port,
+      development: false,
+      maxRequestBodySize: MAX_REQUEST_BYTES,
+      fetch,
+      error: () => secure(error(500, "Viewer unavailable")),
+    });
+  } catch (cause) {
+    void runtime.dispose();
+    throw isAddressInUse(cause) ? new ViewerPortInUse(options.port) : cause;
+  }
   boundPort = server.port ?? options.port;
   return {
     url: server.url,

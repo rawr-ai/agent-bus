@@ -1,5 +1,8 @@
 import { expect, test } from "bun:test";
-import { createObservationResource } from "../viewer/src/observation-resource.ts";
+import {
+  createObservationResource,
+  failureFromStatus,
+} from "../viewer/src/observation-resource.ts";
 
 const deferred = <T>() => {
   let resolve!: (value: T) => void;
@@ -231,4 +234,33 @@ test("two independent resources do not share freshness, errors or cancellation",
   expect(peers.resource.getSnapshot().observation).toBeNull();
   history.resource.dispose();
   peers.resource.dispose();
+});
+
+test("a classifier names server timeouts apart from other failures, and its own failure is unavailability", async () => {
+  expect(failureFromStatus({ status: 504 })).toBe("timeout");
+  expect(failureFromStatus({ status: 503 })).toBe("unavailable");
+  expect(failureFromStatus(new Error("private diagnostic"))).toBe("unavailable");
+  expect(failureFromStatus(null)).toBe("unavailable");
+  const rejections: unknown[] = [];
+  const resource = createObservationResource<string, string>({
+    input: "latest",
+    keyOf: (input) => input,
+    load: () => Promise.reject(rejections.shift()),
+    schedule: () => () => {},
+    classifyFailure: (cause) => {
+      if (cause === "defect") throw new Error("classifier defect");
+      return failureFromStatus(cause);
+    },
+  });
+  for (const [cause, error] of [
+    [{ status: 504 }, "timeout"],
+    [{ status: 503 }, "unavailable"],
+    ["defect", "unavailable"],
+  ] as const) {
+    rejections.push(cause);
+    resource.refresh();
+    await flush();
+    expect(resource.getSnapshot()).toMatchObject({ loading: false, error });
+  }
+  resource.dispose();
 });

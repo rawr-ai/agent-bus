@@ -7,6 +7,8 @@
   --border: #e1e6e2;
   --border-soft: #e9edea;
   --border-strong: #b9cbc3;
+  /* Form-control boundary: at least 3:1 against paper and canvas. */
+  --control-border: #7f8f87;
   --hover: #f2f6f3;
   --selected: #eaf4ef;
   --teal-text: #286d60;
@@ -22,6 +24,7 @@
   --border: #39443e;
   --border-soft: #303a34;
   --border-strong: #5d7065;
+  --control-border: #6b7f74;
   --hover: #28332d;
   --selected: #263d34;
   --teal-text: #9ad8c4;
@@ -38,15 +41,13 @@
     --border: #39443e;
     --border-soft: #303a34;
     --border-strong: #5d7065;
+    --control-border: #6b7f74;
     --hover: #28332d;
     --selected: #263d34;
     --teal-text: #9ad8c4;
     --warning: #f1cb84;
     color-scheme: dark;
   }
-}
-.brand-context {
-  color: var(--muted);
 }
 .render-limit {
   color: var(--warning);

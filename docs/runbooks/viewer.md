@@ -35,7 +35,7 @@ Expected: the pinned dependencies install without changing the lockfile. `--igno
    AGENT_BUS_VIEWER_PORT=4318 AGENT_BUS_PORT=8096 bun --no-env-file dist/viewer/main.js
    ```
 
-   Use an unused viewer port rather than stopping an unrelated process. The source entry is also available with `bun --no-env-file run viewer` after building assets. The outer `--no-env-file` matters: an ordinary `bun run` can load an environment file before a child command starts. No LaunchAgent or persistent service is installed. *Rehearsed 2026-11-01 with the cold compiled artifact and the actual local viewer; no bus service changed.*
+   Use an unused viewer port rather than stopping an unrelated process. When another process already holds the port on `127.0.0.1`, `0.0.0.0` or `[::]`, the viewer prints `Viewer port <port> is already in use on 127.0.0.1, 0.0.0.0 or [::]. Choose an unused port with AGENT_BUS_VIEWER_PORT.` and exits with status 1, leaving that process's traffic alone. The source entry is also available with `bun --no-env-file run viewer` after building assets. The outer `--no-env-file` matters: an ordinary `bun run` can load an environment file before a child command starts. No LaunchAgent or persistent service is installed. *Rehearsed 2026-11-01 with the cold compiled artifact and the actual local viewer; no bus service changed. The port refusal was rehearsed 2026-11-01 with the compiled artifact against a scratch holder on each address, which kept answering its own requests.*
 
 3. Check actual data, not merely the HTML response. Wait for a successful independently timed history observation, choose an observed topic/address and read its context flow. Open a reply group and inspect each message's full Markdown/Source body, literal audience, reply reference and recorded origin. Cross-audience replies keep their actual recipients; unresolved targets remain explicit. Open Current peers and check its separate observation time. A successful zero-record response is valid; an unavailable region is not an empty success. The theme switch changes light/dark appearance without fetching messages. No send control or editable draft is available. *Checked read-only 2026-11-01: successful history, observed context flow, full unclamped Source, literal audiences, theme change and separately observed peers passed in the native local browser.*
 
@@ -52,7 +52,7 @@ Use Control-C in the viewer terminal. Expected: it stops intake, interrupts acti
 
 Use the smallest relevant lane during development, then the full uncached check at the story boundary. The browser and workbench commands below use synthetic data, not the running bus, credentials or a user's browser profile. Their launcher refuses root dotenv names before invoking tools, allowlists inherited environment, disables telemetry/cloud and binds owned servers to loopback. Do not run these tools directly to bypass that boundary.
 
-1. Check pure projection, conversation, Markdown-policy and resource behavior:
+1. Check pure projection, conversation, Markdown-policy, resource and announcement behavior:
 
    ```sh
    bun --no-env-file run test:viewer:unit
@@ -68,7 +68,7 @@ Use the smallest relevant lane during development, then the full uncached check 
    bun --no-env-file run test:storybook
    ```
 
-   Expected: the runner owns an ephemeral static server and fresh local Stagehand browsers, reports actual successful play phases, and closes them. A static build alone does not execute plays. Render-only and deliberately failing internal harness-oracle stories must be rejected when explicitly selected. For interactive component work, `bun --no-env-file run storybook` uses the fixed local development port and refuses a collision rather than taking another owner's server. Stop it with Control-C. *Build and eight positive plays rehearsed 2026-11-01; real failure and no-play oracles correctly refused. Interactive local startup, a native exact-search play against that dev server and owned shutdown also rehearsed.*
+   Expected: the runner owns an ephemeral static server and fresh local Stagehand browsers, reports actual successful play phases, and closes them. A static build alone does not execute plays. Render-only and deliberately failing internal harness-oracle stories must be rejected when explicitly selected. For interactive component work, `bun --no-env-file run storybook` uses the fixed local development port and refuses a collision rather than taking another owner's server. Stop it with Control-C. *Build and fourteen positive plays rehearsed 2026-11-01, including the App's empty, all-omitted, unavailable, timed-out, failed-refresh, arrival, retained and stopped states; real failure and no-play oracles correctly refused. Interactive local startup, a native exact-search play against that dev server and owned shutdown also rehearsed.*
 
 3. Build and check connected production journeys:
 
@@ -96,11 +96,11 @@ Use the smallest relevant lane during development, then the full uncached check 
    bun --no-env-file run check
    ```
 
-   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; after integrating current main, 418 tests, types, lint and documentation passed using the qualified test tool. The upstream retired-validator removal accounts for the count change, not skipped viewer or storage coverage.*
+   Expected: all core/storage, viewer, tooling and docs checks run, with no Nx wrapper or cached aggregate. Select the already qualified storage test tool explicitly when the shell has an older binary, as described below. Do not drop storage tests to make a UI loop faster. *Rehearsed 2026-11-01; 430 tests, types, lint and documentation passed, on a branch and on a detached HEAD.*
 
 ## If it fails
 
-- **No startup URL:** check that the production build exists, the configured ports are integers in range and the viewer port is unused. Rebuild from the same checkout. Startup errors deliberately omit paths and raw diagnostics.
+- **No startup URL:** `Viewer port … is already in use` means another process holds that port on `127.0.0.1`, `0.0.0.0` or `[::]`: choose another with `AGENT_BUS_VIEWER_PORT` rather than stopping it. Otherwise check that the production build exists and the configured ports are integers in range, and rebuild from the same checkout. Startup errors deliberately omit paths and raw diagnostics.
 - **Request refused:** use the exact printed `127.0.0.1` URL and port. Foreign/`null` Origin, a different Host and unsupported methods are refused; do not add permissive CORS or expose it on a network interface to work around this.
 - **History or peers unavailable:** the viewer may be up while the bus or store is not. Check the existing bus with [operate](operate.md), then [recover](recover.md). Confirm `AGENT_BUS_PORT` points at the existing machine's endpoint. The viewer requires the selected stateless MCP revision; no fallback, inbox read or direct store query is a recovery path.
 - **Some records omitted:** malformed records and duplicate identities are quarantined. Inspect the valid observation and its explicit omission count; do not read a short or all-omitted result as a complete archive or no historical messages.
@@ -108,6 +108,7 @@ Use the smallest relevant lane during development, then the full uncached check 
 - **Text search misses older content:** follow the [known Fluree limits](../platforms/fluree.md#full-text-search). Do not infer that a historical message never existed, start a second server or reindex production as a viewer repair.
 - **Contributor full check fails at Fluree search:** verify which Fluree binary the test process selects. The [platform findings](../platforms/fluree.md#full-text-search) distinguish the qualified tool from older local behavior. Do not skip Fluree or merely increase a timeout to conceal an empty result.
 - **Tool refused before startup:** the isolated development checkout contains root dotenv names. Keep credential files in their actual owning environment; use a separate credential-free development checkout. Do not print, move or delete somebody else's files. The task dotenv switch alone does not prevent the parent tool from reading them.
+- **The viewer stopped:** an observation broke a display invariant, so the viewer replaced itself with an alert rather than a blank or partial page. Reload. If the same observation stops it again, keep the page's time and the history criteria and report it; the cause is deliberately not displayed, and the bus is unaffected.
 - **Workbench build succeeds but plays fail:** inspect the native play verdict, rendered error and selected story. No-play, native exception and timeout are failures even if a terminal success event follows. Rebuild after story/config changes; do not replace this check with screenshots or build-only success.
 - **A browser lane is unexpectedly slow:** inspect the bounded failing selector/play, startup and exact viewport separately. The normal representative lane is not a three-minute qualification job. Do not add sleeps, cloud/model fallback or global process cleanup. Close only the named owned session or process; preserve the user's browsers.
 
