@@ -5,6 +5,8 @@
  * stream a chosen body in chunks, and the boundary reports when the bus ended that request
  * (the request's signal aborted or the response stream was cancelled). It shows what the bus
  * does with its own request; it says nothing about whether Fluree's computation would stop.
+ * It can also lose the acknowledgement of an update: the update reaches Fluree, and the
+ * client gets a gateway timeout instead of Fluree's response.
  */
 
 /** A query request the boundary answered, and when the bus let go of it. */
@@ -61,6 +63,9 @@ export const chunked =
     );
   };
 
+/** What became of an update whose acknowledgement the boundary lost. */
+export type Forwarded = { readonly status: number } | { readonly failed: string };
+
 /** A JSON text padded with trailing spaces to exactly `size` UTF-8 bytes. */
 export const padded = (value: unknown, size: number) => {
   const text = JSON.stringify(value);
@@ -76,13 +81,25 @@ export interface Boundary {
   readonly next: (reply: Reply) => Promise<Held>;
   /** Pinned query requests that passed through to Fluree. */
   readonly passed: () => number;
+  /**
+   * Forwards the next update to Fluree and answers it with a 504 once forwarding settles;
+   * resolves with Fluree's status, or with the failure if the update got no response within
+   * the boundary's forward timeout.
+   */
+  readonly loseNextUpdate: () => Promise<Forwarded>;
   readonly stop: () => void;
 }
 
 const PINNED = /^\/v1\/fluree\/query\/([^/]+)$/;
+const UPDATE = "/v1/fluree/update";
 
-export const boundary = (upstream: string): Boundary => {
+export const boundary = (
+  upstream: string,
+  /** How long a lost update may take to reach Fluree and be answered. */
+  options: { readonly forwardTimeoutMs?: number } = {}
+): Boundary => {
   const queued: Array<{ readonly reply: Reply; readonly arrived: (held: Held) => void }> = [];
+  const lostUpdates: Array<(forwarded: Forwarded) => void> = [];
   let passed = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -115,18 +132,32 @@ export const boundary = (upstream: string): Boundary => {
         request.method === "GET" || request.method === "HEAD"
           ? undefined
           : await request.arrayBuffer();
-      return fetch(`${upstream}${url.pathname}${url.search}`, {
-        method: request.method,
-        headers,
-        body,
-        signal: request.signal,
-      });
+      const forward = (signal: AbortSignal) =>
+        fetch(`${upstream}${url.pathname}${url.search}`, {
+          method: request.method,
+          headers,
+          body,
+          signal,
+        });
+      const lost = url.pathname === UPDATE ? lostUpdates.shift() : undefined;
+      if (lost === undefined) return forward(request.signal);
+      // The update still goes to Fluree after the client gives up, and its outcome settles
+      // whether or not Fluree answers, so the test waiting on it can always finish.
+      try {
+        const response = await forward(AbortSignal.timeout(options.forwardTimeoutMs ?? 30_000));
+        await response.arrayBuffer();
+        lost({ status: response.status });
+      } catch (error) {
+        lost({ failed: error instanceof Error ? error.message : String(error) });
+      }
+      return new Response(null, { status: 504 });
     },
   });
   return {
     url: server.url.origin,
     next: (reply) => new Promise<Held>((arrived) => queued.push({ reply, arrived })),
     passed: () => passed,
+    loseNextUpdate: () => new Promise<Forwarded>((settled) => lostUpdates.push(settled)),
     stop: () => server.stop(true),
   };
 };
