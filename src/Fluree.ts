@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
@@ -244,7 +244,12 @@ export const layerFluree = (config: FlureeConfig) =>
       const instance = yield* incarnation;
 
       const encode = Schema.encodeEffect(MessageJson);
-      const decodeMessage = Schema.decodeUnknownEffect(MessageJson);
+      const decodeMessage = (text: string) =>
+        Schema.decodeUnknownEffect(MessageJson)(text).pipe(
+          Effect.mapError(
+            () => new LedgerError({ message: "A ledger entry could not be decoded." })
+          )
+        );
 
       const append = Effect.fn("Ledger.append")(function* (message: Message) {
         const json = yield* encode(message).pipe(
@@ -258,9 +263,7 @@ export const layerFluree = (config: FlureeConfig) =>
       const decodeAll = Effect.fn("Ledger.decodeAll")(function* (texts: ReadonlyArray<string>) {
         const messages: Array<Message> = [];
         for (const text of texts) {
-          const decoded = yield* Effect.option(decodeMessage(text));
-          if (Option.isSome(decoded)) messages.push(decoded.value);
-          else yield* Effect.logWarning("Skipping undecodable message in the Fluree ledger");
+          messages.push(yield* decodeMessage(text));
         }
         return messages;
       });
@@ -284,8 +287,8 @@ export const layerFluree = (config: FlureeConfig) =>
             orderBy: "?t",
           }).pipe(Effect.flatMap(decode(Rows)));
           for (const [text, t] of rows) {
-            const [message] = yield* decodeAll([text]);
-            if (message !== undefined) entries.push({ message, end: t });
+            const message = yield* decodeMessage(text);
+            entries.push({ message, end: t });
           }
         }
         return { entries, next: head } satisfies Slice;
