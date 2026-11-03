@@ -20,7 +20,8 @@
  *    cannot both match (fluree/db v4.2.4: routes/transact.rs, tx_builder.rs,
  *    commit.rs, consensus/local.rs). The run checks what a client can see: a
  *    stale writer writes nothing, a success status or a later t is not
- *    evidence of applying and the operation's witness is, a lost
+ *    evidence of applying and the operation's own witness is, an operation id
+ *    that already has a witness can't be reused for another request, a lost
  *    acknowledgement stays unknown until its witness is found, and an
  *    identical replay never notifies twice. Its races overlap at the client;
  *    they cannot show that the two writes overlapped inside Fluree.
@@ -180,8 +181,12 @@ interface Replacement {
   readonly message: Message;
 }
 
-const replacement = (scope: string, expected: string | null): Replacement => {
-  const op = Bun.randomUUIDv7();
+const replacement = (
+  scope: string,
+  expected: string | null,
+  op = Bun.randomUUIDv7(),
+  body = `${scope} is now ${op}`
+): Replacement => {
   return {
     op,
     scope,
@@ -192,15 +197,25 @@ const replacement = (scope: string, expected: string | null): Replacement => {
       from: "qualify/setter",
       to: [GUARD_READER],
       kind: "message",
-      body: `${scope} is now ${op}`,
+      body,
     }),
   };
 };
 
 const encodeMessage = Schema.encodeSync(MessageJson);
 
-/** The candidate write. `guard: false` is the control that drops its condition. */
-const writeBody = (r: Replacement, guard: boolean) => {
+/**
+ * How much of the write's condition to send. `full` is the candidate: the pointer still names
+ * the expected revision and the operation has no witness yet. The others are controls.
+ */
+type Guard = "full" | "pointer" | "none";
+
+/**
+ * The candidate write. Fluree adds to a node that already exists, so without the witness
+ * condition a reused operation id would move the pointer back to its old revision and
+ * assert its notification a second time.
+ */
+const writeBody = (r: Replacement, guard: Guard) => {
   const { "@context": _, ...notification } = Fluree.toNode(r.message, encodeMessage(r.message));
   const current = { "@id": scopeIri(r.scope), "bus:revision": r.expected };
   const where =
@@ -210,9 +225,13 @@ const writeBody = (r: Replacement, guard: boolean) => {
           ["filter", "(not (bound ?current))"],
         ]
       : [current];
+  const unwitnessed = [
+    ["optional", { "@id": revisionIri(r.op), "bus:entry": "?witnessed" }],
+    ["filter", "(not (bound ?witnessed))"],
+  ];
   return {
     "@context": BUS_CONTEXT,
-    ...(guard ? { where } : {}),
+    ...(guard === "none" ? {} : { where: guard === "full" ? [...where, ...unwitnessed] : where }),
     ...(r.expected === null ? {} : { delete: current }),
     insert: [
       { "@id": scopeIri(r.scope), "bus:revision": r.op },
@@ -257,6 +276,26 @@ const witnessedAt = async (op: string, t?: number) =>
       where: { "@id": revisionIri(op), "bus:entry": "?e" },
     })
   ).length === 1;
+/** Whether the operation's witness at `t` is there, and whether it records this very request. */
+const witnessOf = async (r: Replacement, t?: number) => {
+  const rows = (await guardedQuery({
+    from: at(t),
+    select: ["?scope", "?supersedes", "?json"],
+    where: [
+      { "@id": revisionIri(r.op), "bus:scope": "?scope", "bus:entry": "?entry" },
+      ["optional", { "@id": revisionIri(r.op), "bus:supersedes": "?supersedes" }],
+      { "@id": "?entry", "bus:json": "?json" },
+    ],
+  })) as ReadonlyArray<readonly [string, string | null, string]>;
+  const [row] = rows;
+  if (row === undefined) return "absent";
+  return rows.length === 1 &&
+    row[0] === r.scope &&
+    (row[1] ?? null) === r.expected &&
+    row[2] === encodeMessage(r.message)
+    ? "matches"
+    : "differs";
+};
 /**
  * How many commits asserted an entry's stored JSON, read from history rather than from any
  * classifier. The entry is bound through `values` as an IRI, as the catalogue binds a focus:
@@ -273,7 +312,7 @@ const assertions = async (id: string) =>
     })
   ).length;
 
-type Outcome = "applied" | "not applied" | "unknown";
+type Outcome = "applied" | "not applied" | "identity mismatch" | "unknown";
 interface Sent {
   readonly outcome: Outcome;
   /** The response's t, when Fluree answered. */
@@ -283,12 +322,13 @@ interface Sent {
 }
 
 /**
- * Sends a write and classifies it by its witness at the response's t. No response, or any
- * status but success, is unknown: the write may still have applied.
+ * Sends a write and classifies it by its witness at the response's t: applied only when the
+ * witness records this request, an identity mismatch when it records another. No response,
+ * or any status but success, is unknown: the write may still have applied.
  */
 const send = async (
   r: Replacement,
-  options: { readonly origin?: string; readonly guard?: boolean } = {}
+  options: { readonly origin?: string; readonly guard?: Guard } = {}
 ): Promise<Sent> => {
   const started = performance.now();
   const url = `${options.origin ?? config.url}/v1/fluree/update?ledger=${encodeURIComponent(GUARDED.ledger)}`;
@@ -296,20 +336,33 @@ const send = async (
     const response = await fetch(url, {
       method: "POST",
       headers: JSON_AUTH,
-      body: JSON.stringify(writeBody(r, options.guard ?? true)),
+      body: JSON.stringify(writeBody(r, options.guard ?? "full")),
     });
     const ended = performance.now();
     if (!response.ok) return { outcome: "unknown", started, ended };
     const { t } = (await response.json()) as { t: number };
-    return { outcome: (await witnessedAt(r.op, t)) ? "applied" : "not applied", t, started, ended };
+    const witness = await witnessOf(r, t);
+    const outcome =
+      witness === "matches"
+        ? "applied"
+        : witness === "differs"
+          ? "identity mismatch"
+          : "not applied";
+    return { outcome, t, started, ended };
   } catch {
     return { outcome: "unknown", started, ended: performance.now() };
   }
 };
 
-/** One bounded reconciliation: the witness at a fresh cut proves the write applied; its absence proves nothing. */
-const reconcile = async (op: string): Promise<Outcome> =>
-  (await witnessedAt(op)) ? "applied" : "unknown";
+/** One bounded reconciliation: the request's witness at a fresh cut proves it applied; absence proves nothing. */
+const reconcile = async (r: Replacement): Promise<Outcome> => {
+  const witness = await witnessOf(r);
+  return witness === "matches"
+    ? "applied"
+    : witness === "differs"
+      ? "identity mismatch"
+      : "unknown";
+};
 
 const same = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) =>
   JSON.stringify(a) === JSON.stringify(b);
@@ -417,9 +470,36 @@ const qualifyGuardedReplacement = async () => {
   );
   check("other scope unchanged", same(await pointerAt("b"), [other.op]));
 
+  // A request that reuses an already witnessed operation id changes nothing and is an identity
+  // mismatch. The control drops only the witness condition.
+  const reuse = async (scope: string, guard: Guard) => {
+    const base = replacement(scope, null);
+    await send(base);
+    const next = replacement(scope, base.op);
+    await send(next);
+    notified.push(base.op, next.op);
+    const conflicting = replacement(scope, next.op, base.op, "another request");
+    return { base, next, sent: await send(conflicting, { guard }) };
+  };
+  const reused = await reuse("reuse", "full");
+  check(
+    "reusing a witnessed operation id is an identity mismatch and changes nothing",
+    reused.sent.outcome === "identity mismatch" &&
+      same(await pointerAt("reuse"), [reused.next.op]) &&
+      (await assertions(reused.base.op)) === 1
+  );
+  const pointerOnly = await reuse("reuse-control", "pointer");
+  notified.push(pointerOnly.base.op);
+  check(
+    "control: without the witness condition, reuse restores an old revision and notifies twice",
+    same(await pointerAt("reuse-control"), [pointerOnly.base.op]) &&
+      (await assertions(pointerOnly.base.op)) === 2,
+    `classified ${pointerOnly.sent.outcome}`
+  );
+
   // Control: without its condition the same stale write lands and the pointer forks.
   const unguarded = replacement("a", toS.op);
-  const unguardedSent = await send(unguarded, { guard: false });
+  const unguardedSent = await send(unguarded, { guard: "none" });
   notified.push(unguarded.op);
   check(
     "control: dropping the condition lets the stale write land",
@@ -466,7 +546,7 @@ const qualifyGuardedReplacement = async () => {
     const forwarded = relay.loseNextUpdate();
     const lostSent = await send(lost, { origin: relay.url });
     const status = await forwarded;
-    const reconciled = await reconcile(lost.op);
+    const reconciled = await reconcile(lost);
     const replayed = await send(lost);
     notified.push(lost.op);
     check(
