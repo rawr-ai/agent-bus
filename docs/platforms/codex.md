@@ -336,6 +336,10 @@ The same guide says model and effort may be configured in the agent file; those 
 
 The designer's workspace-write parent refused writes to the authorized `.codex/agents/` path. It returned the draft instead of writing elsewhere; the maintainer applied it for review. This observation does not qualify another permission profile or authorize bypassing a refusal. The contributor procedure is in [stewards](../runbooks/stewards.md).
 
+## Commission models
+
+**Documented, read 2026-11-02:** OpenAI's API documentation identifies [Terra](https://developers.openai.com/api/docs/models/gpt-6.1-terra) as `gpt-6.1-terra`, [Sol](https://developers.openai.com/api/docs/models/gpt-6.1-sol) as `gpt-6.1-sol`, [Astra](https://developers.openai.com/api/docs/models/gpt-6-astra) as `gpt-6-astra`, and [Luna](https://developers.openai.com/api/docs/models/gpt-6-luna) as `gpt-6-luna`. The API model pages document available reasoning levels; API `reasoning.effort` is not evidence of a particular Codex host's controls or access. OpenAI's [prompting guidance](https://developers.openai.com/api/docs/guides/latest-model#prompting-best-practices) notes that Astra is more likely to pause for questions and suggests making authorized follow-through clear; evaluate the guidance on the selected model and workload.
+
 ## Approvals for MCP tools
 
 Codex decides whether an MCP call needs approval as follows (verified live and read in `core/src/mcp_tool_call.rs`, `requires_mcp_tool_approval` and `maybe_request_mcp_tool_approval`, Codex 0.164):

@@ -24,9 +24,28 @@ The roles cover [testing design](../../.codex/agents/agent_bus_testing_design_st
    Stop: return prioritized findings, independent oracles and the smallest useful corrections.
    ```
 
-   Choose an appropriate model and effort explicitly through the runtime's supported per-commission settings; match them to the decision, not a fixed review model. State the actual permission context: a role definition does not override its parent's permissions. Start independent work with fresh context; where the spawn API exposes `fork_turns`, use `"none"`. Expected: the native agent receives its repository definition plus this task prompt. *Rehearsed 2026-11-02* through fresh Codex CLI delegates and a Claude native state-machine invocation. The latter was a no-tool hypothetical, not source verification or proof of role effectiveness; other Claude roles and existing-session hotload remain unverified.
+   Choose an appropriate model and effort explicitly through the runtime's supported per-commission settings; match them to the decision, not a fixed review model. [Starting options](#choose-model-and-effort) can help. State the actual permission context: a role definition does not override its parent's permissions. Start independent work with fresh context; where the spawn API exposes `fork_turns`, use `"none"`. Expected: the native agent receives its repository definition plus this task prompt. *Rehearsed 2026-11-02* through fresh Codex CLI delegates and a Claude native state-machine invocation. The latter was a no-tool hypothetical, not source verification or proof of role effectiveness; other Claude roles and existing-session hotload remain unverified.
 
 3. **Use the domain judgment.** The implementation owner resolves material findings or explicitly declines them with a reason, owns production changes and integrated checks, and reports actual results and remaining uncertainty. Re-engage when material assumptions or implementation change. Expected: useful coverage or design changes, not a second approval chain. *Rehearsed 2026-11-02:* query and viewer owners accepted material findings; query repairs and test-only coverage changes followed. This does not establish deployment or real-team adoption.
+
+### Choose model and effort
+
+These local per-task starting heuristics are not fixed assignments, rankings, requirements or benchmark results. Adjust for the task, evidence, latency and cost. Equal effort names do not imply equal thinking or cost. See [Codex model facts](../platforms/codex.md#commission-models) and [Claude model facts](../platforms/claude-code.md#commission-models).
+
+| Family | Starting effort | Typical fit |
+| --- | --- | --- |
+| Terra | `xhigh`; `max` for demanding input or device work | Known-rails implementation, visual input and device inspection. |
+| Sol | `high` / `xhigh` | Coding reasoning, debugging and technical synthesis. |
+| Astra | `high` / `xhigh` | Focused hard architecture and consequential independent review, with curated context. |
+| Luna | `xhigh` / `max` | Bounded bulk classification, extraction and visual ingestion; the owner resolves substantive ambiguity. |
+| Claude Opus | `high` | Significant design, reasoning and independent creative review. |
+| Claude Sonnet | `medium` for specified execution; `high` for harder work | Defined implementation and bounded review. |
+| Claude Fable | `high`; `xhigh` / `max` when useful | Difficult sustained reasoning and synthesis. |
+| Claude Haiku | `medium` / `high` | High-volume, bounded helper tasks. |
+
+Set model and effort using the current runtime's supported per-commission controls. Published capabilities do not establish host availability, authentication, effort, modalities or tools; check those for the task. Report an explicitly required provider or model review as incomplete if unavailable, rather than silently substituting. On capacity failure, the owner may reassign coherent remaining work with relevant receipts and bounded context; preserve completed work and its evidence.
+
+Give each worker the outcome, relevant source, permitted actions, completion and scope, evidence and uncertainty handling. Supply actual candidate views for visual work; give helpers bounded criteria and a route for uncertainty. Make authorized follow-through and useful progress and final reporting clear. Consult the linked provider guidance for the selected model and evaluate it on the workload. Retain owner judgment, skill routing and resource discovery where the task needs them.
 
 ## Maintain the roles
 
