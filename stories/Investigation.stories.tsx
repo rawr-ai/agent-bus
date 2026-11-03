@@ -1,6 +1,6 @@
 import type { Meta, StoryObj } from "@storybook/react-vite";
 import { useState } from "react";
-import { expect, fireEvent, fn, userEvent, waitFor, within } from "storybook/test";
+import { expect, fn, userEvent, waitFor, within } from "storybook/test";
 import {
   DEFAULT_HISTORY_LIMIT,
   MAX_PARTICIPANT_LENGTH,
@@ -8,6 +8,7 @@ import {
 } from "../viewer/shared/limits";
 import type { HistoryInput } from "../viewer/shared/public";
 import { InvestigationControls } from "../viewer/src/features/investigation/InvestigationControls";
+import { enterValue } from "./enter-value";
 
 function Controlled({
   criteria: initial,
@@ -42,15 +43,6 @@ const meta = {
 } satisfies Meta<typeof InvestigationControls>;
 export default meta;
 type Story = StoryObj<typeof meta>;
-
-// Storybook's synthetic type events do not update React's value tracker in this build.
-function enterValue(input: HTMLElement, value: string) {
-  if (!(input instanceof HTMLInputElement)) throw new Error("Expected input");
-  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, "value")?.set;
-  if (!setter) throw new Error("Input value setter unavailable");
-  setter.call(input, value);
-  fireEvent.input(input);
-}
 
 export const ExactSearchAndClear: Story = {
   play: async ({ canvasElement, args }) => {

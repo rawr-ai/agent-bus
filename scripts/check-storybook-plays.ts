@@ -130,7 +130,16 @@ async function main() {
         "viewer-observation-states--unavailable-then-observed",
         "viewer-observation-states--failed-refresh-keeps-last-good",
         "viewer-observation-states--refresh-announces-arrivals",
+        "viewer-observation-states--conversation-follows-commits",
+        "viewer-observation-states--thread-retried-at-same-commit",
         "viewer-observation-states--retained-reading",
+        "viewer-observation-states--ledger-replaced-freezes-conversation",
+        "viewer-observation-states--older-entries-damage-and-moved-head",
+        "viewer-observation-states--retained-reading-keeps-caveats",
+        "viewer-observation-states--tree-keeps-its-criteria",
+        "viewer-observation-states--earlier-commit-freezes-conversation",
+        "viewer-observation-states--selected-beyond-the-tree-read",
+        "viewer-observation-states--withheld-presence-keeps-tree",
         "viewer-stopped--render-defect",
       ];
   assert.ok(
@@ -163,6 +172,23 @@ async function main() {
     assert.ok(response.ok, "Storybook index available");
     const index: unknown = await response.json();
     assert.ok(isRecord(index) && isRecord(index.entries), "Storybook index shape");
+    if (positionals.length === 0) {
+      // Every play outside the Internal harness oracles runs here: a new one cannot be skipped.
+      const plays = Object.values(index.entries).flatMap((entry) =>
+        isRecord(entry) &&
+        entry.type === "story" &&
+        Array.isArray(entry.tags) &&
+        entry.tags.includes("play-fn") &&
+        typeof entry.id === "string" &&
+        !entry.id.startsWith("internal-")
+          ? [entry.id]
+          : []
+      );
+      const unlisted = plays.filter((id) => !ids.includes(id));
+      if (unlisted.length > 0)
+        console.error(`Plays missing from the suite: ${unlisted.join(", ")}`);
+      assert.deepEqual([...ids].sort(), plays.sort(), "the suite lists exactly the plays");
+    }
     let failed = false;
     for (const id of ids) {
       const entry: unknown = index.entries[id];

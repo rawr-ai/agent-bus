@@ -1,4 +1,4 @@
-import type { HistoryObservation, PublicMessage } from "../../../shared/public.ts";
+import type { PublicMessage } from "../../../shared/public.ts";
 
 export type ConversationContext =
   | { readonly kind: "all" | "broadcast" }
@@ -63,7 +63,9 @@ const invalid = (): never => {
 };
 
 /** Group only explicit references inside one observation, never topic co-occurrence. */
-export const buildConversationIndex = (observation: HistoryObservation): ConversationIndex => {
+export const buildConversationIndex = (observation: {
+  readonly messages: readonly PublicMessage[];
+}): ConversationIndex => {
   const messages = observation.messages;
   const real = new Map<string, number>();
   for (const [index, message] of messages.entries()) {

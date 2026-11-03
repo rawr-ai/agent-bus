@@ -2,7 +2,15 @@ import { ArrowLeft, RefreshCw } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ViewerClient } from "../shared/client-types";
 import { DEFAULT_HISTORY_LIMIT } from "../shared/limits";
-import type { HistoryInput, HistoryObservation, PeersObservation } from "../shared/public";
+import type {
+  HistoryInput,
+  HistoryObservation,
+  HistoryWindow,
+  PeersObservation,
+  Snapshot,
+  ThreadInput,
+  ThreadObservation,
+} from "../shared/public";
 import type { AnnouncerOptions } from "./announcements";
 import { ConversationMessage } from "./features/conversations/ConversationMessage";
 import {
@@ -25,6 +33,13 @@ import {
   type ReadingUnit,
   reconcileReadingUnit,
 } from "./reading-unit";
+import {
+  commitAttributes,
+  commitLabel,
+  treeLabel,
+  upstreamNotes,
+  windowLabel,
+} from "./snapshot-labels";
 import { formatTime, Text } from "./Text";
 import { ThemeToggle } from "./ThemeToggle";
 import {
@@ -96,11 +111,48 @@ function Refresh({ label, onClick }: { label: string; onClick: () => void }) {
     </button>
   );
 }
-function CriteriaScope({ criteria }: { criteria: HistoryInput }) {
+interface WindowInfo {
+  readonly window: HistoryWindow;
+  readonly snapshot: Snapshot;
+  readonly count: number;
+  readonly damaged: number;
+  readonly omitted: number;
+}
+const windowOf = (observation: HistoryObservation): WindowInfo => ({
+  window: observation.window,
+  snapshot: observation.snapshot,
+  count: observation.messages.length + observation.omitted,
+  damaged: observation.damaged,
+  omitted: observation.omitted,
+});
+/** A reply tree read for a selected message, with the criteria it was opened under. */
+interface ThreadRead {
+  readonly request: ThreadInput;
+  readonly criteria: HistoryInput;
+}
+interface ThreadReading {
+  readonly observation: ThreadObservation;
+  readonly criteria: HistoryInput;
+}
+function CriteriaScope({
+  criteria,
+  window,
+}: {
+  criteria: HistoryInput;
+  window?: WindowInfo | undefined;
+}) {
   return (
-    <p className="observation-scope">
-      {isHistoryInvestigation(criteria) ? "Server matches" : "Latest messages"} · limit{" "}
-      {criteria.limit}
+    <p className="observation-scope" {...(window ? commitAttributes(window.snapshot.t) : {})}>
+      {window
+        ? windowLabel(
+            window.window,
+            window.snapshot,
+            window.count,
+            criteria,
+            window.damaged,
+            window.omitted
+          )
+        : `${isHistoryInvestigation(criteria) ? "Server matches" : "Latest messages"} · limit ${criteria.limit}`}
       {criteria.query !== undefined && (
         <>
           {" "}
@@ -137,17 +189,29 @@ function LiveAnnouncement({ value }: { value: Announcement | null }) {
     </p>
   );
 }
+/**
+ * One observation's line: its receipt and loading state, then the caveats it was read with.
+ * A retained reading shows its caveats without a status, since it is no longer being read.
+ */
 function Observation({
   loading,
   error,
   observedAt,
   omitted,
+  snapshot,
+  damaged = 0,
+  status: showStatus = true,
 }: {
   loading: boolean;
   error: null | "unavailable" | "timeout";
   observedAt: string | undefined;
   omitted: number | undefined;
+  snapshot?: Snapshot | undefined;
+  damaged?: number | undefined;
+  status?: boolean;
 }) {
+  const notes = snapshot ? upstreamNotes(snapshot, damaged) : [];
+  if (!showStatus && notes.length === 0 && !omitted) return null;
   const status = error
     ? observedAt
       ? `${error === "timeout" ? "Refresh timed out" : "Refresh failed"} · last observed ${formatTime(observedAt)}`
@@ -162,12 +226,67 @@ function Observation({
         ? `Observed ${formatTime(observedAt)}`
         : "Not yet observed";
   return (
-    <div className={`observation${error ? " observation-error" : ""}`}>
-      <span>{status}</span>
+    <div className={`observation${showStatus && error ? " observation-error" : ""}`}>
+      {showStatus && (
+        <span {...(snapshot ? commitAttributes(snapshot.t) : {})}>
+          {status}
+          {snapshot && ` · ${commitLabel(snapshot.t)}`}
+        </span>
+      )}
+      {notes.map((note) => (
+        <span className="upstream" key={note.text} {...commitAttributes(note.t)}>
+          {note.text}
+        </span>
+      ))}
       {Boolean(omitted) && (
         <span className="omitted">
           {omitted} {omitted === 1 ? "record" : "records"} omitted
         </span>
+      )}
+    </div>
+  );
+}
+/**
+ * A tree read for the selected message that does not hold it: the bus's tree is larger than
+ * the viewer reads and the message comes later, or its record was withheld. This state is
+ * final for that read; the message can still be opened as the history observation holds it.
+ */
+function SelectedBeyondTree({
+  tree,
+  fromHistory,
+  onFocusMessage,
+}: {
+  tree: ThreadObservation;
+  fromHistory: HistoryObservation | null;
+  onFocusMessage: (id: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const read = tree.messages.length + tree.omitted;
+  const message = fromHistory?.messages.find((item) => item.id === tree.request.id);
+  return (
+    <div className="thread-inner">
+      <p className="notice" role="status" {...commitAttributes(tree.snapshot.t)}>
+        {tree.exhausted
+          ? `The selected message was withheld from the reply tree read at ${commitLabel(tree.snapshot.t)}.`
+          : `Conversation larger than ${read} ${read === 1 ? "entry" : "entries"}; the selected message is beyond what was read at ${commitLabel(tree.snapshot.t)}.`}
+      </p>
+      {message !== undefined && fromHistory !== null && !open && (
+        <button className="text-action" type="button" onClick={() => setOpen(true)}>
+          Open it in history
+        </button>
+      )}
+      {message !== undefined && fromHistory !== null && open && (
+        <>
+          <p className="observation-scope" {...commitAttributes(fromHistory.snapshot.t)}>
+            As the history observation at {commitLabel(fromHistory.snapshot.t)} holds it
+          </p>
+          <ConversationMessage
+            message={message}
+            messages={[message]}
+            focusMessage={onFocusMessage}
+            register={() => {}}
+          />
+        </>
       )}
     </div>
   );
@@ -187,17 +306,46 @@ export function App({ client }: { client: ViewerClient }) {
         load: (input, signal) => client.peers(input, { signal }),
         classifyFailure: failureFromStatus,
       }),
+      // The selected conversation's reply tree, read at the history observation's own commit
+      // and kept with that observation's criteria, so a tree is never relabelled by later ones.
+      thread: createObservationResource<ThreadRead | null, ThreadReading | null>({
+        input: null,
+        keyOf: (input) =>
+          input === null
+            ? "none"
+            : JSON.stringify([
+                input.request.id,
+                input.request.ledger,
+                input.request.t,
+                historyInputKey(input.criteria),
+              ]),
+        load: (input, signal) =>
+          input === null
+            ? Promise.resolve(null)
+            : client
+                .thread(input.request, { signal })
+                .then((observation) => ({ observation, criteria: input.criteria })),
+        classifyFailure: failureFromStatus,
+      }),
     }),
     [client]
   );
   const history = useObservation(resources.history);
   const peers = useObservation(resources.peers);
+  const thread = useObservation(resources.thread);
   const historyAnnouncement = useAnnouncement(resources.history, historyAnnouncer);
   const peersAnnouncement = useAnnouncement(resources.peers, peersAnnouncer);
+  // A tree read at one commit answers the same each time, so an unchanged key is not read
+  // again; only a failed read is retried. A retained reading stays retained after a retry
+  // succeeds: only the reader's own selection replaces it.
+  const retryThread = useCallback(() => {
+    if (resources.thread.getSnapshot().error !== null) resources.thread.refresh();
+  }, [resources]);
   const automaticRead = useCallback(() => {
     resources.history.refresh({ replacePending: false });
     resources.peers.refresh({ replacePending: false });
-  }, [resources]);
+    retryThread();
+  }, [resources, retryThread]);
   const automatic = useAutomaticRefresh(automaticRead);
   const applyCriteria = (input: HistoryInput) => {
     const next = canonicalHistoryInput(input);
@@ -221,7 +369,44 @@ export function App({ client }: { client: ViewerClient }) {
     () => (history.data ? buildConversationIndex(history.data) : null),
     [history.data]
   );
-  const group = nav.message === null ? undefined : index?.byMessageId.get(nav.message);
+  const threadRequest = useMemo<ThreadRead | null>(
+    () =>
+      nav.message !== null && history.data !== null
+        ? {
+            request: {
+              id: nav.message,
+              ledger: history.data.snapshot.ledger,
+              t: history.data.snapshot.t,
+            },
+            criteria: history.data.criteria,
+          }
+        : null,
+    [nav.message, history.data]
+  );
+  useEffect(() => resources.thread.setInput(threadRequest), [resources, threadRequest]);
+  // The last tree read for the selected message, at whatever commit and under whatever
+  // criteria it was read: a newer read replaces it only once that read succeeds.
+  const treeReading =
+    thread.data !== null && thread.data.observation.request.id === nav.message ? thread.data : null;
+  const tree = treeReading?.observation ?? null;
+  const treeCurrent = treeReading !== null && thread.observation?.key === thread.key;
+  // The bus's tree is one conversation. Reply groups are rebuilt from it only to find the
+  // selected entry and any cycle: a reply whose target the projection withheld would
+  // otherwise start a group of its own and hide the readable entries above it.
+  const treeConversation = useMemo<ObservedConversation | undefined>(() => {
+    if (tree === null) return undefined;
+    const index = buildConversationIndex(tree);
+    const selected = index.byMessageId.get(tree.request.id);
+    return selected === undefined
+      ? undefined
+      : {
+          ...selected,
+          messages: tree.messages,
+          // Missing anchors are the bus's answer at t, not inferred from what loaded.
+          missingTargetIds: tree.missingReplyTargets,
+          cyclic: index.conversations.some((group) => group.cyclic),
+        };
+  }, [tree]);
   useEffect(() => {
     const change = () => setNav(parseHash());
     window.addEventListener("popstate", change);
@@ -298,20 +483,58 @@ export function App({ client }: { client: ViewerClient }) {
           : null,
     [nav.message, nav.context, showContextFlow]
   );
-  const candidate = useMemo<ReadingUnit | null>(() => {
-    if (history.data === null || readingIntent === null) return null;
-    const observation = { criteria: history.data.criteria, observedAt: history.data.observedAt };
-    if (readingIntent.kind === "conversation")
-      return group
+  // A conversation candidate is built from the tree reading alone, so it keeps that reading's
+  // criteria, commit and receipt time, and stays the same object while a newer read is
+  // pending. It shows every message the tree's projection emitted, in the bus's order. A
+  // failed read, or a current tree without the selected entry, offers none.
+  const treeCandidate = useMemo<ReadingUnit | null>(
+    () =>
+      readingIntent?.kind === "conversation" &&
+      treeReading !== null &&
+      tree !== null &&
+      treeConversation !== undefined
         ? {
             ...readingIntent,
-            ...observation,
-            conversation: group,
-            messages: group.messages,
+            criteria: treeReading.criteria,
+            observedAt: tree.observedAt,
+            snapshot: tree.snapshot,
+            conversation: treeConversation,
+            messages: tree.messages,
+            tree: {
+              missingReplyTargets: tree.missingReplyTargets,
+              exhausted: tree.exhausted,
+              damaged: tree.damaged,
+              complete: tree.complete,
+              omitted: tree.omitted,
+            },
           }
-        : null;
-    return { ...readingIntent, ...observation, messages: contextMessages };
-  }, [history.data, readingIntent, group, contextMessages]);
+        : null,
+    [readingIntent, treeReading, tree, treeConversation]
+  );
+  const flowCandidate = useMemo<ReadingUnit | null>(
+    () =>
+      readingIntent?.kind === "flow" && history.data !== null
+        ? {
+            ...readingIntent,
+            criteria: history.data.criteria,
+            observedAt: history.data.observedAt,
+            snapshot: history.data.snapshot,
+            window: history.data.window,
+            count: history.data.messages.length + history.data.omitted,
+            damaged: history.data.damaged,
+            omitted: history.data.omitted,
+            complete: history.data.complete,
+            messages: contextMessages,
+          }
+        : null,
+    [readingIntent, history.data, contextMessages]
+  );
+  const candidate =
+    readingIntent?.kind === "flow"
+      ? flowCandidate
+      : thread.error !== null || (treeCurrent && treeConversation === undefined)
+        ? null
+        : treeCandidate;
   const reading = useMemo(
     () => reconcileReadingUnit(readingSnapshot, readingIntent, candidate),
     [readingSnapshot, readingIntent, candidate]
@@ -351,6 +574,7 @@ export function App({ client }: { client: ViewerClient }) {
             onClick={() => {
               history.refresh();
               peers.refresh();
+              retryThread();
             }}
           />
         </div>
@@ -364,13 +588,18 @@ export function App({ client }: { client: ViewerClient }) {
             <h1 id="contexts-heading" ref={contextHeading} tabIndex={-1}>
               Contexts
             </h1>
-            <CriteriaScope criteria={history.data?.criteria ?? history.input} />
+            <CriteriaScope
+              criteria={history.data?.criteria ?? history.input}
+              window={history.data ? windowOf(history.data) : undefined}
+            />
           </div>
           <Observation
             loading={history.loading}
             error={history.error}
             observedAt={history.data?.observedAt}
             omitted={history.data?.omitted}
+            snapshot={history.data?.snapshot}
+            damaged={history.data?.damaged}
           />
           {previousCriteria && (
             <p className="notice">
@@ -467,13 +696,17 @@ export function App({ client }: { client: ViewerClient }) {
             error={history.error}
             observedAt={history.data?.observedAt}
             omitted={history.data?.omitted}
+            snapshot={history.data?.snapshot}
+            damaged={history.data?.damaged}
           />
           {previousCriteria && (
             <p className="notice">
               Previous criteria observation. Applied criteria has not succeeded.
             </p>
           )}
-          {history.data && <CriteriaScope criteria={history.data.criteria} />}
+          {history.data && (
+            <CriteriaScope criteria={history.data.criteria} window={windowOf(history.data)} />
+          )}
           {nav.context.kind !== "all" && !nav.chronology && history.data && (
             <button
               className="read-context"
@@ -595,6 +828,8 @@ export function App({ client }: { client: ViewerClient }) {
                 error={peers.error}
                 observedAt={peers.data?.observedAt}
                 omitted={peers.data?.omitted}
+                snapshot={peers.data?.snapshot}
+                damaged={peers.data?.damaged}
               />
               <PeerList
                 data={peers.data}
@@ -630,24 +865,48 @@ export function App({ client }: { client: ViewerClient }) {
                 {readMessages ? (
                   <div className="thread-inner">
                     {retainedSelection && unit && (
-                      <p className="notice">
-                        Not in the current observation · limit {unit.criteria.limit} · last observed{" "}
-                        <Text value={formatTime(unit.observedAt)} />
+                      <p className="notice" {...commitAttributes(unit.snapshot.t)}>
+                        Not in the current observation · frozen at {commitLabel(unit.snapshot.t)} ·
+                        last observed <Text value={formatTime(unit.observedAt)} />
                       </p>
                     )}
-                    {unit && <CriteriaScope criteria={unit.criteria} />}
+                    {unit?.kind === "conversation" && (
+                      <p className="observation-scope" {...commitAttributes(unit.snapshot.t)}>
+                        {treeLabel(
+                          unit.tree,
+                          unit.snapshot,
+                          unit.messages.length + unit.tree.omitted
+                        )}
+                      </p>
+                    )}
+                    {unit?.kind === "flow" && (
+                      <CriteriaScope
+                        criteria={unit.criteria}
+                        window={{
+                          window: unit.window,
+                          snapshot: unit.snapshot,
+                          count: unit.count,
+                          damaged: unit.damaged,
+                          omitted: unit.omitted,
+                        }}
+                      />
+                    )}
                     {retainedSelection && history.error && (
                       <p className="notice">
                         Current history refresh failed. This retained reading is from an earlier
                         observation.
                       </p>
                     )}
-                    {!retainedSelection && unit && (
+                    {/* The unit's own caveats, retained or not: never the current observation's. */}
+                    {unit && (
                       <Observation
-                        loading={history.loading}
-                        error={history.error}
+                        status={!retainedSelection}
+                        loading={unit.kind === "conversation" ? thread.loading : history.loading}
+                        error={unit.kind === "conversation" ? thread.error : history.error}
                         observedAt={unit.observedAt}
-                        omitted={history.data?.omitted}
+                        omitted={unit.kind === "conversation" ? unit.tree.omitted : unit.omitted}
+                        snapshot={unit.snapshot}
+                        damaged={unit.kind === "conversation" ? unit.tree.damaged : unit.damaged}
                       />
                     )}
                     {previousReadingCriteria && (
@@ -688,6 +947,16 @@ export function App({ client }: { client: ViewerClient }) {
                         key={message.id}
                         message={message}
                         messages={readMessages}
+                        target={
+                          unit?.kind !== "conversation"
+                            ? undefined
+                            : {
+                                t: unit.snapshot.t,
+                                missing: unit.tree.missingReplyTargets.includes(
+                                  message.replyTo ?? ""
+                                ),
+                              }
+                        }
                         focusMessage={focusMessage}
                         register={(id, node) => {
                           if (node) {
@@ -702,6 +971,26 @@ export function App({ client }: { client: ViewerClient }) {
                       <p>Sending is not available.</p>
                     </section>
                   </div>
+                ) : nav.message !== null && thread.error !== null ? (
+                  <div className="empty">
+                    <p>
+                      {thread.error === "timeout"
+                        ? "Conversation timed out."
+                        : "Conversation unavailable."}
+                    </p>
+                    <button className="text-action" type="button" onClick={retryThread}>
+                      Retry conversation
+                    </button>
+                  </div>
+                ) : nav.message !== null && tree !== null && treeCurrent ? (
+                  <SelectedBeyondTree
+                    key={nav.message}
+                    tree={tree}
+                    fromHistory={history.data}
+                    onFocusMessage={focusMessage}
+                  />
+                ) : nav.message !== null ? (
+                  <p className="empty">Loading conversation…</p>
                 ) : (
                   <p className="empty">Select a conversation</p>
                 )}

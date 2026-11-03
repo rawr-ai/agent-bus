@@ -10,7 +10,10 @@ import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import { failureFromStatus } from "../viewer/src/observation-resource.ts";
 
 const marker = "private-fixture-value-never-disclosed";
+const LEDGER = "fixture-ledger";
+const AT = 9;
 const message = {
+  t: 5,
   id: "fixture-message",
   ts: "2026-11-01T12:00:00.000Z",
   from: "fixture/a",
@@ -20,7 +23,38 @@ const message = {
   origin: { host: "fixture", cwd: "/fixture", repo: "fixture", branch: "main", session: marker },
   session: marker,
 };
-const peer = { address: "fixture/a", runtime: "claude", topics: ["fixture"], session: marker };
+const peer = {
+  address: "fixture/a",
+  runtime: "claude",
+  status: "joined",
+  topics: ["fixture"],
+  t: 3,
+  session: marker,
+};
+/** A bus_run_query result page at AT, exhausted unless overridden. */
+const envelope = (name: string, rows: unknown, extra: Record<string, unknown> = {}) => ({
+  name,
+  catalogueVersion: 1,
+  ledger: LEDGER,
+  t: AT,
+  unit: "entry",
+  args: {},
+  rows,
+  damage: "checked",
+  damaged: 0,
+  damagedTotal: 0,
+  exhausted: true,
+  complete: true,
+  note: "note",
+  session: marker,
+  ...extra,
+});
+const QueryCallSchema = Schema.Struct({
+  name: Schema.String,
+  args: Schema.Record(Schema.String, Schema.Unknown),
+  t: Schema.optionalKey(Schema.Number),
+  cursor: Schema.optionalKey(Schema.String),
+});
 const RequestSchema = Schema.Struct({
   id: Schema.Number,
   method: Schema.String,
@@ -43,8 +77,15 @@ const setup = (timeoutMillis = 1_000) => {
     | "oversized"
     | "malformed"
     | "quarantine"
-    | "no-peers-tool" = "normal";
+    | "paged"
+    | "endless"
+    | "other-ledger"
+    | "no-query-tool"
+    | "gated"
+    | "sized" = "normal";
   let peersFail = false;
+  /** The exact response body size, in bytes, that "sized" answers every call with. */
+  let sizedBytes = 0;
   let remoteAborts = 0;
   const release = new Set<() => void>();
   const upstream = Bun.serve({
@@ -68,9 +109,16 @@ const setup = (timeoutMillis = 1_000) => {
         return respond({
           ttlMs: 0,
           cacheScope: "private",
-          tools: (mode === "no-peers-tool"
-            ? ["bus_history", "bus_publish"]
-            : ["bus_history", "bus_peers", "bus_publish"]
+          tools: (mode === "no-query-tool"
+            ? ["bus_history", "bus_peers", "bus_publish"]
+            : [
+                "bus_peers",
+                "bus_history",
+                "bus_queries",
+                "bus_run_query",
+                "bus_query",
+                "bus_publish",
+              ]
           ).map((name) => ({
             name,
             inputSchema: { type: "object", properties: {} },
@@ -80,7 +128,7 @@ const setup = (timeoutMillis = 1_000) => {
       if (input.method !== "tools/call") return new Response("Unexpected method", { status: 400 });
       const call = Schema.decodeUnknownSync(CallSchema)(input.params);
       calls.push(call);
-      if (mode === "hang") {
+      if (mode === "hang" || mode === "gated") {
         await new Promise<void>((resolve) => {
           const finish = () => {
             release.delete(finish);
@@ -97,34 +145,83 @@ const setup = (timeoutMillis = 1_000) => {
           );
         });
       }
-      if (mode === "tool-error" || (peersFail && call.name === "bus_peers")) {
+      const query = Schema.decodeUnknownSync(QueryCallSchema)(call.arguments);
+      if (mode === "gated") {
+        // Two pages, each held until the test releases it: the first leads on to the second.
+        const first = query.cursor === undefined;
+        return respond({
+          content: [],
+          structuredContent: envelope(
+            query.name,
+            [first ? message : { ...message, id: "second-page" }],
+            first ? { exhausted: false, complete: false, next: "page-2" } : {}
+          ),
+        });
+      }
+      if (mode === "sized") {
+        // A page padded with trailing JSON whitespace to exactly sizedBytes; "€" makes the
+        // count bytes, not characters.
+        const json = JSON.stringify({
+          jsonrpc: "2.0",
+          id: input.id,
+          result: {
+            content: [],
+            structuredContent: envelope(query.name, [{ ...message, body: "€ sized" }]),
+          },
+        });
+        const pad = sizedBytes - Buffer.byteLength(json);
+        if (pad < 0) throw new Error("sized page is larger than its target");
+        return new Response(json + " ".repeat(pad), {
+          headers: { "content-type": "application/json" },
+        });
+      }
+      if (mode === "tool-error" || (peersFail && query.name === "peers")) {
         return respond({ isError: true, content: [{ type: "text", text: marker }] });
       }
       if (mode === "oversized") {
         return respond({
           content: [],
-          structuredContent: {
-            messages: [{ ...message, body: "x".repeat(MAX_MESSAGE_BYTES + 1) }],
-          },
+          structuredContent: envelope(query.name, [
+            { ...message, body: "x".repeat(MAX_MESSAGE_BYTES + 1) },
+          ]),
         });
       }
+      const open = (next: string, extra: Record<string, unknown> = {}) => ({
+        exhausted: false,
+        complete: false,
+        next,
+        ...extra,
+      });
       const data =
         mode === "malformed"
-          ? { messages: "invalid", peers: "invalid" }
-          : call.name === "bus_history"
-            ? {
-                messages:
-                  mode === "quarantine"
-                    ? [
-                        message,
-                        { ...message, body: "duplicate" },
-                        { ...message, id: "valid" },
-                        { ...message, id: "presence", kind: "presence" },
-                      ]
-                    : [message],
-                session: marker,
-              }
-            : { peers: [peer], session: marker };
+          ? { messages: "invalid", peers: "invalid", rows: "invalid" }
+          : mode === "other-ledger"
+            ? envelope(query.name, [], { ledger: "replaced", missingReplyTargets: [] })
+            : mode === "endless"
+              ? envelope(query.name, [], open(`c${calls.length}`))
+              : mode === "paged" && query.cursor === undefined
+                ? envelope(query.name, [], open("c1", { damaged: 1, damagedTotal: 1 }))
+                : mode === "paged"
+                  ? envelope(query.name, [message], { damagedTotal: 1, complete: false })
+                  : query.name === "peers"
+                    ? envelope("peers", [peer], { unit: "address" })
+                    : query.name === "thread"
+                      ? envelope("thread", [message], {
+                          t: query.t ?? AT,
+                          missingReplyTargets: ["gone"],
+                        })
+                      : envelope(
+                          query.name,
+                          mode === "quarantine"
+                            ? [
+                                message,
+                                { ...message, body: "duplicate" },
+                                { ...message, id: "valid" },
+                                { ...message, id: "presence", kind: "presence" },
+                              ]
+                            : [message],
+                          query.name === "search" ? { complete: false } : {}
+                        );
       return respond({ content: [], structuredContent: data });
     },
   });
@@ -162,6 +259,9 @@ const setup = (timeoutMillis = 1_000) => {
     failPeers: () => {
       peersFail = true;
     },
+    size: (bytes: number) => {
+      sizedBytes = bytes;
+    },
     abortCount: () => remoteAborts,
     release: () => {
       for (const finish of release) finish();
@@ -192,9 +292,15 @@ test("viewer calls only fixed modern public tools and explicitly projects nested
     expect(Number.isFinite(Date.parse(history.observedAt))).toBe(true);
     expect(Number.isFinite(Date.parse(peers.observedAt))).toBe(true);
     expect(JSON.stringify({ history, peers })).not.toContain(marker);
+    expect(history.snapshot).toEqual({ ledger: LEDGER, t: AT });
+    expect(history.window).toBe("all");
+    expect(peers.snapshot).toEqual({ ledger: LEDGER, t: AT });
     expect(fixture.calls).toEqual([
-      { name: "bus_history", arguments: { limit: 50 } },
-      { name: "bus_peers", arguments: {} },
+      {
+        name: "bus_run_query",
+        arguments: { name: "history", args: { direction: "backward", limit: 50 } },
+      },
+      { name: "bus_run_query", arguments: { name: "peers", args: { limit: 500 } } },
     ]);
     // One client and its discovered tools serve every read.
     expect(fixture.methods).toEqual(["server/discover", "tools/list", "tools/call", "tools/call"]);
@@ -219,9 +325,75 @@ test("exact submitted criteria are forwarded without inbox/topic expansion", asy
   const fixture = setup();
   try {
     await fixture.client.history({ limit: 200, query: "adapter", participant: "#Exact" });
+    await fixture.client.history({ limit: 7, participant: "#Exact" });
     expect(fixture.calls).toEqual([
-      { name: "bus_history", arguments: { limit: 200, query: "adapter", participant: "#Exact" } },
+      {
+        name: "bus_run_query",
+        arguments: {
+          name: "search",
+          args: { participants: ["#Exact"], text: "adapter", limit: 200 },
+        },
+      },
+      {
+        name: "bus_run_query",
+        arguments: {
+          name: "history",
+          args: { participants: ["#Exact"], direction: "backward", limit: 7 },
+        },
+      },
     ]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a window follows next with the same args at one commit, and stops at the page bound", async () => {
+  const fixture = setup();
+  try {
+    fixture.mode("paged");
+    const paged = await fixture.client.history({ limit: 50 });
+    expect(paged.messages.map((item) => item.id)).toEqual([message.id]);
+    expect(paged.damaged).toBe(1);
+    expect(paged.omitted).toBe(0);
+    expect(paged.window).toBe("readable");
+    expect(paged.complete).toBe(false);
+    const args = { direction: "backward", limit: 50 };
+    expect(fixture.calls).toEqual([
+      { name: "bus_run_query", arguments: { name: "history", args } },
+      { name: "bus_run_query", arguments: { name: "history", args, cursor: "c1" } },
+    ]);
+    // A bus that never finishes is read for at most eight pages, and never called all.
+    fixture.mode("endless");
+    const endless = await fixture.client.history({ limit: 50 });
+    expect(fixture.calls).toHaveLength(2 + 8);
+    expect(endless.window).toBe("latest");
+    expect(endless.messages).toEqual([]);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a thread is read at the requested commit and refused from another ledger", async () => {
+  const fixture = setup();
+  try {
+    const tree = await fixture.client.thread({ id: message.id, ledger: LEDGER, t: 7 });
+    expect(tree.snapshot).toEqual({ ledger: LEDGER, t: 7 });
+    expect(tree.missingReplyTargets).toEqual(["gone"]);
+    expect(tree.messages.map((item) => item.id)).toEqual([message.id]);
+    expect(JSON.stringify(tree)).not.toContain(marker);
+    expect(fixture.calls).toEqual([
+      {
+        name: "bus_run_query",
+        arguments: { name: "thread", args: { id: message.id, limit: 200 }, t: 7 },
+      },
+    ]);
+    fixture.mode("other-ledger");
+    const refused = await fixture.direct(
+      "/rpc/thread",
+      post({ id: message.id, ledger: LEDGER, t: 7 })
+    );
+    expect(refused.status).toBe(503);
+    expect(await refused.text()).not.toContain(marker);
   } finally {
     await fixture.close();
   }
@@ -256,6 +428,8 @@ test("host, origin, paths, methods, media, bytes and schema bounds refuse before
     }
     for (const path of [
       "/rpc/bus_read",
+      "/rpc/bus_query",
+      "/rpc/bus_run_query",
       "/rpc/bus_publish",
       "/rpc/history/",
       "/rpc-other/history",
@@ -282,6 +456,17 @@ test("host, origin, paths, methods, media, bytes and schema bounds refuse before
       expect((await fixture.direct("/rpc/history", post(input))).status).toBe(400);
     }
     expect((await fixture.direct("/rpc/peers", post({ session: marker }))).status).toBe(400);
+    for (const input of [
+      {},
+      { id: "", ledger: LEDGER, t: 1 },
+      { id: "x", ledger: LEDGER, t: 0 },
+      { id: "x", ledger: LEDGER, t: 1.5 },
+      { id: "x", t: 1 },
+      { id: "x", ledger: LEDGER, t: 1, name: "history" },
+      { id: "x".repeat(513), ledger: LEDGER, t: 1 },
+    ]) {
+      expect((await fixture.direct("/rpc/thread", post(input))).status).toBe(400);
+    }
     expect(fixture.calls).toEqual([]);
     expect(fixture.methods).toEqual([]);
     const asset = await fixture.direct("/", { headers: { origin: fixture.viewer.url.origin } });
@@ -319,16 +504,16 @@ test("a failed discovery is not kept, and a missing tool is discovered again", a
     await expect(outage).rejects.toMatchObject({ status: 503 });
     // The browser labels this rejection as unavailability, not a timeout.
     expect(await outage.catch(failureFromStatus)).toBe("unavailable");
-    fixture.mode("no-peers-tool");
-    expect((await fixture.client.history({ limit: 50 })).messages).toHaveLength(1);
+    // A bus without bus_run_query (an older deployment) is unavailable, not called another way.
+    fixture.mode("no-query-tool");
     await expect(fixture.client.peers({})).rejects.toMatchObject({ status: 503 });
     fixture.mode("normal");
     expect((await fixture.client.peers({})).peers).toHaveLength(1);
+    expect(fixture.calls).toHaveLength(1);
     expect(fixture.methods).toEqual([
       "server/discover",
       "server/discover",
       "tools/list",
-      "tools/call",
       "server/discover",
       "tools/list",
       "tools/call",
@@ -345,7 +530,7 @@ const liveObjects = () => {
   return heapStats().objectCount;
 };
 
-test("a superseded client is released once its last concurrent read finishes", async () => {
+test("a client without the query tool is released, and the next read discovers again", async () => {
   const fixture = setup();
   const scope = Scope.makeUnsafe();
   try {
@@ -355,8 +540,8 @@ test("a superseded client is released once its last concurrent read finishes", a
       )
     );
     const read = <A, E>(effect: Effect.Effect<A, E>) => Effect.runPromise(Effect.exit(effect));
-    // Each peers read discovers a client without bus_peers, which that read then supersedes.
-    fixture.mode("no-peers-tool");
+    // Each peers read discovers a client without bus_run_query, which that read then supersedes.
+    fixture.mode("no-query-tool");
     const failPeers = async (reads: number) => {
       for (let attempt = 0; attempt < reads; attempt++) {
         expect(Exit.isFailure(await read(reader.peers()))).toBe(true);
@@ -368,17 +553,6 @@ test("a superseded client is released once its last concurrent read finishes", a
     expect(fixture.methods.filter((method) => method === "server/discover")).toHaveLength(250);
     // A retained client keeps about 300 objects alive; this bound admits only fixture records.
     expect((liveObjects() - before) / 200).toBeLessThan(50);
-
-    // A read still using the client when a missing tool supersedes it is neither cancelled nor
-    // failed.
-    expect(Exit.isSuccess(await read(reader.history({ limit: 50 })))).toBe(true);
-    fixture.mode("hang");
-    const pending = read(reader.history({ limit: 50 }));
-    while (fixture.calls.length < 2) await Bun.sleep(2);
-    expect(Exit.isFailure(await read(reader.peers()))).toBe(true);
-    fixture.release();
-    expect(Exit.isSuccess(await pending)).toBe(true);
-    expect(fixture.abortCount()).toBe(0);
 
     // The next read discovers a current client.
     fixture.mode("normal");
@@ -413,6 +587,128 @@ test("whole-operation deadline and real client cancellation close upstream work"
     for (let attempt = 0; attempt < 100 && fixture.abortCount() < 2; attempt++) await Bun.sleep(2);
     expect(fixture.abortCount()).toBe(2);
   } finally {
+    await fixture.close();
+  }
+});
+
+/** Waits, within a bound, until the upstream has received `count` tool calls. */
+const callsReach = async (fixture: ReturnType<typeof setup>, count: number) => {
+  for (let attempt = 0; attempt < 500 && fixture.calls.length < count; attempt++)
+    await Bun.sleep(2);
+  return fixture.calls.length;
+};
+
+/**
+ * Eight concurrent reads all reach the upstream only if every earlier read returned its permit
+ * (and, through the host, its active-request slot).
+ */
+const permitsReturned = async (
+  fixture: ReturnType<typeof setup>,
+  read: () => Promise<unknown> = () => fixture.client.history({ limit: 50 })
+) => {
+  const before = fixture.calls.length;
+  fixture.mode("hang");
+  const pending = Array.from({ length: 8 }, read);
+  const reached = (await callsReach(fixture, before + 8)) - before;
+  fixture.release();
+  await Promise.allSettled(pending);
+  return reached;
+};
+
+/** The reader alone, without the host's own request deadline in front of it. */
+const readerFor = (
+  fixture: ReturnType<typeof setup>,
+  scope: Scope.Closeable,
+  timeoutMillis?: number
+) =>
+  Effect.runPromise(
+    Layer.buildWithScope(
+      readerLayer({
+        busPort: fixture.busPort,
+        ...(timeoutMillis === undefined ? {} : { timeoutMillis }),
+      }),
+      scope
+    ).pipe(Effect.map((context) => Context.get(context, ObservationReader)))
+  );
+
+test("the deadline covers the whole traversal: two pages each within it fail together", async () => {
+  // Each page is answered well inside the 600 ms deadline; only their sum crosses it.
+  const fixture = setup();
+  const scope = Scope.makeUnsafe();
+  try {
+    const reader = await readerFor(fixture, scope, 600);
+    const history = () => Effect.runPromise(Effect.exit(reader.history({ limit: 50 })));
+    fixture.mode("gated");
+    const answer = async (holdMillis: number, page: number) => {
+      await callsReach(fixture, page);
+      await Bun.sleep(holdMillis);
+      fixture.release();
+    };
+    // Control: two pages of 150 ms read within the deadline.
+    const quick = history();
+    await answer(150, 1);
+    await answer(150, 2);
+    const observed = await quick;
+    expect(Exit.isSuccess(observed) && observed.value.messages.map((item) => item.id)).toEqual([
+      "fixture-message",
+      "second-page",
+    ]);
+
+    // Page 1 at 400 ms, page 2 held 400 ms more: neither alone reaches 600 ms, together they do.
+    const slow = history();
+    await answer(400, 3);
+    await answer(400, 4);
+    const failed = await slow;
+    expect(Exit.isFailure(failed) && JSON.stringify(failed.cause)).toContain("ObservationTimeout");
+    // The deadline aborted page 2 upstream and started no third page.
+    expect(fixture.abortCount()).toBe(1);
+    expect(fixture.calls).toHaveLength(4);
+    expect(await permitsReturned(fixture, history)).toBe(8);
+  } finally {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
+    await fixture.close();
+  }
+});
+
+test("cancelling a read during its second page aborts that page, starts no third and frees its permit", async () => {
+  const fixture = setup(5_000);
+  fixture.mode("gated");
+  try {
+    const controller = new AbortController();
+    const pending = fixture.client.history({ limit: 50 }, { signal: controller.signal }).then(
+      () => "observed",
+      () => "cancelled"
+    );
+    await callsReach(fixture, 1);
+    fixture.release();
+    await callsReach(fixture, 2);
+    controller.abort();
+    expect(await pending).toBe("cancelled");
+    for (let attempt = 0; attempt < 250 && fixture.abortCount() < 1; attempt++) await Bun.sleep(2);
+    expect(fixture.abortCount()).toBe(1);
+    expect(fixture.calls.map((call) => call.arguments.cursor)).toEqual([undefined, "page-2"]);
+    expect(await permitsReturned(fixture)).toBe(8);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("a response body of exactly the byte cap is read, and one byte more is refused", async () => {
+  const fixture = setup();
+  const scope = Scope.makeUnsafe();
+  try {
+    const reader = await readerFor(fixture, scope);
+    fixture.mode("sized");
+    fixture.size(MAX_MESSAGE_BYTES);
+    const atCap = await Effect.runPromise(Effect.exit(reader.history({ limit: 50 })));
+    expect(Exit.isSuccess(atCap) && atCap.value.messages[0]?.body).toBe("€ sized");
+    fixture.size(MAX_MESSAGE_BYTES + 1);
+    const overCap = await Effect.runPromise(Effect.exit(reader.history({ limit: 50 })));
+    expect(Exit.isFailure(overCap) && JSON.stringify(overCap.cause)).toContain(
+      "ObservationUnavailable"
+    );
+  } finally {
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     await fixture.close();
   }
 });

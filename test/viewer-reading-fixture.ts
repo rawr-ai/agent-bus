@@ -7,13 +7,40 @@ import { RPCLink } from "@orpc/client/fetch";
 import { assertPortFree } from "../viewer/server/port.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import type { PublicMessage, PublicPeer } from "../viewer/shared/public.ts";
+import { busPage, type PageOperation, peerRow } from "./bus-pages.ts";
 
 export const FIXTURE_MODES = ["initial", "changed", "empty", "quarantined", "stress"] as const;
 export type FixtureMode = (typeof FIXTURE_MODES)[number];
+/**
+ * Modes whose rows break the catalogue's row contract on purpose (duplicate identities, a bad
+ * kind, an unsupported runtime), so the viewer's projection is seen withholding them. Every
+ * other mode's pages are ones the bus could send.
+ */
+export const MALFORMED_MODES: ReadonlyArray<FixtureMode> = ["quarantined"];
 
 const DEFAULT_VIEWER_PORT = 4390;
 const PROTOCOL = "2026-07-28";
-const TOOL_NAMES = ["bus_history", "bus_peers"] as const;
+const QUERY_TOOL = "bus_run_query";
+const OPERATIONS = [
+  "history",
+  "search",
+  "peers",
+  "thread",
+] as const satisfies ReadonlyArray<PageOperation>;
+type Operation = (typeof OPERATIONS)[number];
+/** The bus's result budget per page, as UTF-8 JSON; checked against the catalogue's. */
+export const FIXTURE_PAGE_BYTES = 65_536;
+/** The commit the fixture's current peers joined at. */
+const PEER_T = 1;
+const LEDGER = "fixture-ledger";
+const PEERS_PAGE = 500;
+const THREAD_LIMIT = 200;
+/**
+ * The fixture's head starts here, and each mode change commits that mode's new entries after
+ * it and moves it on by HEAD_STEP, like new mail. More new entries than a step would not fit.
+ */
+const FIRST_HEAD = 20;
+const HEAD_STEP = 20;
 const MAX_CALLS = 64;
 const MAX_LIMIT = 200;
 const MAX_DELAY_MS = 15_000;
@@ -181,7 +208,8 @@ export const CHANGED_MESSAGES: ReadonlyArray<PublicMessage> = [
   NEW_REPLY,
 ];
 
-// Parent-added falsifiers for full-source fallback and metadata-wide control notation.
+// Parent-added falsifiers for a large source, as large as one page of the bus carries, and
+// metadata-wide control notation.
 export const STRESS_MESSAGES: ReadonlyArray<PublicMessage> = [
   ...FIXTURE_MESSAGES,
   msg(
@@ -189,7 +217,7 @@ export const STRESS_MESSAGES: ReadonlyArray<PublicMessage> = [
     at(15),
     "fixture/large",
     ["#large"],
-    `LARGE_SOURCE_BEGIN\n${"full source segment ".repeat(8_000)}\nLARGE_SOURCE_END`,
+    `LARGE_SOURCE_BEGIN\n${"full source segment ".repeat(3_000)}\nLARGE_SOURCE_END`,
     { subject: "Large full-source fixture" }
   ),
   msg(
@@ -306,20 +334,16 @@ const PEER_ROWS: Record<FixtureMode, ReadonlyArray<unknown>> = {
 
 type Row = Record<string, unknown>;
 type RequestId = number | string;
-type HistoryArgs = {
-  readonly limit: number;
-  readonly query?: string;
-  readonly participant?: string;
-};
-type RecordedArgs = {
-  readonly limit?: number;
-  readonly query?: string;
-  readonly participant?: string;
+/** A validated bus_run_query call: the operation, its args as sent, and its position. */
+type QueryCall = {
+  readonly operation: Operation;
+  readonly args: Row;
+  readonly t?: number;
+  readonly offset: number;
 };
 type Parsed =
   | { readonly kind: "discover" | "list"; readonly id: RequestId }
-  | { readonly kind: "history"; readonly id: RequestId; readonly args: HistoryArgs }
-  | { readonly kind: "peers"; readonly id: RequestId };
+  | { readonly kind: "query"; readonly id: RequestId; readonly call: QueryCall };
 
 const isRecord = (value: unknown): value is Row =>
   typeof value === "object" && value !== null && !Array.isArray(value);
@@ -333,35 +357,65 @@ const metaOk = (params: Row): boolean => {
   const meta = get(params, "_meta");
   return meta === undefined || isRecord(meta);
 };
-// undefined: absent; null: present but invalid. Exact lengths, no normalization.
-const optionalText = (value: unknown, max: number): string | undefined | null => {
-  if (value === undefined) return undefined;
-  return typeof value === "string" && value.length >= 1 && value.length <= max ? value : null;
+const isText = (value: unknown, max: number): value is string =>
+  typeof value === "string" && value.length >= 1 && value.length <= max;
+// Absent, or exactly one address: the viewer narrows to one participant.
+const participantsOk = (value: unknown): boolean =>
+  value === undefined || (Array.isArray(value) && value.length === 1 && isText(value[0], 512));
+
+/** The args the viewer sends for each operation, exactly; anything else is refused. */
+const argsOk = (operation: Operation, args: Row): boolean => {
+  const limit = get(args, "limit");
+  switch (operation) {
+    case "history":
+      return (
+        onlyKeys(args, ["participants", "direction", "limit"]) &&
+        participantsOk(get(args, "participants")) &&
+        get(args, "direction") === "backward" &&
+        isInt(limit, 1, MAX_LIMIT)
+      );
+    case "search":
+      return (
+        onlyKeys(args, ["participants", "text", "limit"]) &&
+        participantsOk(get(args, "participants")) &&
+        isText(get(args, "text"), 256) &&
+        isInt(limit, 1, MAX_LIMIT)
+      );
+    case "peers":
+      return onlyKeys(args, ["limit"]) && limit === PEERS_PAGE;
+    case "thread":
+      return (
+        onlyKeys(args, ["id", "limit"]) && isText(get(args, "id"), 512) && limit === THREAD_LIMIT
+      );
+  }
 };
+
+// The fixture's cursor is its own: a row offset, valid only for the operation that issued it.
+const CURSOR = /^fixture:(history|search|peers|thread):(\d{1,6})$/;
 
 const parseCall = (id: RequestId, params: unknown): Parsed | undefined => {
   if (!isRecord(params) || !onlyKeys(params, ["name", "arguments", "_meta"])) return undefined;
-  if (!metaOk(params)) return undefined;
-  const name = get(params, "name");
-  const args = get(params, "arguments");
-  if (name === "bus_peers") {
-    const empty = args === undefined || (isRecord(args) && Object.keys(args).length === 0);
-    return empty ? { kind: "peers", id } : undefined;
+  if (!metaOk(params) || get(params, "name") !== QUERY_TOOL) return undefined;
+  const call = get(params, "arguments");
+  if (!isRecord(call) || !onlyKeys(call, ["name", "args", "t", "cursor"])) return undefined;
+  const operation = OPERATIONS.find((candidate) => candidate === get(call, "name"));
+  const args = get(call, "args");
+  const t = get(call, "t");
+  const cursor = get(call, "cursor");
+  if (operation === undefined || !isRecord(args) || !argsOk(operation, args)) return undefined;
+  if (t !== undefined && !isInt(t, 1, Number.MAX_SAFE_INTEGER)) return undefined;
+  // The viewer reads a thread at its history's commit, and follows a list with its cursor.
+  if ((operation === "thread") !== (t !== undefined)) return undefined;
+  let offset = 0;
+  if (cursor !== undefined) {
+    const match = typeof cursor === "string" ? CURSOR.exec(cursor) : null;
+    if (match === null || match[1] !== operation) return undefined;
+    offset = Number(match[2]);
   }
-  if (name !== "bus_history" || !isRecord(args)) return undefined;
-  if (!onlyKeys(args, ["limit", "query", "participant"])) return undefined;
-  const limit = get(args, "limit");
-  const query = optionalText(get(args, "query"), 256);
-  const participant = optionalText(get(args, "participant"), 512);
-  if (!isInt(limit, 1, MAX_LIMIT) || query === null || participant === null) return undefined;
   return {
-    kind: "history",
+    kind: "query",
     id,
-    args: {
-      limit,
-      ...(query === undefined ? {} : { query }),
-      ...(participant === undefined ? {} : { participant }),
-    },
+    call: { operation, args, ...(t === undefined ? {} : { t }), offset },
   };
 };
 
@@ -393,16 +447,40 @@ type Counters = {
   discover: number;
   toolsList: number;
   toolsCall: number;
+  /** history and search pages. */
   history: number;
   peers: number;
+  thread: number;
   refused: number;
 };
 type RecordedCall = {
   readonly seq: number;
-  readonly tool: (typeof TOOL_NAMES)[number];
-  readonly arguments: RecordedArgs;
+  readonly operation: Operation;
+  readonly arguments: Row;
+  readonly t?: number;
+  readonly offset: number;
 };
-type Store = { config: Config; counters: Counters; calls: RecordedCall[] };
+/** Every entry the fixture's bus has held, by id: the first row seen and its commit. */
+type Log = Map<string, { readonly row: Row; readonly t: number }>;
+type Store = {
+  config: Config;
+  head: number;
+  log: Log;
+  counters: Counters;
+  calls: RecordedCall[];
+};
+
+/** Commits a mode's entries not yet on the bus, after `after`; ids already there keep theirs. */
+const commit = (log: Log, mode: FixtureMode, after: number) => {
+  let t = after;
+  for (const row of ROWS[mode]) {
+    const id = isRecord(row) ? get(row, "id") : undefined;
+    if (!isRecord(row) || typeof id !== "string" || log.has(id)) continue;
+    t += 1;
+    log.set(id, { row, t });
+  }
+  if (t > after + HEAD_STEP) throw new Error("Fixture mode commits more than one head step");
+};
 
 const createStore = (): Store => ({
   config: {
@@ -412,22 +490,44 @@ const createStore = (): Store => ({
     historyDelayMs: 0,
     peerDelayMs: 0,
   },
-  counters: { discover: 0, toolsList: 0, toolsCall: 0, history: 0, peers: 0, refused: 0 },
+  head: FIRST_HEAD,
+  log: (() => {
+    const log: Log = new Map();
+    commit(log, "initial", 0);
+    return log;
+  })(),
+  counters: {
+    discover: 0,
+    toolsList: 0,
+    toolsCall: 0,
+    history: 0,
+    peers: 0,
+    thread: 0,
+    refused: 0,
+  },
   calls: [],
 });
 
 // Only method counters and validated business names/arguments are kept, never bodies.
-const record = (store: Store, tool: RecordedCall["tool"], args: RecordedArgs): void => {
-  store.counters[tool === "bus_history" ? "history" : "peers"] += 1;
-  const seq = store.counters.history + store.counters.peers;
-  store.calls.push({ seq, tool, arguments: args });
+const record = (store: Store, call: QueryCall): void => {
+  const counter = call.operation === "search" ? "history" : call.operation;
+  store.counters[counter] += 1;
+  const seq = store.counters.history + store.counters.peers + store.counters.thread;
+  store.calls.push({
+    seq,
+    operation: call.operation,
+    arguments: structuredClone(call.args),
+    ...(call.t === undefined ? {} : { t: call.t }),
+    offset: call.offset,
+  });
   if (store.calls.length > MAX_CALLS) store.calls.shift();
 };
 
 const view = (store: Store) => ({
   config: { ...store.config },
+  head: store.head,
   counters: { ...store.counters },
-  calls: store.calls.map((call) => ({ ...call, arguments: { ...call.arguments } })),
+  calls: store.calls.map((call) => ({ ...call, arguments: structuredClone(call.arguments) })),
 });
 
 const describe = (row: unknown) => {
@@ -444,21 +544,179 @@ const describe = (row: unknown) => {
   };
 };
 
-// Synthetic interaction support only: this local deterministic substring selection (id, subject
-// and body, case-insensitive) is NOT production fulltext correctness or ranking. Participant is
-// exactly from === p OR to.includes(p), with no topic or broadcast expansion. Source order is
-// preserved and the newest bounded slice is taken after filtering.
-const select = (mode: FixtureMode, args: HistoryArgs): ReadonlyArray<unknown> => {
-  const needle = args.query?.toLowerCase();
-  const matches = ROWS[mode].filter((row) => {
-    const fields = describe(row);
-    const person = args.participant;
-    if (person !== undefined && fields.from !== person && !fields.to.includes(person)) {
-      return false;
-    }
-    return needle === undefined || fields.text.includes(needle);
+/**
+ * A mode's history window: its rows in source order, each record carrying the commit its id
+ * was first written at. The window is the mode's; the bus behind it keeps every entry.
+ */
+const committed = (log: Log, mode: FixtureMode): ReadonlyArray<unknown> =>
+  ROWS[mode].map((row) => {
+    const entry = isRecord(row) ? log.get(String(get(row, "id"))) : undefined;
+    return isRecord(row) && entry !== undefined ? { ...row, t: entry.t } : row;
   });
-  return matches.slice(-args.limit);
+
+// Synthetic interaction support only: this local deterministic substring selection (id, subject
+// and body, case-insensitive) is NOT production fulltext correctness or ranking; "best first"
+// is simply newest first. Participant is exactly from === p OR to.includes(p), with no topic or
+// broadcast expansion. Both list newest first, as backward history does.
+const select = (log: Log, mode: FixtureMode, args: Row): ReadonlyArray<unknown> => {
+  const text = get(args, "text");
+  const needle = typeof text === "string" ? text.toLowerCase() : undefined;
+  const participants = get(args, "participants");
+  const person = Array.isArray(participants) ? participants[0] : undefined;
+  return committed(log, mode)
+    .filter((row) => {
+      const fields = describe(row);
+      if (person !== undefined && fields.from !== person && !fields.to.includes(person)) {
+        return false;
+      }
+      return needle === undefined || fields.text.includes(needle);
+    })
+    .reverse();
+};
+
+/**
+ * The reply tree as the bus defines it, over every entry at t (not only the mode's window):
+ * every entry that reaches, along replyTo links (zero or more), a node the focus also reaches. Missing targets are nodes too, so a tree hangs from
+ * one; cycles and self-replies need no special case. Rows in commit order.
+ */
+const replyTree = (log: Log, t: number, focus: string) => {
+  const rows = [...log.values()]
+    .filter((entry) => entry.t <= t)
+    .sort((a, b) => a.t - b.t)
+    .map((entry) => ({ ...entry.row, t: entry.t }));
+  const byId = new Map(rows.map((row) => [get(row, "id"), row]));
+  if (!byId.has(focus)) return undefined;
+  const reach = (start: unknown) => {
+    const seen = new Set<unknown>();
+    for (let node = start; !seen.has(node); ) {
+      seen.add(node);
+      const row = byId.get(node);
+      const target = row === undefined ? undefined : get(row, "replyTo");
+      if (target === undefined) break;
+      node = target;
+    }
+    return seen;
+  };
+  const top = reach(focus);
+  const members = rows.filter((row) => [...reach(get(row, "id"))].some((node) => top.has(node)));
+  const ids = new Set(members.map((row) => get(row, "id")));
+  const missing = new Set<string>();
+  let root: unknown;
+  for (const row of members) {
+    const target = get(row, "replyTo");
+    if (target === undefined) root = get(row, "id");
+    else if (typeof target === "string" && !ids.has(target)) missing.add(target);
+  }
+  return {
+    rows: members,
+    extra: {
+      ...(typeof root === "string" ? { root } : {}),
+      members: members.length,
+      missingReplyTargets: [...missing].sort(),
+    },
+  };
+};
+
+const pageBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value));
+
+/**
+ * One bus_run_query page: no damage, and a cursor only while rows remain. Like the bus, a page
+ * keeps as many of its `limit` rows as fit the result budget, and refuses (undefined) when
+ * even its first row does not.
+ */
+const page = (
+  call: QueryCall,
+  t: number,
+  head: number,
+  all: ReadonlyArray<unknown>,
+  limit: number,
+  extra: Row = {}
+) => {
+  const at = (kept: number) => {
+    const rows = all.slice(call.offset, call.offset + kept);
+    const more = call.offset + rows.length < all.length;
+    return busPage({
+      name: call.operation,
+      ledger: LEDGER,
+      t,
+      head,
+      args: call.args,
+      rows,
+      ...(more ? { next: `fixture:${call.operation}:${call.offset + rows.length}` } : {}),
+      extra,
+    });
+  };
+  let kept = Math.min(limit, all.length - call.offset);
+  while (kept > 1 && pageBytes(at(kept)) > FIXTURE_PAGE_BYTES) kept -= 1;
+  const result = at(Math.max(kept, 0));
+  return pageBytes(result) > FIXTURE_PAGE_BYTES ? undefined : result;
+};
+
+/** The page a call gets in a mode at the head it arrived at, or undefined to refuse it. */
+const answer = (log: Log, mode: FixtureMode, head: number, call: QueryCall) => {
+  const limit = get(call.args, "limit") as number;
+  if (call.operation === "peers") {
+    const joined = PEER_ROWS[mode].map((row) => (isRecord(row) ? peerRow(row, PEER_T) : row));
+    return page(call, head, head, joined, limit);
+  }
+  if (call.operation === "thread") {
+    const t = call.t ?? head;
+    const tree = t > head ? undefined : replyTree(log, t, String(get(call.args, "id")));
+    return tree === undefined ? undefined : page(call, t, head, tree.rows, limit, tree.extra);
+  }
+  const selected = select(log, mode, call.args);
+  // Ranked best first; the synthetic score only falls with rank.
+  const rows =
+    call.operation === "search"
+      ? selected.map((row, rank) =>
+          isRecord(row) ? { ...row, score: selected.length - rank } : row
+        )
+      : selected;
+  return page(call, head, head, rows, limit);
+};
+
+/** The calls the viewer makes, as the fixture validates them, for one operation. */
+const viewerCall = (operation: Operation, args: Row, t?: number): QueryCall => ({
+  operation,
+  args,
+  ...(t === undefined ? {} : { t }),
+  offset: 0,
+});
+
+/**
+ * Every page the fixture serves in a mode, at the head that mode is reached at, read as the
+ * viewer reads it: history, a search, peers, and the reply tree of each entry, each followed
+ * through its cursors. Pure: no server starts. Used to check the fixture against the catalogue.
+ */
+export const fixturePages = (mode: FixtureMode) => {
+  const log: Log = new Map();
+  commit(log, "initial", 0);
+  let head = FIRST_HEAD;
+  if (mode !== "initial") {
+    commit(log, mode, head);
+    head += HEAD_STEP;
+  }
+  const follow = (first: QueryCall) => {
+    const pages: Array<NonNullable<ReturnType<typeof answer>>> = [];
+    let call: QueryCall | undefined = first;
+    while (call !== undefined) {
+      const result = answer(log, mode, head, call);
+      if (result === undefined) throw new Error(`The fixture refused ${call.operation}`);
+      pages.push(result);
+      const next = "next" in result && typeof result.next === "string" ? result.next : undefined;
+      const match = next === undefined ? null : CURSOR.exec(next);
+      call = match === null ? undefined : { ...call, offset: Number(match[2]) };
+    }
+    return pages;
+  };
+  return [
+    ...follow(viewerCall("history", { direction: "backward", limit: MAX_LIMIT })),
+    ...follow(viewerCall("search", { text: "msg", limit: MAX_LIMIT })),
+    ...follow(viewerCall("peers", { limit: PEERS_PAGE })),
+    ...[...log.keys()].flatMap((id) =>
+      follow(viewerCall("thread", { id, limit: THREAD_LIMIT }, head))
+    ),
+  ];
 };
 
 const hostAllowed = (request: Request, port: number): boolean => {
@@ -497,6 +755,7 @@ const startFake = async (store: Store, signal: AbortSignal) => {
     fetch: async (request, self) => {
       // Arrival snapshot: later control changes never affect a request already in flight.
       const snapshot: Config = { ...store.config };
+      const head = store.head;
       const port = self.port;
       const protocol = request.headers.get("mcp-protocol-version");
       if (
@@ -532,30 +791,31 @@ const startFake = async (store: Store, signal: AbortSignal) => {
         return reply({
           ttlMs: 0,
           cacheScope: "private",
-          tools: TOOL_NAMES.map((name) => ({ name, inputSchema: { type: "object" } })),
+          tools: [{ name: QUERY_TOOL, inputSchema: { type: "object" } }],
         });
       }
+      if (parsed.kind !== "query") return refuse();
       store.counters.toolsCall += 1;
-      const history = parsed.kind === "history";
-      record(
-        store,
-        history ? "bus_history" : "bus_peers",
-        parsed.kind === "history" ? parsed.args : {}
+      const { call } = parsed;
+      record(store, call);
+      const listing = call.operation === "history" || call.operation === "search";
+      await pause(
+        listing ? snapshot.historyDelayMs : call.operation === "peers" ? snapshot.peerDelayMs : 0,
+        signal
       );
-      await pause(history ? snapshot.historyDelayMs : snapshot.peerDelayMs, signal);
-      if (history ? snapshot.historyError : snapshot.peerError) {
+      const failing = listing
+        ? snapshot.historyError
+        : call.operation === "peers"
+          ? snapshot.peerError
+          : false;
+      const result = failing ? undefined : answer(store.log, snapshot.mode, head, call);
+      if (result === undefined) {
         return reply({
           content: [{ type: "text", text: "Synthetic fixture failure" }],
           isError: true,
         });
       }
-      return reply({
-        content: [],
-        structuredContent:
-          parsed.kind === "history"
-            ? { messages: select(snapshot.mode, parsed.args) }
-            : { peers: PEER_ROWS[snapshot.mode] },
-      });
+      return reply({ content: [], structuredContent: result });
     },
   });
   const port = server.port;
@@ -625,6 +885,11 @@ const startControl = async (store: Store) => {
         update = undefined;
       }
       if (update === undefined) return deny(400);
+      // A new mode is new mail: the head moves on, so readers see a later commit.
+      if (update.mode !== undefined && update.mode !== store.config.mode) {
+        commit(store.log, update.mode, store.head);
+        store.head += HEAD_STEP;
+      }
       store.config = { ...store.config, ...update };
       return Response.json(view(store), NO_STORE);
     },
@@ -860,6 +1125,19 @@ const runSmoke = async (fixture: Fixture): Promise<void> => {
       byPerson.messages.every((m) => m.from === person || m.to.includes(person)),
     "participant selection"
   );
+  // A conversation is read as its reply tree at the history's own commit.
+  const pinned = { ledger: first.snapshot.ledger, t: first.snapshot.t };
+  const tree = await client.thread({ id: "msg-c-beta-reply", ...pinned });
+  check(
+    sameIds(idsOf(tree.messages), EXPECTED_GROUPS.initial[0] ?? []) && tree.complete,
+    "reply tree"
+  );
+  const orphans = await client.thread({ id: "msg-e-orphan-two", ...pinned });
+  check(
+    sameIds(orphans.missingReplyTargets, ["missing-parent-shared"]) &&
+      sameIds(idsOf(orphans.messages), ["msg-d-orphan-one", "msg-e-orphan-two"]),
+    "cut reply tree"
+  );
 
   for (const mode of FIXTURE_MODES) {
     await configure({ mode });
@@ -872,6 +1150,22 @@ const runSmoke = async (fixture: Fixture): Promise<void> => {
     );
     check((await client.peers({})).omitted === EXPECTED_OMITTED[mode].peers, "mode peers");
   }
+  // The window moves on, but the bus keeps every entry: a tree outlives the window, and an
+  // earlier commit still reads the tree as it was.
+  await configure({ mode: "changed" });
+  const moved = await client.history({ limit: MAX_LIMIT });
+  const kept = await client.thread({
+    id: "msg-a-root",
+    ledger: moved.snapshot.ledger,
+    t: moved.snapshot.t,
+  });
+  check(
+    moved.snapshot.t > pinned.t &&
+      sameIds(idsOf(kept.messages), [...(EXPECTED_GROUPS.initial[0] ?? []), "msg-g-new-reply"]),
+    "tree outlives window"
+  );
+  const earlier = await client.thread({ id: "msg-a-root", ...pinned });
+  check(sameIds(idsOf(earlier.messages), EXPECTED_GROUPS.initial[0] ?? []), "tree at a commit");
   await configure({ mode: "initial" });
 
   // Controlled partial failure: history fails while peers still succeed, then recovery.
@@ -941,23 +1235,35 @@ const runSmoke = async (fixture: Fixture): Promise<void> => {
   const large = await fetch(controlUrl, { method: "POST", headers: json, body: "x".repeat(2_000) });
   check(large.status === 400 || large.status === 413, "control size");
 
-  // Fake endpoint strictness: nothing outside the two read tools is accepted.
+  // Fake endpoint strictness: nothing outside the viewer's own saved-query calls is accepted.
   const call = (name: string, args: unknown) => ({
     jsonrpc: "2.0",
     id: 1,
     method: "tools/call",
     params: { name, arguments: args },
   });
+  const query = (args: unknown) => call("bus_run_query", args);
+  const backward = { direction: "backward", limit: 1 };
   const refusals: ReadonlyArray<unknown> = [
     call("bus_publish", {}),
-    call("bus_history", { limit: 201 }),
-    call("bus_history", { limit: 1, extra: true }),
-    call("bus_peers", { extra: true }),
+    call("bus_history", { limit: 1 }),
+    call("bus_peers", {}),
+    query({ name: "history", args: { ...backward, limit: 201 } }),
+    query({ name: "history", args: { ...backward, extra: true } }),
+    query({ name: "history", args: { limit: 1 } }),
+    query({ name: "history", args: backward, cursor: "fixture:peers:1" }),
+    query({ name: "peers", args: { limit: 1 } }),
+    query({ name: "thread", args: { id: "msg-a-root", limit: 200 } }),
+    query({ name: "counts", args: {} }),
+    query({ name: "peers", args: { limit: 500 }, extra: true }),
     { jsonrpc: "2.0", method: "notifications/initialized" },
     { jsonrpc: "2.0", id: 2, method: "resources/list" },
   ];
   for (const body of refusals) check((await rpc(body)).status === 400, "upstream refusal");
-  check((await rpc(call("bus_peers", {}))).status === 200, "upstream peers shape");
+  check(
+    (await rpc(query({ name: "peers", args: { limit: 500 } }))).status === 200,
+    "upstream peers shape"
+  );
 
   const final = await read();
   const calls = isRecord(final.value) ? get(final.value, "calls") : undefined;

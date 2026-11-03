@@ -7,22 +7,25 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { layerFluree } from "../src/Fluree.ts";
+import { Message, MessageJson } from "../src/domain.ts";
+import { layerFluree, toNode } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
 import { ObservationReader, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
-import { freshLedger } from "./fluree-server.ts";
+import { MAX_PAGES, MAX_THREAD_MESSAGES } from "../viewer/shared/public.ts";
+import { freshLedger, insertRaw } from "./fluree-server.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-viewer-reader-"));
 const cwd = mkdtempSync(join(tmpdir(), "agent-bus-viewer-cwd-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 // The real store: the reader's history and peers run through the bus's query engine.
-const store = layerFluree(await freshLedger("viewer-reader")).pipe(Layer.provide(platform));
+const config = await freshLedger("viewer-reader");
+const store = layerFluree(config).pipe(Layer.provide(platform));
 const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
 const busPort = Number(probe.url.port);
 probe.stop(true);
@@ -92,6 +95,12 @@ test("history from the real bus is projected in order with its public fields onl
   const observation = await read((r) => r.history({ limit: 200 }));
   expect(observation.criteria).toEqual({ limit: 200 });
   expect(observation.omitted).toBe(0);
+  // Every entry at one commit: the window says so because the bus exhausted it.
+  expect(observation.window).toBe("all");
+  expect(observation.complete).toBe(true);
+  expect(observation.damaged).toBe(0);
+  expect(observation.snapshot.t).toBeGreaterThan(0);
+  expect(observation.snapshot.ledger.length).toBeGreaterThan(0);
   expect(Number.isFinite(Date.parse(observation.observedAt))).toBe(true);
   const origin = { host: hostname(), cwd };
   expect(observation.messages.map(({ ts: _, ...message }) => message)).toEqual([
@@ -136,13 +145,18 @@ test("search and exact participant criteria reach the real bus unchanged", async
     byText = await read((r) => r.history({ limit: 200, query: "broadcast" }));
   }
   expect(byText.messages.map((message) => message.id)).toEqual([sent.other]);
+  expect(byText.window).toBe("ranked");
+  expect(byText.complete).toBe(false);
   const latest = await read((r) => r.history({ limit: 1 }));
   expect(latest.messages.map((message) => message.id)).toEqual([sent.other]);
+  expect(latest.window).toBe("latest");
+  expect(latest.complete).toBe(false);
 });
 
 test("current peers from the real bus keep public fields only", async () => {
   const observation = await read((r) => r.peers());
   expect(observation.omitted).toBe(0);
+  expect(observation.complete).toBe(true);
   expect(observation.peers).toEqual([
     {
       address: "claude/lead",
@@ -156,6 +170,74 @@ test("current peers from the real bus keep public fields only", async () => {
   expect(JSON.stringify(observation)).not.toContain(marker);
 });
 
+test("a conversation is the reply tree read at the explicit commit it was opened at", async () => {
+  const window = await read((r) => r.history({ limit: 200 }));
+  const at = { ledger: window.snapshot.ledger, t: window.snapshot.t };
+  const before = await read((r) => r.thread({ id: sent.reply, ...at }));
+  expect(before.messages.map((message) => message.id)).toEqual([sent.root, sent.reply]);
+  expect(before.snapshot).toEqual(at);
+  expect(before.missingReplyTargets).toEqual([]);
+  expect(before.exhausted).toBe(true);
+  expect(before.complete).toBe(true);
+  expect(JSON.stringify(before)).not.toContain(marker);
+  const late = await bus.runPromise(
+    Effect.flatMap(Bus.Bus, (b) =>
+      b.publish({
+        from: "claude/lead",
+        session: marker,
+        to: ["codex/reviewer"],
+        body: "Thanks, merged.",
+        replyTo: sent.reply,
+      })
+    )
+  );
+  // Reread at the same commit: frozen, the later reply is not mixed in.
+  const frozen = await read((r) => r.thread({ id: sent.root, ...at }));
+  expect(frozen.messages.map((message) => message.id)).toEqual([sent.root, sent.reply]);
+  // Accepting the current reading moves to the current commit.
+  const current = await read((r) => r.history({ limit: 200 }));
+  expect(current.snapshot.t).toBeGreaterThan(at.t);
+  const moved = await read((r) =>
+    r.thread({ id: sent.root, ledger: current.snapshot.ledger, t: current.snapshot.t })
+  );
+  expect(moved.messages.map((message) => message.id)).toEqual([sent.root, sent.reply, late.id]);
+  // A tree requested for another ledger incarnation is refused, never answered from this one.
+  const elsewhere = await reader.runPromiseExit(
+    Effect.flatMap(ObservationReader, (r) =>
+      r.thread({ id: sent.root, ledger: "replaced", t: at.t })
+    )
+  );
+  expect(elsewhere._tag).toBe("Failure");
+});
+
+test("unreadable entries are counted apart from projection omissions, across pages at one t", async () => {
+  // Newest entry, damaged: typed and identified, without the stored entry.
+  const damaged = new Message({
+    id: "damaged-viewer-entry",
+    ts: new Date().toISOString(),
+    from: "claude/damaged",
+    to: ["#review"],
+    kind: "message",
+    body: "unreadable",
+  });
+  const { "bus:json": _, ...node } = toNode(damaged, "");
+  await insertRaw(config, node);
+  // limit 1: the first page meets only the damaged entry, so the reader follows next at the
+  // same commit to the newest readable message.
+  const latest = await read((r) => r.history({ limit: 1 }));
+  expect(latest.messages).toHaveLength(1);
+  expect(latest.messages[0]?.from).toBe("claude/lead");
+  expect(latest.damaged).toBe(1);
+  expect(latest.omitted).toBe(0);
+  expect(latest.window).toBe("latest");
+  // Every entry was reached, but one could not be read: all readable entries, never all.
+  const all = await read((r) => r.history({ limit: 200 }));
+  expect(all.window).toBe("readable");
+  expect(all.damaged).toBe(1);
+  expect(all.complete).toBe(false);
+  expect(all.messages.map((message) => message.id)).not.toContain(damaged.id);
+});
+
 test("the whole viewer serves the real bus's observations to a browser client", async () => {
   const viewer = createViewer({ port: 0, busPort, assets: new Map() });
   try {
@@ -163,13 +245,87 @@ test("the whole viewer serves the real bus's observations to a browser client", 
       new RPCLink({ url: new URL("/rpc", viewer.url) })
     );
     const [history, peers] = await Promise.all([client.history({ limit: 200 }), client.peers({})]);
-    expect(history.messages.map((message) => message.id)).toEqual([
+    expect(history.messages.map((message) => message.id).slice(0, 3)).toEqual([
       sent.root,
       sent.reply,
       sent.other,
     ]);
     expect(peers.peers.map((peer) => peer.address)).toEqual(["claude/lead", "codex/reviewer"]);
+    const tree = await client.thread({
+      id: sent.root,
+      ledger: history.snapshot.ledger,
+      t: history.snapshot.t,
+    });
+    expect(tree.messages[0]?.id).toBe(sent.root);
+    expect(tree.snapshot.t).toBe(history.snapshot.t);
   } finally {
     await viewer.close();
   }
+});
+
+const encodeJson = Schema.encodeSync(MessageJson);
+/**
+ * One reply tree written in a single commit, so its entries page by id: `count` replies to a
+ * root, each with a body of `bodyBytes`. Returns the ids in the bus's page order.
+ */
+const writeTree = async (prefix: string, count: number, bodyBytes: number) => {
+  const ts = new Date().toISOString();
+  const id = (index: number) => `${prefix}-${String(index).padStart(3, "0")}`;
+  const messages = Array.from(
+    { length: count + 1 },
+    (_, index) =>
+      new Message({
+        id: id(index),
+        ts,
+        from: "claude/lead",
+        to: ["#tree"],
+        kind: "message",
+        body: `${id(index)} ${"x".repeat(bodyBytes)}`,
+        ...(index === 0 ? { subject: "Large tree" } : { replyTo: id(0) }),
+      })
+  );
+  await insertRaw(config, {
+    "@context": toNode(messages[0] as Message, "")["@context"],
+    "@graph": messages.map((m) => {
+      const { "@context": _, ...node } = toNode(m, encodeJson(m));
+      return node;
+    }),
+  });
+  return messages.map((m) => m.id);
+};
+
+/** The thread for `id`, read at the current history observation's commit. */
+const treeAtHead = async (id: string) => {
+  const window = await read((r) => r.history({ limit: 1 }));
+  return read((r) => r.thread({ id, ledger: window.snapshot.ledger, t: window.snapshot.t }));
+};
+
+test("a tree larger than the read keeps its first entries, and a late selected entry is beyond it", async () => {
+  // A root and 200 replies: 201 entries, one more than a conversation reads.
+  const ids = await writeTree("wide", MAX_THREAD_MESSAGES, 0);
+  const selected = ids.at(-1) ?? "";
+  const tree = await treeAtHead(selected);
+  expect(tree.messages.map((message) => message.id)).toEqual(ids.slice(0, MAX_THREAD_MESSAGES));
+  expect(tree.exhausted).toBe(false);
+  expect(tree.complete).toBe(false);
+  // The selected entry is in the tree at t, but beyond what was read.
+  expect(tree.messages.some((message) => message.id === selected)).toBe(false);
+});
+
+test("a tree the byte budget trims is followed page by page, within the page bound", async () => {
+  // About 20 KB each, so a 64 KiB page holds three entries.
+  const small = await writeTree("trim", 11, 20_000);
+  const whole = await treeAtHead(small.at(-1) ?? "");
+  // Twelve entries over four pages, all read: the whole tree, the selected entry included.
+  expect(whole.messages.map((message) => message.id)).toEqual(small);
+  expect(whole.exhausted).toBe(true);
+  expect(whole.complete).toBe(true);
+
+  const large = await writeTree("bulk", 29, 20_000);
+  const selected = large.at(-1) ?? "";
+  const cut = await treeAtHead(selected);
+  // MAX_PAGES pages of three: the first entries in order, the selected one excluded.
+  expect(cut.messages.map((message) => message.id)).toEqual(large.slice(0, MAX_PAGES * 3));
+  expect(cut.exhausted).toBe(false);
+  expect(cut.messages.some((message) => message.id === selected)).toBe(false);
 });

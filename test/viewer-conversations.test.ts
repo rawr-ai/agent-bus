@@ -22,6 +22,10 @@ const observation = (messages: PublicMessage[]): HistoryObservation => ({
   criteria: { limit: 200 },
   observedAt: "fixture-observation",
   omitted: 0,
+  snapshot: { ledger: "fixture-ledger", t: 1 },
+  window: "all",
+  damaged: 0,
+  complete: true,
 });
 const ids = (messages: readonly PublicMessage[]) => messages.map((item) => item.id);
 
