@@ -40,7 +40,7 @@ import * as Catalogue from "../src/catalogue.ts";
 import { Message, MessageJson } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import type { QueryGateway } from "../src/Query.ts";
-import { boundary } from "../test/fluree-boundary.ts";
+import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
 
 const fluree = Bun.which("fluree");
 if (fluree === null) throw new Error("fluree is not on PATH");
@@ -545,18 +545,29 @@ const qualifyGuardedReplacement = async () => {
     const lost = replacement("lost", before.op);
     const forwarded = relay.loseNextUpdate();
     const lostSent = await send(lost, { origin: relay.url });
-    const status = await forwarded;
+    // The client can fail before the boundary takes the update, so the wait is bounded too.
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const outcome = await Promise.race([
+      forwarded,
+      new Promise<Forwarded>((settle) => {
+        timer = setTimeout(() => settle({ failed: "the boundary never took the update" }), 35_000);
+      }),
+    ]);
+    clearTimeout(timer);
+    const status = "status" in outcome ? String(outcome.status) : `no response: ${outcome.failed}`;
     const reconciled = await reconcile(lost);
     const replayed = await send(lost);
     notified.push(lost.op);
     check(
       "lost acknowledgement is unknown, its witness reconciles it, and replay does not notify twice",
-      lostSent.outcome === "unknown" &&
+      "status" in outcome &&
+        outcome.status === 200 &&
+        lostSent.outcome === "unknown" &&
         reconciled === "applied" &&
         replayed.outcome === "applied" &&
         (await assertions(lost.op)) === 1 &&
         same(await pointerAt("lost"), [lost.op]),
-      `Fluree answered ${status}; client saw unknown, reconciled ${reconciled}, replay ${replayed.outcome}`
+      `Fluree answered ${status}; client saw ${lostSent.outcome}, reconciled ${reconciled}, replay ${replayed.outcome}`
     );
   } finally {
     relay.stop();
