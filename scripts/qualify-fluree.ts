@@ -573,6 +573,20 @@ const qualifyGuardedReplacement = async () => {
     relay.stop();
   }
 
+  // A request that never reached Fluree has no witness, and reconciling it stays unknown:
+  // absence alone is not evidence that the write failed, and looking changes nothing.
+  const unsent = replacement("unsent", null);
+  const unsentHead = await guardedHead();
+  const unsentReconciled = await reconcile(unsent);
+  check(
+    "reconciling a write with no witness stays unknown and changes nothing",
+    unsentReconciled === "unknown" &&
+      (await pointerAt("unsent")).length === 0 &&
+      (await assertions(unsent.op)) === 0 &&
+      (await guardedHead()) === unsentHead,
+    `reconciled ${unsentReconciled}`
+  );
+
   // The production read path delivers each applied write's notification once, and nothing else.
   const received = await withBus(
     Effect.gen(function* () {
