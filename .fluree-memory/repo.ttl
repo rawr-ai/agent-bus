@@ -17,7 +17,7 @@ mem:constraint-01m5y26y2g6hjydmb652z0sb3w a mem:Constraint ;
     mem:createdAt "2026-10-27T06:54:21.776907Z"^^xsd:dateTime .
 
 mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
-    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/: one hook manifest, beside the agent-bus skill): an asyncRewake hook on SessionStart, Stop and StopFailure runs ~/.local/bin/agent-bus claude-wake, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
+    mem:content "Claude Code sessions are woken by the agent-bus plugin (plugin/: one hook manifest, beside the agent-bus skill): an asyncRewake hook on SessionStart, Stop and StopFailure runs the installer's managed launcher as `agent-bus claude-wake`, which waits in bus_wake until an address the session holds as claude, joined from this machine, has unread mail other than what it was last woken for, then prints a fixed nudge to call bus_read and exits 2. bus_join returns hooked: true once serve has seen the session's hook (held in serve's memory). A session without the plugin isn't woken; it reads with bus_read or bus_wait. Plugin monitors were rejected: they don't start in stream-json mode, how the desktop app runs Claude Code." ;
     mem:tag "claude" ;
     mem:tag "hooks" ;
     mem:tag "plugin" ;
@@ -29,7 +29,7 @@ mem:decision-01m5y26y0mphzhke0krefx8rhb a mem:Decision ;
     mem:artifactRef "src/claude.ts" ;
     mem:branch "claude-host-wake" ;
     mem:createdAt "2026-10-27T06:54:21.716683Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-29T01:15:19.803056Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T02:48:01.291538+00:00"^^xsd:dateTime ;
     mem:rationale "The host re-arms the wake at session start and every turn end, so the model starts nothing, in the desktop app (stream-json mode) and the terminal alike." ;
     mem:alternatives "a plugin monitor running a streaming watch (never starts in stream-json mode; desktop sessions run that way),serve posting into the session inbox socket (held for sessions that bypass permissions; the desktop drops held messages after five minutes),channels (terminal only)" .
 
@@ -88,7 +88,7 @@ mem:decision-01m6ckr5x5hqpc9c1hqgyg9j4h a mem:Decision ;
     mem:artifactRef "docs/frames/turnaround-query.md" ;
     mem:branch "codex/bus-turnaround-frame" ;
     mem:createdAt "2026-11-01T22:30:14.695167Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-11-02T04:45:34.735153+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T04:45:34.735153Z"^^xsd:dateTime ;
     mem:rationale "Adversarial local-process containment displaced the actual coordination and analysis job; the owner explicitly withdrew that premise." ;
     mem:alternatives "Keep all public queries disabled,Build a confidentiality grammar or separate public mirror" .
 
@@ -101,7 +101,7 @@ mem:decision-01m6ckr6afeymecqy7zf66cac2 a mem:Decision ;
     mem:artifactRef "docs/frames/coordination-turnaround.md" ;
     mem:branch "codex/bus-turnaround-frame" ;
     mem:createdAt "2026-11-01T22:30:15.119294Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-11-02T04:45:34.991697+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-02T04:45:34.991697Z"^^xsd:dateTime ;
     mem:rationale "Artifact-level closure concealed the absence of useful operating change; each feature must complete discovery through real adoption and iteration." ;
     mem:alternatives "Count shipped artifacts as completion,Count synthetic pilot success as real adoption" .
 
@@ -130,18 +130,20 @@ mem:constraint-01m5xn3cfyazcft2fzpm61vfvp a mem:Constraint ;
     mem:createdAt "2026-10-27T03:05:13.982763Z"^^xsd:dateTime .
 
 mem:constraint-01m5xpmd26mdncn7hmmkp0b53j a mem:Constraint ;
-    mem:content "Never edit, branch or check out anything but a deployed main in the primary agent-bus checkout: the LaunchAgent's serve runs src/bin.ts from it, and every Claude session's wake hook runs it through the installer's link ~/.local/bin/agent-bus. A half-edited tree breaks serve at its next restart and the hooks at their next run. Develop in a worktree; the primary checkout changes only by a fast-forward merge at deploy." ;
+    mem:content "Never edit, branch or switch the primary agent-bus checkout: it stays clean and detached at the exact reviewed deployed commit, leaving main free for Graphite. The LaunchAgent's serve runs src/bin.ts from it, and every Claude session's wake hook runs it through the installer's managed launcher, so a half-edited or switched tree breaks serve at its next restart and the hooks at their next run. Develop in a worktree; the primary moves only when a reviewed deploy activates a new commit." ;
     mem:tag "hooks" ;
     mem:tag "operations" ;
     mem:tag "serve" ;
     mem:tag "worktree" ;
     mem:scope mem:repo ;
     mem:severity "must" ;
+    mem:artifactRef "AGENTS.md" ;
     mem:artifactRef "docs/runbooks/deploy.md" ;
+    mem:artifactRef "docs/runbooks/install.md" ;
     mem:artifactRef "src/bin.ts" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T03:32:00.198214Z"^^xsd:dateTime ;
-    mem:updatedAt "2026-10-29T01:15:03.153294Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T02:35:11.670017+00:00"^^xsd:dateTime ;
     mem:rationale "Found 2026-10-27 when a simplification edit in the primary checkout made the running wait fail to import; the hook and a serve restart would have failed the same way." .
 
 mem:constraint-01m5xxta54dma2s3jwfcbhk54n a mem:Constraint ;
@@ -194,7 +196,7 @@ mem:constraint-01m5zvh3rypm1qrxpmr95bc8y8 a mem:Constraint ;
     mem:createdAt "2026-10-27T23:36:04.126583Z"^^xsd:dateTime .
 
 mem:constraint-01m62kk2wvxhmka4gq0fk694x7 a mem:Constraint ;
-    mem:content "Run scripts/install-launch-agents.sh outside a real install only with all five overrides set (AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL, AGENT_BUS_LAUNCHER), in a subshell: without them it rewrites the live LaunchAgents and the ~/.local/bin/agent-bus link and restarts the live bus. An installer from a revision before the overrides ignores them." ;
+    mem:content "Run scripts/install-launch-agents.sh outside a real install only with all five overrides set (AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL, AGENT_BUS_LAUNCHER), in a subshell: without them it rewrites the live LaunchAgents and the installed managed launcher and restarts the live bus. An installer from a revision before the overrides ignores them." ;
     mem:tag "installer" ;
     mem:tag "launchd" ;
     mem:tag "operations" ;
@@ -205,7 +207,8 @@ mem:constraint-01m62kk2wvxhmka4gq0fk694x7 a mem:Constraint ;
     mem:artifactRef "docs/runbooks/operate.md" ;
     mem:artifactRef "scripts/install-launch-agents.sh" ;
     mem:branch "main" ;
-    mem:createdAt "2026-10-29T01:15:03.451116Z"^^xsd:dateTime .
+    mem:createdAt "2026-10-29T01:15:03.451116Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T03:15:21.490916+00:00"^^xsd:dateTime .
 
 mem:decision-01m5x1zt1sy4dfmyp66p7ah4ep a mem:Decision ;
     mem:content "Each machine runs one agent-bus serve that owns the store for that machine's sessions; sessions and the CLI reach it over MCP (streamable HTTP on loopback), and it also runs the Codex deliverer." ;
@@ -330,17 +333,19 @@ mem:decision-01m5y0xfnyv3fhekaj29gcg196 a mem:Decision ;
     mem:alternatives "deleting the command at once (recorded failures until each app-server restarts),two deploys with the no-op first (guards only against one recorded failure),keeping the hook (message text in the turn and an extra empty turn)" .
 
 mem:decision-01m5zvh3qar2276yby9g3xqbmd a mem:Decision ;
-    mem:content "The Claude Code plugin's hook runs the checkout through the link ~/.local/bin/agent-bus -> src/bin.ts, not through ${CLAUDE_PLUGIN_ROOT}: claude plugin install from a local-directory marketplace copies the plugin into ~/.claude/plugins/cache/<marketplace>/<plugin>/<sha>, so a path inside the plugin root is a stale copy. The installer makes the link and checks it runs with a launchd-style PATH from /." ;
+    mem:content "The Claude Code plugin's hook runs the deployed checkout through the installer's managed launcher (`agent-bus claude-wake`), not through ${CLAUDE_PLUGIN_ROOT}: claude plugin install from a local-directory marketplace copies the plugin into Claude Code's per-version plugin cache, so a path inside the plugin root is a stale copy. The launcher is a regular file the installer writes, binding the exact pinned Bun and the canonical checkout's src/bin.ts, and the installer checks it runs with a launchd-style PATH from /." ;
     mem:tag "claude" ;
     mem:tag "deploy" ;
     mem:tag "hooks" ;
     mem:tag "plugin" ;
     mem:scope mem:repo ;
     mem:artifactRef "docs/frames/finish-swap.md" ;
+    mem:artifactRef "docs/runbooks/install.md" ;
     mem:artifactRef "plugin/.claude-plugin/plugin.json" ;
     mem:artifactRef "scripts/install-launch-agents.sh" ;
     mem:branch "main" ;
     mem:createdAt "2026-10-27T23:36:04.074554Z"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-03T02:48:01.246773+00:00"^^xsd:dateTime ;
     mem:rationale "One stable manifest, and the hook always runs the deployed checkout without a plugin update per release" ;
     mem:alternatives "${CLAUDE_PLUGIN_ROOT}/src/bin.ts (a cached copy, stale after each deploy); per-machine path configuration" .
 
