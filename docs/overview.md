@@ -5,7 +5,7 @@ How the parts of agent-bus fit: the model, one diagram of the system, the pieces
 ## The model
 
 agent-bus is an append-only ledger, a read cursor per address, and a wake signal per runtime. It is not a broker that pushes messages over open connections.
-- **The ledger** holds every message, and every join and leave, in one order, on the bus host. Nothing in it is changed or deleted.
+- **The ledger** holds every message, and every join and leave, in one order, on the bus host. Entries are immutable; orientation also retains revisions and designates one as current.
 - **An address is one session's inbox.** Its cursor marks how far its owner has read, and a read moves the cursor, so reading consumes. A `#topic` or `*` fans out by giving each recipient its own cursor over the same entries.
 - **A wake only says that mail may be waiting.** A Claude Code session is woken by the agent-bus plugin's hook, a Codex thread by a nudge in its own queue. The session's own read then delivers the mail.
 
@@ -45,8 +45,9 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 | --- | --- | --- |
 | **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree, on one transaction server on the bus host. Delivery reads it through `Ledger`; queries through their own read-only gateway. The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`) | One shared, ordered log across machines, with history and full-text search |
 | **Queries** (`src/catalogue.ts`, `src/sparql.ts`, `src/Query.ts`) | The saved-query catalogue behind `bus_queries`, `bus_run_query` and the `bus_history` and `bus_peers` presets, and raw SPARQL for `bus_query`, each pinned to one commit through a read-only gateway | Complete, pageable answers about past mail without a second read path ([interfaces](architecture/interfaces.md#bus_run_query)) |
+| **Orientation** (`src/Orientation.ts`, `src/OrientationView.ts`, `src/orientation-read.ts`) | Composes explicit directory and concern context, associated addresses and designated guidance at one cut | A participant finds context and the designated handoff without inferring authority from recency ([orientation](architecture/orientation.md)) |
 | **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`, `src/Cursors.ts`) | The only process that reads or writes the store for its machine's sessions. Serves the bus tools over MCP on loopback, keeps cursors, enforces ownership, and runs the Codex deliverer | One owner of cursors and locks per machine, so a message is taken once |
-| **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
+| **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `orient`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
 | **Codex deliverer** (`src/codex.ts`, `src/rollout.ts`) | Gives each Codex thread with unread mail one nudge in its own queue, through a short-lived app-server of `serve`'s own. A thread loaded nowhere is borrowed by the machine's Codex daemon to run it, when its stored settings, read from its rollout, allow | Wakes every Codex thread, desktop or daemon, without a second writer |
 | **Installer** (`scripts/install-launch-agents.sh`) | The LaunchAgents and the managed `~/.local/bin/agent-bus` launcher | Keeps the bus running across logins |
@@ -71,6 +72,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | What agent-bus is, why it exists, and installing it in brief | [README](../README.md) |
 | Machines, processes, ports, transports, and where state lives | [Topology](architecture/topology.md) |
 | Addresses, sessions and ownership; topics and replies; the ledger, cursors and presence | [Messaging](architecture/messaging.md) |
+| Explicit directories, concerns, associations and designated current guidance | [Orientation](architecture/orientation.md) |
 | Whether and how each kind of session is woken; the Claude hook and the Codex nudge; the policies that keep a Codex thread safe | [Delivery](architecture/delivery.md) |
 | The MCP tools and parameters, annotations, refusals, the CLI, configuration and environment | [Interfaces](architecture/interfaces.md) |
 | Trust boundaries, and what `serve` may do to a thread; security: Fluree's token, `serve`'s `Host` check, what queries may read | [Connections](architecture/connections.md) |
@@ -82,6 +84,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Starting, stopping, health and logs | [Operate](runbooks/operate.md) |
 | Putting a new version into service | [Deploy](runbooks/deploy.md) |
 | Starting sessions the bus can wake | [Launch agents](runbooks/launch-agents.md) |
+| Publishing and reading orientation guidance | [Orientation runbook](runbooks/orientation.md) |
 | Upgrading a platform or the plugin | [Upgrade](runbooks/upgrade.md) |
 | Invoking repository-local domain stewards and maintaining their definitions | [Stewards](runbooks/stewards.md) |
 | Symptoms and fixes | [Recover](runbooks/recover.md) |

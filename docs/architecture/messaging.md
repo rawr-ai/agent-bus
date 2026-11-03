@@ -8,7 +8,7 @@ agent-bus is an append-only ledger with one read cursor per address. It is not a
 
 ### One ledger, in one order
 
-Everything is an entry in one ledger: messages, and presence entries for joins and leaves. Nothing is changed or deleted. Each entry is one commit on the Fluree transaction server on the bus host, so every machine sees the same order, and a position in the ledger is a commit number.
+Messages and presence entries for joins and leaves are immutable entries in one ledger. Each entry is one commit on the Fluree transaction server on the bus host, so every machine sees the same order, and a position in the ledger is a commit number. Orientation also retains immutable revisions and changes a designated pointer in the same commit as one ordinary notification; its metadata is not an entry ([orientation](orientation.md)).
 
 ### Addressing and replies
 
@@ -36,8 +36,9 @@ A join or a leave writes a presence entry. It is addressed to `*`, but it is nev
 - `rejoinOf`, the first join of the run of joins it continues (see the table below);
 - `codexThreadId`, the Codex thread to wake;
 - `note`, what the session is working on.
+- `associations`, the explicit directories and concerns the address names ([orientation](orientation.md)); they do not subscribe it to a topic.
 
-For each address, the latest presence with an owner is its state. The addresses whose latest presence is a join are the peers that `bus_peers` lists. A leave clears the address's topics, takes it off the peer list, and stops the bus waking it.
+For each address, the latest presence with an owner is its complete state; absent association fields on older entries are not recovered from earlier entries. The addresses whose latest presence is a join are the peers that `bus_peers` lists. A leave clears the address's topics, preserves associations as historical evidence, takes it off the peer list, and stops the bus waking it.
 
 Each machine's `serve` also keeps, in memory, the last call it has seen for each address and how many waits are open on it. A refused join reports them, so the caller can tell a live holder from a dead one.
 
@@ -125,6 +126,7 @@ The ledger's config graph enables inline full-text scoring on `bus:body` and `bu
 10. **A Codex join's `codexThreadId` must be its own thread id,** the same as `session`, or the join is refused. It is what lets this machine's `serve` wake the thread.
 11. **A cursor belongs to one incarnation of the ledger.** Cursors are kept per ledger instance, named by its first commit, so a replacement store starts every subscriber over instead of skipping messages. A cursor ahead of the ledger fails the read rather than skipping.
 12. **Unreadable entries fail the complete read.** A malformed or schema-invalid entry fails the Fluree read before a cursor, nudge or idle action; the limit on returned mail does not shorten that check. An unreadable presence anywhere in the complete history fails ownership-dependent operations before a cursor or announcement changes.
+13. **Associations are explicit and separate from subscriptions.** On a same-runtime, same-session rejoin while the latest presence is joined, omission preserves them, including with replay; `[]` clears them. Leave retains them only as history. A join after leave or a takeover starts unassociated unless it supplies associations. A new association-bearing join checks its size before the cursor or presence changes; [orientation](orientation.md#rules) owns the bounds and unresolved-reference rules.
 
 ## Why
 

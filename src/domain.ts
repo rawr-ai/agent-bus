@@ -4,6 +4,36 @@ import { Schema } from "effect";
 export const Runtime = Schema.Literals(["claude", "codex", "human", "other"]);
 export type Runtime = typeof Runtime.Type;
 
+/** Stable, case-sensitive names within the orientation directory. */
+export const OrientationId = Schema.String.check(
+  Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/)
+);
+
+/** An address's explicit relationship to a directory and its concerns. */
+export const Association = Schema.Struct({
+  directory: OrientationId.annotate({ description: "The directory's stable id." }),
+  concerns: Schema.Array(OrientationId).annotate({
+    description:
+      "Explicit concern ids within the directory; an empty list associates only the directory.",
+  }),
+});
+export type Association = typeof Association.Type;
+export const MAX_ASSOCIATION_BYTES = 16_384;
+export const MAX_ASSOCIATED_ADDRESS_BYTES = 512;
+
+/** Association arrays are sets; a directory can be named more than once. */
+export const canonicalAssociations = (entries: ReadonlyArray<Association>): Array<Association> => {
+  const groups = new Map<string, Set<string>>();
+  for (const entry of entries) {
+    const concerns = groups.get(entry.directory) ?? new Set<string>();
+    for (const concern of entry.concerns) concerns.add(concern);
+    groups.set(entry.directory, concerns);
+  }
+  return [...groups.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([directory, concerns]) => ({ directory, concerns: [...concerns].sort() }));
+};
+
 /** Where an entry was written from. `repo` and `branch` are optional metadata for queries. */
 export class Origin extends Schema.Class<Origin>("Origin")({
   host: Schema.String.annotate({ description: "The machine it was written on." }),
@@ -39,6 +69,8 @@ export class Presence extends Schema.Class<Presence>("Presence")({
   rejoinOf: Schema.optionalKey(Schema.String),
   codexThreadId: Schema.optionalKey(Schema.String),
   note: Schema.optionalKey(Schema.String),
+  /** Absent in legacy presences; the latest presence is never merged with an older one. */
+  associations: Schema.optionalKey(Schema.Array(Association)),
 }) {}
 
 /**
@@ -104,6 +136,12 @@ export class InvalidQuery extends Schema.TaggedError<InvalidQuery>()("InvalidQue
 export class InvalidTopics extends Schema.TaggedError<InvalidTopics>()("InvalidTopics", {
   message: Schema.String,
 }) {}
+
+/** Invalid association input is refused before a join changes a cursor or presence. */
+export class InvalidAssociations extends Schema.TaggedError<InvalidAssociations>()(
+  "InvalidAssociations",
+  { message: Schema.String }
+) {}
 
 /** A case-sensitive topic name, accepting one optional # marker and outer whitespace. */
 export const topicName = (input: string): string | undefined => {

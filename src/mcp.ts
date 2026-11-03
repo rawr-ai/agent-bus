@@ -12,6 +12,8 @@ import {
   search as searchQuery,
 } from "./catalogue.ts";
 import {
+  Association,
+  InvalidAssociations,
   InvalidQuery,
   InvalidTopics,
   LedgerError,
@@ -21,11 +23,31 @@ import {
   Origin,
   Runtime,
 } from "./domain.ts";
+import { Ledger } from "./Ledger.ts";
+import { updateBulletin, updateDirectory } from "./Orientation.ts";
+import { orient } from "./OrientationView.ts";
+import {
+  BulletinUpdate,
+  BulletinView,
+  Cut,
+  DirectoryRecord,
+  DirectoryUpdate,
+  OrientationRecovery,
+  OrientRequest,
+  WriteResult,
+} from "./orientation-model.ts";
 import { QueryGateway } from "./Query.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
 
-const Failure = Schema.Union([LedgerError, NotJoined, NotOwner, InvalidTopics, InvalidQuery]);
+const Failure = Schema.Union([
+  LedgerError,
+  NotJoined,
+  NotOwner,
+  InvalidTopics,
+  InvalidAssociations,
+  InvalidQuery,
+]);
 // Numbers are Finite or Int: Schema.Number's JSON Schema also admits "NaN" and "Infinity"
 // strings, and drops the description and bounds clients are shown.
 // Public fields are an allowlist, including origin: future internal fields stay internal.
@@ -47,6 +69,141 @@ const PublicMessage = Schema.Struct({
   origin: Schema.optionalKey(PublicOrigin),
 });
 export const Messages = Schema.Struct({ messages: Schema.Array(PublicMessage) });
+
+const OrientationPage = Schema.Struct({
+  name: Schema.String.annotate({ description: "The saved query that owns this page." }),
+  catalogueVersion: Schema.Int.annotate({ description: "The query catalogue version." }),
+  ledger: Schema.String.annotate({ description: "The ledger incarnation read." }),
+  t: Schema.Int.annotate({ description: "The commit read for every row." }),
+  currentHeadT: Schema.optionalKey(
+    Schema.Int.annotate({ description: "The later observed head, when it moved." })
+  ),
+  unit: Schema.String.annotate({ description: "The unit represented by one row." }),
+  args: Schema.Record(Schema.String, Schema.Unknown).annotate({
+    description: "The normalized query arguments.",
+  }),
+  rows: Schema.Array(Schema.Unknown).annotate({
+    description: "Whole rows as described by the saved-query catalogue.",
+  }),
+  damage: Schema.Literals(["checked", "not-checked"]).annotate({
+    description: "Whether entries were checked for damage.",
+  }),
+  damaged: Schema.Int.annotate({ description: "Damaged units encountered on this page." }),
+  damagedAt: Schema.optionalKey(
+    Schema.Array(Schema.Int).annotate({
+      description: "Known commits of damaged units, when known.",
+    })
+  ),
+  damagedTotal: Schema.Int.annotate({
+    description: "Damaged units encountered in this traversal.",
+  }),
+  exhausted: Schema.Boolean.annotate({ description: "Whether no page follows at this cut." }),
+  complete: Schema.Boolean.annotate({
+    description: "Whether the declared relation and projection were read without damage.",
+  }),
+  next: Schema.optionalKey(
+    Schema.String.annotate({ description: "The query-owned continuation, when more units remain." })
+  ),
+  note: Schema.String.annotate({ description: "The query's scope and limits." }),
+});
+export const OrientationResult = Schema.Struct({
+  status: Schema.Literals(["COMPLETE", "INCOMPLETE", "UNAVAILABLE"]).annotate({
+    description:
+      "Whether the composed result is complete, has a continuation, or cannot be established.",
+  }),
+  cut: Schema.optionalKey(Cut.annotate({ description: "The ledger cut shared by the result." })),
+  currentHeadT: Schema.optionalKey(
+    Schema.Int.annotate({ description: "The later observed head, when it moved." })
+  ),
+  evaluatedAt: Schema.optionalKey(
+    Schema.String.annotate({ description: "When expiry was evaluated." })
+  ),
+  catalogueVersion: Schema.optionalKey(
+    Schema.Int.annotate({ description: "The separate saved-query catalogue version." })
+  ),
+  programme: Schema.optionalKey(
+    BulletinView.annotate({ description: "The designated programme bulletin." })
+  ),
+  selection: Schema.optionalKey(
+    Schema.Struct({
+      state: Schema.Literals(["SELECTED", "UNRESOLVED", "AMBIGUOUS", "MISSING"]).annotate({
+        description: "The directory selection outcome.",
+      }),
+      basis: Schema.Literals(["none", "alias", "explicit"]).annotate({
+        description: "How the selection was established.",
+      }),
+      directory: Schema.optionalKey(
+        Schema.String.annotate({ description: "The selected or missing directory id." })
+      ),
+    }).annotate({ description: "Directory selection and its basis." })
+  ),
+  directory: Schema.optionalKey(
+    Schema.Struct({
+      revision: Schema.String.annotate({ description: "The designated directory revision." }),
+      value: DirectoryRecord.annotate({
+        description: "The full directory and original provenance.",
+      }),
+    }).annotate({ description: "The selected directory, when resolved." })
+  ),
+  concern: Schema.optionalKey(
+    Schema.Struct({
+      id: Schema.String.annotate({ description: "The selected concern id." }),
+      state: Schema.Literals(["REGISTERED", "UNRESOLVED"]).annotate({
+        description: "Whether this concern is registered at the cut.",
+      }),
+      bulletin: Schema.optionalKey(
+        BulletinView.annotate({ description: "The selected concern's full bulletin." })
+      ),
+    }).annotate({ description: "The selected concern and its full bulletin." })
+  ),
+  summaries: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        concern: Schema.String.annotate({ description: "The summarized concern id." }),
+        bulletin: BulletinView.annotate({ description: "Its status without the full body." }),
+        route: Schema.Struct({
+          directory: Schema.String.annotate({ description: "The containing directory id." }),
+          concern: Schema.String.annotate({ description: "The concern to select." }),
+          t: Schema.Int.annotate({ description: "The original ledger cut." }),
+        }).annotate({ description: "Arguments for a same-cut orientation read." }),
+      })
+    ).annotate({ description: "Other concerns' statuses and same-cut read routes." })
+  ),
+  subscriptions: Schema.optionalKey(
+    Schema.Struct({
+      state: Schema.Literal("SEPARATE_QUERY").annotate({
+        description: "Subscriptions are not inferred from associations.",
+      }),
+      query: Schema.Literal("peers").annotate({
+        description: "The query that shows subscriptions.",
+      }),
+      t: Schema.Int.annotate({ description: "The cut to use for that query." }),
+    }).annotate({ description: "Where to inspect separately recorded topic subscriptions." })
+  ),
+  candidates: Schema.optionalKey(
+    OrientationPage.annotate({ description: "Directory candidate page and continuation." })
+  ),
+  members: Schema.optionalKey(
+    OrientationPage.annotate({
+      description: "Resolved explicit association page and continuation.",
+    })
+  ),
+  unresolvedAssociations: Schema.optionalKey(
+    OrientationPage.annotate({
+      description: "Explicit dangling references, not registered membership.",
+    })
+  ),
+  reason: Schema.optionalKey(
+    Schema.Literals(["DAMAGE", "INADMISSIBLE", "FAULT"]).annotate({
+      description: "Why the result is unavailable.",
+    })
+  ),
+  recovery: Schema.optionalKey(
+    OrientationRecovery.annotate({
+      description: "A read-only recovery route, retaining the cut when known.",
+    })
+  ),
+});
 
 const publicMessages = (messages: ReadonlyArray<Message>): typeof Messages.Type => ({
   messages: messages.map((message) => ({
@@ -79,6 +236,18 @@ export const Joined = Schema.Struct({
         "Your effective topic subscriptions. New names are unique and have no # marker; an omitted list preserves unrecognised legacy names.",
     })
   ),
+  associations: Schema.optionalKey(
+    Schema.Array(Association).annotate({
+      description:
+        "Your effective explicit directory and concern associations; they do not subscribe you to topics.",
+    })
+  ),
+  orientation: Schema.optionalKey(
+    OrientationResult.annotate({
+      description:
+        "An independent read after this join committed, when requested; unavailable never means the join failed.",
+    })
+  ),
   cursor: Schema.Finite.annotate({
     description: "Your read position in the ledger: unread mail is what comes after it.",
   }),
@@ -87,6 +256,14 @@ export const Joined = Schema.Struct({
       description: "This session's wake hook (the agent-bus plugin) wakes it when mail arrives.",
     })
   ),
+});
+// The CLI also decodes old servers with Joined. The current server always echoes this field,
+// so a fresh descriptor can prove association support before a mutating join.
+const CurrentJoined = Schema.Struct({
+  ...Joined.fields,
+  associations: Schema.Array(Association).annotate({
+    description: "Your effective explicit directory and concern associations.",
+  }),
 });
 export const Published = Schema.Struct({
   id: Schema.String.annotate({ description: "The new message's id, for replies to name." }),
@@ -164,6 +341,18 @@ const joinFields = {
         'Topics to receive #topic messages for, e.g. ["project"]. One leading # and outer whitespace are removed; duplicates are merged, case is kept. Blank names or another leading # refuse the join. Omitted on rejoin, current topics are kept; given, they replace them ([] clears). The result echoes the effective topics.',
     })
   ),
+  associations: Schema.optionalKey(
+    Schema.Array(Association).annotate({
+      description:
+        "Explicit directory and concern associations. Omitted on rejoin while held by this session keeps them; [] clears. Associations do not subscribe you to topics.",
+    })
+  ),
+  orient: Schema.optionalKey(
+    Schema.Boolean.annotate({
+      description:
+        "After joining, independently read orientation for cwd. A failed read does not undo the join.",
+    })
+  ),
   codexThreadId: Schema.optionalKey(
     Schema.String.annotate({ description: "Codex only: your thread id, the same as session." })
   ),
@@ -180,7 +369,7 @@ const Join = Tool.make("bus_join", {
   description:
     "Join the agent bus (or rejoin after a restart) before reading. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can nudge them to read new messages. A Claude session is woken by the agent-bus plugin's hook, and then its join returns hooked: true; without the plugin it isn't woken, and reads with bus_read or bus_wait.",
   parameters: Schema.Struct(joinFields),
-  success: Joined,
+  success: CurrentJoined,
   failure: Failure,
 }).annotateMerge(Local);
 
@@ -194,7 +383,7 @@ const Takeover = Tool.make("bus_takeover", {
       description: "The holder's join id, as bus_join's refusal gives it.",
     }),
   }),
-  success: Joined,
+  success: CurrentJoined,
   failure: Failure,
 })
   .annotateMerge(Local)
@@ -226,6 +415,36 @@ const Publish = Tool.make("bus_publish", {
   success: Published,
   failure: Failure,
 }).annotateMerge(Local);
+
+const Directory = Tool.make("bus_directory", {
+  description:
+    "Register or replace one complete directory, with an explicit nonempty notification audience. Supply a unique UUIDv7 operation and the exact current revision (null only for first registration). A matching retry returns its original receipt; UNKNOWN may still have committed, so retry only the identical intent with the same operation id. Association does not subscribe addresses.",
+  parameters: DirectoryUpdate,
+  success: WriteResult,
+  failure: Failure,
+})
+  .annotateMerge(Local)
+  .annotate(Tool.Strict, true);
+
+const Bulletin = Tool.make("bus_bulletin", {
+  description:
+    "Publish or withdraw a programme or registered concern bulletin. Programme notices go to *; concern notices go to its registered topic plus explicitly named direct recipients. Withdrawal retains the prior audience. Supply a UUIDv7 operation and the exact current revision; after UNKNOWN retry only the identical intent with the same operation id. A committed notice does not prove it was read.",
+  parameters: BulletinUpdate,
+  success: WriteResult,
+  failure: Failure,
+})
+  .annotateMerge(Local)
+  .annotate(Tool.Strict, true);
+
+const Orient = Tool.make("bus_orient", {
+  description:
+    "Read designated programme guidance, directory candidates or one selected directory, its concern summaries and optional full concern bulletin, and explicit current associations at one ledger cut. It does not join, subscribe, read mail or move a cursor. Pass a candidate continuation back with the same cwd, or use the members page's saved-query continuation at the same cut. An unavailable result is not an empty or complete result.",
+  parameters: OrientRequest,
+  success: OrientationResult,
+  failure: Failure,
+})
+  .annotateMerge(Lookup)
+  .annotate(Tool.Strict, true);
 
 const Read = Tool.make("bus_read", {
   description:
@@ -474,6 +693,9 @@ const BusToolkit = Toolkit.make(
   Join,
   Takeover,
   Publish,
+  Directory,
+  Bulletin,
+  Orient,
   Read,
   Wait,
   Wake,
@@ -566,19 +788,60 @@ const peersPreset = Effect.gen(function* () {
 const BusHandlers = BusToolkit.toLayer(
   Effect.gen(function* () {
     const bus = yield* Bus;
+    const ledger = yield* Ledger;
     const gateway = yield* QueryGateway;
+    const environment = Context.make(Bus, bus).pipe(
+      Context.add(Ledger, ledger),
+      Context.add(QueryGateway, gateway)
+    );
     // One pool for every query operation, presets included.
     const pool = yield* Semaphore.make(QUERY_PERMITS);
     const queries = <A, E>(effect: Effect.Effect<A, E, QueryGateway>) =>
       effect.pipe(Effect.provideService(QueryGateway, gateway), pool.withPermits(1));
+    const withOrientation = <T extends object>(joined: T, cwd: string) => {
+      const fallback = {
+        status: "UNAVAILABLE" as const,
+        reason: "INADMISSIBLE" as const,
+        recovery: { tool: "bus_orient" as const, input: { cwd } },
+      };
+      const occupied = Buffer.byteLength(JSON.stringify({ ...joined, orientation: null }), "utf8");
+      const remaining = Math.max(0, MAX_ENVELOPE_BYTES - occupied + 4);
+      return queries(orient({ cwd }, remaining)).pipe(
+        Effect.catchTag("InvalidQuery", () => Effect.succeed(fallback)),
+        Effect.map((orientation) => ({
+          ...joined,
+          orientation:
+            Buffer.byteLength(JSON.stringify({ ...joined, orientation }), "utf8") <=
+            MAX_ENVELOPE_BYTES
+              ? orientation
+              : fallback,
+        }))
+      );
+    };
     return {
-      bus_join: (params) => bus.join({ ...params, session: params.session }),
-      bus_takeover: ({ holder, ...params }) =>
-        bus.join({ ...params, session: params.session, takeover: holder }),
+      bus_join: ({ orient: requested, ...params }) =>
+        bus
+          .join({ ...params, session: params.session, orient: requested })
+          .pipe(
+            Effect.flatMap((joined) =>
+              requested !== true ? Effect.succeed(joined) : withOrientation(joined, params.cwd)
+            )
+          ),
+      bus_takeover: ({ holder, orient: requested, ...params }) =>
+        bus
+          .join({ ...params, session: params.session, takeover: holder, orient: requested })
+          .pipe(
+            Effect.flatMap((joined) =>
+              requested !== true ? Effect.succeed(joined) : withOrientation(joined, params.cwd)
+            )
+          ),
       bus_publish: (params) =>
         bus
           .publish({ ...params, session: params.session })
           .pipe(Effect.map(({ id, ts }) => ({ id, ts }))),
+      bus_directory: (params) => updateDirectory(params).pipe(Effect.provide(environment)),
+      bus_bulletin: (params) => updateBulletin(params).pipe(Effect.provide(environment)),
+      bus_orient: (params) => queries(orient(params)),
       bus_read: ({ address, session, limit }) =>
         bus.take(address, session, limit).pipe(Effect.map(publicMessages)),
       bus_wait: ({ address, session, timeoutSeconds }) =>

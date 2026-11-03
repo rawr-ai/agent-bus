@@ -170,6 +170,9 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_join: changes,
       bus_takeover: { ...changes, destructiveHint: true },
       bus_publish: changes,
+      bus_directory: changes,
+      bus_bulletin: changes,
+      bus_orient: lookup,
       bus_read: changes,
       bus_wait: changes,
       bus_wake: changes,
@@ -195,12 +198,51 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(undescribed).toEqual([]);
   });
 
+  test("describes every nested orientation input and result field", async () => {
+    const { tools } = await connect();
+    const object = (value: unknown): value is Record<string, unknown> =>
+      typeof value === "object" && value !== null && !Array.isArray(value);
+    const missing = (schema: unknown, path: string): Array<string> => {
+      if (!object(schema)) return [];
+      const properties = object(schema.properties) ? Object.entries(schema.properties) : [];
+      return [
+        ...properties.flatMap(([name, field]) => [
+          ...(!object(field) ||
+          typeof field.description !== "string" ||
+          field.description.trim() === ""
+            ? [`${path}.${name}`]
+            : []),
+          ...missing(field, `${path}.${name}`),
+        ]),
+        ...(schema.items === undefined ? [] : missing(schema.items, `${path}[]`)),
+        ...(Array.isArray(schema.anyOf)
+          ? schema.anyOf.flatMap((item, index) => missing(item, `${path}|${index}`))
+          : []),
+      ];
+    };
+    const orientationTools = tools.filter(({ name }) =>
+      ["bus_directory", "bus_bulletin", "bus_orient"].includes(name)
+    );
+    expect(orientationTools).toHaveLength(3);
+    expect(
+      orientationTools.flatMap((tool) => [
+        ...missing(tool.inputSchema, `${tool.name}.input`),
+        ...(tool.outputSchema === undefined
+          ? []
+          : missing(tool.outputSchema, `${tool.name}.output`)),
+      ])
+    ).toEqual([]);
+  });
+
   test("lists the bus tools, with output schemas from 2025-06-18", async () => {
     const { tools } = await connect();
     const required = {
-      bus_join: ["address", "cursor"],
-      bus_takeover: ["address", "cursor"],
+      bus_join: ["address", "associations", "cursor"],
+      bus_takeover: ["address", "associations", "cursor"],
       bus_publish: ["id", "ts"],
+      bus_directory: ["status", "operation", "expected"],
+      bus_bulletin: ["status", "operation", "expected"],
+      bus_orient: ["status"],
       bus_read: ["messages"],
       bus_wait: ["messages"],
       bus_wake: ["addresses", "owns", "superseded"],
@@ -249,6 +291,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(await succeed("bus_join", joining(a))).toEqual({
       address: a,
       topics: [],
+      associations: [],
       cursor: expect.any(Number),
     });
     await succeed("bus_join", joining(b));
@@ -420,6 +463,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(await succeed("bus_takeover", { ...other, holder: joinId })).toEqual({
       address: owner,
       topics: [],
+      associations: [],
       cursor: expect.any(Number),
     });
     await refused(

@@ -93,6 +93,10 @@ export const layerJsonl = (file: string) =>
       return Ledger.of({
         instance: "jsonl",
         append,
+        readWitness: () =>
+          Effect.fail(new LedgerError({ message: "Guarded designations need Fluree." })),
+        designate: () =>
+          Effect.fail(new LedgerError({ message: "Guarded designations need Fluree." })),
         read,
         end,
         changes,

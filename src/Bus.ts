@@ -8,15 +8,23 @@ import {
   Exit,
   Layer,
   Option,
+  Schema,
   Semaphore,
   Stream,
 } from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
+  type Association,
+  Association as AssociationSchema,
+  canonicalAssociations,
+  InvalidAssociations,
+  InvalidQuery,
   InvalidTopics,
   isFor,
   type LedgerError,
   latestPresences,
+  MAX_ASSOCIATED_ADDRESS_BYTES,
+  MAX_ASSOCIATION_BYTES,
   Message,
   machine,
   NotJoined,
@@ -38,6 +46,8 @@ export interface JoinInput {
   /** The current holder's join id, to replace a session that has ended. */
   readonly takeover?: string | undefined;
   readonly topics?: ReadonlyArray<string> | undefined;
+  readonly associations?: ReadonlyArray<Association> | undefined;
+  readonly orient?: boolean | undefined;
   readonly codexThreadId?: string | undefined;
   readonly note?: string | undefined;
   /** Start from the beginning of the ledger instead of only new messages. */
@@ -85,10 +95,11 @@ export class Bus extends Context.Service<
       {
         readonly address: string;
         readonly topics: ReadonlyArray<string>;
+        readonly associations: ReadonlyArray<Association>;
         readonly cursor: number;
         readonly hooked?: true;
       },
-      LedgerError | NotOwner | InvalidTopics
+      LedgerError | NotOwner | InvalidTopics | InvalidAssociations | InvalidQuery
     >;
     readonly leave: (
       address: string,
@@ -97,6 +108,12 @@ export class Bus extends Context.Service<
     readonly publish: (
       input: PublishInput
     ) => Effect.Effect<Message, LedgerError | NotJoined | NotOwner>;
+    /** Runs a publisher operation under the same ownership lock as ordinary sends. */
+    readonly withOwner: <A, E>(
+      address: string,
+      session: string | undefined,
+      action: (owner: Subscriber) => Effect.Effect<A, E>
+    ) => Effect.Effect<A, E | LedgerError | NotJoined | NotOwner>;
     readonly peers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
     /**
      * Hands an address's unread messages to `nudge`, and marks none of them
@@ -168,7 +185,7 @@ const git = (cwd: string, args: ReadonlyArray<string>) =>
  * its repo and branch. They are optional metadata for queries: a branch can't
  * be recovered once its worktree or branch is gone.
  */
-const originFor = Effect.fn("Bus.originFor")(function* (cwd: string | undefined) {
+export const originFor = Effect.fn("Bus.originFor")(function* (cwd: string | undefined) {
   if (cwd === undefined) return new Origin({ host: hostname() });
   const repo = yield* git(cwd, ["rev-parse", "--show-toplevel"]);
   const branch = repo === undefined ? undefined : yield* git(cwd, ["branch", "--show-current"]);
@@ -182,6 +199,28 @@ const originFor = Effect.fn("Bus.originFor")(function* (cwd: string | undefined)
 
 const optional = <K extends string, V>(key: K, value: V | undefined) =>
   value === undefined ? {} : { [key]: value };
+
+/** Canonicalize the declared set without resolving it or implying a subscription. */
+const associationsOf = (value: ReadonlyArray<Association>) =>
+  Schema.decodeUnknownEffect(Schema.Array(AssociationSchema))(value).pipe(
+    Effect.mapError(
+      () =>
+        new InvalidAssociations({
+          message:
+            "Each association must name a directory and concern ids using letters, digits, '.', '_' or '-'. Nothing was changed.",
+        })
+    ),
+    Effect.flatMap((entries) => {
+      const associations = canonicalAssociations(entries);
+      return Buffer.byteLength(JSON.stringify(associations), "utf8") <= MAX_ASSOCIATION_BYTES
+        ? Effect.succeed(associations)
+        : Effect.fail(
+            new InvalidAssociations({
+              message: `Associations exceed ${MAX_ASSOCIATION_BYTES} UTF-8 bytes. Nothing was changed.`,
+            })
+          );
+    })
+  );
 
 const sessionHelp =
   "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients.";
@@ -389,6 +428,20 @@ export const layer = Layer.effect(
           (last !== undefined && mine && last.presence.status === "joined"
             ? last.presence.topics
             : []);
+        const associations = yield* associationsOf(
+          input.associations ??
+            (last !== undefined && mine && last.presence.status === "joined"
+              ? (last.presence.associations ?? [])
+              : [])
+        );
+        if (
+          associations.length > 0 &&
+          Buffer.byteLength(input.address, "utf8") > MAX_ASSOCIATED_ADDRESS_BYTES
+        ) {
+          return yield* new InvalidAssociations({
+            message: `An associated address cannot exceed ${MAX_ASSOCIATED_ADDRESS_BYTES} UTF-8 bytes. Nothing was changed.`,
+          });
+        }
         const topics = new Set<string>();
         for (const requested of requestedTopics) {
           const topic = topicName(requested);
@@ -401,10 +454,31 @@ export const layer = Layer.effect(
           // An omitted list must not make an older, malformed subscription block a rejoin.
           topics.add(topic ?? requested);
         }
+        if (input.orient === true) {
+          const smallestResult = {
+            address: input.address,
+            topics: [...topics],
+            associations,
+            cursor: Number.MAX_SAFE_INTEGER,
+            hooked: true,
+            orientation: {
+              status: "UNAVAILABLE",
+              reason: "INADMISSIBLE",
+              recovery: { tool: "bus_orient", input: { cwd: input.cwd } },
+            },
+          };
+          if (Buffer.byteLength(JSON.stringify(smallestResult), "utf8") > 65_536) {
+            return yield* new InvalidQuery({
+              message:
+                "The join echo is too large to include an orientation status. Shorten the join fields, or join without orientation. Nothing was changed.",
+            });
+          }
+        }
         const presence = new Presence({
           runtime: input.runtime,
           status: "joined",
           topics: [...topics],
+          associations,
           session,
           ...optional("takeover", takeover),
           ...optional("rejoinOf", renews ? (last.presence.rejoinOf ?? last.joinId) : undefined),
@@ -427,6 +501,7 @@ export const layer = Layer.effect(
         return {
           address: input.address,
           topics: presence.topics,
+          associations,
           cursor,
           ...(input.runtime === "claude" && hooked.has(session) ? { hooked: true as const } : {}),
         };
@@ -439,6 +514,7 @@ export const layer = Layer.effect(
           runtime: current.presence.runtime,
           status: "left",
           topics: [],
+          ...optional("associations", current.presence.associations),
           ...optional("session", current.presence.session),
         });
         yield* announce(address, presence, current.cwd);
@@ -461,6 +537,17 @@ export const layer = Layer.effect(
         yield* ledger.append(message);
         return message;
       }).pipe(claiming(input.from), Effect.withSpan("Bus.publish"));
+
+    const withOwner = <A, E>(
+      address: string,
+      session: string | undefined,
+      action: (owner: Subscriber) => Effect.Effect<A, E>
+    ) =>
+      owned(address, session).pipe(
+        Effect.flatMap(action),
+        claiming(address),
+        Effect.withSpan("Bus.withOwner")
+      );
 
     /** The unread messages of the subscriber `reader` resolves, as it is under the lock. */
     const pending = <R>(
@@ -668,6 +755,6 @@ export const layer = Layer.effect(
         );
       }).pipe(Effect.withSpan("Bus.wake"));
 
-    return Bus.of({ join, leave, publish, peers, deliver, take, wait, wake });
+    return Bus.of({ join, leave, publish, withOwner, peers, deliver, take, wait, wake });
   })
 );

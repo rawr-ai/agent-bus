@@ -265,6 +265,129 @@ for (const backend of backends) {
         })
       ));
 
+    test("associations follow the latest presence across rejoin, replay, leave and takeover", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const cursors = yield* Cursors.Cursors;
+          const joining = {
+            address: "codex/associated",
+            runtime: "codex" as const,
+            session: "owner-a",
+            cwd: process.cwd(),
+          };
+          const expected = [
+            { directory: "alpha", concerns: ["build", "docs"] },
+            { directory: "beta", concerns: [] },
+          ];
+          const initial = yield* bus.join({
+            ...joining,
+            associations: [
+              { directory: "beta", concerns: [] },
+              { directory: "alpha", concerns: ["docs", "build", "docs"] },
+              { directory: "alpha", concerns: ["build"] },
+            ],
+          });
+          expect(initial.associations).toEqual(expected);
+          expect((yield* ledger.presence).at(-1)?.presence?.associations).toEqual(expected);
+          expect((yield* bus.join(joining)).associations).toEqual(expected);
+          expect((yield* bus.join({ ...joining, replay: true })).associations).toEqual(expected);
+          const beforeInvalid = yield* cursors.get(joining.address);
+          const beforeEnd = yield* ledger.end;
+          const invalid = yield* Effect.flip(
+            bus.join({ ...joining, associations: [{ directory: "bad id", concerns: [] }] })
+          );
+          expect(invalid._tag).toBe("InvalidAssociations");
+          expect(yield* ledger.end).toBe(beforeEnd);
+          expect(yield* cursors.get(joining.address)).toEqual(beforeInvalid);
+          expect((yield* bus.join({ ...joining, associations: [] })).associations).toEqual([]);
+          yield* bus.join({ ...joining, associations: expected });
+          yield* bus.leave(joining.address, joining.session);
+          expect((yield* ledger.presence).at(-1)?.presence?.associations).toEqual(expected);
+          expect((yield* bus.join(joining)).associations).toEqual([]);
+          yield* bus.join({ ...joining, associations: expected });
+          const holder = (yield* ledger.presence).at(-1)?.id;
+          expect(holder).toBeDefined();
+          const takeover = yield* bus.join({ ...joining, session: "owner-b", takeover: holder });
+          expect(takeover.associations).toEqual([]);
+          expect((yield* bus.peers)[0]?.presence.associations).toEqual([]);
+          const refused = yield* Effect.flip(bus.join(joining));
+          expect(refused._tag).toBe("NotOwner");
+          const explicit = yield* bus.join({
+            ...joining,
+            session: "owner-b",
+            associations: [{ directory: "unknown", concerns: ["missing"] }],
+          });
+          expect(explicit.associations).toEqual([{ directory: "unknown", concerns: ["missing"] }]);
+          const legacy = new Message({
+            id: Bun.randomUUIDv7(),
+            ts: new Date().toISOString(),
+            from: joining.address,
+            to: ["*"],
+            kind: "presence",
+            body: "legacy join",
+            presence: new Presence({
+              runtime: "codex",
+              session: "owner-b",
+              status: "joined",
+              topics: [],
+            }),
+          });
+          yield* ledger.append(legacy);
+          expect((yield* bus.join({ ...joining, session: "owner-b" })).associations).toEqual([]);
+        })
+      ));
+
+    test("address byte bound applies only when effective associations are nonempty", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const cursors = yield* Cursors.Cursors;
+          const joining = {
+            address: `other/${"a".repeat(507)}`,
+            runtime: "other" as const,
+            session: "large-address",
+            cwd: process.cwd(),
+          };
+          const before = yield* ledger.end;
+          const error = yield* Effect.flip(
+            bus.join({ ...joining, associations: [{ directory: "project", concerns: [] }] })
+          );
+          expect(error._tag).toBe("InvalidAssociations");
+          expect(yield* ledger.end).toBe(before);
+          const ordinary = { ...joining, address: "other/plain" };
+          expect((yield* bus.join(ordinary)).associations).toEqual([]);
+          const priorCursor = yield* cursors.get(ordinary.address);
+          expect((yield* bus.join({ ...ordinary, associations: [] })).associations).toEqual([]);
+          expect(yield* cursors.get(ordinary.address)).toEqual(priorCursor);
+        })
+      ));
+
+    test("an oversized join echo refuses requested orientation before changing state", () =>
+      run(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
+          const cursors = yield* Cursors.Cursors;
+          const topics = ["x".repeat(66_000)];
+          const legacy = {
+            address: "other/large-topics",
+            runtime: "other" as const,
+            session: "owner",
+            cwd: process.cwd(),
+            topics,
+          };
+          expect((yield* bus.join(legacy)).topics).toEqual(topics);
+          const before = { head: yield* ledger.end, cursor: yield* cursors.get(legacy.address) };
+          const refusal = yield* Effect.flip(bus.join({ ...legacy, orient: true }));
+          expect(refusal._tag).toBe("InvalidQuery");
+          expect(yield* ledger.end).toBe(before.head);
+          expect(yield* cursors.get(legacy.address)).toEqual(before.cursor);
+        })
+      ));
+
     test("legacy prefixed subscriptions route before rejoin; rejoin canonicalizes without moving the cursor", () =>
       run(
         Effect.gen(function* () {
@@ -3897,7 +4020,7 @@ describe("mcp over http", () => {
           codexThreadId: thread,
         });
         const joined = yield* join("codex/a", codex("t-1"));
-        expect(Object.keys(joined).sort()).toEqual(["address", "cursor", "topics"]);
+        expect(Object.keys(joined).sort()).toEqual(["address", "associations", "cursor", "topics"]);
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });
@@ -4077,6 +4200,73 @@ describe("mcp over http", () => {
     );
   });
 
+  test("the CLI discovers association input and required echo on a fresh native connection", () => {
+    const { url, port, layer } = serve();
+    const cli = (...args: Array<string>) =>
+      Effect.promise(async () => {
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "../src/bin.ts"),
+            "join",
+            "--address",
+            "other/associated-cli",
+            "--runtime",
+            "other",
+            "--session",
+            "cli",
+            ...args,
+          ],
+          {
+            timeout: 20_000,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, AGENT_BUS_PORT: String(port) },
+          }
+        );
+        const [code, stdout, stderr] = await Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]);
+        return { code, out: (stdout + stderr).trim() };
+      });
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* McpClient.McpClient;
+        const tools = yield* client.listTools();
+        const descriptor = tools.find((tool) => tool.name === "bus_join");
+        expect(descriptor).toBeDefined();
+        if (descriptor === undefined) throw new Error("missing join descriptor");
+        expect(Client.supportsAssociations(descriptor)).toBe(true);
+        const { outputSchema: _, ...withoutOutput } = descriptor;
+        expect(Client.supportsAssociations(withoutOutput)).toBe(false);
+        const result = yield* cli(
+          "--associations",
+          '[{"directory":"bus","concerns":["orientation","orientation"]}]'
+        );
+        expect(result).toEqual({
+          code: 0,
+          out: 'joined as other/associated-cli; topics: []; associations: [{"directory":"bus","concerns":["orientation"]}]',
+        });
+        const bad = yield* cli("--associations", "not-json");
+        expect(bad.code).toBe(1);
+        expect(bad.out).toContain("No join was sent");
+      }).pipe(
+        Effect.provide(
+          McpClient.layerHttp({
+            name: "native-probe",
+            version: "1",
+            url,
+            protocol: McpProtocol.v2026_07_28,
+          })
+        ),
+        Effect.provide(Layer.merge(layer, FetchHttpClient.layer))
+      )
+    );
+  });
+
   test("the CLI trims topics for an older server without silently dropping blank list items", () => {
     const port = nextPort++;
     const legacy = legacyTopicServer(port);
@@ -4127,6 +4317,48 @@ describe("mcp over http", () => {
         expect(yield* cli("--topics", "")).toEqual(joined);
         expect(legacy.topicsOf(address)).toEqual([]);
         expect(legacy.recipients("#ops")).toEqual([]);
+      }).pipe(Effect.provide(legacy.layer))
+    );
+  });
+
+  test("the CLI refuses association joins before mutating an older server", () => {
+    const port = nextPort++;
+    const legacy = legacyTopicServer(port);
+    const address = "other/legacy-associated";
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const child = Bun.spawn(
+          [
+            process.execPath,
+            join(import.meta.dir, "../src/bin.ts"),
+            "join",
+            "--address",
+            address,
+            "--runtime",
+            "other",
+            "--session",
+            "legacy",
+            "--associations",
+            '[{"directory":"bus","concerns":[]}]',
+          ],
+          {
+            timeout: 20_000,
+            stdin: "ignore",
+            stdout: "pipe",
+            stderr: "pipe",
+            env: { ...process.env, AGENT_BUS_PORT: String(port) },
+          }
+        );
+        const [code, stdout, stderr] = yield* Effect.promise(() =>
+          Promise.all([
+            child.exited,
+            new Response(child.stdout).text(),
+            new Response(child.stderr).text(),
+          ])
+        );
+        expect(code).toBe(1);
+        expect(stdout + stderr).toContain("no join was sent");
+        expect(legacy.topicsOf(address)).toBeUndefined();
       }).pipe(Effect.provide(legacy.layer))
     );
   });

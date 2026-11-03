@@ -10,7 +10,7 @@ import * as Cursors from "./Cursors.ts";
 import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
 import { defaultCodex, localHost } from "./codex.ts";
-import { Runtime } from "./domain.ts";
+import { Association, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import * as Ledger from "./Ledger.ts";
 import * as Mcp from "./mcp.ts";
@@ -155,6 +155,16 @@ const joinCommand = Command.make(
       Flag.withDescription("Comma-separated topic names (optional #); an empty string clears them"),
       Flag.optional
     ),
+    associations: Flag.String("associations").pipe(
+      Flag.withDescription(
+        'JSON array of explicit directory/concern associations; [] clears them, e.g. [{"directory":"bus","concerns":["orientation"]}]'
+      ),
+      Flag.optional
+    ),
+    orient: Flag.Boolean("orient").pipe(
+      Flag.withDescription("Read orientation after the join commits"),
+      Flag.withDefault(false)
+    ),
     codexThread: Flag.String("codex-thread").pipe(
       Flag.withDescription("Codex thread id the bus wakes"),
       Flag.optional
@@ -167,11 +177,26 @@ const joinCommand = Command.make(
   },
   (input) =>
     Effect.gen(function* () {
+      const associations = Option.isNone(input.associations)
+        ? undefined
+        : yield* Schema.decodeUnknownEffect(Schema.fromJsonString(Schema.Array(Association)))(
+            input.associations.value
+          ).pipe(
+            Effect.mapError(
+              () =>
+                new Client.BusCallError({
+                  message:
+                    "--associations must be a JSON array of directory and concern ids. No join was sent.",
+                })
+            )
+          );
       const joining = {
         address: input.address,
         runtime: input.runtime,
         session: yield* Client.sessionFor(input.runtime, Option.getOrUndefined(input.session)),
         cwd: process.cwd(),
+        ...(associations === undefined ? {} : { associations }),
+        ...(input.orient ? { orient: true } : {}),
         ...Client.defined({
           topics: Option.getOrUndefined(
             Option.map(input.topics, (text) =>
@@ -184,14 +209,59 @@ const joinCommand = Command.make(
         replay: input.replay,
       };
       const joined = yield* Option.match(input.takeover, {
-        onNone: () => call("bus_join", Mcp.Joined, joining),
-        onSome: (holder) => call("bus_takeover", Mcp.Joined, { ...joining, holder }),
+        onNone: () => Client.join(endpoint)("bus_join", joining),
+        onSome: (holder) => Client.join(endpoint)("bus_takeover", { ...joining, holder }),
       });
       const topics =
         joined.topics === undefined ? "" : `; topics: ${JSON.stringify(joined.topics)}`;
-      yield* Console.log(`joined as ${joined.address}${topics}`);
+      const effective =
+        associations === undefined ? "" : `; associations: ${JSON.stringify(joined.associations)}`;
+      yield* Console.log(`joined as ${joined.address}${topics}${effective}`);
+      if (input.orient) {
+        yield* Console.log(
+          joined.orientation === undefined
+            ? "Orientation unavailable after the committed join; retry read-only with agent-bus orient. Do not rejoin."
+            : JSON.stringify(joined.orientation)
+        );
+      }
     })
 ).pipe(Command.withDescription("Join the bus as an address, from this directory"));
+
+const orientCommand = Command.make(
+  "orient",
+  {
+    directory: Flag.String("directory").pipe(
+      Flag.withDescription("Select a directory by id"),
+      Flag.optional
+    ),
+    concern: Flag.String("concern").pipe(
+      Flag.withDescription("Include a selected concern's bulletin"),
+      Flag.optional
+    ),
+    cwd: Flag.String("cwd").pipe(
+      Flag.withDescription("Absolute checkout path to discover; defaults to this directory"),
+      Flag.optional
+    ),
+    t: Flag.Int("t").pipe(Flag.withDescription("Historical ledger commit"), Flag.optional),
+    candidateCursor: Flag.String("candidate-cursor").pipe(
+      Flag.withDescription("Continue candidate discovery at its original cut"),
+      Flag.optional
+    ),
+  },
+  (input) =>
+    Effect.gen(function* () {
+      const result = yield* call("bus_orient", Mcp.OrientationResult, {
+        cwd: Option.getOrUndefined(input.cwd) ?? process.cwd(),
+        ...Client.defined({
+          directory: Option.getOrUndefined(input.directory),
+          concern: Option.getOrUndefined(input.concern),
+          t: Option.getOrUndefined(input.t),
+          candidateCursor: Option.getOrUndefined(input.candidateCursor),
+        }),
+      });
+      yield* Console.log(JSON.stringify(result));
+    })
+).pipe(Command.withDescription("Read current orientation without joining or moving a cursor"));
 
 const publish = Command.make(
   "publish",
@@ -261,7 +331,7 @@ const fail = (error: { readonly message: string }) =>
 
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
-  Command.withSubcommands([serve, joinCommand, publish, peers, claudeWakeHook])
+  Command.withSubcommands([serve, joinCommand, orientCommand, publish, peers, claudeWakeHook])
 );
 
 Command.run(cli, { version: VERSION }).pipe(

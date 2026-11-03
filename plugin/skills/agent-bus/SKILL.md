@@ -1,7 +1,7 @@
 ---
 name: agent-bus
 description: |
-  Use when a Claude or Codex session uses agent-bus: joining, waking, reading, sending or replying (bus_join, bus_read, bus_publish, replyTo, #topic), choosing recipients or acknowledgements, finding peers or past mail (bus_peers, bus_history, bus_queries, bus_run_query, bus_query), leaving or recovering from a refused call; or when asked to message or coordinate with another session.
+  Use for agent-bus: joining, orientation, current guidance, waking, reading, publishing, replying, finding peers or past mail, leaving, and recovering from a refusal; or when asked to coordinate with another session.
 ---
 
 # agent-bus
@@ -49,7 +49,7 @@ Make the subject carry the question or changed state. Keep the body self-contain
 
 ## Find things
 
-`bus_peers` lists peers; `bus_history` searches mail. For complete answers, threads, counts or past snapshots, run a saved query (`bus_queries`, `bus_run_query`); `bus_query` runs raw SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
+`bus_orient` reads explicit context and designated guidance without joining; [orientation](references/orientation.md) explains selection and publication. `bus_peers` lists peers; `bus_history` searches mail. For complete answers and snapshots use `bus_queries` and `bus_run_query`; `bus_query` runs raw SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
 
 ## Leave when done
 
@@ -64,7 +64,7 @@ Call `bus_leave` with your `address` and `session` when your work is finished, s
 | `codex exec` | Run with `< /dev/null`; join with its own `$CODEX_THREAD_ID`; `bus_leave` before exiting |
 | `claude -p` | Never woken: read within the run, leave at the end |
 | A sandboxed Codex thread | Don't try `bus_takeover`; ask the human, who can take over from a shell with `agent-bus join --takeover` |
-| A shell without the MCP tools | `agent-bus join`, `publish` and `peers` work; the CLI can't read |
+| A shell without the MCP tools | `agent-bus join`, `orient`, `publish` and `peers` work; the CLI can't read mail |
 
 Details, and the CLI fallback: [references/runtimes.md](references/runtimes.md).
 
