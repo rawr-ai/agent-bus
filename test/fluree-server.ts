@@ -6,9 +6,12 @@
  *
  * `bun test` runs every file in one process and does not emit the process's `exit`
  * event, so the server is stopped by `stopFlureeServer`, which test/preload.ts
- * registers as a global afterAll: it runs once, after the last test file.
+ * registers as a global afterAll: it runs once, after the last test file. A test process
+ * killed before then cannot run it, so the server runs under a supervisor that stops it when
+ * the test process is gone ([supervised](./supervised.ts)).
  */
 import type { FlureeConfig } from "../src/Fluree.ts";
+import { type Supervised, spawnSupervised } from "./supervised.ts";
 
 export const flureeBin = Bun.which("fluree");
 
@@ -24,7 +27,7 @@ const command = (args: ReadonlyArray<string>, stdin?: string) => {
 interface Server {
   readonly url: string;
   readonly token: string;
-  readonly process: ReturnType<typeof Bun.spawn>;
+  readonly process: Supervised;
 }
 
 /** Whether nothing listens on the port now: a quick bind and release. */
@@ -73,7 +76,7 @@ const launch = async (): Promise<Server> => {
     const port = 18_500 + Math.floor(Math.random() * 1400);
     if (!portFree(port)) continue;
     const url = `http://127.0.0.1:${port}`;
-    const spawned = Bun.spawn(
+    const spawned = spawnSupervised(
       [flureeBin, "server", "run", "--memory", "--listen-addr", `127.0.0.1:${port}`, "--"].concat([
         "--cors-enabled=false",
         ...auth,
@@ -100,15 +103,15 @@ const launch = async (): Promise<Server> => {
   throw new Error(stopped ? "the shared fluree server was stopped" : "fluree server did not start");
 };
 
-/** Stops one child and waits until it has exited; harmless once it has. */
-const end = async (proc: ReturnType<typeof Bun.spawn>) => {
+/** Stops one supervised server and waits until it has exited; harmless once it has. */
+const end = async (proc: Supervised) => {
   proc.kill();
   await proc.exited;
 };
 
 let server: Promise<Server> | undefined;
 /** The child of the launch in progress, or of the running server. */
-let child: ReturnType<typeof Bun.spawn> | undefined;
+let child: Supervised | undefined;
 let stopped = false;
 let stopping: Promise<void> | undefined;
 let ledgers = 0;
@@ -132,8 +135,11 @@ export const stopFlureeServer = (): Promise<void> => {
   return stopping;
 };
 
-/** The running server's process id, for the lifecycle regression. */
-export const flureeServerPid = async () => (await shared()).process.pid;
+/**
+ * The process id of the running server's supervisor, for the lifecycle regressions; the
+ * server is its one child.
+ */
+export const flureeSupervisorPid = async () => (await shared()).process.pid;
 
 export interface FlureeServer {
   readonly url: string;

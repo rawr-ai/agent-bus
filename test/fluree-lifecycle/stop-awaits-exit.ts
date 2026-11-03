@@ -1,13 +1,10 @@
 // Run as a plain script by test/fluree-server.test.ts: starts the shared server, stops it, and
-// reports whether its process still exists the moment the stop resolves.
-import { flureeServerPid, stopFlureeServer } from "../fluree-server.ts";
+// reports whether the server process, its supervisor's one child, is still running the moment
+// the stop resolves.
+import { flureeSupervisorPid, stopFlureeServer } from "../fluree-server.ts";
+import { alive, childrenOf } from "../processes.ts";
 
-const pid = await flureeServerPid();
+const supervisor = await flureeSupervisorPid();
+const children = childrenOf(supervisor);
 await stopFlureeServer();
-let exists = true;
-try {
-  process.kill(pid, 0);
-} catch {
-  exists = false;
-}
-console.log(JSON.stringify({ pid, exists }));
+console.log(JSON.stringify({ supervisor, children, running: children.filter(alive) }));

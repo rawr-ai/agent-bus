@@ -26,7 +26,8 @@
  *    identical replay never notifies twice. Its races overlap at the client;
  *    they cannot show that the two writes overlapped inside Fluree.
  *
- * The server requires a token, as the installed one does.
+ * The server requires a token, as the installed one does. It runs under a supervisor, so a
+ * run killed before its cleanup still stops it ([supervised](../test/supervised.ts)).
  */
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +42,7 @@ import { Message, MessageJson } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import type { QueryGateway } from "../src/Query.ts";
 import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
+import { type Supervised, spawnSupervised } from "../test/supervised.ts";
 
 const fluree = Bun.which("fluree");
 if (fluree === null) throw new Error("fluree is not on PATH");
@@ -76,10 +78,10 @@ const HOLD_INDEX = ["--reindex-min-bytes", "1000000000", "--reindex-max-bytes", 
 
 Bun.spawnSync([fluree, "init"], { cwd: dir, stdout: "ignore" });
 
-let server: ReturnType<typeof Bun.spawn> | undefined;
+let server: Supervised | undefined;
 
 const start = async (extra: ReadonlyArray<string> = []) => {
-  server = Bun.spawn(
+  server = spawnSupervised(
     [
       fluree,
       "server",
