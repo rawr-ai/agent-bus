@@ -84,6 +84,8 @@ A change in the ledger only wakes readers; reading from the cursor decides what 
 
 On Fluree, a cursor is the last commit `t` read. A read is a history query over the entries from the cursor to the head, in windows of 500 commits. Cursors are kept by the `serve` of the machine the address joined from, one file per address, and belong to one incarnation of the ledger (rule 11; [topology](topology.md) gives the path).
 
+Every JSON entry returned for the range is decoded before a read returns, even when the caller asks for a limit. Malformed or schema-invalid JSON fails the read without returning a prefix or moving the cursor. Presence reads likewise decode every returned JSON entry in the presence history before deciding ownership, including old entries superseded by a later presence. A failure does not infer an older owner or an unclaimed address.
+
 Each `serve` has two locks per address. One serializes reads, deliveries and anything else that moves the cursor. The other serializes changes of ownership with sends. A join or a leave takes both, the ownership lock first.
 
 ### How an entry is stored
@@ -122,6 +124,7 @@ The ledger's config graph enables inline full-text scoring on `bus:body` and `bu
 9. **The caller controls topic membership.** A rejoin that names no topics preserves canonical subscriptions and unrecognised names, canonicalising recognisable legacy names; a supplied list replaces them. Canonicalising `"#reviews"` to `"reviews"` keeps `#reviews` delivery but ends the legacy literal match for malformed `##reviews` recipients, including unread mail. New names accept one optional `#` and outer whitespace, preserve case and deduplicate. Malformed new names refuse the whole join; an explicit empty list or a leave clears subscriptions.
 10. **A Codex join's `codexThreadId` must be its own thread id,** the same as `session`, or the join is refused. It is what lets this machine's `serve` wake the thread.
 11. **A cursor belongs to one incarnation of the ledger.** Cursors are kept per ledger instance, named by its first commit, so a replacement store starts every subscriber over instead of skipping messages. A cursor ahead of the ledger fails the read rather than skipping.
+12. **Unreadable entries fail the complete read.** A malformed or schema-invalid entry fails the Fluree read before a cursor, nudge or idle action; the limit on returned mail does not shorten that check. An unreadable presence anywhere in the complete history fails ownership-dependent operations before a cursor or announcement changes.
 
 ## Why
 
@@ -163,6 +166,7 @@ One shared, ordered log across machines, with history and full-text search. Each
 | --- | --- |
 | **Publish recipients are literal and unchecked.** Subscription normalisation does not normalise `to` or detect unjoined, misspelled or wrong-case targets. `# reviews` does not reach a canonical `reviews` subscription | Known limit; read in code |
 | **A lost response loses mail.** `bus_read` and `bus_wait` mark messages read before the response is sent. If the response is lost (the caller dies mid-call), those messages are skipped for that address; they stay in `bus_history` | Known gap |
+| **Unreadable stored JSON can block unrelated work.** A damaged JSON entry returned in a read range blocks every address reading through that range, and one returned from the presence history blocks ownership-dependent operations. Rejoin, replay and restart do not repair damaged presence history. Schema-valid wrong values and entries omitted by the query, including those without `bus:json`, are not detected by decoding | Known limit; recovery is not automated ([recover](../runbooks/recover.md#an-entry-cannot-be-decoded)) |
 | **Claims are atomic only within one machine.** Locks are per process, and each machine runs one `serve`. Joins from two machines are ordered by the ledger, and the losing claim is refused only from its next call | Known limit |
 | **Cursors are per machine.** A join, rejoin or takeover from another machine uses that machine's cursor for the address. If it has one from an earlier join there, mail after that position is delivered again. If it has none, the session starts at the present, and the unread mail isn't carried over | Known limit; the second case read in code |
 | **An inherited id acts for its session.** A process started from a session's shell inherits that session's id and acts for it, as subagents do, so a `codex exec` delegate can consume its Claude parent's mail | Known limit: give a delegate that needs its own inbox its own address |

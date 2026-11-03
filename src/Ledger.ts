@@ -9,7 +9,7 @@ export interface Entry {
 
 export interface Slice {
   readonly entries: ReadonlyArray<Entry>;
-  /** Cursor past every complete entry read, including ones that failed to decode. */
+  /** Cursor past every complete, decoded entry read. A failed read returns no slice. */
   readonly next: number;
 }
 

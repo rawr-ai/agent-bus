@@ -24,6 +24,7 @@ Use this when the bus misbehaves: each symptom, how to check it, the fix and how
 | Borrowed turns fail with "out of credits", or run as the earlier user | Whether the Codex login changed since the daemon started | [Borrowed turns run as an earlier user](#borrowed-turns-run-as-an-earlier-user) | A borrowed turn succeeds |
 | A join is refused with "held by another session" | The refusal's facts about the holder | [Held by another session](#held-by-another-session) | `agent-bus peers` shows the address with the right owner |
 | A read fails with "Cursor t=… is ahead of …" | The address's cursor file | [A cursor is ahead of the ledger](#a-cursor-is-ahead-of-the-ledger) | The read returns, and the warnings stop |
+| A read or ownership operation fails with "A ledger entry at t=… could not be decoded." | The stored entry at the named commit | [An entry cannot be decoded](#an-entry-cannot-be-decoded) | The affected operation succeeds after the underlying damage is resolved |
 | A command run over SSH on the other machine can't find `bun` | `command -v bun` over SSH | [`bun` not found over SSH](#bun-not-found-over-ssh-on-the-other-machine) | The command runs |
 
 ## serve won't start
@@ -390,6 +391,10 @@ The refusal reads `<address> is held by another session (runtime …; on …; jo
    ```
 
    Expect the address listed once. *Rehearsed 2026-10-28.*
+
+## An entry cannot be decoded
+
+Tell the human the named commit `t` and preserve the ledger and cursors for investigation. The commit is a starting point, not a repair procedure: saved peers or history queries need not locate every damaged entry, including a superseded malformed presence. A read fails without advancing its cursor, even when a limit would have returned earlier mail. An unreadable presence anywhere in the complete presence history blocks ownership-dependent operations, even if a later presence supersedes it. Rejoining, replaying or restarting does not repair persistent damaged history. Schema-valid wrong values are not detected by this check. No general repair procedure has been qualified; do not move a cursor or rewrite history as an automatic response. *Unverified: no repair procedure is established.*
 
 ## A cursor is ahead of the ledger
 

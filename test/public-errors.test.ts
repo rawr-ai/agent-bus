@@ -97,6 +97,28 @@ test("malformed JSON and schema failures omit source values", async () => {
   await refused("bus_history", {}, "Fluree returned an invalid response.");
 });
 
+test("undecodable stored presence is a sanitized MCP failure", async () => {
+  for (const stored of [`{"session":"${marker}"`, JSON.stringify({ session: marker })]) {
+    failure = { body: JSON.stringify([[stored, 7]]), status: 200 };
+    await refused(
+      "bus_join",
+      { address: "codex/test", runtime: "codex", session: "session", cwd: "/tmp" },
+      "A ledger entry at t=7 could not be decoded."
+    );
+  }
+});
+
+test("invalid presence commit metadata is classified without echoing it", async () => {
+  for (const row of [["{}"], ["{}", marker], ["{}", 0], ["{}", 1.5]]) {
+    failure = { body: JSON.stringify([row]), status: 200 };
+    await refused(
+      "bus_join",
+      { address: "codex/test", runtime: "codex", session: "session", cwd: "/tmp" },
+      "Fluree returned an invalid response."
+    );
+  }
+});
+
 test("bus_query refuses forbidden and malformed queries before reading head or querying upstream", async () => {
   failure = { body: marker, status: 500 };
   const before = storeRequests.length;

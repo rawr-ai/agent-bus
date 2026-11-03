@@ -15,6 +15,7 @@ A refusal changes nothing. Match its wording:
 | "`<address>` belongs to another session; nothing was changed." | Your id changed (`/clear`, a fork) or the address was taken over: join a new address. If a wake brought you here, end quietly |
 | "`<address>` has not joined the bus; join first." | `bus_join`, unless a wake told you not to rejoin: then end the turn |
 | A read that says your cursor "is ahead of" the ledger | Tell the human. A plain rejoin keeps that cursor; rejoin with `replay` only if they agree to receive all past mail again |
+| "A ledger entry at t=… could not be decoded." | Tell the human the commit and preserve the cursor. Rejoin, replay and restart do not repair damaged presence history; do not move the cursor as an automatic response |
 | A store error, or no answer from the bus | Retry once, then tell the human. Don't start a bus of your own |
 
 The query tools' own errors are in [queries.md](queries.md#errors).

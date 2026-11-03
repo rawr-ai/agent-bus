@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
@@ -44,8 +44,9 @@ const httpFailure = (status: number) =>
 const Exists = Schema.Struct({ exists: Schema.Boolean });
 const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
 const Commit = Schema.Struct({ id: Schema.String });
-const Rows = Schema.Array(Schema.Tuple([Schema.String, Schema.Number]));
-const JsonRows = Schema.Array(Schema.Tuple([Schema.String]));
+const Rows = Schema.Array(
+  Schema.Tuple([Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))])
+);
 const AgentJson = Schema.Struct({
   // A column whose values have several datatypes lists them all.
   schema: Schema.optionalKey(
@@ -244,7 +245,12 @@ export const layerFluree = (config: FlureeConfig) =>
       const instance = yield* incarnation;
 
       const encode = Schema.encodeEffect(MessageJson);
-      const decodeMessage = Schema.decodeUnknownEffect(MessageJson);
+      const decodeMessage = (text: string, t: number) =>
+        Schema.decodeUnknownEffect(MessageJson)(text).pipe(
+          Effect.mapError(
+            () => new LedgerError({ message: `A ledger entry at t=${t} could not be decoded.` })
+          )
+        );
 
       const append = Effect.fn("Ledger.append")(function* (message: Message) {
         const json = yield* encode(message).pipe(
@@ -253,16 +259,6 @@ export const layerFluree = (config: FlureeConfig) =>
           )
         );
         yield* postJson(`/insert?ledger=${ledger}`, toNode(message, json));
-      });
-
-      const decodeAll = Effect.fn("Ledger.decodeAll")(function* (texts: ReadonlyArray<string>) {
-        const messages: Array<Message> = [];
-        for (const text of texts) {
-          const decoded = yield* Effect.option(decodeMessage(text));
-          if (Option.isSome(decoded)) messages.push(decoded.value);
-          else yield* Effect.logWarning("Skipping undecodable message in the Fluree ledger");
-        }
-        return messages;
       });
 
       const read = Effect.fn("Ledger.read")(function* (from: number) {
@@ -284,22 +280,22 @@ export const layerFluree = (config: FlureeConfig) =>
             orderBy: "?t",
           }).pipe(Effect.flatMap(decode(Rows)));
           for (const [text, t] of rows) {
-            const [message] = yield* decodeAll([text]);
-            if (message !== undefined) entries.push({ message, end: t });
+            const message = yield* decodeMessage(text, t);
+            entries.push({ message, end: t });
           }
         }
         return { entries, next: head } satisfies Slice;
       });
 
       const presence = query({
-        select: ["?json"],
+        select: ["?json", "?t"],
         where: [
           { "@id": "?m", "@type": "bus:Presence", "bus:json": { "@value": "?json", "@t": "?t" } },
         ],
         orderBy: "?t",
       }).pipe(
-        Effect.flatMap(decode(JsonRows)),
-        Effect.flatMap((rows) => decodeAll(rows.map(([json]) => json))),
+        Effect.flatMap(decode(Rows)),
+        Effect.flatMap((rows) => Effect.forEach(rows, ([json, t]) => decodeMessage(json, t))),
         Effect.withSpan("Ledger.presence")
       );
 
