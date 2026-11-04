@@ -124,6 +124,54 @@ const narrow = async (page: Page, action: string) => {
   await page.evaluate(() => document.querySelector(".pinned-summary")?.scrollIntoView());
 };
 
+/**
+ * The fixture's Markdown message shown in place, with its own lists' markers, indentation and no
+ * entry separators inside it: the outer entry list's styles stop at its own items.
+ */
+const markdownLists = async (page: Page) => {
+  const lists = await page.evaluate(() => {
+    const article = Array.from(document.querySelectorAll(".pinned-entries article")).find(
+      (node) =>
+        node.querySelector(".provenance-fields div:last-child dd")?.textContent === "msg-markdown"
+    );
+    article?.scrollIntoView({ block: "start" });
+    const body = article?.querySelector(".markdown");
+    const style = (selector: string) => {
+      const node = body?.querySelector(selector);
+      return node ? getComputedStyle(node) : undefined;
+    };
+    const marked = (selector: string) => {
+      const type = style(selector)?.listStyleType;
+      return type !== undefined && type !== "none";
+    };
+    const indented = (selector: string) =>
+      Number.parseFloat(style(selector)?.paddingLeft ?? "0") > 0;
+    const items = Array.from(body?.querySelectorAll("li") ?? []);
+    return {
+      ordered: style(":scope > ol")?.listStyleType,
+      orderedIndented: indented(":scope > ol"),
+      bullets: marked(":scope > ul"),
+      bulletsIndented: indented(":scope > ul"),
+      nested: marked("ul > li > ul"),
+      nestedIndented: indented("ul > li > ul"),
+      items: items.length,
+      separators: items.filter((item) => getComputedStyle(item).borderTopStyle !== "none").length,
+      scrollFits: document.documentElement.scrollWidth <= innerWidth,
+    };
+  });
+  assert.deepEqual(lists, {
+    ordered: "decimal",
+    orderedIndented: true,
+    bullets: true,
+    bulletsIndented: true,
+    nested: true,
+    nestedIndented: true,
+    items: 8,
+    separators: 0,
+    scrollFits: true,
+  });
+};
+
 let stage = "arguments";
 async function main() {
   const { values } = parseArgs({ options: { "capture-dir": { type: "string" } } });
@@ -319,8 +367,12 @@ async function main() {
       stage = "complete screenshots";
       await page.evaluate(() => document.querySelector(".pinned-summary")?.scrollIntoView());
       await capture(page, "pinned-desktop-complete-light.png");
+      await markdownLists(page);
+      await capture(page, "pinned-desktop-markdown-lists.png");
       await narrow(page, "Read again");
       await capture(page, "pinned-320-complete.png");
+      await markdownLists(page);
+      await capture(page, "pinned-320-markdown-lists.png");
       console.log(`rerun completed in ${rerunSeconds.toFixed(2)}s`);
     });
     console.log(

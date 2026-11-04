@@ -431,7 +431,7 @@ export const BusyThenComplete: Story = {
   play: async ({ canvasElement }) => {
     // Busy is not a stop: no partial label, counts unchanged, Cancel still offered.
     await expectScreen(canvasElement, {
-      status: "Waiting: another pinned investigation page is being read. Retrying page 1.",
+      status: "Waiting: the viewer is busy with other reads. Retrying page 1.",
       coverage: null,
       counts: ZERO,
       ids: [],

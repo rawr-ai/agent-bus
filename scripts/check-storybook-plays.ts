@@ -3,11 +3,65 @@ import { parseArgs } from "node:util";
 import storybookPackage from "storybook/package.json";
 import { withNativePage } from "../tests/browser/native-page";
 import { isolatedTool } from "../tests/browser/tool-process";
-import { type PlayEvent, type PlayObservation, playVerdict } from "./storybook-play-verdict";
+import {
+  abortCause,
+  type PlayEvent,
+  type PlayObservation,
+  playVerdict,
+} from "./storybook-play-verdict";
+
+const PLAY_EVENTS = [
+  "storyRenderPhaseChanged",
+  "storyFinished",
+  "playFunctionThrewException",
+  "unhandledErrorsWhilePlaying",
+  "storyThrewException",
+  "storyErrored",
+];
+
+/**
+ * Records the story's first play, which runs on load before observePlay can listen. Storybook
+ * leaves a failed play's render phase "finished", so without this a first play that fails could
+ * hide behind a replay that passes. Runs before any page script, as an init script.
+ */
+function recordFirstPlay({ storyId, types }: { storyId: string; types: string[] }) {
+  const events: Array<Record<string, string>> = [];
+  Reflect.set(window, "__PLAY_FIRST_EVENTS__", events);
+  let channel: unknown;
+  Object.defineProperty(window, "__STORYBOOK_ADDONS_CHANNEL__", {
+    configurable: true,
+    get: () => channel,
+    set: (value: unknown) => {
+      channel = value;
+      const on = value !== null && typeof value === "object" ? Reflect.get(value, "on") : undefined;
+      if (typeof on !== "function") return;
+      for (const type of types)
+        on.call(value, type, (payload: unknown) => {
+          const data: Record<string, unknown> =
+            payload !== null && typeof payload === "object" ? { ...payload } : {};
+          if (typeof data.storyId === "string" && data.storyId !== storyId) return;
+          events.push({
+            type,
+            ...(typeof data.storyId === "string" ? { storyId: data.storyId } : {}),
+            ...(typeof data.newPhase === "string" ? { phase: data.newPhase } : {}),
+            ...(typeof data.status === "string" ? { status: data.status } : {}),
+          });
+        });
+    },
+  });
+}
 
 // Version-coupled native channel adapter borrowed from OPA website's checker.
 // Requalify against real positive AND negative stories when Storybook changes.
-async function observePlay({ storyId, timeoutMs }: { storyId: string; timeoutMs: number }) {
+async function observePlay({
+  storyId,
+  timeoutMs,
+  types,
+}: {
+  storyId: string;
+  timeoutMs: number;
+  types: string[];
+}) {
   const record = (value: unknown): value is Record<string, unknown> =>
     value !== null && typeof value === "object";
   const preview: unknown = Reflect.get(window, "__STORYBOOK_PREVIEW__");
@@ -34,14 +88,7 @@ async function observePlay({ storyId, timeoutMs }: { storyId: string; timeoutMs:
       resolve({ events, end });
     };
     const timer = setTimeout(() => finish("timeout"), timeoutMs);
-    for (const type of [
-      "storyRenderPhaseChanged",
-      "storyFinished",
-      "playFunctionThrewException",
-      "unhandledErrorsWhilePlaying",
-      "storyThrewException",
-      "storyErrored",
-    ]) {
+    for (const type of types) {
       const listener = (payload: unknown) => {
         const data = record(payload) ? payload : {};
         if (typeof data.storyId === "string" && data.storyId !== storyId) return;
@@ -108,13 +155,26 @@ async function staticStorybook() {
   return { url: `http://127.0.0.1:${server.port}/`, close: () => server.stop(true) };
 }
 
+// Where the runner was when an exception escaped, how long it had been there, and any signal
+// that arrived: with abortCause, the only account of an abort it prints.
+let stage = "startup";
+let stageStart = performance.now();
+let signalled: string | undefined;
+const enter = (next: string) => {
+  stage = next;
+  stageStart = performance.now();
+};
+
 async function main() {
   assert.equal(storybookPackage.version, "10.6.3", "requalify Storybook event adapter");
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
     allowPositionals: true,
-    options: { url: { type: "string" } },
+    options: { url: { type: "string" }, "cdp-log": { type: "boolean" } },
   });
+  // Stagehand's own sanitized record of each dropped browser connection, on stderr. Every
+  // browser's normal close is one too, so it is for investigating aborts, not routine runs.
+  if (values["cdp-log"]) process.env.STAGEHAND_CDP_LOG = "1";
   const ids = positionals.length
     ? positionals
     : [
@@ -166,7 +226,8 @@ async function main() {
     "literal story IDs required"
   );
   const owned = values.url === undefined ? await staticStorybook() : undefined;
-  const stop = () => {
+  const stop = (signal: NodeJS.Signals) => {
+    signalled ??= signal;
     void owned?.close();
   };
   process.once("SIGINT", stop);
@@ -213,15 +274,19 @@ async function main() {
       const entry: unknown = index.entries[id];
       assert.ok(isRecord(entry) && entry.type === "story", "requested story exists");
       const start = performance.now();
+      enter(`${id}: browser start`);
       const mobile = id.endsWith("--mobile-context") || id.endsWith("--dark-mobile");
       const narrow = id.endsWith("--dark-narrow");
       await withNativePage(
         narrow ? 320 : mobile ? 390 : 1440,
         narrow ? 640 : mobile ? 844 : 900,
         async (page) => {
+          enter(`${id}: open`);
+          await page.addInitScript(recordFirstPlay, { storyId: id, types: PLAY_EVENTS });
           await page.goto(new URL(`iframe.html?id=${id}&viewMode=story`, base).href, {
             timeout: 10_000,
           });
+          enter(`${id}: first render`);
           await page.waitForFunction(
             (storyId) => {
               const preview: unknown = Reflect.get(window, "__STORYBOOK_PREVIEW__");
@@ -237,16 +302,33 @@ async function main() {
             id,
             { timeout: 15_000 }
           );
-          const observation = await page.evaluate(observePlay, { storyId: id, timeoutMs: 15_000 });
-          const verdict = playVerdict(id, observation);
-          if (!verdict.ok) console.error(JSON.stringify(observation));
+          enter(`${id}: observe`);
+          const first: PlayObservation = {
+            events: await page.evaluate(() => Reflect.get(window, "__PLAY_FIRST_EVENTS__")),
+            end: "finished",
+          };
+          const observation = await page.evaluate(observePlay, {
+            storyId: id,
+            timeoutMs: 15_000,
+            types: PLAY_EVENTS,
+          });
+          // Both the first play and its replay must pass; the first's failure is never hidden.
+          const firstVerdict = playVerdict(id, first);
+          const judged = firstVerdict.ok || observation.end === "no-play" ? observation : first;
+          const verdict =
+            judged === observation
+              ? playVerdict(id, observation)
+              : { ok: false, reason: `first play: ${firstVerdict.reason}` };
+          if (!verdict.ok) console.error(JSON.stringify(judged));
           failed ||= !verdict.ok;
           console.log(
             `${verdict.ok ? "PASS" : "FAIL"} ${id}: ${verdict.reason} (${((performance.now() - start) / 1000).toFixed(2)}s)`
           );
+          enter(`${id}: browser close`);
         }
       );
     }
+    enter("shutdown");
     if (failed) process.exitCode = 1;
   } finally {
     process.off("SIGINT", stop);
@@ -258,8 +340,11 @@ async function main() {
 if (import.meta.main) {
   try {
     await isolatedTool(import.meta.url, main);
-  } catch {
-    console.error("Storybook play check failed");
+  } catch (error) {
+    const seconds = ((performance.now() - stageStart) / 1000).toFixed(2);
+    console.error(
+      `Storybook play check failed during ${stage} after ${seconds}s (${abortCause(error)}${signalled ? `; ${signalled} received` : ""})`
+    );
     process.exitCode = 1;
   }
 }

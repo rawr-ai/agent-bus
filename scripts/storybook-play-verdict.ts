@@ -41,3 +41,20 @@ export function playVerdict(storyId: string, observation: PlayObservation) {
     ? { ok: true, reason: "play completed successfully" }
     : { ok: false, reason: "missing ordered playing, played, success evidence" };
 }
+
+/**
+ * What an exception that escaped the runner was, without its message: a raw message can carry
+ * page or tool text. Assertion text is shown only when the runner wrote it, and a response
+ * timeout names the library's own method and limit.
+ */
+export function abortCause(error: unknown): string {
+  if (!(error instanceof Error)) return "non-Error";
+  const name = /^[A-Za-z]{1,40}$/.test(error.name) ? error.name : "unnamed";
+  if (name === "AssertionError" && Reflect.get(error, "generatedMessage") === false)
+    return `${name}: ${error.message}`;
+  const method = Reflect.get(error, "method");
+  const timeoutMs = Reflect.get(error, "timeoutMs");
+  if (typeof method === "string" && /^[A-Za-z.]{1,60}$/.test(method) && Number.isInteger(timeoutMs))
+    return `${name} ${method} ${timeoutMs}ms`;
+  return name;
+}
