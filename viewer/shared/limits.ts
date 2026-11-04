@@ -11,3 +11,9 @@ export const MAX_PEERS_PAGE = 500;
 export const MAX_THREAD_MESSAGES = 200;
 /** The most saved-query pages one observation follows at one commit. */
 export const MAX_PAGES = 8;
+/** The page size every pinned-investigation page asks for, bound into each cursor. */
+export const INVESTIGATION_PAGE_SIZE = 200;
+/** The most entries one pinned investigation keeps. */
+export const MAX_INVESTIGATION_ENTRIES = 200;
+/** The longest continuation an investigation sends: the bus decodes no longer cursor. */
+export const MAX_CONTINUATION_LENGTH = 1024;

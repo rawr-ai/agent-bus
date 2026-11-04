@@ -36,6 +36,11 @@
       "inputs": [
         "toolchain",
         "{workspaceRoot}/viewer/shared/**/*.ts",
+        "{workspaceRoot}/src/history-args.ts",
+        "{workspaceRoot}/src/catalogue.ts",
+        "{workspaceRoot}/src/domain.ts",
+        "{workspaceRoot}/src/Query.ts",
+        "{workspaceRoot}/src/sparql.ts",
         "{workspaceRoot}/viewer/src/features/conversations/model.ts",
         "{workspaceRoot}/viewer/src/markdown-policy.ts",
         "{workspaceRoot}/viewer/src/observation-resource.ts",
@@ -49,6 +54,7 @@
         "{workspaceRoot}/test/viewer-markdown-policy.test.ts",
         "{workspaceRoot}/test/viewer-observation-resource.test.ts",
         "{workspaceRoot}/test/viewer-investigation.test.ts",
+        "{workspaceRoot}/test/viewer-investigation-contract.test.ts",
         "{workspaceRoot}/test/viewer-reading-unit.test.ts",
         "{workspaceRoot}/test/viewer-announcements.test.ts",
         "{workspaceRoot}/test/preload.ts",
@@ -67,6 +73,7 @@
       "inputs": [
         "toolchain",
         "{workspaceRoot}/viewer/**/*",
+        "{workspaceRoot}/src/history-args.ts",
         "{workspaceRoot}/scripts/build-viewer.ts",
         "{workspaceRoot}/tsconfig.json"
       ],

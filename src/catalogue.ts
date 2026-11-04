@@ -8,6 +8,17 @@ import {
   MessageJson,
   Runtime,
 } from "./domain.ts";
+import {
+  duplicatesProblem,
+  HistoryArgs,
+  Limit,
+  normalizeHistoryArgs,
+  Participants,
+  Token,
+  Tokens,
+  Window,
+  windowProblem,
+} from "./history-args.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import {
   largestFitting,
@@ -143,50 +154,8 @@ export type DayRow = typeof DayRow.Type;
 
 // ---- Arguments --------------------------------------------------------------------------------
 
-const Limit = (fallback: number, maximum: number) =>
-  Schema.optionalKey(
-    Int.check(Schema.isBetween({ minimum: 1, maximum })).annotate({
-      description: `Page size, 1 to ${maximum}; defaults to ${fallback}.`,
-    })
-  );
-const Token = Text.check(Schema.isMinLength(1)).check(Schema.isMaxLength(512));
-const Tokens = (description: string, maximum = 50) =>
-  Schema.Array(Token)
-    .check(Schema.isMinLength(1))
-    .check(Schema.isMaxLength(maximum))
-    .annotate({ description });
-const Instant = Text.check(
-  Schema.isPattern(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,9})?Z$/)
-).annotate({ description: "A UTC instant, e.g. 2026-11-01T09:00:00Z." });
 const Day = Text.check(Schema.isPattern(/^\d{4}-\d{2}-\d{2}$/)).annotate({
   description: "A UTC day, YYYY-MM-DD.",
-});
-const Participants = Schema.optionalKey(
-  Tokens(
-    "1 to 50 literal tokens (addresses, #topic, *); an entry matches when its sender or any recorded recipient equals one."
-  )
-);
-const Window = {
-  fromTs: Schema.optionalKey(
-    Instant.annotate({ description: "Only entries with ts at or after this." })
-  ),
-  toTs: Schema.optionalKey(Instant.annotate({ description: "Only entries with ts before this." })),
-};
-
-const HistoryArgs = Schema.Struct({
-  participants: Participants,
-  ...Window,
-  kinds: Schema.optionalKey(
-    Schema.Array(Schema.Literals(["message", "presence"]))
-      .check(Schema.isMinLength(1))
-      .annotate({ description: 'Entry kinds; defaults to ["message"].' })
-  ),
-  direction: Schema.optionalKey(
-    Schema.Literals(["forward", "backward"]).annotate({
-      description: "forward from the oldest entry, backward from the newest; defaults to forward.",
-    })
-  ),
-  limit: Limit(50, 200),
 });
 const MessagesArgs = Schema.Struct({
   ids: Tokens("1 to 100 message ids, unique; rows keep this order.", 100),
@@ -740,34 +709,14 @@ const entryItems = (
   more: rows.length > size,
 });
 
-const unique = (name: string, values: ReadonlyArray<string> | undefined) =>
-  values === undefined || new Set(values).size === values.length
-    ? Effect.void
-    : Effect.fail(invalid(`${name} has duplicates.`));
+const unique = (name: string, values: ReadonlyArray<string> | undefined) => {
+  const problem = duplicatesProblem(name, values);
+  return problem === undefined ? Effect.void : Effect.fail(invalid(problem));
+};
 const sorted = <A extends string>(values: ReadonlyArray<A>) => [...values].sort();
-/** An Instant padded to nanoseconds, so equal instants compare equal whatever their spelling. */
-const instantKey = (value: string) => {
-  const [seconds, fraction = ""] = value.slice(0, -1).split(".");
-  return `${seconds}.${fraction.padEnd(9, "0")}`;
-};
-/** A real calendar instant: Date.parse rolls T24:00 and February 30 into the next day. */
-const realInstant = (value: string) => {
-  const millis = Date.parse(value);
-  return (
-    Number.isFinite(millis) && new Date(millis).toISOString().slice(0, 19) === value.slice(0, 19)
-  );
-};
 const checkWindow = (window: { fromTs?: string | undefined; toTs?: string | undefined }) => {
-  for (const value of [window.fromTs, window.toTs]) {
-    if (value !== undefined && !realInstant(value)) {
-      return Effect.fail(invalid(`${value} is not a valid instant.`));
-    }
-  }
-  return window.fromTs !== undefined &&
-    window.toTs !== undefined &&
-    instantKey(window.fromTs) >= instantKey(window.toTs)
-    ? Effect.fail(invalid("fromTs must be before toTs."))
-    : Effect.void;
+  const problem = windowProblem(window);
+  return problem === undefined ? Effect.void : Effect.fail(invalid(problem));
 };
 const optionalKey = <K extends string, V>(key: K, value: V | undefined) =>
   value === undefined ? {} : { [key]: value };
@@ -784,20 +733,12 @@ export const history = define({
   Args: HistoryArgs,
   Row: EntryRow,
   example: { participants: ["#coordination"], direction: "backward", limit: 20 },
-  normalize: (args) =>
-    Effect.gen(function* () {
-      yield* unique("participants", args.participants);
-      yield* unique("kinds", args.kinds);
-      yield* checkWindow(args);
-      return {
-        ...optionalKey("participants", args.participants && sorted(args.participants)),
-        ...optionalKey("fromTs", args.fromTs),
-        ...optionalKey("toTs", args.toTs),
-        kinds: sorted(args.kinds ?? ["message"]),
-        direction: args.direction ?? "forward",
-        limit: args.limit ?? 50,
-      };
-    }),
+  normalize: (args) => {
+    const normalized = normalizeHistoryArgs(args);
+    return "problem" in normalized
+      ? Effect.fail(invalid(normalized.problem))
+      : Effect.succeed(normalized.args);
+  },
   pageSize: (args) => args.limit ?? 50,
   start: (args, t) =>
     args.direction === "backward" ? { before: [t + 1, ""] } : { after: [0, ""] },

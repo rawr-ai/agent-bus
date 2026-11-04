@@ -16,7 +16,11 @@
       "{workspaceRoot}/scripts/task-identity.ts",
       { "runtime": "bun --no-env-file scripts/task-identity.ts" }
     ],
-    "ui": ["{workspaceRoot}/viewer/src/**/*", "{workspaceRoot}/viewer/shared/**/*"],
+    "ui": [
+      "{workspaceRoot}/viewer/src/**/*",
+      "{workspaceRoot}/viewer/shared/**/*",
+      "{workspaceRoot}/src/history-args.ts"
+    ],
     "default": [
       "{projectRoot}/**/*",
       "!{projectRoot}/dist/**/*",
