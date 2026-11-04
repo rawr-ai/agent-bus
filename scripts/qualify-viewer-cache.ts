@@ -85,6 +85,11 @@ try {
   const css = await Bun.file(cssPath).text();
   await Bun.write(cssPath, `${css}\n/* cache qualification sentinel */\n`);
   await expectRun("CSS invalidates viewer build", target, "miss");
+  // The viewer imports the shared history arguments from core source.
+  const argsPath = join(sandbox, "src/history-args.ts");
+  const args = await Bun.file(argsPath).text();
+  await Bun.write(argsPath, `${args}\n// shared arguments viewer sentinel\n`);
+  await expectRun("shared history args invalidate viewer build", target, "miss");
   const unitTarget = ["run", "agent-bus:test-viewer-unit", "--output-style=static"];
   await expectRun("unit cold miss", unitTarget, "miss");
   await expectRun("unit warm hit", unitTarget, "hit");
@@ -106,6 +111,8 @@ try {
   await Bun.write(schemaPath, `${schema}\n// schema cache sentinel\n`);
   await expectRun("public schema invalidates units", unitTarget, "miss");
   await Bun.write(schemaPath, schema);
+  await Bun.write(argsPath, `${args}\n// shared arguments unit sentinel\n`);
+  await expectRun("shared history args invalidate units", unitTarget, "miss");
   // bunfig.toml preloads this into every bun test run, the units included.
   const preloadPath = join(sandbox, "test/preload.ts");
   const preload = await Bun.file(preloadPath).text();
@@ -123,6 +130,8 @@ try {
     JSON.stringify(await inventory(join(sandbox, "dist/storybook"))) === JSON.stringify(stories),
     "restored Storybook output differs"
   );
+  await Bun.write(argsPath, `${args}\n// shared arguments Storybook sentinel\n`);
+  await expectRun("shared history args invalidate Storybook", storyTarget, "miss");
   await Bun.write(
     join(sandbox, "vite.config.ts"),
     'throw new Error("synthetic root Vite config must not load");\n'

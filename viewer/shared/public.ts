@@ -1,5 +1,8 @@
 import { Option, Schema } from "effect";
+import { HistoryArgs, normalizeHistoryArgs } from "../../src/history-args.ts";
 import {
+  INVESTIGATION_PAGE_SIZE,
+  MAX_CONTINUATION_LENGTH,
   MAX_HISTORY_LIMIT,
   MAX_ID_LENGTH,
   MAX_PAGES,
@@ -12,7 +15,10 @@ import {
 
 export {
   DEFAULT_HISTORY_LIMIT,
+  INVESTIGATION_PAGE_SIZE,
+  MAX_CONTINUATION_LENGTH,
   MAX_HISTORY_LIMIT,
+  MAX_INVESTIGATION_ENTRIES,
   MAX_PAGES,
   MAX_PEERS,
   MAX_PEERS_PAGE,
@@ -144,6 +150,83 @@ export const ThreadObservationSchema = Schema.Struct({
   complete: Schema.Boolean,
 });
 export type ThreadObservation = typeof ThreadObservationSchema.Type;
+
+/**
+ * A pinned investigation's history criteria: the bus's own echo of `history` arguments
+ * without `limit`, for forward message history only. Defaults are present and participants
+ * sorted, as the bus echoes them, so the criteria are compared with each page's echo as given.
+ */
+const InvestigationCriteriaSchema = Schema.Struct({
+  participants: HistoryArgs.fields.participants,
+  fromTs: HistoryArgs.fields.fromTs,
+  toTs: HistoryArgs.fields.toTs,
+  kinds: Schema.Tuple([Schema.Literal("message")]),
+  direction: Schema.Literal("forward"),
+});
+export type InvestigationCriteria = typeof InvestigationCriteriaSchema.Type;
+
+/** One closed reference, taken from an agent's own `bus_run_query` result. */
+export const InvestigationReferenceSchema = Schema.Struct({
+  name: Schema.Literal("history"),
+  catalogueVersion: Commit,
+  ledger: Schema.String.check(Schema.isMinLength(1)).check(Schema.isMaxLength(MAX_ID_LENGTH)),
+  t: Commit,
+  criteria: InvestigationCriteriaSchema,
+});
+export type InvestigationReference = typeof InvestigationReferenceSchema.Type;
+
+/**
+ * The bus decodes continuations of at most MAX_CONTINUATION_LENGTH characters and issues them
+ * as `bq1.` and base64url. Only that alphabet is sent, so each character is one serialized
+ * byte and the reserved length is the reserved size.
+ */
+const CONTINUATION = /^[A-Za-z0-9._-]+$/;
+export const isSupportedContinuation = (value: string) =>
+  value.length <= MAX_CONTINUATION_LENGTH && CONTINUATION.test(value);
+
+export const InvestigationPageInputSchema = Schema.Struct({
+  reference: InvestigationReferenceSchema,
+  cursor: Schema.optionalKey(
+    Schema.String.check(Schema.isMaxLength(MAX_CONTINUATION_LENGTH)).check(
+      Schema.isPattern(CONTINUATION)
+    )
+  ),
+});
+export type InvestigationPageInput = typeof InvestigationPageInputSchema.Type;
+
+/** An entry as the investigation keeps it: its commit, then the public message. */
+export const InvestigationEntrySchema = Schema.Struct({
+  t: Commit,
+  message: PublicMessageSchema,
+});
+export type InvestigationEntry = typeof InvestigationEntrySchema.Type;
+
+/**
+ * One validated investigation page. Entries keep the bus's source order. The page's own
+ * claims are passed on unjudged; the browser's traversal decides what they mean together.
+ */
+export const InvestigationPageSchema = Schema.Struct({
+  entries: Schema.mutable(Schema.Array(InvestigationEntrySchema)),
+  omitted: Omitted,
+  damaged: Count,
+  damagedTotal: Count,
+  exhausted: Schema.Boolean,
+  complete: Schema.Boolean,
+  next: Schema.optionalKey(Schema.String),
+  currentHeadT: Schema.optionalKey(Commit),
+});
+export type InvestigationPage = typeof InvestigationPageSchema.Type;
+
+/** The identity fields a page is checked on, in the order they are checked. */
+export const IDENTITY_FIELDS = [
+  "name",
+  "catalogueVersion",
+  "ledger",
+  "t",
+  "criteria",
+  "limit",
+] as const;
+export type IdentityField = (typeof IDENTITY_FIELDS)[number];
 
 type Raw = Readonly<Record<string, unknown>>;
 type PublicOrigin = NonNullable<PublicMessage["origin"]>;
@@ -492,5 +575,123 @@ export const projectThread = (
       damaged: last.damagedTotal,
       exhausted: last.exhausted && !cut,
       complete: last.complete && !cut,
+    };
+  });
+
+// ---- Pinned investigation ----------------------------------------------------------------------
+
+const decodeReference = Schema.decodeUnknownOption(InvestigationReferenceSchema);
+const decodeHistoryArgs = Schema.decodeUnknownOption(HistoryArgs);
+
+/** JSON with object keys sorted, so equal values compare equal whatever their key order. */
+const canonical = (value: unknown): string => {
+  if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
+  if (isRecord(value)) {
+    return `{${Object.keys(value)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${canonical(value[key])}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+};
+
+export type ReferenceCheck =
+  | { readonly reference: InvestigationReference }
+  | { readonly refused: "unsupported" | "invalid" };
+
+/**
+ * A pinned reference, accepted only in the bus's own echoed form: criteria the shared
+ * definition accepts and leaves unchanged when it normalises them. A reference that is valid
+ * except for its kinds or direction is unsupported; anything else is invalid.
+ */
+export const checkReference = (value: unknown): ReferenceCheck =>
+  guarded((): ReferenceCheck => {
+    if (!isRecord(value)) return { refused: "invalid" };
+    const criteria = own(value, "criteria");
+    const decoded = decodeHistoryArgs(criteria, { onExcessProperty: "error" });
+    if (Option.isNone(decoded) || Object.hasOwn(decoded.value, "limit")) {
+      return { refused: "invalid" };
+    }
+    const normalized = normalizeHistoryArgs({ ...decoded.value, limit: 1 });
+    if ("problem" in normalized) return { refused: "invalid" };
+    const { limit: _, ...echoed } = normalized.args;
+    if (canonical(echoed) !== canonical(decoded.value)) return { refused: "invalid" };
+    const reference = decodeReference(value, { onExcessProperty: "error" });
+    if (Option.isSome(reference)) return { reference: reference.value };
+    const forward = { ...echoed, kinds: ["message"], direction: "forward" };
+    return Option.isSome(
+      decodeReference({ ...value, criteria: forward }, { onExcessProperty: "error" })
+    )
+      ? { refused: "unsupported" }
+      : { refused: "invalid" };
+  });
+
+export type InvestigationPageCheck =
+  | { readonly page: InvestigationPage }
+  | { readonly mismatch: IdentityField };
+
+/**
+ * One raw `history` page read for `reference`, checked against it field by field. A field
+ * that differs is reported as a mismatch; a page that is not a valid result is rejected.
+ * Rows that fail projection, or share an id within the page, are counted as omitted.
+ */
+export const projectInvestigationPage = (
+  raw: unknown,
+  reference: InvestigationReference
+): InvestigationPageCheck =>
+  guarded((): InvestigationPageCheck => {
+    if (!isRecord(raw)) return fail();
+    const args = own(raw, "args");
+    if (!isRecord(args)) return fail();
+    const { limit, ...echoed } = args;
+    const fields: Record<IdentityField, boolean> = {
+      name: own(raw, "name") === reference.name,
+      catalogueVersion: own(raw, "catalogueVersion") === reference.catalogueVersion,
+      ledger: own(raw, "ledger") === reference.ledger,
+      t: own(raw, "t") === reference.t,
+      criteria: canonical(echoed) === canonical(reference.criteria),
+      limit: limit === INVESTIGATION_PAGE_SIZE,
+    };
+    const mismatch = IDENTITY_FIELDS.find((field) => !fields[field]);
+    if (mismatch !== undefined) return { mismatch };
+
+    const rows = own(raw, "rows");
+    const damaged = own(raw, "damaged");
+    const damagedTotal = own(raw, "damagedTotal");
+    const exhausted = own(raw, "exhausted");
+    const complete = own(raw, "complete");
+    const currentHeadT = own(raw, "currentHeadT");
+    const next = optionalText(raw, "next");
+    if (
+      own(raw, "damage") !== "checked" ||
+      !Array.isArray(rows) ||
+      rows.length > INVESTIGATION_PAGE_SIZE ||
+      !isCount(damaged) ||
+      !isCount(damagedTotal) ||
+      damaged > damagedTotal ||
+      typeof exhausted !== "boolean" ||
+      typeof complete !== "boolean" ||
+      (complete && (!exhausted || damagedTotal > 0)) ||
+      next === null ||
+      (currentHeadT !== undefined && (!isCommit(currentHeadT) || currentHeadT <= reference.t))
+    ) {
+      return fail();
+    }
+    const { items, omitted } = project(rows, "id", (record) => {
+      const message = toMessage(record);
+      const t = isRecord(record) ? own(record, "t") : undefined;
+      return message === undefined || !isCommit(t) || t > reference.t ? undefined : { t, message };
+    });
+    return {
+      page: {
+        entries: items,
+        omitted,
+        damaged,
+        damagedTotal,
+        exhausted,
+        complete,
+        ...(next === undefined ? {} : { next }),
+        ...(currentHeadT === undefined ? {} : { currentHeadT }),
+      },
     };
   });
