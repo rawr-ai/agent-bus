@@ -13,5 +13,13 @@ export const IntentionallyFailing: Story = {
     throw new Error("Synthetic harness failure");
   },
 };
+let firstPlays = 0;
+/** Fails on load and passes when replayed: the checker must still report the first failure. */
+export const FailsOnlyFirstPlay: Story = {
+  play: async () => {
+    firstPlays += 1;
+    if (firstPlays === 1) throw new Error("Synthetic first-play failure");
+  },
+};
 /** Render-only: a correct interaction checker must not call this a passed play. */
 export const NoPlay: Story = {};

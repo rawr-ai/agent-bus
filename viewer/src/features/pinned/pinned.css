@@ -1,3 +1,11 @@
+.pinned-shell .header-actions {
+  align-items: center;
+  gap: 12px;
+}
+.pinned-shell .brand,
+.pinned-shell .header-actions .text-action {
+  white-space: nowrap;
+}
 .pinned {
   flex: 1;
   min-height: 0;
@@ -182,5 +190,12 @@
   }
   .pinned-identity div {
     grid-template-columns: 8em minmax(0, 1fr);
+  }
+}
+@media (max-width: 480px) {
+  /* The summary's own eyebrow names the screen, so the header keeps to one line. */
+  .pinned-shell .brand-separator,
+  .pinned-shell .brand-context {
+    display: none;
   }
 }

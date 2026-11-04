@@ -2,7 +2,7 @@
 
 This frame scopes the next viewer outcome of the [viewer query integration](turnaround-viewer.md): a reader opens the exact history evidence an agent returned and reads it in the viewer. The released viewer's rules are in [viewer](../architecture/viewer.md) and its procedures in [interfaces](../architecture/interfaces.md#viewer); the query contract it reuses is [`bus_run_query`](../architecture/interfaces.md#bus_run_query).
 
-Status: accepted in direction by Codex, with transport and admission corrections, 2026-11-04; no implementation, deploy or adoption. DRA: Claude lead, cross-reviewed by Codex. Mode: co-framing; object: solution. It extends one bounded release decision deliberately (below) and changes no bus behaviour. This is a bounded-replay increment of at most 200 entries, not completion of unrestricted complete-history reading.
+Status: accepted in direction by Codex, with transport and admission corrections, 2026-11-04; application qualification on the synthetic fixture accepted by Codex, 2026-11-04, on one declared integrated attempt. One owned harness limitation remains: an intermittent Storybook play-runner abort, a transport defect tracked in [agent-bus#37](https://github.com/rawr-ai/agent-bus/issues/37), whose original cause is unknown. Not yet merged, deployed or adopted, and no claim about what the provider holds. DRA: Claude lead, cross-reviewed by Codex. Mode: co-framing; object: solution. It extends one bounded release decision deliberately (below) and changes no bus behaviour. This is a bounded-replay increment of at most 200 entries, not completion of unrestricted complete-history reading.
 
 ## Consumer job
 
@@ -77,7 +77,7 @@ Every oracle through the bus shares its provider, so agreement with the agent pa
 
 Any genuine reader who did not implement this and did not run the job is eligible, when a decision of theirs naturally needs a pinned window, such as checking a closed decision an agent reported. The owner may be that reader but is not assigned as a tester, and no current need is assumed. While none exists, the record says so.
 
-When the agent hands over the reference, it keeps a private, bounded baseline of what it returned, outside the public repository. For each entry, that is the material projected fields in order: id, commit, ts, sender, literal audience, subject, body and reply target. Before reading, the reader writes down what they must decide. They open the reference in the deployed viewer and answer from it, citing its identity and terminal claim. Afterwards they say in their own words what the result does and does not cover. Only then do the leads compare the baseline with the viewer's investigation entries: order, bodies, literal audiences and reply relationships. Matching ids with altered content fail. Record the deployed revision, the reference identity, both completeness claims and any help the reader needed. The 83-message benchmark stays envelope-only.
+When the agent hands over the reference, it keeps a private, bounded baseline of what it returned, outside the public repository. For each entry, that is the material projected fields in order: id, commit, ts, sender, literal audience, subject, body, reply target and, where the entry has one, its complete projected origin. Before reading, the reader writes down what they must decide. They open the reference in the deployed viewer and answer from it, citing its identity and terminal claim. Afterwards they say in their own words what the result does and does not cover. Only then do the leads compare the baseline with the viewer's investigation entries: order, bodies, literal audiences and reply relationships. Matching ids with altered content fail. Record the deployed revision, the reference identity, both completeness claims and any help the reader needed. The 83-message benchmark stays envelope-only.
 
 The integration is refused, and reframed before more viewer work, if any of these happen:
 - the reader needs an export, the agent's rows, `bus_run_query` or `bus_query` to trust or finish the answer;
@@ -102,8 +102,8 @@ Open: none needing the owner. Broader kinds, backward order or more than 200 ent
 
 ## Moved into current docs
 
-- [ ] Contract: the investigation procedure, its reference fields, transport subset and bounds in [interfaces](../architecture/interfaces.md#viewer).
-- [ ] Rule: the superseded viewer rules and limits, rewritten in [viewer](../architecture/viewer.md).
-- [ ] Agent guidance: when an agent offers a viewer reference and keeps its baseline, in the skill's queries reference.
-- [ ] Platform claim: none expected; only what is observed.
-- [ ] Procedure: opening and reading an investigation, and its failures, in the [viewer runbook](../runbooks/viewer.md).
+- [x] Contract: the investigation procedure, its reference fields, transport subset and bounds in [interfaces](../architecture/interfaces.md#viewer).
+- [x] Rule: the superseded viewer rules and limits, rewritten in [viewer](../architecture/viewer.md).
+- [x] Agent guidance: when an agent offers a viewer reference and keeps its baseline, in the skill's queries reference.
+- [x] Platform claim: none expected; only what is observed.
+- [x] Procedure: opening and reading an investigation, and its failures, in the [viewer runbook](../runbooks/viewer.md).

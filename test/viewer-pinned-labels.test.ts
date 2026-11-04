@@ -52,7 +52,7 @@ test("running phases say what is happening, on which page, and claim nothing", (
     "Reading page 3 at commit 9."
   );
   expect(statusLabel(snapshot({ kind: "busy" }, { kept: 3, pages: 2 }))).toBe(
-    "Waiting: another pinned investigation page is being read. Retrying page 3."
+    "Waiting: the viewer is busy with other reads. Retrying page 3."
   );
   expect(statusLabel(snapshot({ kind: "too-large" }))).toBe(
     "Not read: this reference is too large to send with a continuation. Ask the agent for a reference with fewer participants."

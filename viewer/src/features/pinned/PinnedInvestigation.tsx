@@ -34,7 +34,7 @@ export type ReadPage = (
 
 function Shell({ children }: { children: ReactNode }) {
   return (
-    <div className="app-shell">
+    <div className="app-shell pinned-shell">
       <header className="app-header">
         <div className="brand">
           <span className="brand-mark" aria-hidden="true">

@@ -137,6 +137,15 @@
         "command": "bun --no-env-file run test:browser:investigation",
         "env": { "FORCE_COLOR": "0" }
       }
+    },
+    "browser-pinned": {
+      "executor": "nx:run-commands",
+      "cache": false,
+      "dependsOn": ["viewer-build"],
+      "options": {
+        "command": "bun --no-env-file run test:browser:pinned",
+        "env": { "FORCE_COLOR": "0" }
+      }
     }
   }
 }

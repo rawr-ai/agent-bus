@@ -73,7 +73,7 @@ export const statusLabel = (snapshot: TraversalSnapshot): string => {
     case "reading":
       return `Reading page ${page} at ${commitLabel(snapshot.reference.t)}.`;
     case "busy":
-      return `Waiting: another pinned investigation page is being read. Retrying page ${page}.`;
+      return `Waiting: the viewer is busy with other reads. Retrying page ${page}.`;
     case "too-large":
       return "Not read: this reference is too large to send with a continuation. Ask the agent for a reference with fewer participants.";
     case "ended":
