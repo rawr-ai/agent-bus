@@ -64,12 +64,27 @@ describe("an exception that escapes the play runner", () => {
     }
     throw new Error("expected a throw");
   };
-  test("shows the runner's own assertion text and never a generated one", () => {
-    expect(abortCause(caught(() => assert.ok(false, "requested story exists")))).toBe(
-      "AssertionError: requested story exists"
-    );
-    const generated = abortCause(caught(() => assert.equal(secret, "expected")));
-    expect(generated).toBe("AssertionError");
+  const labels = new Set(["requested story exists"]);
+  test("shows only the runner's own assertion labels", () => {
+    expect(
+      abortCause(
+        caught(() => assert.ok(false, "requested story exists")),
+        labels
+      )
+    ).toBe("AssertionError: requested story exists");
+    expect(
+      abortCause(
+        caught(() => assert.equal(secret, "expected")),
+        labels
+      )
+    ).toBe("AssertionError");
+    // An explicit message is not provenance: a library or page can throw one too.
+    expect(
+      abortCause(
+        caught(() => assert.ok(false, secret)),
+        labels
+      )
+    ).toBe("AssertionError");
   });
   test("names a library timeout by its method and limit", () => {
     const timeout = Object.assign(new Error(secret), {
@@ -77,23 +92,23 @@ describe("an exception that escapes the play runner", () => {
       method: "page.goto",
       timeoutMs: 10_000,
     });
-    expect(abortCause(timeout)).toBe("RPCResponseTimeoutError page.goto 10000ms");
+    expect(abortCause(timeout, labels)).toBe("RPCResponseTimeoutError page.goto 10000ms");
   });
   test("never prints a message, a hostile name or a hostile method", () => {
     const named = (name: string, extra: object = {}) =>
-      abortCause(Object.assign(new Error(secret), { name }, extra));
+      abortCause(Object.assign(new Error(secret), { name }, extra), labels);
     for (const cause of [
-      abortCause(new Error(secret)),
-      abortCause(new TypeError(secret)),
+      abortCause(new Error(secret), labels),
+      abortCause(new TypeError(secret), labels),
       named(secret),
       named("AssertionError"),
       named("Error", { method: secret, timeoutMs: 1 }),
-      abortCause(secret),
+      abortCause(secret, labels),
     ])
       expect(cause).not.toContain("token");
-    expect(abortCause(new Error(secret))).toBe("Error");
+    expect(abortCause(new Error(secret), labels)).toBe("Error");
     expect(named(secret)).toBe("unnamed");
     expect(named("AssertionError")).toBe("AssertionError");
-    expect(abortCause(secret)).toBe("non-Error");
+    expect(abortCause(secret, labels)).toBe("non-Error");
   });
 });

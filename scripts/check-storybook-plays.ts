@@ -155,6 +155,20 @@ async function staticStorybook() {
   return { url: `http://127.0.0.1:${server.port}/`, close: () => server.stop(true) };
 }
 
+// The runner's own assertion labels: the only error text an abort may print.
+const LABELS = new Set([
+  "requalify Storybook event adapter",
+  "build Storybook first",
+  "literal story IDs required",
+  "explicit loopback HTTP origin required",
+  "Storybook index available",
+  "Storybook index shape",
+  "the suite lists exactly the plays",
+  "requested story exists",
+  "native browser has a page",
+  "actual browser viewport",
+]);
+
 // Where the runner was when an exception escaped, how long it had been there, and any signal
 // that arrived: with abortCause, the only account of an abort it prints.
 let stage = "startup";
@@ -343,7 +357,7 @@ if (import.meta.main) {
   } catch (error) {
     const seconds = ((performance.now() - stageStart) / 1000).toFixed(2);
     console.error(
-      `Storybook play check failed during ${stage} after ${seconds}s (${abortCause(error)}${signalled ? `; ${signalled} received` : ""})`
+      `Storybook play check failed during ${stage} after ${seconds}s (${abortCause(error, LABELS)}${signalled ? `; ${signalled} received` : ""})`
     );
     process.exitCode = 1;
   }
