@@ -1,7 +1,8 @@
 // A stand-in long-lived child for test/supervised.test.ts. Writes its pid to the file named by
 // its first argument, then runs until signalled. Options: `ignore-term` survives SIGTERM;
 // `slow-term` takes a second to exit after SIGTERM; `exit=<code>` exits with that code shortly
-// after starting.
+// after starting; `with-parent` exits 20 seconds after its parent has, so that a stand-in
+// nothing supervises outlives its parent for a test but cannot be left behind by one.
 import { writeFileSync } from "node:fs";
 
 const [pidFile, ...options] = Bun.argv.slice(2);
@@ -12,4 +13,10 @@ if (options.includes("slow-term"))
 const exit = options.find((option) => option.startsWith("exit="));
 writeFileSync(pidFile, String(process.pid));
 if (exit !== undefined) setTimeout(() => process.exit(Number(exit.slice(5))), 200);
-setInterval(() => {}, 60_000);
+const parent = process.ppid;
+const timer = setInterval(() => {
+  if (options.includes("with-parent") && process.ppid !== parent) {
+    clearInterval(timer);
+    setTimeout(() => process.exit(0), 20_000);
+  }
+}, 100);

@@ -13,13 +13,14 @@ import {
   firstLine,
   type Identity,
   identify,
-  killOwned,
+  ownership,
+  STOP_TIMEOUT_MS,
   signalable,
 } from "./processes.ts";
 
 const root = join(import.meta.dir, "..");
 const files = ["./test/fluree-lifecycle/first-file.ts", "./test/fluree-lifecycle/second-file.ts"];
-const owned: Identity[] = [];
+const owned = ownership();
 const scratch: string[] = [];
 
 interface Recorded {
@@ -37,8 +38,8 @@ const serverOf = (recorded: Recorded | undefined): Identity => {
 /** Every process a record names, so a failing check can stop what this file's child left. */
 const own = (recorded: Recorded) => {
   const supervisor = identify(recorded.supervisor);
-  if (supervisor !== undefined) owned.push(supervisor);
-  owned.push(...recorded.children);
+  if (supervisor !== undefined) owned.supervisor(supervisor);
+  for (const child of recorded.children) owned.process(child);
 };
 
 /** One `bun test` child over both files, in the repository so its bunfig preload applies. */
@@ -46,12 +47,14 @@ const run = async (env: Record<string, string> = {}) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-fluree-lifecycle-"));
   scratch.push(dir);
   const pidFile = join(dir, "pids");
-  const child = Bun.spawn([process.execPath, "test", ...files], {
-    cwd: root,
-    env: { ...process.env, FLUREE_PID_FILE: pidFile, ...env },
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const child = owned.parent(
+    Bun.spawn([process.execPath, "test", ...files], {
+      cwd: root,
+      env: { ...process.env, FLUREE_PID_FILE: pidFile, ...env },
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+  );
   const [code, output] = await Promise.all([
     child.exited,
     new Response(child.stderr).text(),
@@ -70,11 +73,11 @@ const run = async (env: Record<string, string> = {}) => {
   return { code, output, records, server, survived: alive(server) };
 };
 
-afterEach(() => {
+afterEach(async () => {
   // A failing check must not leave its own server behind: stop only what this test started.
-  for (const target of owned.splice(0)) killOwned(target);
+  await owned.stop();
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+}, STOP_TIMEOUT_MS);
 
 test("two files share one server, which has exited when their test process has", async () => {
   const result = await run();
@@ -94,11 +97,13 @@ test("a failing test still leaves no server behind", async () => {
 }, 60_000);
 
 test("the stop resolves only once the server process has exited", async () => {
-  const child = Bun.spawn([process.execPath, "./test/fluree-lifecycle/stop-awaits-exit.ts"], {
-    cwd: root,
-    stdout: "pipe",
-    stderr: "pipe",
-  });
+  const child = owned.parent(
+    Bun.spawn([process.execPath, "./test/fluree-lifecycle/stop-awaits-exit.ts"], {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "pipe",
+    })
+  );
   const [code, stdout] = await Promise.all([child.exited, new Response(child.stdout).text()]);
   const report = JSON.parse(stdout.trim().split("\n").at(-1) ?? "{}") as Recorded & {
     running: ReadonlyArray<Identity>;
@@ -111,11 +116,13 @@ test("the stop resolves only once the server process has exited", async () => {
 }, 60_000);
 
 test("a process killed with SIGKILL leaves no server behind", async () => {
-  const child = Bun.spawn([process.execPath, "./test/fluree-lifecycle/killed-with-server.ts"], {
-    cwd: root,
-    stdout: "pipe",
-    stderr: "ignore",
-  });
+  const child = owned.parent(
+    Bun.spawn([process.execPath, "./test/fluree-lifecycle/killed-with-server.ts"], {
+      cwd: root,
+      stdout: "pipe",
+      stderr: "ignore",
+    })
+  );
   const report = JSON.parse(await firstLine(child.stdout)) as Recorded;
   own(report);
   const server = serverOf(report);

@@ -9,22 +9,24 @@ import { join } from "node:path";
 import {
   alive,
   childrenOf,
+  commandOf,
   exitsWithin,
   firstLine,
   type Identity,
   identify,
-  killOwned,
+  ownership,
+  STOP_TIMEOUT_MS,
 } from "./processes.ts";
 import { KILL_AFTER_MS, spawnSupervised } from "./supervised.ts";
 
 const standIn = join(import.meta.dir, "supervised", "stand-in.ts");
-const owned: Identity[] = [];
+const owned = ownership();
 const scratch: string[] = [];
 
-afterEach(() => {
-  for (const target of owned.splice(0)) killOwned(target);
+afterEach(async () => {
+  await owned.stop();
   for (const dir of scratch.splice(0)) rmSync(dir, { recursive: true, force: true });
-});
+}, STOP_TIMEOUT_MS);
 
 const tempDir = () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-supervised-"));
@@ -42,60 +44,67 @@ const childOf = async (supervisor: number, pidFile: string): Promise<Identity> =
   const reported = Number(readFileSync(pidFile, "utf8"));
   const child = childrenOf(supervisor).find((entry) => entry.pid === reported);
   if (child === undefined) throw new Error(`pid ${reported} is not the supervisor's child`);
-  owned.push(child);
+  owned.process(child);
   return child;
 };
 
-const superviseStandIn = (pidFile: string, ...options: string[]) => {
-  const supervisor = spawnSupervised([process.execPath, standIn, pidFile, ...options]);
-  const identity = identify(supervisor.pid);
-  if (identity !== undefined) owned.push(identity);
-  return supervisor;
-};
+const superviseStandIn = (pidFile: string, ...options: string[]) =>
+  owned.supervisor(spawnSupervised([process.execPath, standIn, pidFile, ...options]));
 
 test("a parent killed with SIGKILL takes its supervised child with it", async () => {
   const dir = tempDir();
-  const parent = Bun.spawn(
-    [process.execPath, join(import.meta.dir, "supervised", "parent.ts"), dir],
-    { stdout: "pipe", stderr: "ignore" }
+  const parent = owned.parent(
+    Bun.spawn([process.execPath, join(import.meta.dir, "supervised", "parent.ts"), dir], {
+      stdout: "pipe",
+      stderr: "ignore",
+    })
   );
   const report = JSON.parse(await firstLine(parent.stdout)) as {
     supervisor: number;
     sibling: number;
   };
-  const supervisor = identify(report.supervisor) as Identity;
-  owned.push(supervisor);
+  const supervisor = owned.supervisor(identify(report.supervisor) as Identity);
   const child = await childOf(report.supervisor, join(dir, "supervised"));
   const sibling = await childOf(parent.pid, join(dir, "sibling"));
   parent.kill("SIGKILL");
   await parent.exited;
-  // A sibling started after the supervisor still runs, so had it inherited the pipe's write
-  // end, end of file could not arrive and the child would survive.
-  expect(alive(sibling)).toBe(true);
   expect(await exitsWithin(child)).toBe(true);
   expect(await exitsWithin(supervisor)).toBe(true);
+  // A sibling started after the supervisor ran throughout, so had it inherited the pipe's write
+  // end, end of file could not have arrived and the child would have survived.
+  expect(alive(sibling)).toBe(true);
 }, 30_000);
 
-test("a parent killed before its supervisor starts the child still takes the child with it", async () => {
+test("a parent killed as soon as it spawns its supervisor leaves no stand-in running", async () => {
   const dir = tempDir();
-  const parent = Bun.spawn(
-    [process.execPath, join(import.meta.dir, "supervised", "parent.ts"), dir, "die-at-once"],
-    { stdout: "ignore", stderr: "ignore" }
+  const parent = owned.parent(
+    Bun.spawn(
+      [process.execPath, join(import.meta.dir, "supervised", "parent.ts"), dir, "die-at-once"],
+      { stdout: "ignore", stderr: "ignore" }
+    )
   );
   await parent.exited;
-  // The stand-in starts after its parent is gone and may be ended before it can report. A
-  // survivor would report within the wait, so no report means none survived. Its supervisor
-  // has been reparented, so only the stand-in's own report names it.
+  // An exercise of scheduling, not a proven order: the parent usually dies before the stand-in
+  // starts, but nothing here shows it did. The supervisor's pid was written before the parent
+  // died; it counts only while that pid still runs this test's supervisor, since a supervisor
+  // already gone may have had its pid reused.
+  const supervisorPid = Number(readFileSync(join(dir, "supervisor"), "utf8"));
+  const supervisor = commandOf(supervisorPid).includes(dir)
+    ? owned.supervisor(identify(supervisorPid))
+    : undefined;
+  // The stand-in may be ended before it can report; a survivor would report within the wait, so
+  // no report means none survived.
   const pidFile = join(dir, "supervised");
   const deadline = Date.now() + 10_000;
   while (Date.now() < deadline && (!existsSync(pidFile) || readFileSync(pidFile, "utf8") === "")) {
     await Bun.sleep(20);
   }
-  if (!existsSync(pidFile)) return;
-  const child = identify(Number(readFileSync(pidFile, "utf8")));
-  if (child === undefined) return;
-  owned.push(child);
-  expect(await exitsWithin(child)).toBe(true);
+  const child = existsSync(pidFile) ? identify(Number(readFileSync(pidFile, "utf8"))) : undefined;
+  if (child !== undefined) {
+    owned.process(child);
+    expect(await exitsWithin(child)).toBe(true);
+  }
+  if (supervisor !== undefined) expect(await exitsWithin(supervisor)).toBe(true);
 }, 30_000);
 
 test("data on the pipe is ignored; its end ends the child", async () => {
