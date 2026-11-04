@@ -8,14 +8,23 @@ import {
   storyBusPages,
   threadOf,
 } from "../stories/story-bus.ts";
-import type { PublicMessage } from "../viewer/shared/public.ts";
+import {
+  checkReference,
+  isSupportedContinuation,
+  type PublicMessage,
+  projectInvestigationPage,
+} from "../viewer/shared/public.ts";
+import { acceptPage, emptyProgress, type Step } from "../viewer/src/features/pinned/traversal.ts";
 import { PAGE_CATALOGUE_VERSION, PAGE_UNITS } from "./bus-pages.ts";
 import { PRESENCE_TREE, presenceTreePage } from "./presence-tree.ts";
 import {
+  FIXTURE_LEDGER,
   FIXTURE_MODES,
   FIXTURE_PAGE_BYTES,
   fixturePages,
+  INVESTIGATION_ARGS,
   MALFORMED_MODES,
+  STRESS_MESSAGES,
 } from "./viewer-reading-fixture.ts";
 
 // The viewer's synthetic buses (the browser fixture and the stories) answer with pages the
@@ -135,6 +144,45 @@ describe("the browser fixture", () => {
   test("the large source needs more than one history page, as the bus would page it", () => {
     const history = fixturePages("stress").filter((page) => record(page).name === "history");
     expect(history.length).toBeGreaterThan(1);
+  });
+
+  test("a pinned investigation of the stress mode is two byte-cut pages the viewer reads whole", () => {
+    // Handwritten: the large source fits after the fourteen initial entries, and the control
+    // notation entry takes a page of its own. Commits 1 to 14 are `initial`, 21 and 22 `stress`.
+    const expected = [
+      { commits: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 21], next: "fixture.history.15" },
+      { commits: [22], next: undefined },
+    ];
+    const pages = fixturePages("stress")
+      .map(record)
+      .filter((page) => page.name === "history" && record(page.args).direction === "forward");
+    const { limit: _, ...criteria } = INVESTIGATION_ARGS;
+    const checked = checkReference({
+      name: "history",
+      catalogueVersion: PAGE_CATALOGUE_VERSION,
+      ledger: FIXTURE_LEDGER,
+      t: 40,
+      criteria,
+    });
+    if (!("reference" in checked)) throw new Error("The fixture's reference is refused");
+    let progress = emptyProgress;
+    let step: Step | undefined;
+    const split = pages.map((raw) => {
+      const result = projectInvestigationPage(raw, checked.reference);
+      if (!("page" in result)) throw new Error(`Identity mismatch on ${result.mismatch}`);
+      expect(result.page.omitted).toBe(0);
+      if (result.page.next !== undefined) {
+        expect(isSupportedContinuation(result.page.next)).toBe(true);
+      }
+      step = acceptPage(progress, result.page);
+      progress = step.progress;
+      return { commits: result.page.entries.map((entry) => entry.t), next: result.page.next };
+    });
+    expect(split).toEqual(expected);
+    expect(step && "end" in step ? step.end : undefined).toEqual({ kind: "complete" });
+    expect(progress.entries.map((entry) => entry.message.id)).toEqual(
+      STRESS_MESSAGES.map((message) => message.id)
+    );
   });
 
   test("the malformed modes are labelled, and each breaks the row contract", () => {

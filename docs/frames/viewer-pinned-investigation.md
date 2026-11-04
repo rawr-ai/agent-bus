@@ -2,7 +2,7 @@
 
 This frame scopes the next viewer outcome of the [viewer query integration](turnaround-viewer.md): a reader opens the exact history evidence an agent returned and reads it in the viewer. The released viewer's rules are in [viewer](../architecture/viewer.md) and its procedures in [interfaces](../architecture/interfaces.md#viewer); the query contract it reuses is [`bus_run_query`](../architecture/interfaces.md#bus_run_query).
 
-Status: accepted in direction by Codex, with transport and admission corrections, 2026-11-04; no implementation, deploy or adoption. DRA: Claude lead, cross-reviewed by Codex. Mode: co-framing; object: solution. It extends one bounded release decision deliberately (below) and changes no bus behaviour. This is a bounded-replay increment of at most 200 entries, not completion of unrestricted complete-history reading.
+Status: accepted in direction by Codex, with transport and admission corrections, 2026-11-04; implemented and qualified on the synthetic fixture in draft units, with no merge, deploy or adoption. DRA: Claude lead, cross-reviewed by Codex. Mode: co-framing; object: solution. It extends one bounded release decision deliberately (below) and changes no bus behaviour. This is a bounded-replay increment of at most 200 entries, not completion of unrestricted complete-history reading.
 
 ## Consumer job
 
@@ -102,8 +102,8 @@ Open: none needing the owner. Broader kinds, backward order or more than 200 ent
 
 ## Moved into current docs
 
-- [ ] Contract: the investigation procedure, its reference fields, transport subset and bounds in [interfaces](../architecture/interfaces.md#viewer).
-- [ ] Rule: the superseded viewer rules and limits, rewritten in [viewer](../architecture/viewer.md).
-- [ ] Agent guidance: when an agent offers a viewer reference and keeps its baseline, in the skill's queries reference.
-- [ ] Platform claim: none expected; only what is observed.
-- [ ] Procedure: opening and reading an investigation, and its failures, in the [viewer runbook](../runbooks/viewer.md).
+- [x] Contract: the investigation procedure, its reference fields, transport subset and bounds in [interfaces](../architecture/interfaces.md#viewer).
+- [x] Rule: the superseded viewer rules and limits, rewritten in [viewer](../architecture/viewer.md).
+- [x] Agent guidance: when an agent offers a viewer reference and keeps its baseline, in the skill's queries reference.
+- [x] Platform claim: none expected; only what is observed.
+- [x] Procedure: opening and reading an investigation, and its failures, in the [viewer runbook](../runbooks/viewer.md).

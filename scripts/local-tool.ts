@@ -19,6 +19,7 @@ if (tool === "nx") {
   tool === "browser" ||
   tool === "browser-live" ||
   tool === "browser-investigation" ||
+  tool === "browser-pinned" ||
   tool === "storybook-plays"
 ) {
   const entry =
@@ -28,7 +29,9 @@ if (tool === "nx") {
         ? "tests/browser/live.browser.ts"
         : tool === "browser-investigation"
           ? "tests/browser/investigation.browser.ts"
-          : "scripts/check-storybook-plays.ts";
+          : tool === "browser-pinned"
+            ? "tests/browser/pinned.browser.ts"
+            : "scripts/check-storybook-plays.ts";
   cmd = [process.execPath, "--no-env-file", resolve(root, entry), ...args];
 } else {
   throw new Error("Select the local nx, storybook, browser or storybook-plays tool");

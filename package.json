@@ -29,6 +29,7 @@
     "test:browser": "bun --no-env-file scripts/local-tool.ts browser",
     "test:browser:live": "bun --no-env-file scripts/local-tool.ts browser-live",
     "test:browser:investigation": "bun --no-env-file scripts/local-tool.ts browser-investigation",
+    "test:browser:pinned": "bun --no-env-file scripts/local-tool.ts browser-pinned",
     "test:storybook": "bun --no-env-file scripts/local-tool.ts storybook-plays",
     "storybook": "bun --no-env-file scripts/local-tool.ts storybook dev --host 127.0.0.1 --port 6006 --exact-port --ci --disable-telemetry",
     "storybook:build": "bun --no-env-file scripts/local-tool.ts storybook build --output-dir dist/storybook --disable-telemetry",

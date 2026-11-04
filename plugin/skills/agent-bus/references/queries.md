@@ -51,6 +51,7 @@ Every result is one page read at one commit. Read what it says before concluding
 - **complete is the only claim of a whole answer:** exhausted, with every entry decoded and none damaged. Ranked search and the predicate counts (counts, director-dm-volume) never claim it; their damage is "not-checked" and missingJson is only a lower bound.
 - **damaged and damagedTotal count unreadable entries** passed on this page and so far. Report them rather than treating the answer as whole.
 - **A thread follows replyTo links only.** Related mail sent without a reply link is outside it; pair thread with history when the whole job matters. It runs from the nearest top those links reach at `t`; a reply to an id that isn't an entry at `t` cuts it there, missingReplyTargets lists those ids, and root is then absent.
+- **To let a person read forward message history you report, offer a viewer link** rather than an export: the local viewer's address, then `#investigation=` and `encodeURIComponent(JSON.stringify({name, catalogueVersion, ledger, t, criteria}))` from your result, where criteria is its args without limit. Keep your own private record of the rows you returned (id, t, ts, sender, audience, subject, body, reply target), outside any public repository, so their reading can be compared with what you said.
 
 ## bus_query: raw SPARQL
 

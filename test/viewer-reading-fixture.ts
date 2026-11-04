@@ -6,6 +6,7 @@ import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { assertPortFree } from "../viewer/server/port.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
+import { INVESTIGATION_PAGE_SIZE } from "../viewer/shared/limits.ts";
 import type { PublicMessage, PublicPeer } from "../viewer/shared/public.ts";
 import { busPage, type PageOperation, peerRow } from "./bus-pages.ts";
 import { spawnSupervised } from "./supervised.ts";
@@ -33,7 +34,8 @@ type Operation = (typeof OPERATIONS)[number];
 export const FIXTURE_PAGE_BYTES = 65_536;
 /** The commit the fixture's current peers joined at. */
 const PEER_T = 1;
-const LEDGER = "fixture-ledger";
+export const FIXTURE_LEDGER = "fixture-ledger";
+const LEDGER = FIXTURE_LEDGER;
 const PEERS_PAGE = 500;
 const THREAD_LIMIT = 200;
 /**
@@ -364,11 +366,24 @@ const isText = (value: unknown, max: number): value is string =>
 const participantsOk = (value: unknown): boolean =>
   value === undefined || (Array.isArray(value) && value.length === 1 && isText(value[0], 512));
 
+/**
+ * A pinned investigation's history args: exactly the bus's echo of a forward message reading
+ * of every participant and time, at page size 200, as the journey's reference asks. The viewer
+ * sends it only with a pinned commit, and live history never carries it. Participants and
+ * windows are proven against the real bus, so this fake refuses them rather than imitate them.
+ */
+export const isInvestigationArgs = (args: Row): boolean =>
+  onlyKeys(args, ["kinds", "direction", "limit"]) &&
+  JSON.stringify(get(args, "kinds")) === '["message"]' &&
+  get(args, "direction") === "forward" &&
+  get(args, "limit") === INVESTIGATION_PAGE_SIZE;
+
 /** The args the viewer sends for each operation, exactly; anything else is refused. */
-const argsOk = (operation: Operation, args: Row): boolean => {
+const argsOk = (operation: Operation, args: Row, t: number | undefined): boolean => {
   const limit = get(args, "limit");
   switch (operation) {
     case "history":
+      if (t !== undefined) return isInvestigationArgs(args);
       return (
         onlyKeys(args, ["participants", "direction", "limit"]) &&
         participantsOk(get(args, "participants")) &&
@@ -392,7 +407,8 @@ const argsOk = (operation: Operation, args: Row): boolean => {
 };
 
 // The fixture's cursor is its own: a row offset, valid only for the operation that issued it.
-const CURSOR = /^fixture:(history|search|peers|thread):(\d{1,6})$/;
+// Like the bus's own `bq1.` continuations, it keeps to the alphabet the viewer passes back.
+const CURSOR = /^fixture\.(history|search|peers|thread)\.(\d{1,6})$/;
 
 const parseCall = (id: RequestId, params: unknown): Parsed | undefined => {
   if (!isRecord(params) || !onlyKeys(params, ["name", "arguments", "_meta"])) return undefined;
@@ -403,10 +419,15 @@ const parseCall = (id: RequestId, params: unknown): Parsed | undefined => {
   const args = get(call, "args");
   const t = get(call, "t");
   const cursor = get(call, "cursor");
-  if (operation === undefined || !isRecord(args) || !argsOk(operation, args)) return undefined;
   if (t !== undefined && !isInt(t, 1, Number.MAX_SAFE_INTEGER)) return undefined;
-  // The viewer reads a thread at its history's commit, and follows a list with its cursor.
-  if ((operation === "thread") !== (t !== undefined)) return undefined;
+  if (operation === undefined || !isRecord(args) || !argsOk(operation, args, t)) return undefined;
+  // The viewer reads a thread at its history's commit and a pinned investigation at its
+  // reference's; it follows every list with its cursor.
+  if (
+    t === undefined ? operation === "thread" : operation !== "thread" && operation !== "history"
+  ) {
+    return undefined;
+  }
   let offset = 0;
   if (cursor !== undefined) {
     const match = typeof cursor === "string" ? CURSOR.exec(cursor) : null;
@@ -453,6 +474,8 @@ type Counters = {
   peers: number;
   thread: number;
   refused: number;
+  /** Requests whose caller went away while the fixture held them. */
+  aborted: number;
 };
 type RecordedCall = {
   readonly seq: number;
@@ -505,6 +528,7 @@ const createStore = (): Store => ({
     peers: 0,
     thread: 0,
     refused: 0,
+    aborted: 0,
   },
   calls: [],
 });
@@ -576,6 +600,17 @@ const select = (log: Log, mode: FixtureMode, args: Row): ReadonlyArray<unknown> 
 };
 
 /**
+ * A pinned investigation's rows: every entry the bus held at t, ordered by commit then id as
+ * the bus orders them. It reads the whole log, not the mode's window; from a fresh start in
+ * `initial` and then `stress`, as the journey runs, the two hold the same entries.
+ */
+const forward = (log: Log, t: number): ReadonlyArray<unknown> =>
+  [...log.values()]
+    .filter((entry) => entry.t <= t)
+    .sort((a, b) => a.t - b.t || String(get(a.row, "id")).localeCompare(String(get(b.row, "id"))))
+    .map((entry) => ({ ...entry.row, t: entry.t }));
+
+/**
  * The reply tree as the bus defines it, over every entry at t (not only the mode's window):
  * every entry that reaches, along replyTo links (zero or more), a node the focus also reaches. Missing targets are nodes too, so a tree hangs from
  * one; cycles and self-replies need no special case. Rows in commit order.
@@ -643,7 +678,7 @@ const page = (
       head,
       args: call.args,
       rows,
-      ...(more ? { next: `fixture:${call.operation}:${call.offset + rows.length}` } : {}),
+      ...(more ? { next: `fixture.${call.operation}.${call.offset + rows.length}` } : {}),
       extra,
     });
   };
@@ -665,6 +700,10 @@ const answer = (log: Log, mode: FixtureMode, head: number, call: QueryCall) => {
     const tree = t > head ? undefined : replyTree(log, t, String(get(call.args, "id")));
     return tree === undefined ? undefined : page(call, t, head, tree.rows, limit, tree.extra);
   }
+  if (call.t !== undefined) {
+    // The bus validates t from 1 to head.
+    return call.t > head ? undefined : page(call, call.t, head, forward(log, call.t), limit);
+  }
   const selected = select(log, mode, call.args);
   // Ranked best first; the synthetic score only falls with rank.
   const rows =
@@ -675,6 +714,13 @@ const answer = (log: Log, mode: FixtureMode, head: number, call: QueryCall) => {
       : selected;
   return page(call, head, head, rows, limit);
 };
+
+/** A pinned investigation of every message, as the bus echoes its default forward reading. */
+export const INVESTIGATION_ARGS = {
+  kinds: ["message"],
+  direction: "forward",
+  limit: INVESTIGATION_PAGE_SIZE,
+} as const;
 
 /** The calls the viewer makes, as the fixture validates them, for one operation. */
 const viewerCall = (operation: Operation, args: Row, t?: number): QueryCall => ({
@@ -712,6 +758,7 @@ export const fixturePages = (mode: FixtureMode) => {
   };
   return [
     ...follow(viewerCall("history", { direction: "backward", limit: MAX_LIMIT })),
+    ...follow(viewerCall("history", INVESTIGATION_ARGS, head)),
     ...follow(viewerCall("search", { text: "msg", limit: MAX_LIMIT })),
     ...follow(viewerCall("peers", { limit: PEERS_PAGE })),
     ...[...log.keys()].flatMap((id) =>
@@ -800,10 +847,15 @@ const startFake = async (store: Store, signal: AbortSignal) => {
       const { call } = parsed;
       record(store, call);
       const listing = call.operation === "history" || call.operation === "search";
+      // A held request ends with its caller, as the bus's work would be cancelled.
       await pause(
         listing ? snapshot.historyDelayMs : call.operation === "peers" ? snapshot.peerDelayMs : 0,
-        signal
+        AbortSignal.any([signal, request.signal])
       );
+      if (request.signal.aborted) {
+        store.counters.aborted += 1;
+        return new Response("Request ended", { status: 499 });
+      }
       const failing = listing
         ? snapshot.historyError
         : call.operation === "peers"
@@ -1256,7 +1308,31 @@ const runSmoke = async (fixture: Fixture): Promise<void> => {
     query({ name: "history", args: { ...backward, limit: 201 } }),
     query({ name: "history", args: { ...backward, extra: true } }),
     query({ name: "history", args: { limit: 1 } }),
-    query({ name: "history", args: backward, cursor: "fixture:peers:1" }),
+    query({ name: "history", args: backward, cursor: "fixture.peers.1" }),
+    query({ name: "history", args: backward, cursor: "fixture:history:1" }),
+    // A pinned investigation only with its commit, at page size 200, forward messages only,
+    // and no participants or window: those are proven against the real bus.
+    query({ name: "history", args: INVESTIGATION_ARGS }),
+    query({ name: "history", args: { ...INVESTIGATION_ARGS, direction: "backward" } }),
+    query({ name: "history", args: backward, t: 1 }),
+    query({ name: "history", args: { ...INVESTIGATION_ARGS, direction: "backward" }, t: 1 }),
+    query({ name: "history", args: INVESTIGATION_ARGS, t: 0 }),
+    query({ name: "history", args: { ...INVESTIGATION_ARGS, limit: 50 }, t: 1 }),
+    query({
+      name: "history",
+      args: { ...INVESTIGATION_ARGS, kinds: ["message", "presence"] },
+      t: 1,
+    }),
+    query({ name: "history", args: { ...INVESTIGATION_ARGS, extra: true }, t: 1 }),
+    query({ name: "history", args: { ...INVESTIGATION_ARGS, participants: ["#alpha"] }, t: 1 }),
+    query({
+      name: "history",
+      args: { ...INVESTIGATION_ARGS, fromTs: "2026-11-01T10:00:00Z" },
+      t: 1,
+    }),
+    query({ name: "history", args: INVESTIGATION_ARGS, t: 1, cursor: "fixture.peers.1" }),
+    query({ name: "search", args: { text: "x", limit: 1 }, t: 1 }),
+    query({ name: "peers", args: { limit: 500 }, t: 1 }),
     query({ name: "peers", args: { limit: 1 } }),
     query({ name: "thread", args: { id: "msg-a-root", limit: 200 } }),
     query({ name: "counts", args: {} }),
@@ -1269,6 +1345,23 @@ const runSmoke = async (fixture: Fixture): Promise<void> => {
     (await rpc(query({ name: "peers", args: { limit: 500 } }))).status === 200,
     "upstream peers shape"
   );
+  check(
+    (await rpc(query({ name: "history", args: backward, cursor: "fixture.history.1" }))).status ===
+      200,
+    "upstream history cursor"
+  );
+  // The bus validates t from 1 to head: past head is the bus's error, not a refused call.
+  const answered = async (t: number): Promise<boolean> => {
+    const response = await rpc(query({ name: "history", args: INVESTIGATION_ARGS, t }));
+    const body: unknown = response.status === 200 ? await response.json() : undefined;
+    const result = isRecord(body) ? get(body, "result") : undefined;
+    return isRecord(result) && get(result, "isError") !== true;
+  };
+  const { value: current } = await read();
+  const head = isRecord(current) ? get(current, "head") : undefined;
+  check(typeof head === "number", "control head");
+  check((await answered(head)) && (await answered(1)), "upstream investigation shape");
+  check(!(await answered(head + 1)), "investigation past head");
 
   const final = await read();
   const calls = isRecord(final.value) ? get(final.value, "calls") : undefined;
