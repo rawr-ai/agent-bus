@@ -17,3 +17,5 @@ export const INVESTIGATION_PAGE_SIZE = 200;
 export const MAX_INVESTIGATION_ENTRIES = 200;
 /** The longest continuation an investigation sends: the bus decodes no longer cursor. */
 export const MAX_CONTINUATION_LENGTH = 1024;
+/** The largest RPC request body the viewer host reads. */
+export const MAX_REQUEST_BYTES = 4096;

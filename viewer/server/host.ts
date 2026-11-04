@@ -1,10 +1,11 @@
 import { RPCHandler } from "@orpc/server/fetch";
 import { ManagedRuntime } from "effect";
+import { MAX_REQUEST_BYTES } from "../shared/limits.ts";
 import { assertPortFree, isAddressInUse, ViewerPortInUse } from "./port.ts";
 import { MAX_CONCURRENT_READS, OPERATION_TIMEOUT_MILLIS, readerLayer } from "./reader.ts";
 import { createRouter, type ViewerRuntime } from "./router.ts";
 
-export const MAX_REQUEST_BYTES = 4096;
+export { MAX_REQUEST_BYTES };
 export interface ViewerAsset {
   readonly body: Uint8Array;
   readonly contentType: string;
@@ -28,7 +29,7 @@ const secure = (response: Response) => {
   return response;
 };
 
-/** A single guarded request path serves both exact assets and the two RPC leaves. */
+/** A single guarded request path serves both exact assets and the fixed RPC leaves. */
 export const createViewer = (options: {
   readonly port: number;
   readonly busPort: number;
@@ -40,6 +41,8 @@ export const createViewer = (options: {
   const runtime = options.runtime ?? ManagedRuntime.make(readerLayer(options));
   const handler = new RPCHandler(createRouter(runtime));
   const active = new Set<AbortController>();
+  // At most one investigation page is in flight in this viewer, so live reads keep the rest.
+  let investigating = false;
   let closing = false;
   let closed: Promise<void> | undefined;
   let boundPort = options.port;
@@ -58,7 +61,9 @@ export const createViewer = (options: {
     const origin = request.headers.get("origin");
     if (origin !== null && origin !== `http://${authority}`) return error(403, "Request refused");
     if (url.search !== "") return error(404, "Not Found");
+    const investigation = url.pathname === "/rpc/investigationPage";
     const rpc =
+      investigation ||
       url.pathname === "/rpc/history" ||
       url.pathname === "/rpc/peers" ||
       url.pathname === "/rpc/thread";
@@ -85,7 +90,13 @@ export const createViewer = (options: {
     ) {
       return error(413, "Request too large");
     }
-    if (active.size >= MAX_CONCURRENT_READS) return error(503, "Viewer busy");
+    // Investigation busy is refused before a host slot is considered, so it never takes one.
+    // Both busy refusals of an investigation page are 429: a 503 there could not be told apart
+    // from a viewer shutting down, which is unavailable, not retryable.
+    if (investigation && investigating) return error(429, "Investigation busy");
+    if (active.size >= MAX_CONCURRENT_READS) {
+      return error(investigation ? 429 : 503, "Viewer busy");
+    }
     const controller = new AbortController();
     let bodyReader = request.body?.getReader();
     let timedOut = false;
@@ -100,7 +111,9 @@ export const createViewer = (options: {
     const abort = () => controller.abort();
     request.signal.addEventListener("abort", abort, { once: true });
     if (request.signal.aborted) controller.abort();
+    // Taken with the slot, before any await; released with it once the handler has settled.
     active.add(controller);
+    if (investigation) investigating = true;
     try {
       const parts: Uint8Array[] = [];
       let bytes = 0;
@@ -149,6 +162,7 @@ export const createViewer = (options: {
       clearTimeout(timer);
       controller.signal.removeEventListener("abort", cancelBody);
       active.delete(controller);
+      if (investigation) investigating = false;
       request.signal.removeEventListener("abort", abort);
     }
   };

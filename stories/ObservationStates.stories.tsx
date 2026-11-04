@@ -42,6 +42,10 @@ const client: ViewerClient = {
   },
   peers: async () => reply(script.peers),
   thread: async (input) => reply(script.thread(input)),
+
+  investigationPage: async () => {
+    throw new Error("This story reads no investigation");
+  },
 };
 
 const request: PublicMessage = {
