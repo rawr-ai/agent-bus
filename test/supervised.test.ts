@@ -48,8 +48,16 @@ const childOf = async (supervisor: number, pidFile: string): Promise<Identity> =
   return child;
 };
 
-const superviseStandIn = (pidFile: string, ...options: string[]) =>
-  owned.supervisor(spawnSupervised([process.execPath, standIn, pidFile, ...options]));
+const superviseStandIn = (
+  pidFile: string,
+  options: ReadonlyArray<string> = [],
+  spawn: { readonly env?: Record<string, string>; readonly cwd?: string } = {}
+) => {
+  // The stand-in loads no .env itself, so its environment is only what the supervisor passed.
+  return owned.supervisor(
+    spawnSupervised([process.execPath, "--no-env-file", standIn, pidFile, ...options], spawn)
+  );
+};
 
 test("a parent killed with SIGKILL takes its supervised child with it", async () => {
   const dir = tempDir();
@@ -145,7 +153,7 @@ test("data on the pipe is ignored; its end ends the child", async () => {
 test("a stopped supervisor exits only after its child has", async () => {
   const pidFile = join(tempDir(), "pid");
   // A child that takes a second to exit: a supervisor that did not wait would exit first.
-  const supervisor = superviseStandIn(pidFile, "slow-term");
+  const supervisor = superviseStandIn(pidFile, ["slow-term"]);
   const child = await childOf(supervisor.pid, pidFile);
   supervisor.kill("SIGTERM");
   await supervisor.exited;
@@ -154,7 +162,7 @@ test("a stopped supervisor exits only after its child has", async () => {
 
 test("a child that ignores SIGTERM is killed after the bound", async () => {
   const pidFile = join(tempDir(), "pid");
-  const supervisor = superviseStandIn(pidFile, "ignore-term");
+  const supervisor = superviseStandIn(pidFile, ["ignore-term"]);
   const child = await childOf(supervisor.pid, pidFile);
   const started = Date.now();
   supervisor.kill("SIGTERM");
@@ -168,7 +176,66 @@ test("a child that ignores SIGTERM is killed after the bound", async () => {
 test("a child that exits on its own ends the supervisor with its status", async () => {
   for (const code of [0, 3]) {
     const pidFile = join(tempDir(), "pid");
-    const supervisor = superviseStandIn(pidFile, `exit=${code}`);
+    const supervisor = superviseStandIn(pidFile, [`exit=${code}`]);
     expect(await supervisor.exited).toBe(code);
+  }
+}, 30_000);
+
+test("a second signal kills a child that ignores the first at once", async () => {
+  const pidFile = join(tempDir(), "pid");
+  const supervisor = superviseStandIn(pidFile, ["ignore-term"]);
+  const child = await childOf(supervisor.pid, pidFile);
+  const started = Date.now();
+  supervisor.kill("SIGTERM");
+  await Bun.sleep(300);
+  expect(alive(child)).toBe(true);
+  supervisor.kill("SIGTERM");
+  expect(await supervisor.exited).toBe(128 + 9);
+  expect(Date.now() - started).toBeLessThan(KILL_AFTER_MS - 1_000);
+  expect(alive(child)).toBe(false);
+}, 30_000);
+
+test("the parent ending after a stop still allows the child its grace period", async () => {
+  const pidFile = join(tempDir(), "pid");
+  // A child that exits cleanly a second after SIGTERM: were end of file a second signal, it
+  // would be killed first and the status would be 137.
+  const supervisor = superviseStandIn(pidFile, ["slow-term"]);
+  await childOf(supervisor.pid, pidFile);
+  supervisor.kill("SIGTERM");
+  await Bun.sleep(100);
+  await supervisor.stdin.end();
+  expect(await supervisor.exited).toBe(0);
+}, 30_000);
+
+test("a repeated SIGINT lets the child finish exiting", async () => {
+  const pidFile = join(tempDir(), "pid");
+  // A terminal's Ctrl-C and the caller's own SIGINT both arrive: the second must not kill.
+  const supervisor = superviseStandIn(pidFile, ["slow-int"]);
+  await childOf(supervisor.pid, pidFile);
+  supervisor.kill("SIGINT");
+  await Bun.sleep(300);
+  supervisor.kill("SIGINT");
+  expect(await supervisor.exited).toBe(0);
+}, 30_000);
+
+test("the child gets exactly the environment given, and nothing the parent has", async () => {
+  const dir = tempDir();
+  const pidFile = join(dir, "pid");
+  // A .env in the working directory would be loaded by a supervisor run without --no-env-file;
+  // this directory has no bunfig to turn that off.
+  await Bun.write(join(dir, ".env"), "AGENT_BUS_SUPERVISED_DOTENV=1\n");
+  process.env.AGENT_BUS_SUPERVISED_LEAK = "1";
+  try {
+    const env = { PATH: process.env.PATH ?? "", AGENT_BUS_SUPERVISED_MARK: "kept" };
+    const supervisor = superviseStandIn(pidFile, ["env"], { env, cwd: dir });
+    await childOf(supervisor.pid, pidFile);
+    const seen = JSON.parse(readFileSync(`${pidFile}.env`, "utf8")) as Record<string, string>;
+    // Exactly these keys: neither the parent's environment nor anything the supervisor adds.
+    expect(Object.keys(seen).sort()).toEqual(["AGENT_BUS_SUPERVISED_MARK", "PATH"]);
+    expect(seen.AGENT_BUS_SUPERVISED_MARK).toBe("kept");
+    supervisor.kill("SIGTERM");
+    await supervisor.exited;
+  } finally {
+    delete process.env.AGENT_BUS_SUPERVISED_LEAK;
   }
 }, 30_000);

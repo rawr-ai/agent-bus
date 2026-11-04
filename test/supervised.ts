@@ -8,9 +8,13 @@
  * The supervisor's stdin is a pipe whose write end only the parent holds and never writes or
  * closes. When it reaches end of file, because the parent exited however it died, the
  * supervisor ends the command with SIGTERM. SIGTERM or SIGINT sent to the supervisor is passed
- * on to the command instead. Either way, a command still running after KILL_AFTER_MS gets
- * SIGKILL. SIGHUP counts as SIGTERM. The supervisor exits only once the command has, with the command's status, so a
- * caller that stops the supervisor and awaits its exit has also waited for the command.
+ * on to the command instead, and SIGHUP counts as SIGTERM. Either way, a command still running
+ * after KILL_AFTER_MS gets SIGKILL, and SIGTERM or SIGHUP to a supervisor already ending kills
+ * it at once: a caller that cannot wait sends one rather than SIGKILL, which would orphan the
+ * command. A repeated SIGINT does not escalate, since a terminal's Ctrl-C reaches the whole
+ * process group and the caller's own SIGINT may follow it. The
+ * supervisor exits only once the command has, with the command's status, so a caller that
+ * stops the supervisor and awaits its exit has also waited for the command.
  *
  * Limits: a supervisor killed alone with SIGKILL orphans its command, and the command's own
  * children are not tracked.
@@ -33,7 +37,10 @@ const supervise = async (command: ReadonlyArray<string>) => {
   let child: ReturnType<typeof Bun.spawn> | undefined;
   let ending = false;
   const end = (signal: "SIGTERM" | "SIGINT") => {
-    if (ending) return;
+    if (ending) {
+      if (signal === "SIGTERM") child?.kill("SIGKILL");
+      return;
+    }
     ending = true;
     child?.kill(signal);
     setTimeout(() => child?.kill("SIGKILL"), KILL_AFTER_MS);
@@ -52,7 +59,9 @@ const supervise = async (command: ReadonlyArray<string>) => {
     } catch {
       // A failed read is treated as the parent being gone.
     } finally {
-      end("SIGTERM");
+      // Not a second signal: a parent that ends after stopping the supervisor still allows the
+      // command its grace period.
+      if (!ending) end("SIGTERM");
     }
   })();
   await child.exited;
@@ -66,15 +75,19 @@ if (import.meta.main) await supervise(Bun.argv.slice(2));
  * implies the command's. Stop it with `kill()` and await `exited`. Keep the returned process
  * referenced while the command should run: its stdin is the pipe whose end stops the command.
  */
-export const spawnSupervised = (
+type Output = "ignore" | "inherit" | "pipe";
+
+export const spawnSupervised = <Out extends Output = "pipe", Err extends Output = "inherit">(
   command: ReadonlyArray<string>,
   options: {
     readonly cwd?: string;
-    readonly stdout?: "ignore" | "inherit" | "pipe";
-    readonly stderr?: "ignore" | "inherit" | "pipe";
+    /** The environment of the supervisor, which the command inherits unchanged. */
+    readonly env?: Record<string, string>;
+    readonly stdout?: Out;
+    readonly stderr?: Err;
   } = {}
 ) =>
-  Bun.spawn([process.execPath, "--no-env-file", import.meta.path, ...command], {
+  Bun.spawn<"pipe", Out, Err>([process.execPath, "--no-env-file", import.meta.path, ...command], {
     ...options,
     stdin: "pipe",
   });

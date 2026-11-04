@@ -8,6 +8,7 @@ import { assertPortFree } from "../viewer/server/port.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import type { PublicMessage, PublicPeer } from "../viewer/shared/public.ts";
 import { busPage, type PageOperation, peerRow } from "./bus-pages.ts";
+import { spawnSupervised } from "./supervised.ts";
 
 export const FIXTURE_MODES = ["initial", "changed", "empty", "quarantined", "stress"] as const;
 export type FixtureMode = (typeof FIXTURE_MODES)[number];
@@ -909,6 +910,7 @@ export type Fixture = {
   readonly controlPort: number;
   readonly fakePort: number;
   readonly viewerExited: Promise<void>;
+  /** The viewer's supervisor's status: the viewer's code, or 128 plus a fatal signal's number. */
   readonly viewerExitCode: () => number | null;
   readonly close: () => Promise<void>;
 };
@@ -969,9 +971,11 @@ const drain = async <T extends Uint8Array>(
   }
 };
 
-// Minimal environment allowlist: no inherited credentials, tokens or .env files.
+// Minimal environment allowlist: no inherited credentials, tokens or .env files. The viewer
+// runs under a supervisor, so a fixture killed before its shutdown still stops it; the
+// supervisor passes on signals and writes the viewer's output straight to these pipes.
 const spawnViewer = (fakePort: number, viewerPort: number) =>
-  Bun.spawn([process.execPath, "--no-env-file", "dist/viewer/main.js"], {
+  spawnSupervised([process.execPath, "--no-env-file", "dist/viewer/main.js"], {
     cwd: Bun.fileURLToPath(ROOT),
     env: {
       PATH: process.env.PATH ?? "",
@@ -980,7 +984,6 @@ const spawnViewer = (fakePort: number, viewerPort: number) =>
     },
     stdout: "pipe",
     stderr: "pipe",
-    stdin: "ignore",
   });
 type Child = ReturnType<typeof spawnViewer>;
 
@@ -997,14 +1000,16 @@ export const startFixture = async (
   const drains: Array<Promise<void>> = [];
   let child: Child | undefined;
 
-  // Idempotent and awaited: SIGINT first, bounded wait, SIGKILL fallback, then servers.
+  // Idempotent and awaited: SIGINT first, bounded wait, then SIGTERM, which has the supervisor
+  // kill the viewer at once (SIGKILL to the supervisor would orphan it), then servers. A
+  // supervisor still running after both waits is reported as the viewer surviving.
   const shutdown = async (): Promise<void> => {
     abort.abort();
     let survived = false;
     if (child !== undefined && child.exitCode === null) {
       child.kill("SIGINT");
       if ((await within(child.exited, STOP_WAIT_MS)) === "timeout") {
-        child.kill("SIGKILL");
+        child.kill("SIGTERM");
         survived = (await within(child.exited, STOP_WAIT_MS)) === "timeout";
       }
     }
