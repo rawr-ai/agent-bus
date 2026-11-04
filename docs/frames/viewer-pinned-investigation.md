@@ -2,7 +2,7 @@
 
 This frame scopes the next viewer outcome of the [viewer query integration](turnaround-viewer.md): a reader opens the exact history evidence an agent returned and reads it in the viewer. The released viewer's rules are in [viewer](../architecture/viewer.md) and its procedures in [interfaces](../architecture/interfaces.md#viewer); the query contract it reuses is [`bus_run_query`](../architecture/interfaces.md#bus_run_query).
 
-Status: accepted in direction by Codex, with transport and admission corrections, 2026-11-04; implemented in draft units with checks performed on the synthetic fixture; qualification is pending the disposition of the Markdown list correction and the Storybook play-runner abort, with no merge, deploy or adoption. DRA: Claude lead, cross-reviewed by Codex. Mode: co-framing; object: solution. It extends one bounded release decision deliberately (below) and changes no bus behaviour. This is a bounded-replay increment of at most 200 entries, not completion of unrestricted complete-history reading.
+Status: accepted in direction by Codex, with transport and admission corrections, 2026-11-04; implemented in draft units with checks performed on the synthetic fixture; qualification is pending the disposition of the Markdown list correction and the Storybook play-runner abort, a harness transport defect tracked in [agent-bus#37](https://github.com/rawr-ai/agent-bus/issues/37), with no merge, deploy or adoption. DRA: Claude lead, cross-reviewed by Codex. Mode: co-framing; object: solution. It extends one bounded release decision deliberately (below) and changes no bus behaviour. This is a bounded-replay increment of at most 200 entries, not completion of unrestricted complete-history reading.
 
 ## Consumer job
 
