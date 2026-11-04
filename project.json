@@ -49,12 +49,14 @@
         "{workspaceRoot}/viewer/src/reading-unit.ts",
         "{workspaceRoot}/viewer/src/snapshot-labels.ts",
         "{workspaceRoot}/viewer/src/announcements.ts",
+        "{workspaceRoot}/viewer/src/features/pinned/traversal.ts",
         "{workspaceRoot}/test/viewer-public.test.ts",
         "{workspaceRoot}/test/viewer-conversations.test.ts",
         "{workspaceRoot}/test/viewer-markdown-policy.test.ts",
         "{workspaceRoot}/test/viewer-observation-resource.test.ts",
         "{workspaceRoot}/test/viewer-investigation.test.ts",
         "{workspaceRoot}/test/viewer-investigation-contract.test.ts",
+        "{workspaceRoot}/test/viewer-pinned-traversal.test.ts",
         "{workspaceRoot}/test/viewer-reading-unit.test.ts",
         "{workspaceRoot}/test/viewer-announcements.test.ts",
         "{workspaceRoot}/test/preload.ts",
@@ -104,7 +106,7 @@
       "executor": "nx:run-commands",
       "cache": false,
       "options": {
-        "command": "bun --no-env-file test test/viewer-server.test.ts test/viewer-reader-bus.test.ts test/viewer-investigation-page.test.ts test/viewer-investigation-bus.test.ts",
+        "command": "bun --no-env-file test test/viewer-server.test.ts test/viewer-reader-bus.test.ts test/viewer-investigation-page.test.ts test/viewer-investigation-bus.test.ts test/viewer-pinned-equivalence.test.ts test/viewer-pinned-host.test.ts",
         "env": { "FORCE_COLOR": "0" }
       }
     },
