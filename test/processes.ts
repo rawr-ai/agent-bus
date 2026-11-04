@@ -161,13 +161,23 @@ export const ownership = () => {
 export const STOP_TIMEOUT_MS = SUPERVISOR_STOP_MS + 10_000;
 
 /**
+ * Whether this process has lost the parent it had at `parent`: reparented, or already adopted
+ * by init (pid 1, launchd on macOS), which no test fixture has as its own parent. This holds on
+ * macOS, which hands every orphan to launchd; it would not under a Linux subreaper, or with a
+ * test runner that is itself pid 1.
+ */
+export const orphaned = (parent: number) => parent === 1 || process.ppid !== parent;
+
+/**
  * Keeps a fixture that never exits on its own running only while its parent does: polled, so
- * that a test runner killed outright cannot leave it, or what it started, behind.
+ * that a test runner killed outright cannot leave it, or what it started, behind. Call it before
+ * any asynchronous startup; a fixture whose parent is already gone exits at once.
  */
 export const exitWithParent = () => {
   const parent = process.ppid;
+  if (orphaned(parent)) process.exit(0);
   setInterval(() => {
-    if (process.ppid !== parent) process.exit(0);
+    if (orphaned(parent)) process.exit(0);
   }, 100);
 };
 

@@ -4,6 +4,7 @@
 import { flureeSupervisorPid } from "../fluree-server.ts";
 import { childrenOf, exitWithParent } from "../processes.ts";
 
+// Before the server starts, so that a parent lost during startup still ends this process.
+exitWithParent();
 const supervisor = await flureeSupervisorPid();
 console.log(JSON.stringify({ supervisor, children: childrenOf(supervisor) }));
-exitWithParent();

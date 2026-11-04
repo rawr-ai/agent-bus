@@ -107,6 +107,28 @@ test("a parent killed as soon as it spawns its supervisor leaves no stand-in run
   if (supervisor !== undefined) expect(await exitsWithin(supervisor)).toBe(true);
 }, 30_000);
 
+test("a fixture whose parent is already gone when it starts watching exits", async () => {
+  const dir = tempDir();
+  const parent = owned.parent(
+    Bun.spawn(
+      [process.execPath, join(import.meta.dir, "supervised", "abandoned.ts"), "parent", dir],
+      { stdout: "ignore", stderr: "ignore" }
+    )
+  );
+  await parent.exited;
+  // The child starts watching only once its parent is gone: had it taken its new parent, init,
+  // as the one to watch, it would never exit. Its pid counts only while it still runs this
+  // test's fixture, since a child already gone may have had its pid reused.
+  const pid = Number(readFileSync(join(dir, "child"), "utf8"));
+  const child = commandOf(pid).includes(dir) ? identify(pid) : undefined;
+  if (child !== undefined) {
+    owned.process(child);
+    expect(await exitsWithin(child, 5_000)).toBe(true);
+  }
+  // It reached the call, rather than failing before it.
+  expect(existsSync(join(dir, "watching"))).toBe(true);
+}, 30_000);
+
 test("data on the pipe is ignored; its end ends the child", async () => {
   const pidFile = join(tempDir(), "pid");
   const supervisor = superviseStandIn(pidFile);

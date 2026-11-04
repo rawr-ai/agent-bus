@@ -4,7 +4,10 @@
 // after starting; `with-parent` exits 20 seconds after its parent has, so that a stand-in
 // nothing supervises outlives its parent for a test but cannot be left behind by one.
 import { writeFileSync } from "node:fs";
+import { orphaned } from "../processes.ts";
 
+// Taken before the pid is published, so that a parent lost from then on is noticed.
+const parent = process.ppid;
 const [pidFile, ...options] = Bun.argv.slice(2);
 if (pidFile === undefined) throw new Error("usage: stand-in.ts <pid-file> [options]");
 if (options.includes("ignore-term")) process.on("SIGTERM", () => {});
@@ -13,9 +16,8 @@ if (options.includes("slow-term"))
 const exit = options.find((option) => option.startsWith("exit="));
 writeFileSync(pidFile, String(process.pid));
 if (exit !== undefined) setTimeout(() => process.exit(Number(exit.slice(5))), 200);
-const parent = process.ppid;
 const timer = setInterval(() => {
-  if (options.includes("with-parent") && process.ppid !== parent) {
+  if (options.includes("with-parent") && orphaned(parent)) {
     clearInterval(timer);
     setTimeout(() => process.exit(0), 20_000);
   }

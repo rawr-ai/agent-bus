@@ -8,6 +8,8 @@ import { join } from "node:path";
 import { exitWithParent } from "../processes.ts";
 import { spawnSupervised } from "../supervised.ts";
 
+// Before anything is started, so that a parent already gone leaves nothing behind.
+exitWithParent();
 const [dir, mode] = Bun.argv.slice(2);
 if (dir === undefined) throw new Error("usage: parent.ts <dir> [die-at-once]");
 const standIn = join(import.meta.dir, "stand-in.ts");
@@ -22,4 +24,3 @@ const sibling = Bun.spawn([process.execPath, standIn, join(dir, "sibling"), "wit
   stderr: "ignore",
 });
 console.log(JSON.stringify({ supervisor: supervised.pid, sibling: sibling.pid }));
-exitWithParent();
