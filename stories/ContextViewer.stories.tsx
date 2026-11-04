@@ -40,6 +40,10 @@ const client: ViewerClient = {
   history: async () => historyOf(messages, { t: 1 }),
   peers: async () => peersOf(["agent/lead"]),
   thread: async (input) => threadOf(input),
+
+  investigationPage: async () => {
+    throw new Error("This story reads no investigation");
+  },
 };
 const meta = {
   title: "Viewer/Context journey",

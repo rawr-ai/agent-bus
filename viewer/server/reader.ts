@@ -9,17 +9,22 @@ import {
   type Scope,
   Semaphore,
 } from "effect";
-import { McpClient, McpProtocol } from "effect/ai";
+import { McpClient, McpClientError, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import {
   type HistoryInput,
   type HistoryObservation,
+  type IdentityField,
+  INVESTIGATION_PAGE_SIZE,
+  type InvestigationPage,
+  type InvestigationPageInput,
   MAX_PAGES,
   MAX_PEERS,
   MAX_PEERS_PAGE,
   MAX_THREAD_MESSAGES,
   type PeersObservation,
   projectHistory,
+  projectInvestigationPage,
   projectPeers,
   projectThread,
   type ThreadInput,
@@ -34,8 +39,17 @@ export const QUERY_TOOL = "bus_run_query";
 
 export class ObservationUnavailable extends Data.TaggedError("ObservationUnavailable") {}
 export class ObservationTimeout extends Data.TaggedError("ObservationTimeout") {}
+/** The bus answered an investigation page with an error: a refusal or its own failure. */
+export class BusError extends Data.TaggedError("BusError") {}
+/** An investigation page that is not the referenced reading, on the named field. */
+export class IdentityMismatch extends Data.TaggedError("IdentityMismatch")<{
+  readonly field: IdentityField;
+}> {}
+/** An investigation page that is not a valid history result. */
+export class PageRejected extends Data.TaggedError("PageRejected") {}
 
 type Failure = ObservationUnavailable | ObservationTimeout;
+export type InvestigationFailure = Failure | BusError | IdentityMismatch | PageRejected;
 
 export class ObservationReader extends Context.Service<
   ObservationReader,
@@ -43,6 +57,10 @@ export class ObservationReader extends Context.Service<
     readonly history: (criteria: HistoryInput) => Effect.Effect<HistoryObservation, Failure>;
     readonly peers: () => Effect.Effect<PeersObservation, Failure>;
     readonly thread: (request: ThreadInput) => Effect.Effect<ThreadObservation, Failure>;
+    /** One page of a pinned investigation, checked against its reference. */
+    readonly investigationPage: (
+      input: InvestigationPageInput
+    ) => Effect.Effect<InvestigationPage, InvestigationFailure>;
   }
 >()("viewer/ObservationReader") {}
 
@@ -52,6 +70,9 @@ const nextOf = (page: unknown): string | undefined => {
   const next: unknown = Reflect.get(page, "next");
   return typeof next === "string" ? next : undefined;
 };
+/** The bus answered with an error result: it carries no tag, and its text is never used. */
+const isToolError = (error: unknown): error is McpClientError.McpClientError =>
+  McpClientError.isMcpClientError(error) && error.reason._tag === "ToolError";
 const rowCount = (page: unknown): number => {
   if (typeof page !== "object" || page === null || !Object.hasOwn(page, "rows")) return 0;
   const rows: unknown = Reflect.get(page, "rows");
@@ -200,6 +221,37 @@ export const readerLayer = (options: {
                 projectThread(pages, request, new Date().toISOString())
               );
             })
+          ),
+        investigationPage: ({ reference, cursor }) =>
+          // Only the upstream read takes the permit and deadline; checking the page after it
+          // keeps its own failures from becoming unavailable.
+          observe(
+            runQuery({
+              name: "history",
+              args: { ...reference.criteria, limit: INVESTIGATION_PAGE_SIZE },
+              t: reference.t,
+              ...(cursor === undefined ? {} : { cursor }),
+            }).pipe(
+              Effect.map((raw) => ({ raw })),
+              Effect.catchIf(isToolError, () => Effect.succeed({ busError: true } as const))
+            )
+          ).pipe(
+            Effect.flatMap(
+              (
+                read
+              ): Effect.Effect<InvestigationPage, BusError | IdentityMismatch | PageRejected> => {
+                if ("busError" in read) return Effect.fail(new BusError());
+                let checked: ReturnType<typeof projectInvestigationPage>;
+                try {
+                  checked = projectInvestigationPage(read.raw, reference);
+                } catch {
+                  return Effect.fail(new PageRejected());
+                }
+                return "mismatch" in checked
+                  ? Effect.fail(new IdentityMismatch({ field: checked.mismatch }))
+                  : Effect.succeed(checked.page);
+              }
+            )
           ),
       };
     })
