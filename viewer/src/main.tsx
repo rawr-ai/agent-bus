@@ -3,8 +3,8 @@ import { RPCLink } from "@orpc/client/fetch";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import type { ViewerClient } from "../shared/client-types";
-import { App } from "./App";
 import { ViewerErrorBoundary } from "./ViewerErrorBoundary";
+import { ViewerRoute } from "./ViewerRoute";
 
 const client: ViewerClient = createORPCClient(
   new RPCLink({ url: new URL("/rpc", location.origin) })
@@ -12,7 +12,7 @@ const client: ViewerClient = createORPCClient(
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
     <ViewerErrorBoundary>
-      <App client={client} />
+      <ViewerRoute client={client} />
     </ViewerErrorBoundary>
   </StrictMode>
 );
