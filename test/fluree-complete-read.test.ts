@@ -65,20 +65,16 @@ const fixture = () => {
         inserts += 1;
         return Response.json({});
       }
-      // Presence is read at a pinned commit: node, recorded sender, stored entry, commit.
-      if (path.includes("/query") && !path.endsWith("/query")) {
+      if (path.endsWith("/query")) {
         const query: unknown = await request.json();
-        if (JSON.stringify(query).includes("bus:Presence")) {
+        const body = JSON.stringify(query);
+        // Presence is read at the cut: node, recorded sender, stored entry, commit.
+        if (body.includes("bus:Presence")) {
           presenceSelects.push(
             typeof query === "object" && query !== null && "select" in query ? query.select : null
           );
           return Response.json(presences.map(presenceRow));
         }
-        return new Response(null, { status: 404 });
-      }
-      if (path.endsWith("/query")) {
-        const query: unknown = await request.json();
-        const body = JSON.stringify(query);
         if (held !== undefined) {
           held();
           held = undefined;

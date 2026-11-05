@@ -659,50 +659,48 @@ export const layerFluree = (config: FlureeConfig) =>
        * an entry it could miss fails the read rather than the guard.
        */
       const presenceAt = (at?: number) =>
-        Effect.gen(function* () {
-          const id = yield* bounded(guardedIncarnation);
-          if (id !== instance) return yield* replaced();
-          const head = at ?? (yield* bounded(guardedHead));
-          // The complete history, uncapped as every presence read has been: valid history of
-          // any size must never fail ownership. Only the small pins are bounded.
-          const rows = yield* send(
-            HttpClientRequest.post(pinned(head)).pipe(
-              HttpClientRequest.bodyJsonUnsafe({
-                "@context": context,
-                select: ["?m", "?from", "?json", "?t"],
-                where: [
-                  {
-                    "@id": "?m",
-                    "@type": "bus:Presence",
-                    "bus:json": { "@value": "?json", "@t": "?t" },
-                  },
-                  ["optional", { "@id": "?m", "bus:from": "?from" }],
-                ],
-                orderBy: "?t",
-              })
-            )
-          ).pipe(Effect.flatMap(decode(PresenceRows)));
-          const nodes = new Map<string, number>();
-          for (const [node] of rows) nodes.set(node, (nodes.get(node) ?? 0) + 1);
-          const entries = [];
-          for (const [node, from, json, t] of rows) {
-            const message = yield* decodeMessage(json, t);
-            if (
-              message.presence?.session !== undefined &&
-              (message.kind !== "presence" ||
-                node !== messageIri(message.id) ||
-                from !== message.from ||
-                nodes.get(node) !== 1)
-            ) {
-              return yield* new LedgerError({
-                message: `A ledger entry at t=${t} could not be decoded.`,
-              });
+        bounded(
+          Effect.gen(function* () {
+            const id = yield* guardedIncarnation;
+            if (id !== instance) return yield* replaced();
+            const head = at ?? (yield* guardedHead);
+            // The complete history through the ordinary query, uncapped as every presence read
+            // has been, pinned at the cut: valid history of any size must not fail ownership.
+            const rows = yield* query({
+              from: `${config.ledger}@t:${head}`,
+              select: ["?m", "?from", "?json", "?t"],
+              where: [
+                {
+                  "@id": "?m",
+                  "@type": "bus:Presence",
+                  "bus:json": { "@value": "?json", "@t": "?t" },
+                },
+                ["optional", { "@id": "?m", "bus:from": "?from" }],
+              ],
+              orderBy: "?t",
+            }).pipe(Effect.flatMap(decode(PresenceRows)));
+            const nodes = new Map<string, number>();
+            for (const [node] of rows) nodes.set(node, (nodes.get(node) ?? 0) + 1);
+            const entries = [];
+            for (const [node, from, json, t] of rows) {
+              const message = yield* decodeMessage(json, t);
+              if (
+                message.presence?.session !== undefined &&
+                (message.kind !== "presence" ||
+                  node !== messageIri(message.id) ||
+                  from !== message.from ||
+                  nodes.get(node) !== 1)
+              ) {
+                return yield* new LedgerError({
+                  message: `A ledger entry at t=${t} could not be decoded.`,
+                });
+              }
+              entries.push(message);
             }
-            entries.push(message);
-          }
-          if ((yield* bounded(guardedIncarnation)) !== id) return yield* replaced();
-          return { entries, cut: { head, incarnation: id } } satisfies PresenceRead;
-        }).pipe(Effect.withSpan("Ledger.presenceAt"));
+            if ((yield* guardedIncarnation) !== id) return yield* replaced();
+            return { entries, cut: { head, incarnation: id } } satisfies PresenceRead;
+          })
+        ).pipe(Effect.withSpan("Ledger.presenceAt"));
 
       /** The commit of the attempted entry at `head`, if it is there. */
       const attemptAt = (id: string, head: number) =>

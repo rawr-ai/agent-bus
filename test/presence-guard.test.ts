@@ -177,6 +177,23 @@ for (const backend of backends) {
     );
 
     test(
+      "a presence read at a cut excludes presences committed after it",
+      async () => {
+        const { decider, writer } = await backend.make();
+        const before = presence(address, "session:before");
+        await writer.append(before);
+        const cut = await decider.cut();
+        const after = presence(address, "session:after");
+        await writer.append(after);
+        const at = await decider.ids(cut.head);
+        expect(at).toContain(before.id);
+        expect(at).not.toContain(after.id);
+        expect(await decider.ids()).toContain(after.id);
+      },
+      TIMEOUT
+    );
+
+    test(
       "valid presence history larger than any query page is read completely",
       async () => {
         const { decider, writer } = await backend.make();
