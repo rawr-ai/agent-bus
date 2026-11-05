@@ -8,6 +8,7 @@ import {
   foldStanding,
   LedgerError,
   type Logged,
+  type Message,
   MessageJson,
   type MuteScope,
   needsScan,
@@ -123,29 +124,52 @@ const presenceOf = (node: ReturnType<typeof presenceNodes>[number]) =>
 
 /**
  * A presence or command that can't be read: no standing can be established past it, so the
- * whole log fails, as the guarded presence read does. An address's activity is never shown from
- * a standing that may have lost its accepted mutes.
+ * whole log fails. An address's activity is never shown, and its ownership never decided, from
+ * a standing that may have lost its accepted mutes or a later holder.
  */
 const undecodable = (t: number) =>
   Effect.fail(new LedgerError({ message: `A ledger entry at t=${t} could not be decoded.` }));
+
+/**
+ * Every typed presence node, each value a row of its own: nothing missing or repeated is dropped
+ * or merged before the reader sees it. The guarded presence read and the activity log both ask it.
+ */
+export const PRESENCE_NODES = {
+  select: ["?m", "?jt", "?it", "?id", "?json", "?from"],
+  where: [
+    { "@id": "?m", "@type": "bus:Presence" },
+    ["optional", { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?jt" } }],
+    ["optional", { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?it" } }],
+    ["optional", { "@id": "?m", "bus:from": "?from" }],
+  ],
+  orderBy: "?m",
+};
+
+/**
+ * The presence entries of a `PRESENCE_NODES` response read at `t`, each at its own commit, in
+ * commit order; or the read fails on the first node, in node order, no standing can rest on.
+ * One law for the guarded presence read, which decides ownership, and the activity log.
+ */
+export const presencesOf = (response: unknown, t: number) =>
+  Effect.gen(function* () {
+    const rows = yield* decodeRows(PresenceRows)(response);
+    const entries: Array<{ readonly t: number; readonly message: Message }> = [];
+    for (const node of presenceNodes(rows)) {
+      // A node with no dated value has no commit of its own to name: the read's commit stands in.
+      if (node.t === null) return yield* undecodable(t);
+      const message = presenceOf(node);
+      if (Option.isNone(message)) return yield* undecodable(node.t);
+      entries.push({ t: node.t, message: message.value });
+    }
+    return entries.sort((a, b) => a.t - b.t);
+  });
 
 /** Every presence entry and command node visible at `t`, in commit order. */
 export const logAt = (gateway: Gateway, t: number) =>
   Effect.gen(function* () {
     const presences = yield* gateway
-      .jsonld(t, {
-        // Every typed presence node, each value a row of its own: nothing missing or repeated is
-        // dropped or merged before the fold sees it.
-        select: ["?m", "?jt", "?it", "?id", "?json", "?from"],
-        where: [
-          { "@id": "?m", "@type": "bus:Presence" },
-          ["optional", { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?jt" } }],
-          ["optional", { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?it" } }],
-          ["optional", { "@id": "?m", "bus:from": "?from" }],
-        ],
-        orderBy: "?m",
-      })
-      .pipe(Effect.flatMap(decodeRows(PresenceRows)));
+      .jsonld(t, PRESENCE_NODES)
+      .pipe(Effect.flatMap((response) => presencesOf(response, t)));
     const commands = yield* gateway
       .jsonld(t, {
         // Every typed command node, a missing value included: one isn't dropped from the fold.
@@ -157,14 +181,7 @@ export const logAt = (gateway: Gateway, t: number) =>
         orderBy: "?c",
       })
       .pipe(Effect.flatMap(decodeRows(CommandRows)));
-    const log: Array<Logged> = [];
-    for (const node of presenceNodes(presences)) {
-      // A node with no dated value has no commit of its own to name: the read's commit stands in.
-      if (node.t === null) return yield* undecodable(t);
-      const message = presenceOf(node);
-      if (Option.isNone(message)) return yield* undecodable(node.t);
-      log.push({ kind: "presence", t: node.t, message: message.value });
-    }
+    const log: Array<Logged> = presences.map((entry) => ({ kind: "presence" as const, ...entry }));
     const nodes = new Map<string, Array<readonly [string, number]>>();
     for (const [subject, json, at] of commands) {
       // A command node with no value has no commit of its own to name: the read's commit does.

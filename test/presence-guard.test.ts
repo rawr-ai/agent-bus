@@ -128,6 +128,23 @@ for (const backend of backends) {
     );
 
     test(
+      "control: a presence without a session reads, and a later presence still admits",
+      async () => {
+        const { decider, writer } = await backend.make();
+        const legacy = new Message({
+          ...presence(address, "unused"),
+          presence: new Presence({ runtime: "claude", status: "joined", topics: [] }),
+        });
+        await writer.append(legacy);
+        const basis = await decider.cut();
+        expect(await decider.ids()).toContain(legacy.id);
+        const attempt = presence(address, "session:a");
+        expect((await decider.admit(attempt, basis)).status).toBe("ADMITTED");
+      },
+      TIMEOUT
+    );
+
+    test(
       "another address's presence after the basis does not block",
       async () => {
         const { decider, writer } = await backend.make();

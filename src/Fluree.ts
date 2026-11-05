@@ -1,7 +1,7 @@
 import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
-import { directAt, logAt } from "./activity-read.ts";
+import { directAt, logAt, PRESENCE_NODES, presencesOf } from "./activity-read.ts";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import {
   type Admission,
@@ -73,15 +73,6 @@ const WitnessRows = Schema.Array(
   ])
 );
 const UpdateResponse = Schema.Struct({ t: Schema.Int });
-/** A presence node, its recorded sender when present, its stored entry and that entry's commit. */
-const PresenceRows = Schema.Array(
-  Schema.Tuple([
-    Schema.String,
-    Schema.NullOr(Schema.String),
-    Schema.String,
-    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
-  ])
-);
 const Commits = Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)));
 const AgentJson = Schema.Struct({
   // A column whose values have several datatypes lists them all.
@@ -657,9 +648,11 @@ export const layerFluree = (config: FlureeConfig) =>
         });
 
       /**
-       * Presence at one cut. An entry that holds a session must also be the node its id names,
-       * recorded under its own sender, with one stored entry: the guard keys on that sender, so
-       * an entry it could miss fails the read rather than the guard.
+       * Presence at one cut, under the activity log's law (`presencesOf`): every typed presence
+       * node must hold one entry and one id that agree, and an entry that holds a session must
+       * also be the node its id names, recorded under its own sender. The guard keys on that
+       * sender, so a node it could miss, or one the activity relation refuses, fails the read
+       * rather than letting an ownership decision rest on a standing that read can't establish.
        */
       const presenceAt = (at?: number) =>
         bounded(
@@ -669,37 +662,11 @@ export const layerFluree = (config: FlureeConfig) =>
             const head = at ?? (yield* guardedHead);
             // The complete history through the ordinary query, uncapped as every presence read
             // has been, pinned at the cut: no application byte cap, so a complete result or a failure.
-            const rows = yield* query({
+            const read = yield* query({
               from: `${config.ledger}@t:${head}`,
-              select: ["?m", "?from", "?json", "?t"],
-              where: [
-                {
-                  "@id": "?m",
-                  "@type": "bus:Presence",
-                  "bus:json": { "@value": "?json", "@t": "?t" },
-                },
-                ["optional", { "@id": "?m", "bus:from": "?from" }],
-              ],
-              orderBy: "?t",
-            }).pipe(Effect.flatMap(decode(PresenceRows)));
-            const nodes = new Map<string, number>();
-            for (const [node] of rows) nodes.set(node, (nodes.get(node) ?? 0) + 1);
-            const entries = [];
-            for (const [node, from, json, t] of rows) {
-              const message = yield* decodeMessage(json, t);
-              if (
-                message.presence?.session !== undefined &&
-                (message.kind !== "presence" ||
-                  node !== messageIri(message.id) ||
-                  from !== message.from ||
-                  nodes.get(node) !== 1)
-              ) {
-                return yield* new LedgerError({
-                  message: `A ledger entry at t=${t} could not be decoded.`,
-                });
-              }
-              entries.push(message);
-            }
+              ...PRESENCE_NODES,
+            }).pipe(Effect.flatMap((response) => presencesOf(response, head)));
+            const entries = read.map((entry) => entry.message);
             if ((yield* guardedIncarnation) !== id) return yield* replaced();
             return { entries, cut: { head, incarnation: id } } satisfies PresenceRead;
           })

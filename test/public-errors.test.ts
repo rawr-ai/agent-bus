@@ -99,8 +99,11 @@ test("malformed JSON and schema failures omit source values", async () => {
 
 test("undecodable stored presence is a sanitized MCP failure", async () => {
   for (const stored of [`{"session":"${marker}"`, JSON.stringify({ session: marker })]) {
-    // The pinned presence read's row: node, recorded sender, stored entry, commit.
-    failure = { body: JSON.stringify([["urn:agent-bus:message:x", null, stored, 7]]), status: 200 };
+    // The pinned presence read's row: node, entry and id commits, id, stored entry, sender.
+    failure = {
+      body: JSON.stringify([["urn:agent-bus:message:x", 7, 7, "x", stored, null]]),
+      status: 200,
+    };
     await refused(
       "bus_join",
       { address: "codex/test", runtime: "codex", session: "session", cwd: "/tmp" },

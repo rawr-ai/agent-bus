@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Exit, Fiber, Layer, Logger, Option } from "effect";
 import { FetchHttpClient } from "effect/http";
+import { PRESENCE_NODES } from "../src/activity-read.ts";
 import * as Bus from "../src/Bus.ts";
 import { Cursors } from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
@@ -30,7 +31,10 @@ const presence = (id: string, session: string) =>
 const malformed = '{"secret":"DO-NOT-LEAK"';
 const invalid = JSON.stringify({ id: "DO-NOT-LEAK", kind: "message" });
 
-/** A stored presence as the pinned read returns it, bound to the node and sender it names. */
+/**
+ * A stored presence as the pinned read returns it (`PRESENCE_NODES`): its node, the entry's and
+ * the id's commits, the id, the entry and the sender, bound to the node, id and sender it names.
+ */
 const presenceRow = ([json, t]: readonly [string, number]) => {
   let named: { id?: unknown; from?: unknown } = {};
   try {
@@ -38,9 +42,11 @@ const presenceRow = ([json, t]: readonly [string, number]) => {
   } catch {}
   return [
     `urn:agent-bus:message:${String(named.id)}`,
-    typeof named.from === "string" ? named.from : null,
-    json,
     t,
+    t,
+    typeof named.id === "string" ? named.id : null,
+    json,
+    typeof named.from === "string" ? named.from : null,
   ];
 };
 
@@ -68,7 +74,7 @@ const fixture = () => {
       if (path.endsWith("/query")) {
         const query: unknown = await request.json();
         const body = JSON.stringify(query);
-        // Presence is read at the cut: node, recorded sender, stored entry, commit.
+        // Presence is read at the cut: every typed node with its entry, id and sender.
         if (body.includes("bus:Presence")) {
           presenceSelects.push(
             typeof query === "object" && query !== null && "select" in query ? query.select : null
@@ -413,10 +419,7 @@ describe("complete Fluree reads", () => {
           expect(
             f
               .presenceSelects()
-              .every(
-                (select) =>
-                  JSON.stringify(select) === JSON.stringify(["?m", "?from", "?json", "?t"])
-              )
+              .every((select) => JSON.stringify(select) === JSON.stringify(PRESENCE_NODES.select))
           ).toBe(true);
         }).pipe(Effect.provide(f.bus))
       );
