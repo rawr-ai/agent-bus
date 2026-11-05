@@ -159,7 +159,7 @@ claude mcp get agent-bus
 codex mcp get agent-bus
 ```
 
-Expected: `Status: ✔ Connected` and the URL for Claude Code; `enabled: true` and the URL for Codex. A session picks the server up when it next starts. The `get` commands: *Checked read-only 2026-10-28*. The `add` commands change the owner's Claude and Codex configuration, so they were not run; their syntax is from `claude mcp add --help` and `codex mcp add --help`: *Unverified*
+Expected: `Status: ✔ Connected` and the URL for Claude Code; `enabled: true` and the URL for Codex. A session picks the server up when it next starts. The `get` commands: *Checked read-only 2026-10-28*. *Observed live 2026-11-05:* the Claude `add` above registered the endpoint; the subsequent `get` reported `Status: ✔ Connected`, and the next client connection exposed the bus tools. The Codex `add` has not been run; its syntax is from `codex mcp add --help`: *Unverified*
 
 ## Install the Claude plugin
 
