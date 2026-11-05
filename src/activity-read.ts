@@ -74,9 +74,10 @@ const entryOf = (group: ReturnType<typeof grouped>[number]) =>
 /**
  * Presence rows of (node, entry t, id t, sender t, id, json, from) grouped by node. A valid
  * entry is ordered by its own commit, as the guarded presence read and the guard key on it; a
- * damaged node counts from the latest commit of anything stored on it, so a later alteration
- * is never dated before a reset that would hide it. A node with several ids, entries or
- * senders is damaged; one with neither an id nor an entry holds nothing to read.
+ * damaged node counts from the latest commit of anything still stored on it. A retraction
+ * leaves nothing there, so that is only a lower bound, and the fold lets no reset end it. A
+ * node with several ids, entries or senders is damaged; one with neither an id nor an entry
+ * holds nothing to read.
  */
 const presenceNodes = (
   rows: ReadonlyArray<
@@ -181,7 +182,7 @@ export const logAt = (gateway: Gateway, t: number) =>
       log.push(
         Option.isSome(message)
           ? { kind: "presence", t: node.t, message: message.value }
-          : { kind: "damaged", t: node.latest }
+          : { kind: "damaged", t: node.latest, lasting: true }
       );
     }
     const nodes = new Map<string, Array<readonly [string, number]>>();

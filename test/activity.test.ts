@@ -13,7 +13,15 @@ import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { deliverOnce, type Holds } from "../src/codex.ts";
-import { activityAt, type Standing } from "../src/domain.ts";
+import {
+  activityAt,
+  foldStanding,
+  type Logged,
+  Message,
+  Origin,
+  Presence,
+  type Standing,
+} from "../src/domain.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as ServeHttp from "../src/serve.ts";
 import {
@@ -1164,5 +1172,96 @@ describe("activity reason", () => {
     ] as const) {
       expect({ name, has: Object.hasOwn(result, "activityReason") }).toEqual({ name, has: false });
     }
+  });
+});
+
+describe("the fold: commands after damage", () => {
+  const joined = (id: string, session: string, t: number): Logged => ({
+    kind: "presence",
+    t,
+    message: new Message({
+      id,
+      ts: `2026-01-01T00:00:0${t}Z`,
+      from: x,
+      to: ["*"],
+      kind: "presence",
+      body: `${x} joined`,
+      presence: new Presence({ runtime: "claude", status: "joined", topics: [], session }),
+      origin: new Origin({ host: "fixture", cwd: "/work" }),
+    }),
+  });
+  const command = (operation: string, session: string, run: string, t: number): Logged => ({
+    kind: "command",
+    t,
+    operation,
+    command: {
+      address: x,
+      runtime: "claude",
+      session,
+      run,
+      activity: "inactive",
+      mutes: [{ scope: "programme" }],
+    },
+  });
+  const outcome = (log: ReadonlyArray<Logged>, operation: string) => {
+    const standing = foldStanding(x, log);
+    return {
+      verdict: standing.verdicts.get(operation),
+      anchor: standing.anchor.value,
+      mutes: standing.mutes,
+    };
+  };
+
+  test("damage that may be the address's makes a later command UNKNOWN; it changes nothing", () => {
+    for (const damage of [
+      { kind: "damaged", t: 2 },
+      { kind: "damaged", t: 2, address: x },
+    ] as const) {
+      expect(outcome([joined("j1", "s", 1), damage, command("op", "s", "j1", 3)], "op")).toEqual({
+        verdict: { status: "UNKNOWN" },
+        anchor: "active",
+        mutes: [],
+      });
+    }
+  });
+
+  test("damage to a presence outlasts a later reset; only damage to a command ends there", () => {
+    expect(
+      outcome(
+        [
+          joined("j1", "s", 1),
+          { kind: "damaged", t: 2, lasting: true },
+          joined("j2", "s2", 3),
+          command("op", "s2", "j2", 4),
+        ],
+        "op"
+      )
+    ).toEqual({ verdict: { status: "UNKNOWN" }, anchor: "active", mutes: [] });
+  });
+
+  // The gate must not outlive what clears damage, nor reach past the address it names.
+  test("a reset after the damage, or damage naming another address, leaves it APPLIED", () => {
+    const applied = {
+      verdict: { status: "APPLIED" },
+      anchor: "inactive",
+      mutes: [{ scope: "programme" }],
+    } as const;
+    expect(
+      outcome(
+        [
+          joined("j1", "s", 1),
+          { kind: "damaged", t: 2 },
+          joined("j2", "s2", 3),
+          command("op", "s2", "j2", 4),
+        ],
+        "op"
+      )
+    ).toEqual(applied);
+    expect(
+      outcome(
+        [joined("j1", "s", 1), { kind: "damaged", t: 2, address: y }, command("op", "s", "j1", 3)],
+        "op"
+      )
+    ).toEqual(applied);
   });
 });

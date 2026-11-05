@@ -250,7 +250,9 @@ export const layerJsonl = (file: string) =>
             }
             const message = decode(text);
             const decoded = yield* Effect.option(message);
-            if (Option.isSome(decoded) && decoded.value.kind === "presence") {
+            // A line that can't be read may have been a presence, as Fluree's damaged node is.
+            if (Option.isNone(decoded)) logged.push({ kind: "damaged", t, lasting: true });
+            else if (decoded.value.kind === "presence") {
               logged.push({ kind: "presence", t, message: decoded.value });
             }
           }

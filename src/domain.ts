@@ -330,11 +330,19 @@ export type Logged =
       readonly t: number;
       /** The address it names, when that much is legible; otherwise it may be anyone's. */
       readonly address?: string | undefined;
+      /**
+       * A presence that can't be read. Whether any later presence reset the address depends on
+       * it, so no reset ends it; only repair does. Its `t` is a lower bound: a retraction leaves
+       * no commit of its own on the node.
+       */
+      readonly lasting?: boolean | undefined;
     };
 
 export type Verdict =
   | { readonly status: "APPLIED" }
-  | { readonly status: "CONFLICT"; readonly reason: "not-joined" | "not-holder" | "stale-run" };
+  | { readonly status: "CONFLICT"; readonly reason: "not-joined" | "not-holder" | "stale-run" }
+  /** Committed while damage stood, so whether its sender held the address can't be known. */
+  | { readonly status: "UNKNOWN" };
 
 /** Where activity was last set: by a reset (active) or an accepted command. */
 export interface Anchor {
@@ -362,17 +370,23 @@ export interface Standing {
  * resets it: active, no mutes, anchored at that presence. A rejoin keeps its run; a replay
  * starts a new one; neither changes activity or mutes. A command applies only from the
  * joined holder's own runtime, session and run, and never changes the holder or its run.
+ * One committed while damage stands is UNKNOWN and changes nothing: an unreadable entry may
+ * have moved the address or changed its standing, so no holder can authorize it, nor refuse it. A reset ends damage only
+ * to a command; damage to a presence lasts.
  */
 export const foldStanding = (address: string, log: Iterable<Logged>): Standing => {
   let holder: Subscriber | undefined;
   let anchor: Anchor = { value: "active", t: 0, ts: "" };
   let mutes: ReadonlyArray<MuteScope> = [];
   let damaged = false;
+  let lasting = false;
   const verdicts = new Map<string, Verdict>();
   for (const entry of log) {
     switch (entry.kind) {
       case "damaged":
-        if (entry.address === undefined || entry.address === address) damaged = true;
+        if (entry.address !== undefined && entry.address !== address) break;
+        if (entry.lasting === true) lasting = true;
+        else damaged = true;
         break;
       case "presence": {
         const { message } = entry;
@@ -402,14 +416,16 @@ export const foldStanding = (address: string, log: Iterable<Logged>): Standing =
         const { command } = entry;
         if (command.address !== address) break;
         const verdict: Verdict =
-          holder === undefined || holder.presence.status !== "joined"
-            ? { status: "CONFLICT", reason: "not-joined" }
-            : holder.presence.runtime !== command.runtime ||
-                holder.presence.session !== command.session
-              ? { status: "CONFLICT", reason: "not-holder" }
-              : runOf(holder) !== command.run
-                ? { status: "CONFLICT", reason: "stale-run" }
-                : { status: "APPLIED" };
+          damaged || lasting
+            ? { status: "UNKNOWN" }
+            : holder === undefined || holder.presence.status !== "joined"
+              ? { status: "CONFLICT", reason: "not-joined" }
+              : holder.presence.runtime !== command.runtime ||
+                  holder.presence.session !== command.session
+                ? { status: "CONFLICT", reason: "not-holder" }
+                : runOf(holder) !== command.run
+                  ? { status: "CONFLICT", reason: "stale-run" }
+                  : { status: "APPLIED" };
         if (!verdicts.has(entry.operation)) verdicts.set(entry.operation, verdict);
         if (verdict.status !== "APPLIED") break;
         if (command.activity !== undefined) {
@@ -420,7 +436,7 @@ export const foldStanding = (address: string, log: Iterable<Logged>): Standing =
       }
     }
   }
-  return { holder, anchor, mutes, damaged, verdicts };
+  return { holder, anchor, mutes, damaged: damaged || lasting, verdicts };
 };
 
 /** A direct message that reactivates its addressee: from someone else, naming it literally. */

@@ -815,6 +815,70 @@ describe("presence identity: no standing rests on a record the guarded read refu
     if (!response.ok) throw new Error(`alteration failed: HTTP ${response.status}`);
   };
 
+  /** Deletes one stored value from a node at a new commit, asserting nothing in its place. */
+  const retract = async (config: FlureeConfig, node: string, predicate: string, value: string) => {
+    const response = await fetch(
+      `${config.url}/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          "@context": context,
+          delete: { "@id": node, [predicate]: value },
+        }),
+      }
+    );
+    if (!response.ok) throw new Error(`retraction failed: HTTP ${response.status}`);
+  };
+
+  test(
+    "a pure retraction of the reset join's bus:from is damage no later reset ends",
+    () =>
+      scoped(async (track) => {
+        const config = await freshFluree("identity-retracted");
+        const a = await open(track, config);
+        await a.run(joinAs(x));
+        const reset = (await a.run(holderOf(x)))?.joinId ?? "";
+        expect(
+          plain(await a.run(act(x, { activity: "inactive", mutes: [programme] })))
+        ).toMatchObject({ status: "APPLIED" });
+        await a.run(joinAs(x));
+        expect(await runOf(a, x)).toBe(reset);
+
+        await retract(config, messageIri(reset), "bus:from", x);
+        // The retraction leaves no commit on the node, so its damage dates no later than the
+        // join; the rejoin after it must not read as a reset that makes the address determinate.
+        expect(await peerRow(a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
+        await writesNothing(config, a, undefined);
+      }),
+    TIMEOUT
+  );
+
+  // Control: damage to a command, unlike damage to a presence, ends at the address's next reset.
+  test(
+    "control: an undecodable command before a takeover no longer stands after it",
+    () =>
+      scoped(async (track) => {
+        const config = await freshFluree("identity-command-reset");
+        const a = await open(track, config);
+        await a.run(joinAs(x));
+        await insertRaw(config, rawCommand(uuid(), "{not json"));
+        expect(await peerRow(a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
+        await takeOver(a, x);
+        expect(await peerRow(a, x)).toMatchObject({ activity: "active", mutes: [] });
+        expect(
+          plain(await a.run(act(x, { activity: "inactive", session: successor })))
+        ).toMatchObject({ status: "APPLIED", activity: "inactive" });
+      }),
+    TIMEOUT
+  );
+
   for (const predicate of ["bus:from", "bus:id"] as const) {
     test(
       `a later alteration of the reset join's ${predicate} is damage at its own commit, never an earlier reset`,
@@ -851,6 +915,86 @@ describe("presence identity: no standing rests on a record the guarded read refu
       TIMEOUT
     );
   }
+
+  /**
+   * x held on a clean ledger, then bus_activity whose command write first lets `between` commit:
+   * after the call's ownership read and before its own command's commit.
+   */
+  const interleaved = async (
+    track: <T>(resource: T, close: () => unknown) => T,
+    name: string,
+    between: (config: FlureeConfig, other: BusServe) => Promise<void>
+  ) => {
+    const config = await freshFluree(name);
+    const relay = commandBoundary(config.url);
+    track(relay, relay.stop);
+    const a = await open(track, config, { url: relay.url });
+    const other = await open(track, config);
+    await a.run(joinAs(x));
+    let fired = false;
+    void relay.beforeNextCommand(async () => {
+      await between(config, other);
+      fired = true;
+    });
+    const intent = { activity: "inactive" as const, mutes: [programme], operation: uuid() };
+    const result = plain(await a.run(act(x, intent)));
+    expect(fired).toBe(true);
+    return { config, a, intent, result };
+  };
+
+  for (const [mismatch, identity] of [
+    ["recorded sender is another address", { from: "claude/elsewhere" }],
+    ["node is not the one its id names", { node: messageIri(uuid()) }],
+  ] as const) {
+    test(
+      `a command that commits after a refused record whose ${mismatch} is UNKNOWN and changes nothing`,
+      () =>
+        scoped(async (track) => {
+          const { config, a, intent, result } = await interleaved(
+            track,
+            "identity-interleaved",
+            (store) => insertRaw(store, successorRecord(identity))
+          );
+          expect(result).toEqual({ status: "UNKNOWN", operation: intent.operation });
+          // It did commit: one value on its node.
+          expect(await commandValues(config, intent.operation)).toHaveLength(1);
+          // A retry reads the recorded operation: still UNKNOWN, and nothing is written.
+          const head = await a.run(end);
+          expect(plain(await a.run(act(x, intent)))).toEqual(result);
+          expect(await a.run(end)).toBe(head);
+          // The fold took neither its activity nor its mutes.
+          expect(await peerRow(a, x)).toMatchObject({
+            activity: "unknown",
+            activityReason: "damaged-log",
+            mutes: [],
+          });
+        }),
+      TIMEOUT
+    );
+  }
+
+  test(
+    "control: the holder's own continuing rejoin in the same place leaves the command APPLIED",
+    () =>
+      scoped(async (track) => {
+        const { a, intent, result } = await interleaved(
+          track,
+          "identity-interleaved-control",
+          async (_, other) => {
+            await other.run(joinAs(x));
+          }
+        );
+        expect(result).toMatchObject({
+          status: "APPLIED",
+          operation: intent.operation,
+          activity: "inactive",
+        });
+        const row = await peerRow(a, x);
+        expect(row).toMatchObject({ activity: "inactive" });
+        expect(sortedMutes(row?.mutes)).toEqual(sortedMutes([programme]));
+      }),
+    TIMEOUT
+  );
 
   // Control: the same record with consistent identity is an ordinary takeover by the successor.
   // The applicability races (CONFLICT not-holder, stale-run, not-joined) are covered above in

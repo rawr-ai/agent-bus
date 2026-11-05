@@ -56,12 +56,14 @@ One evaluator reads presence entries and command nodes in commit order:
   - A command never changes the join id, `since`, the holder or the wake identity.
 
   The guard refuses a delayed command from an earlier run of the same session, and an old session's command after a takeover, on any serve.
+
+  A command that commits while damage that may be the address's stands (after it and before the next reset) is neither accepted nor refused. Its verdict is unknown and it changes nothing while the damage stands, because the unreadable entry may have moved the address or changed its standing.
 - **Mutes** come only from accepted commands since the last reset, so no writer can erase them by omission.
 
 ## Activity at a cut
 
 The result is `active`, `inactive` or `unknown`, evaluated in this order:
-1. **Unknown from damage first.** A damaged presence entry or command, possibly from the address and after its last reset, makes it unknown. A later valid direct message cannot settle this.
+1. **Unknown from damage first.** A damaged presence entry anywhere in the log, or a damaged command possibly from the address after its last reset, makes it unknown. Damage to a presence lasts until repair, because whether a later presence reset the address depends on it, and a retraction leaves no commit to date it by. A later valid direct message cannot settle this.
 2. **Active** if the anchor is not inactive.
 3. **Active** if a decoded qualifying direct message was committed after the anchor and at or before the cut. Qualifying means kind `message`, `to` literally names the address, and `from` is a different address. The decoded entry is authoritative for qualification.
 4. **Unknown** if any damaged candidate is in that window, or the scan is truncated or incomplete. An indexed `bus:from` never rules a damaged candidate out.

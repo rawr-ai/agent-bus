@@ -931,7 +931,7 @@ export const layer = Layer.effect(
         const standing: Standing = foldStanding(address, yield* ledger.log(found.t));
         const verdict = standing.verdicts.get(operation);
         const cut = { head: found.t, incarnation: found.cut.incarnation };
-        if (verdict === undefined) return unknown;
+        if (verdict === undefined || verdict.status === "UNKNOWN") return unknown;
         if (verdict.status === "CONFLICT") {
           return {
             status: "CONFLICT",
