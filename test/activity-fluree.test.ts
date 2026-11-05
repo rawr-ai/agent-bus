@@ -583,6 +583,33 @@ describe("a damaged standing fails the read", () => {
     expect(await serve.run(end)).toBe(head);
   };
 
+  const cursorOf = (serve: BusServe, address: string) =>
+    serve.run(Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(address)));
+  const leaveAs = (address: string, session = sid(address)) =>
+    Effect.flatMap(Bus.Bus, (bus) => bus.leave(address, session));
+
+  /**
+   * No ownership is decided past the damage either: the holder's peers lookup, rejoin and leave,
+   * the session given joining, and an unrelated address's first join all fail, as the activity
+   * read does, writing nothing and leaving x's cursor where it was. With `at`, the failure names
+   * that commit.
+   */
+  const ownershipUnreadable = async (serve: BusServe, session?: string, at?: number) => {
+    const head = await serve.run(end);
+    const cursor = await cursorOf(serve, x);
+    const named = (message: string) =>
+      at === undefined
+        ? expect(message).toContain(DAMAGE)
+        : expect(message).toBe(`A ledger entry at t=${at} could not be decoded.`);
+    named(await failure(serve.run(holderOf(x))));
+    named(await failure(serve.run(joinAs(x))));
+    if (session !== undefined) named(await failure(serve.run(joinAs(x, { session }))));
+    named(await failure(serve.run(leaveAs(x))));
+    named(await failure(serve.run(joinAs("claude/z"))));
+    expect(await serve.run(end)).toBe(head);
+    expect(await cursorOf(serve, x)).toEqual(cursor);
+  };
+
   /** One update at a new commit: `remove` retracted from a node, `add` asserted on it. */
   const update = async (
     config: FlureeConfig,
@@ -608,9 +635,11 @@ describe("a damaged standing fails the read", () => {
    * node or its recorded sender optionally replaced. The guarded presence read refuses an entry
    * whose node isn't the one its id names or whose sender isn't its own.
    */
-  const successorRecord = (identity: { readonly node?: string; readonly from?: string } = {}) => {
+  const successorRecord = (
+    identity: { readonly id?: string; readonly node?: string; readonly from?: string } = {}
+  ) => {
     const message = new Message({
-      id: uuid(),
+      id: identity.id ?? uuid(),
       ts: new Date().toISOString(),
       from: x,
       to: ["*"],
@@ -630,6 +659,20 @@ describe("a damaged standing fails the read", () => {
       ...(identity.from === undefined ? {} : { "bus:from": identity.from }),
     };
   };
+
+  /** A presence for x with no session, as an older join stored it. */
+  const legacyMessage = (id: string, body: string) =>
+    new Message({
+      id,
+      ts: new Date().toISOString(),
+      from: x,
+      to: ["*"],
+      kind: "presence",
+      body,
+      origin: new Origin({ host: hostname(), cwd }),
+      presence: new Presence({ runtime: "claude", status: "joined", topics: [] }),
+    });
+  const encoded = (message: Message) => Schema.encodeSync(MessageJson)(message);
 
   // Each way the history before a carried-over mute can be corrupted after the fact. Dated at
   // the reset join's commit, any of them could make the later rejoin read as a reset that clears
@@ -656,6 +699,11 @@ describe("a damaged standing fails the read", () => {
       (config: FlureeConfig, node: string) =>
         update(config, { remove: { "@id": node, "bus:from": x } }),
     ],
+    [
+      "a second bus:id on the reset join",
+      (config: FlureeConfig, node: string) =>
+        insertRaw(config, { "@context": context, "@id": node, "bus:id": uuid() }),
+    ],
   ] as const) {
     test(
       `${corruption} fails peers, bus_activity and pierce all, and keeps a receipt pinned before it`,
@@ -679,6 +727,7 @@ describe("a damaged standing fails the read", () => {
           await corrupt(config, messageIri(reset), reset);
           // Not active with mutes []: no standing past the damage is shown or acted on.
           await unreadable(config, a);
+          await ownershipUnreadable(a);
           const head = await a.run(end);
           expect(await failure(a.run(say(y, ["*"], "everyone", { pierce: "all" })))).toContain(
             DAMAGE
@@ -728,16 +777,41 @@ describe("a damaged standing fails the read", () => {
       },
     ],
     ["whose entry can't be decoded", undecodablePresence],
+    [
+      "with an id but no entry",
+      () => {
+        const { "bus:json": _, ...rest } = successorRecord();
+        return rest;
+      },
+    ],
+    [
+      "without a session, stored with two entries",
+      () => {
+        const id = uuid();
+        const [first, second] = [legacyMessage(id, `${x} joined`), legacyMessage(id, "again")];
+        return { ...toNode(first, encoded(first)), "bus:json": [encoded(first), encoded(second)] };
+      },
+    ],
+    [
+      "without a session, recorded under two senders",
+      () => {
+        const message = legacyMessage(uuid(), `${x} joined`);
+        return { ...toNode(message, encoded(message)), "bus:from": [x, "claude/elsewhere"] };
+      },
+    ],
   ] as const) {
     test(
       `a later presence ${record} gives no session authority and fails the read`,
       () =>
         scoped(async (track) => {
           const { config, a } = await heldThen(track, "damage-identity", make());
+          const head = await a.run(end);
           // The session a never-valid record names gains nothing from it.
           await unreadable(config, a, successor);
           // The prior holder can't act past damage that may be its own address's either.
           await unreadable(config, a);
+          // Nor is ownership decided past it, by anyone, at the record's own commit.
+          await ownershipUnreadable(a, successor, head);
         }),
       TIMEOUT
     );
@@ -753,17 +827,25 @@ describe("a damaged standing fails the read", () => {
       `a presence node with ${shape} fails the read at the read's own commit and writes nothing`,
       () =>
         scoped(async (track) => {
-          const { config, a } = await heldThen(track, "damage-empty-presence", {
+          const shell = {
             "@context": context,
             "@id": messageIri(uuid()),
             "@type": "bus:Presence",
             ...extra,
-          });
+          };
+          const { config, a } = await heldThen(track, "damage-empty-presence", shell);
           const head = await a.run(end);
           expect(await failure(peerRow(a, x))).toBe(
             `A ledger entry at t=${head} could not be decoded.`
           );
           await unreadable(config, a);
+          await ownershipUnreadable(a, undefined, head);
+
+          // Repair: the shell retracted whole, its type included; ownership reads again.
+          const { "@context": _, ...node } = shell;
+          await update(config, { remove: node });
+          await a.run(joinAs(x));
+          expect((await a.run(holderOf(x)))?.presence.session).toBe(sid(x));
         }),
       TIMEOUT
     );
@@ -785,6 +867,98 @@ describe("a damaged standing fails the read", () => {
         expect(refused._tag).toBe("NotOwner");
         expect(refused.message).toContain("belongs to another session; this call wrote nothing");
         expect(await a.run(end)).toBe(head);
+      }),
+    TIMEOUT
+  );
+
+  // Control: entries are ordered by commit, not by node: a record whose id sorts before x's join
+  // but commits after it is the later presence.
+  test(
+    "control: a consistent record committed after x's join holds, though its id sorts before",
+    () =>
+      scoped(async (track) => {
+        const early = uuid();
+        const { a } = await heldThen(track, "presence-order", successorRecord({ id: early }));
+        expect((await a.run(holderOf(x)))?.joinId).toBe(early);
+        const head = await a.run(end);
+        expect((await a.run(Effect.flip(leaveAs(x))))._tag).toBe("NotOwner");
+        expect(await a.run(end)).toBe(head);
+      }),
+    TIMEOUT
+  );
+
+  /** Retracts every value of `predicate` on `node`, at one new commit. */
+  const retractAll = async (config: FlureeConfig, node: string, predicate: string) => {
+    const response = await fetch(
+      `${config.url}/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          "@context": context,
+          where: { "@id": node, [predicate]: "?value" },
+          delete: { "@id": node, [predicate]: "?value" },
+        }),
+      }
+    );
+    if (!response.ok) throw new Error(`update failed: HTTP ${response.status}`);
+  };
+
+  test(
+    "a takeover whose entry is retracted doesn't hand the address back to the prior session",
+    () =>
+      scoped(async (track) => {
+        const config = await freshFluree("damage-retracted-takeover");
+        const a = await open(track, config);
+        await a.run(joinAs(x));
+        await takeOver(a, x);
+        const taken = await a.run(end);
+        const holder = await a.run(holderOf(x));
+        expect(holder?.presence.session).toBe(successor);
+        await retractAll(config, messageIri(holder?.joinId ?? ""), "bus:json");
+        // The node keeps its id, dated at the takeover's commit: neither session holds past it.
+        await ownershipUnreadable(a, successor, taken);
+      }),
+    TIMEOUT
+  );
+
+  test(
+    "the guarded presence read is pinned: past a refused admission's damage it fails, before it it reads",
+    () =>
+      scoped(async (track) => {
+        const config = await freshFluree("damage-admission");
+        const a = await open(track, config);
+        await a.run(joinAs(x));
+        const presences = (at?: number) =>
+          a.run(Effect.flatMap(Ledger.Ledger, (ledger) => ledger.presenceAt(at)));
+        const { cut } = await presences();
+        const { "bus:id": _, ...record } = successorRecord();
+        await insertRaw(config, record);
+        const attempt = new Message({
+          id: uuid(),
+          ts: new Date().toISOString(),
+          from: x,
+          to: ["*"],
+          kind: "presence",
+          body: `${x} joined`,
+          origin: new Origin({ host: hostname(), cwd }),
+          presence: new Presence({
+            runtime: "claude",
+            status: "joined",
+            topics: [],
+            session: sid(x),
+          }),
+        });
+        // The record carries x's sender and an entry after the basis, so the guard refuses.
+        const admission = await a.run(
+          Effect.flatMap(Ledger.Ledger, (ledger) => ledger.admit(attempt, cut))
+        );
+        expect(admission.status).toBe("REFUSED");
+        if (admission.status !== "REFUSED") return;
+        const named = `A ledger entry at t=${admission.cut.head} could not be decoded.`;
+        expect(await failure(presences(admission.cut.head))).toBe(named);
+        expect(await failure(presences())).toBe(named);
+        expect((await presences(cut.head)).entries.map((entry) => entry.from)).toContain(x);
       }),
     TIMEOUT
   );
