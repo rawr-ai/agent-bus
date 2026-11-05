@@ -33,7 +33,7 @@ test("compact context uses native payload identity, one read, quoted whole holdi
   if (Option.isNone(result)) return;
   const addressPrefix = "these addresses: ";
   const addressStart = result.value.indexOf(addressPrefix) + addressPrefix.length;
-  const addressEnd = result.value.indexOf(". Recover and use", addressStart);
+  const addressEnd = result.value.indexOf(". Hook identity", addressStart);
   expect(JSON.parse(result.value.slice(addressStart, addressEnd))).toEqual([
     'a"quoted',
     literalBackslash,
@@ -46,6 +46,7 @@ test("compact context uses native payload identity, one read, quoted whole holdi
   expect(result.value).toContain("$CODEX_THREAD_ID");
   expect(result.value).toContain("Do not call bus_join");
   expect(result.value).toContain("only your assigned address");
+  expect(result.value).toContain("Hook identity can be shared or refer to a parent");
   expect(result.value).toContain("Do not read all listed inboxes");
   expect(result.value).toContain("it consumes no mail");
   expect(result.value).toContain("Normal ownership refusals remain authoritative");
@@ -104,16 +105,48 @@ test("empty, malformed and refused ownership reads are quiet and never retried",
 });
 
 test("whole UTF-8 budget includes the output newline and never emits a prefix", () => {
-  const addresses = ["\u00e9".repeat(100)];
+  const addresses = [String.fromCodePoint(0xe9).repeat(100)];
   const result = formatCompact("claude", "/workspace", addresses);
   expect(Option.isSome(result)).toBe(true);
   if (Option.isNone(result)) return;
   const bytes = Buffer.byteLength(result.value, "utf8") + 1;
-  expect(bytes).toBeGreaterThan(result.value.length + 1);
+  expect(bytes).toBe(result.value.length + 1);
+  expect(result.value).toContain(String.fromCharCode(92) + "u00e9");
   expect(formatCompact("claude", "/workspace", addresses, bytes)).toEqual(result);
   expect(formatCompact("claude", "/workspace", addresses, bytes - 1)).toEqual(Option.none());
   expect(formatCompact("claude", "/workspace", ["x".repeat(3000)])).toEqual(Option.none());
   expect(formatCompact("claude", "/workspace", [])).toEqual(Option.none());
+});
+
+test("display controls and non-ASCII data are escaped, round-trip intact and consume the output budget", () => {
+  const unusual = String.fromCodePoint(0x2028, 0x2029, 0x85, 0x202e, 0x200b, 0x10400);
+  const addresses = ["data-" + unusual];
+  const cwd = "/workspace/" + unusual;
+  const result = formatCompact("codex", cwd, addresses);
+  expect(Option.isSome(result)).toBe(true);
+  if (Option.isNone(result)) return;
+  expect(
+    [...result.value].every(
+      (character) => character.charCodeAt(0) >= 32 && character.charCodeAt(0) <= 126
+    )
+  ).toBe(true);
+  const addressPrefix = "these addresses: ";
+  const addressStart = result.value.indexOf(addressPrefix) + addressPrefix.length;
+  expect(
+    JSON.parse(
+      result.value.slice(addressStart, result.value.indexOf(". Hook identity", addressStart))
+    )
+  ).toEqual(addresses);
+  const routePrefix = "call bus_orient with ";
+  const routeStart = result.value.indexOf(routePrefix) + routePrefix.length;
+  expect(
+    JSON.parse(
+      result.value.slice(routeStart, result.value.indexOf("; it consumes no mail", routeStart))
+    )
+  ).toEqual({ cwd });
+  expect(formatCompact("codex", "/workspace", [String.fromCodePoint(0x2028).repeat(400)])).toEqual(
+    Option.none()
+  );
 });
 
 test("whole-operation deadline cancels stdin and releases its reader before returning", async () => {

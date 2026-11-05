@@ -368,7 +368,7 @@ const Wake = Tool.make("bus_wake", {
 
 const Owned = Tool.make("bus_owned_addresses", {
   description:
-    "Read all addresses currently held by your exact session and runtime. Use after losing join context without rejoining. Returns only latest joined holdings, ordered by address; no session values, notes or guidance bodies. Changes no cursor, activity, hook observation, waiter or wake mark. A later ownership refusal remains authoritative.",
+    "For native compact recovery hooks, or direct read-only recovery of lost join context: list all latest joined addresses held by the exact session and runtime, ordered by address. These are session-level holdings, not inbox assignments to your role; use only your assigned address. This is not a wake, mail check or ownership claim. Returns no session values, notes or guidance bodies. Changes no cursor, activity, hook observation, waiter or wake mark. Later ownership refusals remain authoritative.",
   parameters: Schema.Struct({
     session: Session,
     runtime: Runtime.annotate({ description: "The exact runtime the addresses joined as." }),

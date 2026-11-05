@@ -32,7 +32,13 @@ export const readCompactInput = (evaluate: () => ReadableStream<Uint8Array>) =>
     Effect.map((chunks) => chunks.join(""))
   );
 
-/** Only fixed instructions and JSON-quoted data enter privileged hook context. */
+const asciiJson = (value: ReadonlyArray<string> | { readonly cwd: string }) =>
+  JSON.stringify(value).replace(
+    /[^\x20-\x7e]/g,
+    (character) => "\\u" + character.charCodeAt(0).toString(16).padStart(4, "0")
+  );
+
+/** Only fixed instructions and ASCII-escaped JSON data enter privileged hook context. */
 export const formatCompact = (
   runtime: NativeRuntime,
   cwd: string,
@@ -41,9 +47,9 @@ export const formatCompact = (
 ): Option.Option<string> => {
   if (addresses.length === 0) return Option.none();
   const session = runtime === "codex" ? "$CODEX_THREAD_ID" : "$CLAUDE_CODE_SESSION_ID";
-  const held = JSON.stringify([...new Set(addresses)].sort());
-  const route = JSON.stringify({ cwd });
-  const text = `[agent-bus] This session already holds these addresses: ${held}. Recover and use only your assigned address; this list does not assign inboxes to your role. Do not read all listed inboxes or commandeer delegates' addresses. Do not call bus_join to recover them. Use your own ${session} as session. For current guidance, call bus_orient with ${route}; it consumes no mail. Normal ownership refusals remain authoritative; do not automatically rejoin a refused address. Continue your work.`;
+  const held = asciiJson([...new Set(addresses)].sort());
+  const route = asciiJson({ cwd });
+  const text = `[agent-bus] The hook observed these addresses: ${held}. Hook identity can be shared or refer to a parent; this list does not assign inboxes to your role. Recover and use only your assigned address. Do not read all listed inboxes or commandeer delegates' addresses. Do not call bus_join to recover them. Use your own ${session} as session. For current guidance, call bus_orient with ${route}; it consumes no mail. Normal ownership refusals remain authoritative; do not automatically rejoin a refused address. Continue your work.`;
   return Buffer.byteLength(text, "utf8") + 1 <= budget ? Option.some(text) : Option.none();
 };
 

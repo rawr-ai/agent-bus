@@ -58,7 +58,7 @@ This is the one table of who is woken; other pages link here. "Within seconds" i
 
 ### Claude Code sessions
 
-The agent-bus plugin (`plugin/`) has one hook, beside the agent skill. It runs `agent-bus claude-wake` in the background (`asyncRewake`) at three arming points: `SessionStart` (startup, resume, `/clear` and compaction), `Stop` (every turn's end) and `StopFailure` (a turn ended by an API error).
+The agent-bus plugin (`plugin/`) preserves the asynchronous mail wake alongside its separate synchronous compact recovery. The Claude manifest runs `agent-bus claude-wake` in the background (`asyncRewake`) at three arming points: `SessionStart` (startup, resume, `/clear` and compaction), `Stop` (every turn's end) and `StopFailure` (a turn ended by an API error).
 
 ```mermaid
 sequenceDiagram
@@ -205,7 +205,7 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 | `RECONCILE` | 5, 15, 60 min | `src/codex.ts` | The pause after each attempt at the same unread span. The last value repeats, so it is hourly after the third |
 | `RECONCILES_BEFORE_WARNING` | 3 | `src/codex.ts` | The reconcile at which the log warns that the thread isn't reading its mail |
 
-One value is set outside code: the hook's `timeout` in `plugin/.claude-plugin/plugin.json`, 2592000 s (30 days), after which Claude Code kills it.
+Values also live in the native manifests: Claude's asynchronous wake has `timeout` 2592000 s (30 days); both native synchronous compact commands have `timeout` 5 s around `COMPACT_DEADLINE`'s 4 s observation. The host's outer deadline covers launcher/Bun startup and final output as well, with about a one-second margin. These host timeouts kill the command; they do not extend the helper's deadline.
 
 ### Compact ownership recovery
 
