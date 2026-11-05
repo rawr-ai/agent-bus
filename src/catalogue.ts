@@ -160,7 +160,7 @@ const activityFields = {
   activityReason: Schema.optionalKey(
     Schema.Literals(ACTIVITY_REASONS).annotate({
       description:
-        "With unknown only, why: damaged-log (an unreadable entry in its own log), damaged-mail (an unreadable direct message after it went inactive) or incomplete-scan (the direct-mail scan hit its cap or did not complete).",
+        "With unknown only, why: damaged-mail (an unreadable direct message after it went inactive) or incomplete-scan (the direct-mail scan hit its cap or did not complete).",
     })
   ),
   mutes: Schema.Array(MuteScope).annotate({
@@ -168,12 +168,17 @@ const activityFields = {
   }),
 };
 
-const shownFields = (shown: Shown | undefined) => ({
-  activity: shown?.activity ?? "unknown",
-  ...optionalKey("activeSince", shown?.activeSince),
-  ...optionalKey("activityReason", shown?.activityReason),
-  mutes: [...(shown?.mutes ?? [])],
-});
+const shownFields = (shown: Shown | undefined) => {
+  // activitiesAt reads every listed address or fails the query, so a missing one is a defect:
+  // no activity or mutes are ever made up for it.
+  if (shown === undefined) throw new Error("A listed peer's activity was not read.");
+  return {
+    activity: shown.activity,
+    ...optionalKey("activeSince", shown.activeSince),
+    ...optionalKey("activityReason", shown.activityReason),
+    mutes: [...shown.mutes],
+  };
+};
 
 export const PeerRow = Schema.Struct({
   address: Text,

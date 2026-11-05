@@ -9,7 +9,6 @@ const ACTIVITY_LABEL: Partial<Record<NonNullable<PublicPeer["activity"]>, string
 };
 
 const REASON_TEXT: Record<NonNullable<PublicPeer["activityReason"]>, string> = {
-  "damaged-log": "damaged log",
   "damaged-mail": "damaged mail",
   "incomplete-scan": "incomplete scan",
 };

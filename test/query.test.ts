@@ -461,9 +461,10 @@ describe("entries", () => {
       found = await bus.run("search", { text: "twin doubled" });
     }
     expect(found).toMatchObject({ rows: [], damaged: 1 });
-    const peers = await bus.run("peers", { includeLeft: true });
-    expect(peers.rows).toEqual([]);
-    expect(peers).toMatchObject({ damaged: 1, complete: false });
+    // Peers carry activity, which no standing past the damaged presence can establish.
+    expect(
+      await bus.refused("bus_run_query", { name: "peers", args: { includeLeft: true } })
+    ).toContain("could not be decoded");
   });
 
   for (const copies of [3, 4]) {
@@ -527,8 +528,9 @@ describe("entries", () => {
       expect(traversal([await bus.run("messages", { ids: [multi.id, before.id] })])).toEqual(
         once([before.id])
       );
-      const peers = await bus.run("peers", { includeLeft: true, limit: 1 });
-      expect(peers).toMatchObject({ rows: [], damaged: 1, exhausted: true });
+      expect(
+        await bus.refused("bus_run_query", { name: "peers", args: { includeLeft: true, limit: 1 } })
+      ).toContain("could not be decoded");
 
       // Search pages by offset over stored copies: the entry's copies are consumed together.
       let found = traversal(await bus.all("search", { text: "copied entry", limit: 1 }));

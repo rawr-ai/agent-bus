@@ -41,7 +41,6 @@ const PresenceRows = Schema.Array(
     Schema.String,
     Schema.NullOr(Schema.Number),
     Schema.NullOr(Schema.Number),
-    Schema.NullOr(Schema.Number),
     Schema.NullOr(Schema.String),
     Schema.NullOr(Schema.String),
     Schema.NullOr(Schema.String),
@@ -72,48 +71,32 @@ const entryOf = (group: ReturnType<typeof grouped>[number]) =>
     : Option.filter(decodeEntry(group.json), (message) => message.id === group.id);
 
 /**
- * Presence rows of (node, entry t, id t, sender t, id, json, from) grouped by node. A valid
- * entry is ordered by its own commit, as the guarded presence read and the guard key on it; a
- * damaged node counts from the latest commit of anything still stored on it. A retraction
- * leaves nothing there, so that is only a lower bound, and the fold lets no reset end it. A
- * node with several ids, entries or senders is damaged; one with neither an id nor an entry
- * holds nothing to read.
+ * Presence rows of (node, entry t, id t, id, json, from) grouped by node, each at its
+ * entry's own commit, as the guarded presence read and the guard key on it. A node with several
+ * ids, entries or senders, or with neither an id nor an entry, fails the read; one retracted
+ * whole, its type included, is no longer a presence node and can't be seen.
  */
 const presenceNodes = (
   rows: ReadonlyArray<
-    readonly [
-      string,
-      number | null,
-      number | null,
-      number | null,
-      string | null,
-      string | null,
-      string | null,
-    ]
+    readonly [string, number | null, number | null, string | null, string | null, string | null]
   >
 ) => {
   const nodes = new Map<
     string,
     {
       node: string;
-      t: number;
-      latest: number;
+      t: number | null;
       id: string | null;
       json: string | null;
       from: string | null;
       copies: number;
     }
   >();
-  for (const [node, entryT, idT, fromT, id, json, from] of rows) {
+  for (const [node, entryT, idT, id, json, from] of rows) {
     const t = entryT ?? idT;
-    if (t === null) continue;
-    const latest = Math.max(t, idT ?? t, fromT ?? t);
     const found = nodes.get(node);
-    if (found === undefined) nodes.set(node, { node, t, latest, id, json, from, copies: 1 });
-    else {
-      found.copies += 1;
-      found.latest = Math.max(found.latest, latest);
-    }
+    if (found === undefined) nodes.set(node, { node, t, id, json, from, copies: 1 });
+    else found.copies += 1;
   }
   return [...nodes.values()];
 };
@@ -136,18 +119,13 @@ const presenceOf = (node: ReturnType<typeof presenceNodes>[number]) =>
               node.from === message.from))
       );
 
-/** The address a damaged command names, when its JSON says that much. */
-const legibleAddress = (json: string) => {
-  try {
-    const value: unknown = JSON.parse(json);
-    if (typeof value === "object" && value !== null && "address" in value) {
-      return typeof value.address === "string" ? value.address : undefined;
-    }
-  } catch {
-    return undefined;
-  }
-  return undefined;
-};
+/**
+ * A presence or command that can't be read: no standing can be established past it, so the
+ * whole log fails, as the guarded presence read does. An address's activity is never shown from
+ * a standing that may have lost its accepted mutes.
+ */
+const undecodable = (t: number) =>
+  Effect.fail(new LedgerError({ message: `A ledger entry at t=${t} could not be decoded.` }));
 
 /** Every presence entry and command node visible at `t`, in commit order. */
 export const logAt = (gateway: Gateway, t: number) =>
@@ -156,12 +134,12 @@ export const logAt = (gateway: Gateway, t: number) =>
       .jsonld(t, {
         // Every typed presence node, each value a row of its own: nothing missing or repeated is
         // dropped or merged before the fold sees it.
-        select: ["?m", "?jt", "?it", "?ft", "?id", "?json", "?from"],
+        select: ["?m", "?jt", "?it", "?id", "?json", "?from"],
         where: [
           { "@id": "?m", "@type": "bus:Presence" },
           ["optional", { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?jt" } }],
           ["optional", { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?it" } }],
-          ["optional", { "@id": "?m", "bus:from": { "@value": "?from", "@t": "?ft" } }],
+          ["optional", { "@id": "?m", "bus:from": "?from" }],
         ],
         orderBy: "?m",
       })
@@ -178,12 +156,11 @@ export const logAt = (gateway: Gateway, t: number) =>
       .pipe(Effect.flatMap(decodeRows(CommandRows)));
     const log: Array<Logged> = [];
     for (const node of presenceNodes(presences)) {
+      // A node with no dated value has no commit of its own to name: the read's commit stands in.
+      if (node.t === null) return yield* undecodable(t);
       const message = presenceOf(node);
-      log.push(
-        Option.isSome(message)
-          ? { kind: "presence", t: node.t, message: message.value }
-          : { kind: "damaged", t: node.latest, lasting: true }
-      );
+      if (Option.isNone(message)) return yield* undecodable(node.t);
+      log.push({ kind: "presence", t: node.t, message: message.value });
     }
     const nodes = new Map<string, Array<readonly [string, number]>>();
     for (const [subject, json, at] of commands) {
@@ -196,22 +173,13 @@ export const logAt = (gateway: Gateway, t: number) =>
           ? decodeCommand(only[0])
           : Option.none();
       const at = Math.max(...values.map(([, commit]) => commit));
-      log.push(
-        Option.isSome(command)
-          ? {
-              kind: "command",
-              t: at,
-              operation: subject.slice(COMMAND_PREFIX.length),
-              command: command.value,
-            }
-          : {
-              kind: "damaged",
-              t: at,
-              // Several values may name several addresses: then it may be anyone's.
-              address:
-                values.length === 1 && only !== undefined ? legibleAddress(only[0]) : undefined,
-            }
-      );
+      if (Option.isNone(command)) return yield* undecodable(at);
+      log.push({
+        kind: "command",
+        t: at,
+        operation: subject.slice(COMMAND_PREFIX.length),
+        command: command.value,
+      });
     }
     return log.sort((a, b) => a.t - b.t);
   });

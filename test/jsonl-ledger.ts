@@ -229,6 +229,8 @@ export const layerJsonl = (file: string) =>
       const decodeCommand = Schema.decodeUnknownOption(AddressCommandJson, {
         onExcessProperty: "error",
       });
+      const undecodable = (t: number) =>
+        Effect.fail(new LedgerError({ message: `A ledger entry at t=${t} could not be decoded.` }));
       const log = (upTo: number) =>
         Effect.gen(function* () {
           const logged: Array<Logged> = [];
@@ -236,23 +238,20 @@ export const layerJsonl = (file: string) =>
             if (text.startsWith(COMMAND_MARK)) {
               const line = decodeCommandLine(text);
               const command = Option.flatMap(line, (value) => decodeCommand(value.command));
-              logged.push(
-                Option.isSome(line) && Option.isSome(command)
-                  ? {
-                      kind: "command",
-                      t,
-                      operation: line.value["@command"],
-                      command: command.value,
-                    }
-                  : { kind: "damaged", t }
-              );
+              if (Option.isNone(line) || Option.isNone(command)) return yield* undecodable(t);
+              logged.push({
+                kind: "command",
+                t,
+                operation: line.value["@command"],
+                command: command.value,
+              });
               continue;
             }
             const message = decode(text);
             const decoded = yield* Effect.option(message);
             // A line that can't be read may have been a presence, as Fluree's damaged node is.
-            if (Option.isNone(decoded)) logged.push({ kind: "damaged", t, lasting: true });
-            else if (decoded.value.kind === "presence") {
+            if (Option.isNone(decoded)) return yield* undecodable(t);
+            if (decoded.value.kind === "presence") {
               logged.push({ kind: "presence", t, message: decoded.value });
             }
           }

@@ -151,7 +151,7 @@ export interface StoryPeer {
   readonly address: string;
   readonly activity?: "active" | "inactive" | "unknown";
   /** Why activity is unknown; the serve sends it only beside unknown. */
-  readonly activityReason?: "damaged-log" | "damaged-mail" | "incomplete-scan";
+  readonly activityReason?: "damaged-mail" | "incomplete-scan";
   readonly activeSince?: string;
   readonly mutes?: ReadonlyArray<StoryMute>;
 }

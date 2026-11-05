@@ -61,7 +61,7 @@ An owner can set its address inactive, which works like do-not-disturb, or mute 
 | `{scope: "directory", directory}` | `#t` for every concern topic `t` the registered directory has when the message commits, so a concern added later is covered too |
 | `{scope: "concern", directory, concern}` | `#t` where that concern's topic is `t` when the message commits, so a remapped concern's new topic is covered |
 
-A directory that can't be read, or that isn't registered, covers nothing: the route wakes, erring toward contact. A leave, a join while absent or left, a takeover, or another session's join resets the address to active with no mutes. An ordinary rejoin and a replay keep them.
+A directory that can't be read, or that isn't registered, covers nothing: the route wakes, erring toward contact. A presence or address command that can't be read is different: it leaves no standing to apply this law to, since the mutes it may have carried can't be known. Rules 1 and 2 need no standing, so the pass's direct and pierced mail still wakes the address and is all the wake rings for; its ambient mail is held back, unread and outside the wake's coverage, until the ledger can be read again, and it then wakes by rule 3 as held-back mail does. A pass with only ambient mail fails, as one with an unreadable entry does. No cursor moves either way. A leave, a join while absent or left, a takeover, or another session's join resets the address to active with no mutes. An ordinary rejoin and a replay keep them.
 
 ### How a message moves
 

@@ -64,7 +64,7 @@ export const PublicMessageSchema = Schema.Struct({
 export type PublicMessage = typeof PublicMessageSchema.Type;
 
 const ACTIVITIES = ["active", "inactive", "unknown"] as const;
-const ACTIVITY_REASONS = ["damaged-log", "damaged-mail", "incomplete-scan"] as const;
+const ACTIVITY_REASONS = ["damaged-mail", "incomplete-scan"] as const;
 
 // The serve's mute scopes (src/domain.ts MuteScope); ids are checked for shape only, since the
 // serve already checked them.

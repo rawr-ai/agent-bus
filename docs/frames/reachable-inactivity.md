@@ -13,6 +13,18 @@ The owner's own words, 2026-11-05:
 4. Scoped muting is part of the experience. Stage 1 ships the active bit together with programme, topic and project/concern mutes. Thread mute comes later.
 5. Agents rarely leave, roughly only when their platform archives them. A completed disposable delegate counts as archived. The default guidance changes to "go inactive", but only when this ships.
 
+## Adjustment: damaged standing fails the read
+
+The director's decision of 2026-11-05, made after review of the implementation. The rest of this frame keeps the accepted text; where it says a damaged presence or command makes an address `unknown`, this section governs instead.
+- A presence or command entry that can't be read, including a presence the guarded presence read refuses, no longer folds as `unknown` with reason `damaged-log`. The read that needs the standing fails with the existing ledger error, as the guarded presence read already does, and `bus_activity` writes nothing.
+- Why: `unknown` beside an empty mute set looked authoritative when the accepted mutes might have been lost, and a damaged presence can't be dated or healed by a later reset, since a retraction leaves no commit of its own.
+- `unknown` now means only activity uncertainty from direct mail (`damaged-mail`, `incomplete-scan`), with the standing and its mutes intact.
+- The `peers` query, and so `bus_peers`, the viewer's peers panel and orientation members with activity, fail the same way. This changes `peers`' earlier contract, which skipped an unreadable presence and counted it as damaged; `history`, `messages`, `thread` and `search` keep counting damage.
+- Delivery keeps rules 1 and 2, which are per message and need no standing: a pass's direct and pierced mail still wakes the address, alone. Its ambient mail has no standing to apply rule 3 to, so it is held back, unread and outside the wake's coverage, and no cursor moves; a pass with only ambient mail fails, as one with an unreadable entry does. `pierce: "all"` fails rather than guess its bypass set.
+- A receipt stays as decided at its own commit. No history reconstruction, cache or second store is added; only repairing the ledger ends the failure.
+- Follow-up, outside this change: the guarded presence read still skips a presence node that has neither an id nor an entry, where the activity read now fails on it. Ownership operations should fail on it the same way.
+- Deployment: a command that a serve can't decode now fails its standing reads for every address. A new command field or mute scope (a thread mute, say) therefore needs every serve able to decode it before the first such write, and rolling back below that release is then unsafe while such a command is in the log.
+
 ## Representation: commands are their own typed nodes
 
 An owner call that sets activity, mutes or both writes one node and no message:
@@ -56,14 +68,12 @@ One evaluator reads presence entries and command nodes in commit order:
   - A command never changes the join id, `since`, the holder or the wake identity.
 
   The guard refuses a delayed command from an earlier run of the same session, and an old session's command after a takeover, on any serve.
-
-  A command that commits while damage that may be the address's stands (after it and before the next reset) is neither accepted nor refused. Its verdict is unknown and it changes nothing while the damage stands, because the unreadable entry may have moved the address or changed its standing.
 - **Mutes** come only from accepted commands since the last reset, so no writer can erase them by omission.
 
 ## Activity at a cut
 
 The result is `active`, `inactive` or `unknown`, evaluated in this order:
-1. **Unknown from damage first.** A damaged presence entry anywhere in the log, or a damaged command possibly from the address after its last reset, makes it unknown. Damage to a presence lasts until repair, because whether a later presence reset the address depends on it, and a retraction leaves no commit to date it by. A later valid direct message cannot settle this.
+1. **Unknown from damage first.** A damaged presence entry or command, possibly from the address and after its last reset, makes it unknown. A later valid direct message cannot settle this.
 2. **Active** if the anchor is not inactive.
 3. **Active** if a decoded qualifying direct message was committed after the anchor and at or before the cut. Qualifying means kind `message`, `to` literally names the address, and `from` is a different address. The decoded entry is authoritative for qualification.
 4. **Unknown** if any damaged candidate is in that window, or the scan is truncated or incomplete. An indexed `bus:from` never rules a damaged candidate out.

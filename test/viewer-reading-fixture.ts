@@ -277,7 +277,7 @@ export const FIXTURE_PEERS: ReadonlyArray<PublicPeer> = [
     topics: ["#beta"],
     note: "Synthetic note",
     activity: "unknown",
-    activityReason: "damaged-log",
+    activityReason: "damaged-mail",
   },
   { address: "fixture/dave", runtime: "other", topics: [] },
 ];

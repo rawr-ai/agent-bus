@@ -227,7 +227,7 @@ async function main() {
       ]);
       assert.equal(shownPeer("fixture/bob").markup, false, "a mute id is never markup");
       assert.ok(
-        shownPeer("fixture/carol").meta.endsWith(" · Activity unknown: damaged log"),
+        shownPeer("fixture/carol").meta.endsWith(" · Activity unknown: damaged mail"),
         "unknown label with its reason"
       );
       assert.deepEqual(shownPeer("fixture/carol").muted, []);

@@ -191,8 +191,7 @@ export const ActivityResult = Schema.Struct({
   ),
   activityReason: Schema.optionalKey(
     Schema.Literals(ACTIVITY_REASONS).annotate({
-      description:
-        "With APPLIED and unknown activity only: damaged-log, damaged-mail or incomplete-scan.",
+      description: "With APPLIED and unknown activity only: damaged-mail or incomplete-scan.",
     })
   ),
   mutes: Schema.optionalKey(
@@ -247,7 +246,7 @@ export const Peers = Schema.Struct({
       ),
       activityReason: Schema.optionalKey(
         Schema.Literals(ACTIVITY_REASONS).annotate({
-          description: "With unknown activity only: damaged-log, damaged-mail or incomplete-scan.",
+          description: "With unknown activity only: damaged-mail or incomplete-scan.",
         })
       ),
       mutes: Schema.optionalKey(

@@ -203,10 +203,10 @@ const fixture = () => {
           if (JSON.stringify(query.select) === '["?c","?json","?t"]') return [];
           // The activity log reads each presence's node and recorded sender too, stored as
           // Fluree stores a written entry.
-          if (JSON.stringify(query.select) === '["?m","?jt","?it","?ft","?id","?json","?from"]')
+          if (JSON.stringify(query.select) === '["?m","?jt","?it","?id","?json","?from"]')
             return rows
               .filter((row) => row[0] <= t)
-              .map(([at, id, json]) => [messageIri(id), at, at, at, id, json, senderOf(json)]);
+              .map(([at, id, json]) => [messageIri(id), at, at, id, json, senderOf(json)]);
           if (JSON.stringify(query.selectDistinct) === '["?m"]')
             return missingIdAt !== undefined && missingIdAt <= t ? [["urn:unkeyed-presence"]] : [];
           return rows.filter((row) => row[0] <= t);

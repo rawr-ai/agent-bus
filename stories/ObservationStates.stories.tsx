@@ -289,7 +289,6 @@ export const PeerActivityShownReadOnly: Story = {
       "agent/on",
       { address: "agent/away", activity: "inactive", activeSince: "2026-01-01T08:00:00Z" },
       { address: "agent/unread", activity: "unknown" },
-      { address: "agent/log", activity: "unknown", activityReason: "damaged-log" },
       { address: "agent/mail", activity: "unknown", activityReason: "damaged-mail" },
       { address: "agent/scan", activity: "unknown", activityReason: "incomplete-scan" },
       {
@@ -317,14 +316,13 @@ export const PeerActivityShownReadOnly: Story = {
         });
     };
     await userEvent.click(canvas.getByRole("button", { name: "Current peers" }));
-    await waitFor(() => expect(canvasElement.querySelectorAll(".peer-row")).toHaveLength(7));
+    await waitFor(() => expect(canvasElement.querySelectorAll(".peer-row")).toHaveLength(6));
 
     await shows("agent/away", ["Inactive"]);
     await shows("agent/unread", ["Activity unknown"]);
     // Unknown says why, as text after the label; with no reason sent, the label stands alone.
     await expect(textOf("agent/unread")).not.toContain("Activity unknown:");
     for (const [address, shown] of [
-      ["agent/log", "Activity unknown: damaged log"],
       ["agent/mail", "Activity unknown: damaged mail"],
       ["agent/scan", "Activity unknown: incomplete scan"],
     ] as const) {

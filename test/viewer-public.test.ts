@@ -906,10 +906,10 @@ describe("peer activity projection", () => {
 // reason on only beside "unknown", invents none, and withholds a row whose reason it cannot read
 // or that names a reason for a known activity, as it withholds other malformed rows.
 describe("peer activity reason projection", () => {
-  const REASONS = ["damaged-log", "damaged-mail", "incomplete-scan"] as const;
+  const REASONS = ["damaged-mail", "incomplete-scan"] as const;
   const strictPeers = Schema.decodeUnknownExit(PeersObservationSchema);
 
-  test("each of the three reasons passes through beside unknown", () => {
+  test("each reason passes through beside unknown", () => {
     const result = projectPeers(
       peerPages(
         REASONS.map((reason) =>
@@ -950,7 +950,9 @@ describe("peer activity reason projection", () => {
     ["a null reason", { activity: "unknown", activityReason: null }],
     ["a reason present but undefined", { activity: "unknown", activityReason: undefined }],
     ["a reason carrying private text", { activity: "unknown", activityReason: MARK }],
-    ["a reason beside active", { activity: "active", activityReason: "damaged-log" }],
+    ["a reason beside active", { activity: "active", activityReason: "damaged-mail" }],
+    // A damaged presence or command fails the serve's read, so it is never a reason.
+    ["the retired damaged-log reason", { activity: "unknown", activityReason: "damaged-log" }],
     ["a reason beside inactive", { activity: "inactive", activityReason: "damaged-mail" }],
     ["a reason with no activity", { activityReason: "incomplete-scan" }],
   ];
@@ -959,7 +961,7 @@ describe("peer activity reason projection", () => {
       const result = projectPeers(
         peerPages([
           peer("bad", { mutes: [], ...extra }),
-          peer("good", { activity: "unknown", activityReason: "damaged-log", mutes: [] }),
+          peer("good", { activity: "unknown", activityReason: "damaged-mail", mutes: [] }),
         ]),
         AT
       );

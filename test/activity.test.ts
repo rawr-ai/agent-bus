@@ -3,6 +3,7 @@
 // receipts). Expectations are derived from the frame; see test/activity-support.ts for the
 // sentinel that makes "rang nothing" an observation rather than a timeout.
 import { describe, expect, test } from "bun:test";
+import { appendFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -13,15 +14,7 @@ import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { deliverOnce, type Holds } from "../src/codex.ts";
-import {
-  activityAt,
-  foldStanding,
-  type Logged,
-  Message,
-  Origin,
-  Presence,
-  type Standing,
-} from "../src/domain.ts";
+import { activityAt, type Standing } from "../src/domain.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as ServeHttp from "../src/serve.ts";
 import {
@@ -39,6 +32,7 @@ import {
   rung,
   type Serve,
   say,
+  serveOn,
   sid,
   sortedMutes,
   takeAll,
@@ -51,6 +45,8 @@ import {
 const x = "claude/x";
 const y = "codex/y";
 const TIMEOUT = 60_000;
+/** A command line cut off mid-write: it could have run into anything. */
+const TORN_COMMAND = '{"@command":"torn","command":"{\\"addr\n';
 
 const within = async <A>(open: () => Promise<Serve>, effect: Parameters<Serve["run"]>[0]) => {
   const serve = await open();
@@ -607,15 +603,18 @@ describe("reachable inactivity: Codex delivery", () => {
     const deliver = deliverOnce(codex.openQueue, codex.daemon, hostname(), holds);
     return { ...codex, holds, deliver };
   });
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) => {
+  /** As `run`, with the ledger file at hand for writing damage into it. */
+  const runOnFile = <A, E>(
+    body: (file: string) => Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>
+  ) => {
     const dir = tempDir();
+    const file = `${dir}/ledger.jsonl`;
     return Effect.runPromise(
-      Effect.provide(
-        effect,
-        Layer.mergeAll(busOn(jsonlStore(`${dir}/ledger.jsonl`), dir), TestClock.layer())
-      )
+      Effect.provide(body(file), Layer.mergeAll(busOn(jsonlStore(file), dir), TestClock.layer()))
     );
   };
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) =>
+    runOnFile(() => effect);
 
   test("L. an inactive Codex address gets no nudge and no coverage record; a direct message nudges once", () =>
     run(
@@ -796,6 +795,89 @@ describe("reachable inactivity: Codex delivery", () => {
         expect(bodies(yield* takeAll(codexAddress, "t-2"))).toEqual(["B", "C", "D"]);
       })
     ));
+
+  // A standing that can't be read leaves only direct and pierced mail eligible: a nudge for that
+  // mail alone, nothing for ambient mail alone, and nothing acknowledged either way.
+  test("a damaged standing: held-back ambient mail stays unnudged; a direct message nudges once for itself alone; the owner's read is unchanged", () =>
+    runOnFile((file) =>
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const cursors = yield* Cursors.Cursors;
+        const codex = yield* setup;
+        applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
+        yield* takeAll(codexAddress, thread);
+        const held = String(plain(yield* say(sender, ["*"], "ambient")).id);
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        yield* Effect.sync(() => appendFileSync(file, TORN_COMMAND));
+
+        const before = yield* cursors.get(codexAddress);
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        const direct = String(plain(yield* say(sender, [codexAddress], "direct")).id);
+        const pending = yield* bus.deliver(codexAddress, (found) =>
+          Effect.succeed({
+            messages: found.messages.map((message) => message.id),
+            unread: [...found.unread],
+            cursor: found.cursor,
+          })
+        );
+        expect(pending).toEqual({
+          messages: [direct],
+          unread: [held, direct],
+          cursor: Option.getOrThrow(before),
+        });
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        expect(yield* cursors.get(codexAddress)).toEqual(before);
+        // The same damage and no new mail: no second nudge.
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+
+        // The owner's read needs no standing: both messages, in order, and the cursor moves on.
+        expect(bodies(yield* takeAll(codexAddress, thread))).toEqual(["ambient", "direct"]);
+        const after = yield* cursors.get(codexAddress);
+        expect(Option.getOrThrow(after)).toBeGreaterThan(Option.getOrThrow(before));
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        expect(yield* cursors.get(codexAddress)).toEqual(after);
+      })
+    ));
+});
+
+// The JSONL double's log fails as Fluree's does: past a line it can't decode, no standing reads.
+describe("a damaged standing fails the read (jsonl)", () => {
+  for (const [damage, line] of [
+    ["an undecodable line", "{not json\n"],
+    ["a torn command line", TORN_COMMAND],
+  ] as const) {
+    test(
+      `${damage} fails the log; bus_activity and pierce all fail and write nothing`,
+      async () => {
+        const dir = tempDir();
+        const file = join(dir, "ledger.jsonl");
+        const serve = await serveOn(jsonlStore(file), dir);
+        try {
+          await serve.run(
+            Effect.gen(function* () {
+              yield* joinAs(x);
+              yield* joinAs(y, { runtime: "codex" });
+              applied(yield* act(x, { mutes: [programme] }));
+            })
+          );
+          appendFileSync(file, line);
+          const head = await serve.run(end);
+          const log = await serve.run(
+            Effect.flip(Effect.flatMap(Ledger.Ledger, (ledger) => ledger.log(head)))
+          );
+          expect(log.message).toContain("could not be decoded");
+          const activity = await serve.run(Effect.flip(act(x, { activity: "inactive" })));
+          expect(activity.message).toContain("could not be decoded");
+          const pierce = await serve.run(Effect.flip(say(y, ["*"], "all", { pierce: "all" })));
+          expect(pierce.message).toContain("could not be decoded");
+          expect(await serve.run(end)).toBe(head);
+        } finally {
+          await serve.dispose();
+        }
+      },
+      TIMEOUT
+    );
+  }
 });
 
 // DRA pin: explicit reactivation rings once for eligible unread mail its join's last wake mark
@@ -1122,15 +1204,15 @@ describe("bus_activity over MCP: strict input (jsonl)", () => {
   }
 });
 
-// Unknown activity names why (activityReason): damage in the address's own log, an unreadable
-// direct candidate after the inactive anchor, or a candidate scan that hit its cap or did not
-// complete. It is present only when activity is unknown. Damage is read first, as the fold does.
+// Unknown activity names why (activityReason): an unreadable direct candidate after the
+// inactive anchor, or a candidate scan that hit its cap or did not complete. It is present only
+// when activity is unknown. An unreadable presence or command leaves no standing to read at all:
+// the read fails (see "a damaged standing fails the read" in activity-fluree.test.ts).
 describe("activity reason", () => {
-  const standing = (value: "active" | "inactive", damaged = false): Standing => ({
+  const standing = (value: "active" | "inactive"): Standing => ({
     holder: undefined,
     anchor: { value, t: 1, ts: value === "active" ? "" : "2026-01-01T00:00:00Z" },
     mutes: [],
-    damaged,
     verdicts: new Map(),
   });
   const scan = (extra: { damaged?: boolean; complete?: boolean; found?: boolean } = {}) => ({
@@ -1139,15 +1221,12 @@ describe("activity reason", () => {
     ...(extra.found === true ? { found: { ts: "2026-01-02T00:00:00Z", t: 2 } } : {}),
   });
 
-  test("unknown carries exactly one of the three reasons", () => {
+  test("unknown carries exactly one of the two reasons", () => {
     const reason = (...args: Parameters<typeof activityAt>) => plain(activityAt(...args));
-    expect(reason(standing("inactive", true), undefined)).toEqual({
+    // A damaged candidate is the more specific reason, so it wins over a capped scan.
+    expect(reason(standing("inactive"), scan({ damaged: true, complete: false }))).toEqual({
       activity: "unknown",
-      activityReason: "damaged-log",
-    });
-    expect(reason(standing("active", true), undefined)).toMatchObject({
-      activity: "unknown",
-      activityReason: "damaged-log",
+      activityReason: "damaged-mail",
     });
     expect(reason(standing("inactive"), scan({ damaged: true }))).toEqual({
       activity: "unknown",
@@ -1172,96 +1251,5 @@ describe("activity reason", () => {
     ] as const) {
       expect({ name, has: Object.hasOwn(result, "activityReason") }).toEqual({ name, has: false });
     }
-  });
-});
-
-describe("the fold: commands after damage", () => {
-  const joined = (id: string, session: string, t: number): Logged => ({
-    kind: "presence",
-    t,
-    message: new Message({
-      id,
-      ts: `2026-01-01T00:00:0${t}Z`,
-      from: x,
-      to: ["*"],
-      kind: "presence",
-      body: `${x} joined`,
-      presence: new Presence({ runtime: "claude", status: "joined", topics: [], session }),
-      origin: new Origin({ host: "fixture", cwd: "/work" }),
-    }),
-  });
-  const command = (operation: string, session: string, run: string, t: number): Logged => ({
-    kind: "command",
-    t,
-    operation,
-    command: {
-      address: x,
-      runtime: "claude",
-      session,
-      run,
-      activity: "inactive",
-      mutes: [{ scope: "programme" }],
-    },
-  });
-  const outcome = (log: ReadonlyArray<Logged>, operation: string) => {
-    const standing = foldStanding(x, log);
-    return {
-      verdict: standing.verdicts.get(operation),
-      anchor: standing.anchor.value,
-      mutes: standing.mutes,
-    };
-  };
-
-  test("damage that may be the address's makes a later command UNKNOWN; it changes nothing", () => {
-    for (const damage of [
-      { kind: "damaged", t: 2 },
-      { kind: "damaged", t: 2, address: x },
-    ] as const) {
-      expect(outcome([joined("j1", "s", 1), damage, command("op", "s", "j1", 3)], "op")).toEqual({
-        verdict: { status: "UNKNOWN" },
-        anchor: "active",
-        mutes: [],
-      });
-    }
-  });
-
-  test("damage to a presence outlasts a later reset; only damage to a command ends there", () => {
-    expect(
-      outcome(
-        [
-          joined("j1", "s", 1),
-          { kind: "damaged", t: 2, lasting: true },
-          joined("j2", "s2", 3),
-          command("op", "s2", "j2", 4),
-        ],
-        "op"
-      )
-    ).toEqual({ verdict: { status: "UNKNOWN" }, anchor: "active", mutes: [] });
-  });
-
-  // The gate must not outlive what clears damage, nor reach past the address it names.
-  test("a reset after the damage, or damage naming another address, leaves it APPLIED", () => {
-    const applied = {
-      verdict: { status: "APPLIED" },
-      anchor: "inactive",
-      mutes: [{ scope: "programme" }],
-    } as const;
-    expect(
-      outcome(
-        [
-          joined("j1", "s", 1),
-          { kind: "damaged", t: 2 },
-          joined("j2", "s2", 3),
-          command("op", "s2", "j2", 4),
-        ],
-        "op"
-      )
-    ).toEqual(applied);
-    expect(
-      outcome(
-        [joined("j1", "s", 1), { kind: "damaged", t: 2, address: y }, command("op", "s", "j1", 3)],
-        "op"
-      )
-    ).toEqual(applied);
   });
 });

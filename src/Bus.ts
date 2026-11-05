@@ -798,20 +798,26 @@ export const layer = Layer.effect(
         return false;
       });
 
-    /** Whether ambient mail would leave a peer asleep: inactive, or every route muted at `t`. */
+    /**
+     * Whether ambient mail would leave a peer asleep: inactive, or every route muted at `t`. A
+     * standing that can't be read fails the call: no bypass set is fabricated without it.
+     */
     const suppressed = (peer: Subscriber, message: Message, t: number, concerns: Concerns) =>
       Effect.gen(function* () {
         const { standing, activity } = yield* standingAt(peer.address, t);
         if (activity === "inactive") return true;
         if (standing.mutes.length === 0) return false;
         return !(yield* uncovered(standing.mutes, ambientRoutes(message, peer), t, concerns));
-      }).pipe(Effect.orElseSucceed(() => false));
+      });
 
     /**
      * The wake law (docs/frames/reachable-inactivity.md): direct mail always wakes, and
      * reactivates by being direct mail after the anchor; a pierce wakes without reactivating;
      * otherwise mail wakes an active or unknown address through an unmuted ambient route.
-     * Activity is read at the slice's cut, and a failed read wakes.
+     * Activity is read at the slice's cut, only when some mail is ambient. Direct and pierced
+     * mail needs no standing, so a standing that can't be read leaves only that mail eligible;
+     * with none, the pass fails, as an unreadable entry does. Either way the ambient mail stays
+     * unread until the ledger can be read again.
      */
     const eligibleOf = (subscriber: Subscriber, entries: ReadonlyArray<Entry>, cut: number) =>
       Effect.gen(function* () {
@@ -819,9 +825,13 @@ export const layer = Layer.effect(
         const reaches = (message: Message) =>
           message.to.includes(address) || (message.pierce ?? []).includes(address);
         const all = entries.map((entry) => entry.message);
-        if (entries.every(({ message }) => reaches(message))) return all;
-        const read = yield* Effect.option(standingAt(address, cut));
-        if (Option.isNone(read)) return all;
+        const direct = all.filter(reaches);
+        if (direct.length === all.length) return all;
+        const read =
+          direct.length === 0
+            ? Option.some(yield* standingAt(address, cut))
+            : yield* Effect.option(standingAt(address, cut));
+        if (Option.isNone(read)) return direct;
         const { standing, activity } = read.value;
         const concerns: Concerns = new Map();
         const eligible: Array<Message> = [];
@@ -931,7 +941,7 @@ export const layer = Layer.effect(
         const standing: Standing = foldStanding(address, yield* ledger.log(found.t));
         const verdict = standing.verdicts.get(operation);
         const cut = { head: found.t, incarnation: found.cut.incarnation };
-        if (verdict === undefined || verdict.status === "UNKNOWN") return unknown;
+        if (verdict === undefined) return unknown;
         if (verdict.status === "CONFLICT") {
           return {
             status: "CONFLICT",
@@ -983,12 +993,10 @@ export const layer = Layer.effect(
         }
         if (recorded.status !== "ABSENT") return unknown;
         // Ownership at the cut where the operation was absent: a refusal here wrote nothing, and
-        // says nothing of any other attempt with the same operation.
+        // says nothing of any other attempt with the same operation. A log that can't be read
+        // fails the call before anything is written.
         const at = recorded.cut.head;
-        const { holder, damaged } = foldStanding(input.address, yield* ledger.log(at));
-        // An entry that may be the address's can't be read, so who holds it can't be established:
-        // nothing is written, as when the ledger can't be read.
-        if (damaged) return unknown;
+        const { holder } = foldStanding(input.address, yield* ledger.log(at));
         if (holder === undefined || holder.presence.status !== "joined") {
           return yield* new NotJoined({
             address: input.address,
