@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect";
-import { McpClient, McpProtocol } from "effect/ai";
-import { type Runtime, validSession } from "./domain.ts";
-import { Peers } from "./mcp.ts";
+import { McpClient, McpProtocol, type McpSchema } from "effect/ai";
+import { type Association, canonicalAssociations, type Runtime, validSession } from "./domain.ts";
+import { Joined, Peers } from "./mcp.ts";
 import { CALL_TIMEOUT_SECONDS } from "./timing.ts";
 import { VERSION } from "./version.ts";
 
@@ -64,6 +64,143 @@ export const call =
         { tool, schema, arguments: args },
         { timeout: `${timeoutSeconds} seconds` }
       );
+    }).pipe(
+      Effect.provide(
+        McpClient.layerHttp({
+          name: "agent-bus-cli",
+          version: VERSION,
+          url,
+          protocol: McpProtocol.v2026_07_28,
+        })
+      ),
+      Effect.mapError(
+        (error): BusCallError =>
+          error instanceof BusCallError
+            ? error
+            : new BusCallError({ message: error.reason.message })
+      )
+    );
+
+const object = (value: unknown): value is Readonly<Record<string, unknown>> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** Refuse descriptors which do not unambiguously advertise both the input and effective echo. */
+export const supportsAssociations = (tool: McpSchema.Tool): boolean => {
+  const associationArray = (schema: unknown): boolean => {
+    if (!object(schema) || schema.type !== "array" || !object(schema.items)) return false;
+    const item = schema.items;
+    if (item.type !== "object" || !object(item.properties) || !Array.isArray(item.required)) {
+      return false;
+    }
+    const directory = item.properties.directory;
+    const concerns = item.properties.concerns;
+    return (
+      item.required.includes("directory") &&
+      item.required.includes("concerns") &&
+      object(directory) &&
+      directory.type === "string" &&
+      object(concerns) &&
+      concerns.type === "array" &&
+      object(concerns.items) &&
+      concerns.items.type === "string"
+    );
+  };
+  const input = tool.inputSchema;
+  const output = tool.outputSchema;
+  return (
+    object(input.properties) &&
+    associationArray(input.properties.associations) &&
+    object(output) &&
+    object(output.properties) &&
+    Array.isArray(output.required) &&
+    output.required.includes("associations") &&
+    associationArray(output.properties.associations)
+  );
+};
+
+/** A requested join orientation requires both its input and observable output. */
+export const supportsOrientation = (tool: McpSchema.Tool): boolean => {
+  const input = tool.inputSchema;
+  const output = tool.outputSchema;
+  if (!object(input.properties) || !object(output) || !object(output.properties)) return false;
+  const flag = input.properties.orient;
+  const orientation = output.properties.orientation;
+  if (
+    !object(flag) ||
+    flag.type !== "boolean" ||
+    !object(orientation) ||
+    orientation.type !== "object" ||
+    !object(orientation.properties) ||
+    !Array.isArray(orientation.required)
+  ) {
+    return false;
+  }
+  const status = orientation.properties.status;
+  return orientation.required.includes("status") && object(status) && status.type === "string";
+};
+
+/** Join on one fresh connection; verify advertised capability before sending associations. */
+export const join =
+  (url: string) =>
+  (
+    name: "bus_join" | "bus_takeover",
+    args: Record<string, unknown> & { readonly associations?: ReadonlyArray<Association> }
+  ) =>
+    Effect.gen(function* () {
+      const client = yield* McpClient.McpClient;
+      const tools = yield* client.listTools();
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (tool === undefined)
+        return yield* new BusCallError({ message: `The bus has no ${name} tool.` });
+      const requested = args.associations;
+      if (requested !== undefined && !supportsAssociations(tool)) {
+        return yield* new BusCallError({
+          message:
+            "The server does not unambiguously advertise association input and effective output; no join was sent. Reconnect to an upgraded server.",
+        });
+      }
+      if (
+        args.orient === true &&
+        (!supportsOrientation(tool) || !tools.some((candidate) => candidate.name === "bus_orient"))
+      ) {
+        return yield* new BusCallError({
+          message:
+            "The server does not unambiguously advertise join orientation and its read-only retry; no join was sent. Reconnect to an upgraded server.",
+        });
+      }
+      const joined = yield* client
+        .callTool(
+          { tool, schema: Joined, arguments: args },
+          { timeout: `${CALL_TIMEOUT_SECONDS} seconds` }
+        )
+        .pipe(
+          Effect.mapError((error) =>
+            error.reason._tag === "ToolError"
+              ? new BusCallError({
+                  message: `${error.reason.message}\nIf the server reported a storage failure, the join may have committed; inspect it read-only rather than automatically rejoining.`,
+                })
+              : new BusCallError({
+                  message:
+                    "The join outcome is uncertain and may have committed. Inspect it read-only; do not automatically rejoin.",
+                })
+          )
+        );
+      if (
+        requested !== undefined &&
+        (joined.associations === undefined ||
+          JSON.stringify(canonicalAssociations(joined.associations)) !==
+            JSON.stringify(canonicalAssociations(requested)))
+      ) {
+        return yield* new BusCallError({
+          message: `Joined as ${joined.address}, but the effective associations were absent or mismatched. Inspect them read-only; do not automatically rejoin.`,
+        });
+      }
+      if (args.orient === true && joined.orientation === undefined) {
+        return yield* new BusCallError({
+          message: `Joined as ${joined.address}, but orientation was absent. Retry the read only; do not automatically rejoin.`,
+        });
+      }
+      return joined;
     }).pipe(
       Effect.provide(
         McpClient.layerHttp({

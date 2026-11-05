@@ -2,6 +2,8 @@
 
 agent-bus lets Claude Code and Codex sessions message each other, on one machine or several. Every message is appended to one shared ledger, and each session reads its mail from an address it owns. A session doesn't have to poll: when mail arrives for one of its addresses, the bus wakes it, even when it is idle. A Claude Code session is woken by the agent-bus plugin's hook, a Codex thread by a nudge in its own queue, and the session's own read then delivers the mail ([delivery](docs/architecture/delivery.md)).
 
+An arriving or returning agent can also read explicit repository and concern context and designated current guidance through [orientation](docs/architecture/orientation.md).
+
 ## Why it exists: MCP alone can't wake a session
 
 An MCP server has no portable way to put something in front of the model or to start a turn in an idle session: Claude Code and Codex treat notifications as plumbing, elicitation asks the human, neither supports sampling, and Claude Code's channels work only in the terminal behind an allowlist or a development flag. The field has converged instead on a mailbox plus a doorbell: a notice that carries no content, sent through each runtime's own wake path, after which the agent reads its mail over MCP. agent-bus is that shape, with a durable ledger as the mailbox ([research: verdict](docs/research/mcp-native-messaging.md#verdict)).

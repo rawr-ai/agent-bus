@@ -71,6 +71,7 @@ const toolNamed = (name: string) => tools.find((tool) => tool.name === name);
 type Schema = {
   type?: string;
   items?: Schema;
+  anyOf?: ReadonlyArray<Schema>;
   enum?: ReadonlyArray<unknown>;
   minimum?: number;
   maximum?: number;
@@ -78,6 +79,7 @@ type Schema = {
 const parametersOf = (tool: Tool) => (tool.inputSchema.properties ?? {}) as Record<string, Schema>;
 const resultFieldsOf = (tool: Tool) => Object.keys(tool.outputSchema?.properties ?? {});
 const parameterNames = new Set(tools.flatMap((tool) => Object.keys(parametersOf(tool))));
+const resultNames = new Set(tools.flatMap(resultFieldsOf));
 
 /**
  * Where refusals are worded, with each `${NAME}` that names a string or number constant of
@@ -210,8 +212,14 @@ const parameterRows = (name: string): ReadonlyArray<ParameterRow> => [
   ...(INHERITS[name] === undefined ? [] : parameterRows(INHERITS[name] ?? "")),
 ];
 
-const KINDS = ["string", "number", "integer", "boolean", "array", "object"];
+const KINDS = ["string", "number", "integer", "boolean", "array", "object", "null"];
 const numbersIn = (text: string) => (text.match(/-?\d+(?:\.\d+)?/g) ?? []).sort();
+const schemaKinds = (schema: Schema): Array<string> =>
+  schema.anyOf === undefined
+    ? schema.type === "array"
+      ? [schema.items?.type ?? "", "array"]
+      : [schema.type ?? ""]
+    : [...new Set(schema.anyOf.flatMap(schemaKinds))];
 
 /**
  * What a type cell gets wrong against the schema, comparing whole tokens: the kind words (an
@@ -228,10 +236,7 @@ const typeProblems = (schema: Schema, cell: string) => {
     .sort();
   const [stated, expected]: [Array<string>, Array<string>] =
     schema.enum === undefined
-      ? [
-          KINDS.filter((kind) => words.includes(kind)),
-          schema.type === "array" ? [schema.items?.type ?? "", "array"] : [schema.type ?? ""],
-        ]
+      ? [KINDS.filter((kind) => words.includes(kind)), schemaKinds(schema)]
       : [ticked(cell), schema.enum.map(String)];
   return [
     ...(stated.sort().join() === expected.sort().join()
@@ -345,7 +350,7 @@ describe("tool names in the pages are real", () => {
 });
 
 /**
- * Backticked tokens of the skill that are one plain word and aren't a parameter of any tool.
+ * Backticked tokens of the skill that are one plain word and aren't a parameter or result field.
  * The skill keeps backticks for parameters, full tool names, `hooked: true`, commands
  * and placeholders, so a lone word in backticks is checked as a parameter name unless listed.
  */
@@ -353,13 +358,22 @@ const NOT_PARAMETERS = [
   // `agent-bus` CLI subcommands.
   "publish",
   "peers",
+  // Public orientation outcome values.
+  "APPLIED",
+  "CONFLICT",
+  "INCOMPLETE",
+  "UNAVAILABLE",
+  "UNKNOWN",
 ];
 
 describe("parameter names in the skill are real", () => {
   test.each(SKILL_FILES)("%s", (path) => {
     const words = ticked(read(path)).filter((span) => /^[A-Za-z][A-Za-z0-9]*$/.test(span));
     expect(
-      words.filter((word) => !parameterNames.has(word) && !NOT_PARAMETERS.includes(word))
+      words.filter(
+        (word) =>
+          !parameterNames.has(word) && !resultNames.has(word) && !NOT_PARAMETERS.includes(word)
+      )
     ).toEqual([]);
   });
 });

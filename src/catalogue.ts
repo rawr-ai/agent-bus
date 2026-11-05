@@ -1,11 +1,17 @@
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { Effect, Option, Schema } from "effect";
 import {
+  Association,
+  canonicalAssociations,
   InvalidQuery,
   LedgerError,
   latestPresences,
+  MAX_ASSOCIATED_ADDRESS_BYTES,
+  MAX_ASSOCIATION_BYTES,
   type Message,
   MessageJson,
+  OrientationId,
   Runtime,
 } from "./domain.ts";
 import {
@@ -19,6 +25,9 @@ import {
   Window,
   windowProblem,
 } from "./history-args.ts";
+import { scopeIri } from "./Ledger.ts";
+import { checkoutMatches } from "./orientation-model.ts";
+import { DAMAGE_MESSAGE, directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import {
   largestFitting,
@@ -145,6 +154,56 @@ export const PeerRow = Schema.Struct({
 });
 export type PeerRow = typeof PeerRow.Type;
 
+export const OrientationAssociationRow = Schema.Struct({
+  address: Text.annotate({ description: "The associated address." }),
+  runtime: Runtime.annotate({ description: "The runtime recorded in its latest presence." }),
+  status: Schema.Literals(["joined", "left"]).annotate({
+    description: "The latest presence status; association rows are joined.",
+  }),
+  topics: Schema.optionalKey(
+    Schema.Array(Text).annotate({
+      description: "Recorded topic subscriptions, in the full projection.",
+    })
+  ),
+  since: Schema.optionalKey(
+    Text.annotate({ description: "When that presence was written, in the full projection." })
+  ),
+  t: Schema.optionalKey(
+    Int.annotate({ description: "The presence commit, in the full projection." })
+  ),
+  host: Schema.optionalKey(
+    Text.annotate({ description: "The recorded host, in the full projection when present." })
+  ),
+  note: Schema.optionalKey(
+    Text.annotate({ description: "The recorded note, in the full projection when present." })
+  ),
+  association: Association.annotate({
+    description: "The complete explicit association for this directory.",
+  }),
+  resolution: Schema.Struct({
+    directory: Schema.Literals(["REGISTERED", "UNRESOLVED"]).annotate({
+      description: "Whether the directory is registered at the query cut.",
+    }),
+    concern: Schema.Literals(["REGISTERED", "UNRESOLVED", "NOT_SELECTED"]).annotate({
+      description:
+        "Whether the selected concern is registered at the query cut, or none was selected.",
+    }),
+    danglingConcerns: Schema.Array(OrientationId).annotate({
+      description: "Associated concern ids not registered in the directory at the query cut.",
+    }),
+  }).annotate({
+    description: "Same-cut registration diagnostics; unresolved references are not membership.",
+  }),
+});
+export type OrientationAssociationRow = typeof OrientationAssociationRow.Type;
+
+export const OrientationDirectoryRow = Schema.Struct({
+  id: OrientationId.annotate({ description: "The directory's stable id." }),
+  name: Text.annotate({ description: "The directory's current name." }),
+  revision: Text.annotate({ description: "The validated current directory revision." }),
+});
+export type OrientationDirectoryRow = typeof OrientationDirectoryRow.Type;
+
 export const DayRow = Schema.Struct({
   day: Text.annotate({ description: "UTC day, YYYY-MM-DD." }),
   directorToCohort: Int,
@@ -194,6 +253,29 @@ const PeersArgs = Schema.Struct({
   ),
   limit: Limit(100, 500),
 });
+const OrientationAssociationsArgs = Schema.Struct({
+  directory: OrientationId.annotate({
+    description: "The explicitly associated directory id, whether registered or unresolved.",
+  }),
+  concern: Schema.optionalKey(
+    OrientationId.annotate({
+      description: "Include only associations explicitly naming this concern id.",
+    })
+  ),
+  projection: Schema.optionalKey(
+    Schema.Literals(["full", "membership"]).annotate({
+      description:
+        "full includes public presence detail; membership omits optional presence fields. Defaults to full.",
+    })
+  ),
+  limit: Limit(50, 50),
+});
+const OrientationDirectoriesArgs = Schema.Struct({
+  cwd: Text.annotate({
+    description: "Absolute path to match against explicit directory aliases, lexically.",
+  }),
+  limit: Limit(20, 20),
+});
 const DirectorArgs = Schema.Struct({
   director: Token.annotate({ description: "The director's address." }),
   cohort: Tokens("1 to 50 literal addresses, not the director, no #topic or *."),
@@ -222,8 +304,9 @@ export type Position =
 
 type Item<Row> =
   | { readonly kind: "row"; readonly row: Row; readonly at: Position; readonly label: string }
-  | { readonly kind: "damaged"; readonly t: number; readonly at: Position }
-  | { readonly kind: "absent"; readonly id: string; readonly at: Position };
+  | { readonly kind: "damaged"; readonly t?: number; readonly at: Position }
+  | { readonly kind: "absent"; readonly id: string; readonly at: Position }
+  | { readonly kind: "passed"; readonly at: Position };
 
 interface Fetched<Row> {
   /** Candidates after the position, in order, up to the page size. */
@@ -388,11 +471,10 @@ const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
     return cursor.t;
   });
 
-const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
+const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
   spec: Spec<S, Row>,
   args: S["Type"],
-  input: RunInput,
-  budget: number | undefined
+  input: RunInput
 ) =>
   Effect.gen(function* () {
     const gateway = yield* QueryGateway;
@@ -426,6 +508,21 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
       return yield* invalid("The cursor's position does not fit this operation.");
     }
     const position = cursor?.p ?? start;
+    return { gateway, normalized, hash, size, cursor, pin, t, position };
+  });
+
+const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
+  spec: Spec<S, Row>,
+  args: S["Type"],
+  input: RunInput,
+  budget: number | undefined
+) =>
+  Effect.gen(function* () {
+    const { gateway, normalized, hash, size, cursor, pin, t, position } = yield* prepareRun(
+      spec,
+      args,
+      input
+    );
     const fetched = yield* spec.fetch(args, { t, position });
     const after = yield* gateway.pin;
     if (after.incarnation !== pin.incarnation) {
@@ -440,15 +537,18 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
       const items = fetched.items.slice(0, kept);
       const rows: Array<Row> = [];
       const damagedAt: Array<number> = [...outside];
+      let damaged = outside.length;
       const notFound: Array<string> = [];
       for (const item of items) {
         if (item.kind === "row") rows.push(item.row);
-        else if (item.kind === "damaged") damagedAt.push(item.t);
-        else notFound.push(item.id);
+        else if (item.kind === "damaged") {
+          damaged += 1;
+          if (item.t !== undefined) damagedAt.push(item.t);
+        } else if (item.kind === "absent") notFound.push(item.id);
       }
       const more = fetched.more || kept < fetched.items.length;
       const last = items.at(-1);
-      const damagedTotal = previous + damagedAt.length;
+      const damagedTotal = previous + damaged;
       const exhausted = !more;
       return {
         name: spec.name,
@@ -460,7 +560,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
         args: normalized,
         rows,
         damage: spec.coverage === "predicates" ? "not-checked" : "checked",
-        damaged: damagedAt.length,
+        damaged,
         ...(damagedAt.length === 0 ? {} : { damagedAt: damagedAt.slice(0, MAX_DAMAGED_AT) }),
         damagedTotal,
         exhausted,
@@ -499,9 +599,24 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
     // damaged candidate after it is neither counted nor skipped, and the next page
     // starts right after that row.
     let consumed = largestFitting(all - 1, (k) => bytes(envelope(k)) <= budget);
-    while (consumed > 0 && fetched.items[consumed - 1]?.kind !== "row") consumed -= 1;
+    while (
+      consumed > 0 &&
+      fetched.items[consumed - 1]?.kind !== "row" &&
+      (spec.name !== "orientation_directories" || fetched.items[consumed - 1]?.kind !== "passed")
+    )
+      consumed -= 1;
     if (consumed === 0) {
       const first = fetched.items.find((item) => item.kind === "row");
+      if (spec.name === "orientation_associations" && normalized.projection === "full") {
+        return yield* invalid(
+          `A full association unit exceeds the ${budget}-byte result limit. Start a new orientation_associations traversal at t=${t} with args ${JSON.stringify({ ...normalized, projection: "membership" })}, without a cursor.`
+        );
+      }
+      if (spec.name === "orientation_associations") {
+        return yield* invalid(
+          `An association unit exceeds the ${budget}-byte result limit at t=${t}; retry at the same cut without consuming this cursor.`
+        );
+      }
       return yield* invalid(
         first?.kind === "row"
           ? `The entry ${first.label} alone exceeds the ${budget}-byte result limit; read it with bus_query, selecting fewer fields.`
@@ -540,6 +655,13 @@ const define = <S extends Schema.Top & { readonly DecodingServices: never }, Row
     );
   return {
     ...spec,
+    /** Resolve and validate this operation's original cut without fetching a page. */
+    resolveCut: (args: S["Encoded"], input: RunInput) =>
+      Effect.flatMap(prepare(args), (decoded) =>
+        prepareRun(spec, decoded, input).pipe(
+          Effect.map(({ pin, t }) => ({ head: t, incarnation: pin.incarnation }))
+        )
+      ),
     /** Typed execution for the presets. */
     run: (args: S["Encoded"], input: RunInput, budget: number | undefined) =>
       Effect.flatMap(prepare(args), (decoded) => run(spec, decoded, input, budget)),
@@ -1217,6 +1339,238 @@ export const peers = define({
     }),
 });
 
+const DIRECTORY_PREFIX = "urn:agent-bus:orientation:directory:";
+const SubjectRows = Schema.Array(Schema.Tuple([Schema.String]));
+const isOrientationId = Schema.is(OrientationId);
+
+export const orientationDirectories = define({
+  name: "orientation_directories",
+  purpose: "Discover current directories whose explicit checkout aliases contain cwd.",
+  unit: "directory",
+  paging: "offset",
+  coverage: "entries",
+  note: "Aliases match lexically at path boundaries, without filesystem inspection. Up to 200 directory scopes are inspected per page; an empty page may have a continuation. Damaged scopes are not filtered out by aliases.",
+  Args: OrientationDirectoriesArgs,
+  Row: OrientationDirectoryRow,
+  example: { cwd: "/workspace/project", limit: 20 },
+  normalize: (args) =>
+    isAbsolute(args.cwd)
+      ? Effect.succeed({ cwd: args.cwd, limit: args.limit ?? 20 })
+      : Effect.fail(invalid("cwd must be an absolute path.")),
+  pageSize: (args) => args.limit ?? 20,
+  start: () => ({ offset: 0 }),
+  fetch: (args, at) =>
+    Effect.gen(function* () {
+      const gateway = yield* QueryGateway;
+      const size = args.limit ?? 20;
+      const offset = "offset" in at.position ? at.position.offset : 0;
+      // Discover subjects before reading any of their properties: even a missing or
+      // malformed scopeKind or pointer must not disappear behind the alias filter.
+      const scopes = yield* gateway
+        .jsonld(at.t, {
+          selectDistinct: ["?scope"],
+          where: [
+            { "@id": "?scope", "?predicate": "?object" },
+            ["filter", `(strStarts (str ?scope) "${DIRECTORY_PREFIX}")`],
+          ],
+          orderBy: "?scope",
+          offset,
+          limit: 201,
+        })
+        .pipe(Effect.flatMap(decodeRows(SubjectRows)));
+      const items: Array<Item<OrientationDirectoryRow>> = [];
+      let matched = 0;
+      const inspect = (scope: string, index: number) =>
+        Effect.gen(function* () {
+          const position: Position = { offset: offset + index + 1 };
+          const id = scope.startsWith(DIRECTORY_PREFIX) ? scope.slice(DIRECTORY_PREFIX.length) : "";
+          if (!isOrientationId(id) || scopeIri({ kind: "directory", directory: id }) !== scope) {
+            return {
+              kind: "damaged",
+              at: position,
+            } satisfies Item<OrientationDirectoryRow>;
+          }
+          const result = yield* directoryAt(gateway, at.t, id).pipe(
+            Effect.map((directory) => ({ kind: "read" as const, directory })),
+            Effect.catchTag("LedgerError", (error) =>
+              error.message === DAMAGE_MESSAGE
+                ? Effect.succeed({ kind: "damaged" as const })
+                : Effect.fail(error)
+            )
+          );
+          if (result.kind === "damaged" || result.directory === undefined) {
+            return {
+              kind: "damaged",
+              at: position,
+            } satisfies Item<OrientationDirectoryRow>;
+          } else if (
+            result.directory.value.directory.aliases.some((alias) =>
+              checkoutMatches(alias, args.cwd)
+            )
+          ) {
+            return {
+              kind: "row",
+              row: {
+                id,
+                name: result.directory.value.directory.name,
+                revision: result.directory.revision,
+              },
+              at: position,
+              label: id,
+            } satisfies Item<OrientationDirectoryRow>;
+          } else return { kind: "passed", at: position } satisfies Item<OrientationDirectoryRow>;
+        });
+      for (let start = 0; start < Math.min(scopes.length, 200) && matched < size; start += 8) {
+        const chunk = scopes.slice(start, Math.min(start + 8, 200));
+        const inspected = yield* Effect.forEach(
+          chunk,
+          ([scope], index) => inspect(scope, start + index),
+          { concurrency: 8 }
+        );
+        for (const item of inspected) {
+          if (matched === size) break;
+          items.push(item);
+          if (item.kind === "row") matched += 1;
+        }
+      }
+      return { items, more: items.length < scopes.length };
+    }).pipe(
+      Effect.timeoutOrElse({
+        duration: "10 seconds",
+        orElse: () =>
+          Effect.fail(
+            new LedgerError({
+              message: "Directory discovery timed out; retry at the same cut and cursor.",
+            })
+          ),
+      })
+    ),
+});
+
+export const orientationAssociations = define({
+  name: "orientation_associations",
+  purpose: "Explicit associations on latest joined addresses, with registration diagnostics.",
+  unit: "address association",
+  paging: "offset",
+  coverage: "entries",
+  note: "Latest joined presence per address at t, with its complete matching association and same-cut registration diagnostics. Unresolved references are not registered membership. An empty relation does not prove a directory exists. Association does not imply subscription or availability; use peers for subscriptions. Any damaged presence makes associations unavailable because its address may be unknown.",
+  Args: OrientationAssociationsArgs,
+  Row: OrientationAssociationRow,
+  example: { directory: "project", concern: "delivery", limit: 50 },
+  normalize: (args) =>
+    Effect.succeed({
+      directory: args.directory,
+      ...optionalKey("concern", args.concern),
+      projection: args.projection ?? "full",
+      limit: args.limit ?? 50,
+    }),
+  pageSize: (args) => args.limit ?? 50,
+  start: () => ({ offset: 0 }),
+  fetch: (args, at) =>
+    Effect.gen(function* () {
+      const gateway = yield* QueryGateway;
+      const size = args.limit ?? 50;
+      const offset = "offset" in at.position ? at.position.offset : 0;
+      const selected = yield* directoryAt(gateway, at.t, args.directory);
+      const registered = new Set(selected?.value.directory.concerns.map(({ id }) => id) ?? []);
+      // A typed presence without an id has no key or reliable damage location, but may be
+      // the latest state of any address. Never let the keyed fold resurrect an older row.
+      const unkeyed = yield* gateway
+        .jsonld(at.t, {
+          selectDistinct: ["?m"],
+          where: [...typed("?m", ["presence"]), ["minus", { "@id": "?m", "bus:id": "?id" }]],
+          limit: 1,
+        })
+        .pipe(Effect.flatMap(decodeRows(SubjectRows)));
+      if (unkeyed.length > 0) return yield* new LedgerError({ message: DAMAGE_MESSAGE });
+      const rows = yield* gateway
+        .jsonld(at.t, {
+          selectDistinct: ["?t", "?id", "?json"],
+          where: [...typed("?m", ["presence"]), candidate("?m"), storedJson("?m")],
+          orderBy: ["?t", "?id"],
+        })
+        .pipe(Effect.flatMap(decodeRows(CandidateRows)));
+      const keyed = new Map<string, Group<(typeof rows)[number]>>();
+      for (const [index, row] of rows.entries()) {
+        const key = JSON.stringify([row[0], row[1]]);
+        const group = keyed.get(key);
+        if (group === undefined) keyed.set(key, { first: row, copies: 1, last: index });
+        else group.copies += 1;
+      }
+      const decoded: Array<Message> = [];
+      const commits = new Map<string, number>();
+      const damaged: Array<number> = [];
+      for (const group of keyed.values()) {
+        const [t, id] = group.first;
+        const message = decodeGroup(group);
+        if (
+          Option.isNone(message) ||
+          message.value.kind !== "presence" ||
+          message.value.presence === undefined ||
+          ((message.value.presence.associations?.length ?? 0) > 0 &&
+            (bytes(message.value.presence.associations) > MAX_ASSOCIATION_BYTES ||
+              Buffer.byteLength(message.value.from, "utf8") > MAX_ASSOCIATED_ADDRESS_BYTES))
+        ) {
+          damaged.push(t);
+        } else {
+          decoded.push(message.value);
+          commits.set(id, t);
+        }
+      }
+      // A damaged record may be a newer state for any address, so none is safe to expose.
+      if (damaged.length > 0) return { items: [], more: false, damagedOutside: damaged };
+      const all = [...latestPresences(decoded).values()]
+        .filter((peer) => peer.presence.status === "joined")
+        .flatMap((peer) => {
+          const association = canonicalAssociations(peer.presence.associations ?? []).find(
+            (entry) =>
+              entry.directory === args.directory &&
+              (args.concern === undefined || entry.concerns.includes(args.concern))
+          );
+          return association === undefined ? [] : [{ peer, association }];
+        })
+        .sort((a, b) =>
+          a.peer.address < b.peer.address ? -1 : a.peer.address > b.peer.address ? 1 : 0
+        );
+      const items = all
+        .slice(offset, offset + size)
+        .map(({ peer, association }, index): Item<OrientationAssociationRow> => {
+          const t = commits.get(peer.joinId) ?? 0;
+          return {
+            kind: "row",
+            row: {
+              address: peer.address,
+              runtime: peer.presence.runtime,
+              status: peer.presence.status,
+              ...(args.projection === "membership"
+                ? {}
+                : {
+                    topics: [...peer.presence.topics],
+                    ...optionalKey("since", peer.since),
+                    t,
+                    ...optionalKey("host", peer.host),
+                    ...optionalKey("note", peer.presence.note),
+                  }),
+              association,
+              resolution: {
+                directory: selected === undefined ? "UNRESOLVED" : "REGISTERED",
+                concern:
+                  args.concern === undefined
+                    ? "NOT_SELECTED"
+                    : registered.has(args.concern)
+                      ? "REGISTERED"
+                      : "UNRESOLVED",
+                danglingConcerns: association.concerns.filter((id) => !registered.has(id)),
+              },
+            },
+            at: { offset: offset + index + 1 },
+            label: `${peer.address} (t=${t})`,
+          };
+        });
+      return { items, more: offset + size < all.length };
+    }),
+});
+
 const DayRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String]));
 const isAddress = (token: string) => token !== "*" && !token.startsWith("#");
 const isTopic = (token: string) => token.startsWith("#") && token.length > 1;
@@ -1382,6 +1736,8 @@ export const operations: ReadonlyArray<Operation> = [
   search,
   counts,
   peers,
+  orientationDirectories,
+  orientationAssociations,
   directorDmVolume,
 ];
 
@@ -1392,6 +1748,8 @@ export const operationNames = [
   "search",
   "counts",
   "peers",
+  "orientation_directories",
+  "orientation_associations",
   "director-dm-volume",
 ] as const;
 

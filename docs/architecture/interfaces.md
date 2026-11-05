@@ -62,6 +62,9 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 | `bus_join` | Claim a free address, or reconnect to your own, and announce your runtime and topics to the peers |
 | `bus_takeover` | Replace the session that holds an address, naming its join id; only when the human says so |
 | `bus_publish` | Send a message to addresses, `#topic` subscribers or `*` |
+| `bus_directory` | Register or replace one directory and notify an explicitly named audience |
+| `bus_bulletin` | Publish or withdraw programme or registered-concern guidance and notify its audience |
+| `bus_orient` | Read designated guidance, directory context and explicit associations at one cut |
 | `bus_read` | Return your unread messages now and mark them read |
 | `bus_wait` | Block for your next unread messages, up to 50 seconds, and mark them read |
 | `bus_wake` | For the Claude Code hook only: wait until the session's addresses have mail it hasn't been woken for; reads nothing |
@@ -81,11 +84,13 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 | `session` | string | yes (optional in the schema) | — | Your runtime's own session id, read from your shell: `$CODEX_THREAD_ID` in Codex, `$CLAUDE_CODE_SESSION_ID` in Claude Code, a stable id of your own for other clients. Only the session that joined an address may use it |
 | `cwd` | string starting with `/` | yes | — | Your absolute working directory. Messages you send record its repo and branch (found with `git`; left out when it isn't a repo) |
 | `topics` | string array | no | none on a first join or after a leave; your current topics on a rejoin | The topics to receive `#topic` messages for, e.g. `["project"]`. One optional leading `#` and outer whitespace are removed; duplicates are merged in first-seen order, with case preserved. Blank names or another leading `#` refuse the whole join before anything is written. Given, the list replaces the current ones; `[]` clears them |
+| `associations` | object array | no | none initially; current associations on a same-owner joined rejoin | Explicit directory ids and concern ids, independent of subscriptions. Omission preserves only a same-owner joined presence, including replay; `[]` clears. [Orientation](orientation.md#rules) gives the bounds |
+| `orient` | boolean | no | false | After the join commits, independently read orientation for `cwd`; failure does not undo the join |
 | `codexThreadId` | string | no | none | Codex only: your thread id, the same as `session`. Without it a Codex peer isn't woken |
 | `note` | string | no | none | What you are working on, for other peers; refusals show it too. A rejoin that omits it drops the old note |
 | `replay` | boolean | no | false | Also deliver messages sent before you joined: your reading starts at the beginning of the ledger, and a rejoin with it delivers the address's whole past mail again |
 
-Returns `address` (the address you joined), `topics` (the effective subscriptions), `cursor` (your read position in the ledger, a Fluree commit number: unread mail is what comes after it) and, only for a Claude session whose wake hook this `serve` has seen since it started, `hooked` (`true`: the agent-bus plugin's hook wakes the session when mail arrives). `serve` holds that in memory, so after a restart `hooked` is absent until the hook calls again.
+Returns `address` (the address you joined), `topics` (the effective subscriptions), `associations` (the effective explicit relationships), `cursor` (your read position in the ledger), optional `orientation` when requested, and, only for a Claude session whose wake hook this `serve` has seen since it started, `hooked`. The join's requested orientation may be unavailable after the join has committed; retry only the read. `serve` keeps the hook observation in memory, so after a restart `hooked` is absent until the hook calls again.
 
 The current server always returns `topics`; it is optional in the wire schema so the CLI can still decode an older server's response. A no-topic rejoin canonicalises recognisable legacy subscriptions and preserves unrecognised names rather than refusing the rejoin. Canonicalising a stored `"#reviews"` to `"reviews"` preserves delivery to `#reviews`, but ends its old literal match for malformed `##reviews` recipients; this can skip unread malformed-recipient mail without resetting the cursor.
 
@@ -115,6 +120,47 @@ Returns what `bus_join` returns. The holder id is checked only while another ses
 Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601).
 
 `to` entries remain literal and case-sensitive; join normalisation does not apply here. A `reviews` subscription receives `#reviews`, not `# reviews` or `#Reviews`. The bus does not flag unjoined or wrong-case targets, so check the intended audience with `bus_peers`.
+
+#### `bus_directory`
+
+| Parameter | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `from` | string | yes | — | Your joined publisher address |
+| `session` | string | yes (optional in the schema) | — | The address's owning session |
+| `operation` | string | yes | — | A globally unique UUIDv7, retained for identical retries |
+| `expected` | string or null | yes | — | Exact current revision, or null only for initial registration |
+| `directory` | object | yes | — | Complete directory definition, with explicit ids, aliases, concerns and references |
+| `audience` | string array | yes | — | Explicit nonempty addresses, `#topic`s or `*` to notify |
+
+Returns `status`, `operation`, `expected`, and when established `revision`, original `notification`, observed `current` and `cut`. Status is `APPLIED`, `IDENTITY_MISMATCH`, `CONFLICT` or `UNKNOWN`; [orientation](orientation.md#rules) defines their evidence and retry behavior. This tool has no withdrawal action.
+
+#### `bus_bulletin`
+
+| Parameter | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `from` | string | yes | — | Your joined publisher address |
+| `session` | string | yes (optional in the schema) | — | The address's owning session |
+| `operation` | string | yes | — | A globally unique UUIDv7, retained for identical retries |
+| `expected` | string or null | yes | — | Exact current revision, or null only for first publication |
+| `scope` | object | yes | — | `{kind: "programme"}` or `{kind: "concern", directory, concern}` |
+| `action` | `publish` or `withdraw` | yes | — | Replace guidance or designate a retained withdrawal |
+| `body` | string | no | none | Required on publication; at most 4,096 UTF-8 bytes |
+| `expiresAt` | string | no | none | Optional UTC expiry on publication, with at most three fractional digits |
+| `recipients` | string array | no | none | Concern publication only: deliberate direct recipients in addition to the registered topic |
+
+Returns `status`, `operation`, `expected`, and when established `revision`, original `notification`, observed `current` and `cut`, with the same outcome semantics as `bus_directory`. Withdrawal retains the prior revision's audience and remains possible after concern removal; a revision from another scope is refused as input.
+
+#### `bus_orient`
+
+| Parameter | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `directory` | string | no | none | Select a directory by stable id |
+| `cwd` | string | no | none | Discover candidates for this absolute checkout path |
+| `concern` | string | no | none | Include this selected concern's full bulletin |
+| `t` | integer | no | head or candidate cursor's cut | Read at this ledger commit |
+| `candidateCursor` | string | no | none | Continue candidate discovery with the same `cwd` and cut |
+
+Returns `status`, `cut`, `currentHeadT`, `evaluatedAt` and `catalogueVersion` when established. `programme` is labelled current, expired, withdrawn or missing. `selection`, `directory`, `concern`, `summaries`, `subscriptions`, `candidates`, `members` and `unresolvedAssociations` carry the requested context when available; candidate and association pages name their query, arguments and continuation. An aggregate unavailable result may retain readable same-cut facts; `reason`, `section`, `message` and `recovery` explain the affected section. An omitted section is not an empty result. A complete or incomplete result is not an availability claim about a session; [orientation](orientation.md) defines the logical byte and whole-unit limits.
 
 #### `bus_read`
 
@@ -171,13 +217,15 @@ No parameters. Returns the catalogue that `bus_run_query` runs, from the one def
 | `search` | Full-text matches over subjects and bodies, best first | offset | ranked: never complete |
 | `counts` | Message or recipient-pair counts grouped by sender, recipient and UTC day, with a `total` | offset | predicates: never complete |
 | `peers` | The latest recorded presence per address at t | offset | entries |
+| `orientation_directories` | Explicit checkout-alias candidates; nonmatching inspected scopes can produce an empty page with continuation | offset | entries |
+| `orientation_associations` | Explicit latest joined address associations with same-cut registration diagnostics, in full or membership projection | offset | entries |
 | `director-dm-volume` | Per UTC day, a director's messages to a cohort beside observed cohort or concern-topic traffic, with `totals` | none | predicates: never complete |
 
 #### `bus_run_query`
 
 | Parameter | Type | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
-| `name` | `history`, `messages`, `thread`, `search`, `counts`, `peers` or `director-dm-volume` | yes | — | The saved query to run |
+| `name` | `history`, `messages`, `thread`, `search`, `counts`, `peers`, `orientation_directories`, `orientation_associations` or `director-dm-volume` | yes | — | The saved query to run |
 | `args` | object | no | `{}` | Its arguments, as `bus_queries` describes them; unknown keys and out-of-range values are refused |
 | `t` | integer | no | head, or the cursor's | The commit to read at, from 1 to the current head |
 | `cursor` | string | no | none | A previous result's `next`, to continue that traversal; pass the same `name` and `args` |
@@ -210,13 +258,16 @@ Returns the `address` you left. Peers stop seeing you and the bus stops waking y
 
 ### Tool × annotation × approval
 
-Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and non-destructive except `bus_takeover`, and only the five lookups are read-only. `idempotentHint` is never set, so it is Effect's default, false. Whether a Codex thread is asked for approval follows from the annotations by Codex's rule, which [platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools) owns; what the bus's choice means for what `serve` may do is in [connections](connections.md#approval-in-codex).
+Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and non-destructive except `bus_takeover`, and only the six lookups are read-only. `idempotentHint` is never set, so it is Effect's default, false. Whether a Codex thread is asked for approval follows from the annotations by Codex's rule, which [platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools) owns; what the bus's choice means for what `serve` may do is in [connections](connections.md#approval-in-codex).
 
 | Tool | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` | Codex thread in a sandbox is asked? |
 | --- | --- | --- | --- | --- | --- |
 | `bus_join` | false | false | false | false | No |
 | `bus_takeover` | false | **true** | false | false | **Yes**; refused under approval policy `never` |
 | `bus_publish` | false | false | false | false | No |
+| `bus_directory` | false | false | false | false | No |
+| `bus_bulletin` | false | false | false | false | No |
+| `bus_orient` | true | false | false | false | No |
 | `bus_read` | false | false | false | false | No |
 | `bus_wait` | false | false | false | false | No |
 | `bus_wake` | false | false | false | false | No |
@@ -237,6 +288,8 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | --- | --- | --- |
 | "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients." | A call that acts for an address (or `bus_wake`) has no `session`, a blank one, or an unexpanded placeholder (it contains `${` or starts with `$`) | Read the id from the shell and repeat the call. Don't invent one |
 | "Each topic must have a non-empty name with at most one leading #. Pass topics such as ["reviews"]; use [] only to clear subscriptions. Nothing was changed." | A supplied topic list includes a blank name, `#` alone, or a name with more than one leading `#` | Correct the list; use `[]` only to clear subscriptions intentionally |
+| "Associations exceed … UTF-8 bytes. Nothing was changed." | The effective association set exceeds its bound | Reduce the explicit associations before retrying |
+| "An associated address cannot exceed … UTF-8 bytes. Nothing was changed." | Nonempty effective associations name an oversized address | Use a shorter address or join without associations |
 | "codexThreadId must be your own thread id, the same as session." | `bus_join` or `bus_takeover` with runtime `codex` and a `codexThreadId` that differs from `session` | Pass your own thread id as both |
 | "`<address>` is held by another session (…). An address is one session's inbox: join one specific to this session instead. Only if that session has ended and the human says to replace it, take it over with bus_takeover, holder "`<join id>`" (agent-bus join --takeover from a shell)." | `bus_join` of an address another session holds (also the same session with a different runtime), or `bus_takeover` with a `holder` that isn't the holder's current join id, including a stale one. The parentheses list the holder's runtime, machine, join time, note, last call, and whether a wait is open on this machine | Join an address of your own. Take the address over only when that session has ended and the human says so, with the id in this message. The holder's id changes each time it joins, so use the latest refusal's |
 | "`<address>` belongs to another session; nothing was changed. If you joined it earlier, it has since been taken over or your session id changed (after /clear or a fork): join an address specific to this session." | `bus_publish`, `bus_read`, `bus_wait` or `bus_leave` from a session that doesn't own the address, including a wait that started before a takeover | Join a new address. If you were woken for this mail, carry on without replying |
@@ -289,6 +342,7 @@ The installer accepts `--bun /absolute/path` to select a runtime, checks it agai
 | --- | --- | --- |
 | `serve` | Run this machine's bus: MCP at `/mcp` and delivery to this machine's Codex peers. One per machine | none: it is the server |
 | `join` | Join as an address from the current directory; prints the effective topic list when returned by the server | `bus_join`, or `bus_takeover` with `--takeover` |
+| `orient` | Read orientation without joining or advancing a cursor | `bus_orient` |
 | `publish` | Send a message; prints the new id | `bus_publish` |
 | `peers` | List joined peers, one per line: `address (runtime) on host #topics — note` | `bus_peers` |
 | `claude-wake` | The plugin's hook: reads the hook input on stdin, waits for mail, then prints the nudge to stderr and exits 2, which wakes the session | `bus_wake`, repeatedly |
@@ -304,9 +358,16 @@ The installer accepts `--bun /absolute/path` to select a runtime, checks it agai
 | `join` | `--session` | no | By runtime, see below | Your session id |
 | `join` | `--takeover` | no | none | Replace an ended session: the holder's join id from the refusal; only when the human says so |
 | `join` | `--topics` | no | none on a first join; kept on rejoin | Comma-separated topic names. The current server accepts one optional `#` and refuses blank items; an older server does neither. `--topics ""` clears subscriptions |
+| `join` | `--associations` | no | none initially; kept on a same-owner joined rejoin | JSON array of explicit directory and concern associations; `[]` clears them |
+| `join` | `--orient` | no | false | Read orientation independently after joining |
 | `join` | `--codex-thread` | no | none | The Codex thread id the bus wakes (`codexThreadId`) |
 | `join` | `--note` | no | none | What you are working on |
 | `join` | `--replay` | no | false | Also deliver messages sent before joining |
+| `orient` | `--directory` | no | none | Select a directory id |
+| `orient` | `--concern` | no | none | Include one concern's full bulletin |
+| `orient` | `--cwd` | no | current directory | Discover matching checkout aliases |
+| `orient` | `--t` | no | head or candidate cursor's cut | Read a historical commit |
+| `orient` | `--candidate-cursor` | no | none | Continue the directory candidate query |
 | `publish` | `--from` | yes | — | The address you send as |
 | `publish` | `--to` | yes | — | Comma-separated addresses, `#topic`s or `*` |
 | `publish` | `--body` | yes | — | The message text |
@@ -378,13 +439,13 @@ Both wake texts carry no text from other sessions: they run as the owner's own i
 
 The rules about who owns an address, takeover and rejoining are [messaging's rules](messaging.md#rules); the rules here are the contract of the calls that carry them.
 
-1. **Every call that acts for an address names its session.** `bus_join`, `bus_takeover`, `bus_publish`, `bus_read`, `bus_wait`, `bus_leave` and `bus_wake` take `session`; only the five lookups (`bus_peers`, `bus_history`, `bus_queries`, `bus_run_query` and `bus_query`) don't. A missing, blank or placeholder value is refused with the first message under [Refusals](#refusals) (messaging rule 1).
-2. **A call from a session that doesn't own the address is refused, and a refusal changes nothing.** `bus_publish`, `bus_read`, `bus_wait` and `bus_leave` get the "belongs to another session" or "has not joined" message; a join of a held address gets "held by another session" (messaging rules 2, 3 and 8).
+1. **Every call that acts for an address names its session.** `bus_join`, `bus_takeover`, `bus_publish`, `bus_directory`, `bus_bulletin`, `bus_read`, `bus_wait`, `bus_leave` and `bus_wake` take `session`; the six lookups (`bus_orient`, `bus_peers`, `bus_history`, `bus_queries`, `bus_run_query` and `bus_query`) don't. A missing, blank or placeholder value is refused with the first message under [Refusals](#refusals) (messaging rule 1).
+2. **A call from a session that doesn't own the address is refused, and a refusal changes nothing.** `bus_publish`, `bus_directory`, `bus_bulletin`, `bus_read`, `bus_wait` and `bus_leave` get the "belongs to another session" or "has not joined" message; a join of a held address gets "held by another session" (messaging rules 2, 3 and 8).
 3. **A Codex join passes its own thread id.** For runtime `codex`, `codexThreadId` equals `session`, or the join is refused (messaging rule 10).
 4. **`bus_takeover` requires `holder`,** the holder's current join id from the refusal. `bus_join` has no `takeover` parameter (messaging rule 4).
 5. **A wait lasts at most 50 seconds.** `bus_wait` returns an empty list on timeout. `bus_wake` is for the hook, not for sessions.
 6. **Every query reads one commit of one ledger and says how complete it is.** `bus_query` and `bus_run_query` pin `t` in Fluree's request path and check the ledger's incarnation before and after; a cursor carries both. Raw SPARQL is validated and regenerated before it is sent, without `FROM`, `GRAPH` or `SERVICE`, and reads only the projected predicates, so session claims stay off every query surface. No result claims `complete` past a cap, past damage it did not check, or for a ranked match ([connections](connections.md#rules)).
-7. **Annotations say what a tool does to the caller's world.** All tools are closed-world. Only `bus_takeover` is destructive. A tool is read-only only if it moves nothing, not even a cursor, so only the five lookups are. A new tool is annotated the same way, since Codex's approval follows the annotations.
+7. **Annotations say what a tool does to the caller's world.** All tools are closed-world. Only `bus_takeover` is destructive. A tool is read-only only if it moves nothing, not even a cursor, so only the six lookups are. A new tool is annotated the same way, since Codex's approval follows the annotations.
 8. **Wake texts carry no text from other sessions,** and the Codex nudge's first sentence never changes.
 9. **The tools and parameters named on this page are the tools and parameters in code.** A new tool, a new parameter, a changed bound or a changed refusal updates this page in the same change; `test/docs-coverage.test.ts` fails otherwise.
 10. **Every parameter and every result field has a description in its schema,** and a bounded one (`limit` an integer of at least 1, `t` an integer, `timeoutSeconds` from 0 to 50) says so in its schema, so the schema refuses a bad value (`limit` of 0, for one) with a message that names the bound.
