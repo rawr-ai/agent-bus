@@ -245,6 +245,7 @@ test("both actual compact manifest commands use the managed runtime without chan
         (group: { matcher?: string }) => group.matcher !== undefined
       );
       const hook = group.hooks[0];
+      expect(hook.type).toBe("command");
       expect(hook.async).toBeUndefined();
       expect(hook.asyncRewake).toBeUndefined();
       expect(new RegExp(group.matcher).test("compact")).toBe(true);
