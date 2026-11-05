@@ -1,4 +1,4 @@
-import { Schema } from "effect";
+import { Option, Schema } from "effect";
 
 /** The agent runtime behind an address; it decides how the bus delivers to it. */
 export const Runtime = Schema.Literals(["claude", "codex", "human", "other"]);
@@ -94,6 +94,12 @@ export class Message extends Schema.Class<Message>("Message")({
   ),
   origin: Schema.optionalKey(Origin),
   presence: Schema.optionalKey(Presence),
+  /**
+   * The recipients a sender confirmed waking despite inactivity or mutes. Never routes: only
+   * members of the audience `to` reaches, other than those it names directly. Earlier releases
+   * strip it on decode and deliver normally.
+   */
+  pierce: Schema.optionalKey(Schema.Array(Schema.String)),
 }) {}
 
 export const MessageJson = Schema.fromJsonString(Message);
@@ -172,20 +178,26 @@ export interface Subscriber {
   readonly cwd?: string | undefined;
 }
 
+/** Whether a `#topic` recipient names one of the subscriber's topics. */
+const subscribes = (subscriber: Subscriber, recipient: string) =>
+  recipient.startsWith("#") &&
+  subscriber.presence.topics.some(
+    // Keep literal legacy matching, and accept its valid #prefixed subscriptions too.
+    (topic) => topic === recipient.slice(1) || topicName(topic) === recipient.slice(1)
+  );
+
 /** Whether a message should be delivered to a subscriber. Senders never receive their own. */
 export const isFor = (message: Message, subscriber: Subscriber): boolean =>
   message.kind === "message" &&
   message.from !== subscriber.address &&
   message.to.some(
     (recipient) =>
-      recipient === "*" ||
-      recipient === subscriber.address ||
-      (recipient.startsWith("#") &&
-        subscriber.presence.topics.some(
-          // Keep literal legacy matching, and accept its valid #prefixed subscriptions too.
-          (topic) => topic === recipient.slice(1) || topicName(topic) === recipient.slice(1)
-        ))
+      recipient === "*" || recipient === subscriber.address || subscribes(subscriber, recipient)
   );
+
+/** The ambient routes by which a message reaches a subscriber: `*` and its matching #topics. */
+export const ambientRoutes = (message: Message, subscriber: Subscriber): Array<string> =>
+  message.to.filter((recipient) => recipient === "*" || subscribes(subscriber, recipient));
 
 /** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
 export const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
@@ -210,4 +222,242 @@ export const latestPresences = (entries: Iterable<Message>): Map<string, Subscri
     });
   }
   return latest;
+};
+
+/** The run a join belongs to: the first join of a run of ordinary rejoins by one session. */
+export const runOf = (subscriber: Subscriber) => subscriber.presence.rejoinOf ?? subscriber.joinId;
+
+// ---- Reachable inactivity ----------------------------------------------------------------------
+
+/**
+ * A scope an address mutes: programme `*` mail, one topic, or the concern topics of a
+ * directory, or of one of its concerns, as registered when each message commits.
+ */
+export const MuteScope = Schema.Union([
+  Schema.Struct({ scope: Schema.Literal("programme") }),
+  Schema.Struct({ scope: Schema.Literal("topic"), topic: Schema.String }),
+  Schema.Struct({ scope: Schema.Literal("directory"), directory: OrientationId }),
+  Schema.Struct({
+    scope: Schema.Literal("concern"),
+    directory: OrientationId,
+    concern: OrientationId,
+  }),
+]);
+export type MuteScope = typeof MuteScope.Type;
+
+const muteKey = (mute: MuteScope) => {
+  switch (mute.scope) {
+    case "programme":
+      return JSON.stringify([mute.scope]);
+    case "topic":
+      return JSON.stringify([mute.scope, mute.topic]);
+    case "directory":
+      return JSON.stringify([mute.scope, mute.directory]);
+    case "concern":
+      return JSON.stringify([mute.scope, mute.directory, mute.concern]);
+  }
+};
+
+const decodeMutes = Schema.decodeUnknownOption(Schema.Array(MuteScope), {
+  onExcessProperty: "error",
+});
+
+/**
+ * A mute set in its one stored form: topics named as topicName names them, duplicates merged,
+ * in a fixed order. Undefined for anything that is not a set of known scopes.
+ */
+export const normalizeMutes = (input: unknown): Array<MuteScope> | undefined => {
+  const decoded = decodeMutes(input);
+  if (Option.isNone(decoded)) return undefined;
+  const unique = new Map<string, MuteScope>();
+  for (const mute of decoded.value) {
+    let normal: MuteScope;
+    switch (mute.scope) {
+      case "programme":
+        normal = { scope: "programme" };
+        break;
+      case "topic": {
+        const topic = topicName(mute.topic);
+        if (topic === undefined) return undefined;
+        normal = { scope: "topic", topic };
+        break;
+      }
+      case "directory":
+        normal = { scope: "directory", directory: mute.directory };
+        break;
+      case "concern":
+        normal = { scope: "concern", directory: mute.directory, concern: mute.concern };
+        break;
+    }
+    unique.set(muteKey(normal), normal);
+  }
+  return [...unique.entries()]
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([, mute]) => mute);
+};
+
+export const ActivityValue = Schema.Literals(["active", "inactive"]);
+
+/**
+ * An owner's command, stored as its own node beside messages: `run` is the holder's run when
+ * the call was validated, and `ts` when it was written. The frame's representation has no `ts`,
+ * so a command without one still decodes; it only leaves `activeSince` unstated. Legacy readers
+ * never see it.
+ */
+export const AddressCommand = Schema.Struct({
+  address: Schema.String,
+  runtime: Runtime,
+  session: Schema.String,
+  run: Schema.String,
+  ts: Schema.optionalKey(Schema.String),
+  activity: Schema.optionalKey(ActivityValue),
+  mutes: Schema.optionalKey(Schema.Array(MuteScope)),
+});
+export type AddressCommand = typeof AddressCommand.Type;
+export const AddressCommandJson = Schema.fromJsonString(AddressCommand);
+
+/** A presence entry or a command node at its commit, or one that could not be decoded. */
+export type Logged =
+  | { readonly kind: "presence"; readonly t: number; readonly message: Message }
+  | {
+      readonly kind: "command";
+      readonly t: number;
+      readonly operation: string;
+      readonly command: AddressCommand;
+    }
+  | {
+      readonly kind: "damaged";
+      readonly t: number;
+      /** The address it names, when that much is legible; otherwise it may be anyone's. */
+      readonly address?: string | undefined;
+    };
+
+export type Verdict =
+  | { readonly status: "APPLIED" }
+  | { readonly status: "CONFLICT"; readonly reason: "not-joined" | "not-holder" | "stale-run" };
+
+/** Where activity was last set: by a reset (active) or an accepted command. */
+export interface Anchor {
+  readonly value: typeof ActivityValue.Type;
+  readonly t: number;
+  /** When it was set, or "" when nothing recorded that. */
+  readonly ts: string;
+}
+
+/** An address's state folded from its presences and commands in commit order. */
+export interface Standing {
+  /** The latest session-bearing presence, joined or left, as latestPresences reads it. */
+  readonly holder: Subscriber | undefined;
+  readonly anchor: Anchor;
+  readonly mutes: ReadonlyArray<MuteScope>;
+  /** An entry that may be the address's could not be read since its last reset. */
+  readonly damaged: boolean;
+  /** Each command's verdict at its own commit, by operation. */
+  readonly verdicts: ReadonlyMap<string, Verdict>;
+}
+
+/**
+ * Folds one address's presences and commands, oldest first (docs/frames/reachable-inactivity.md,
+ * "The fold"). A leave, a join while absent or left, a takeover or another session's join
+ * resets it: active, no mutes, anchored at that presence. A rejoin keeps its run; a replay
+ * starts a new one; neither changes activity or mutes. A command applies only from the
+ * joined holder's own runtime, session and run, and never changes the holder or its run.
+ */
+export const foldStanding = (address: string, log: Iterable<Logged>): Standing => {
+  let holder: Subscriber | undefined;
+  let anchor: Anchor = { value: "active", t: 0, ts: "" };
+  let mutes: ReadonlyArray<MuteScope> = [];
+  let damaged = false;
+  const verdicts = new Map<string, Verdict>();
+  for (const entry of log) {
+    switch (entry.kind) {
+      case "damaged":
+        if (entry.address === undefined || entry.address === address) damaged = true;
+        break;
+      case "presence": {
+        const { message } = entry;
+        const presence = message.presence;
+        if (message.from !== address || presence?.session === undefined) break;
+        const continues =
+          holder?.presence.status === "joined" &&
+          presence.status === "joined" &&
+          holder.presence.session === presence.session &&
+          presence.takeover === undefined;
+        if (!continues) {
+          anchor = { value: "active", t: entry.t, ts: message.ts };
+          mutes = [];
+          damaged = false;
+        }
+        holder = {
+          address,
+          presence,
+          joinId: message.id,
+          since: message.ts,
+          host: message.origin?.host,
+          cwd: message.origin?.cwd,
+        };
+        break;
+      }
+      case "command": {
+        const { command } = entry;
+        if (command.address !== address) break;
+        const verdict: Verdict =
+          holder === undefined || holder.presence.status !== "joined"
+            ? { status: "CONFLICT", reason: "not-joined" }
+            : holder.presence.runtime !== command.runtime ||
+                holder.presence.session !== command.session
+              ? { status: "CONFLICT", reason: "not-holder" }
+              : runOf(holder) !== command.run
+                ? { status: "CONFLICT", reason: "stale-run" }
+                : { status: "APPLIED" };
+        if (!verdicts.has(entry.operation)) verdicts.set(entry.operation, verdict);
+        if (verdict.status !== "APPLIED") break;
+        if (command.activity !== undefined) {
+          anchor = { value: command.activity, t: entry.t, ts: command.ts ?? "" };
+        }
+        if (command.mutes !== undefined) mutes = command.mutes;
+        break;
+      }
+    }
+  }
+  return { holder, anchor, mutes, damaged, verdicts };
+};
+
+/** A direct message that reactivates its addressee: from someone else, naming it literally. */
+export const qualifies = (message: Message, address: string) =>
+  message.kind === "message" && message.from !== address && message.to.includes(address);
+
+/**
+ * The direct candidates committed after an anchor: the first qualifying message, and whether
+ * any candidate could not be decoded or the scan stopped short of the cut.
+ */
+export interface DirectScan {
+  readonly found?: { readonly ts: string; readonly t: number } | undefined;
+  readonly damaged: boolean;
+  readonly complete: boolean;
+}
+
+export type Activity = "active" | "inactive" | "unknown";
+
+/** Whether activity at a cut depends on direct mail after the anchor. */
+export const needsScan = (standing: Standing) =>
+  !standing.damaged && standing.anchor.value === "inactive";
+
+/**
+ * Activity at a cut ("Activity at a cut"): damage first, then the anchor, then the first
+ * qualifying direct message after it; a damaged candidate or an incomplete scan is unknown.
+ */
+export const activityAt = (
+  standing: Standing,
+  scan: DirectScan | undefined
+): { readonly activity: Activity; readonly activeSince?: string } => {
+  if (standing.damaged) return { activity: "unknown" };
+  if (standing.anchor.value === "active") {
+    return standing.anchor.ts === ""
+      ? { activity: "active" }
+      : { activity: "active", activeSince: standing.anchor.ts };
+  }
+  if (scan?.found !== undefined) return { activity: "active", activeSince: scan.found.ts };
+  if (scan === undefined || scan.damaged || !scan.complete) return { activity: "unknown" };
+  return { activity: "inactive" };
 };

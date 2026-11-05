@@ -217,7 +217,8 @@ const numbersIn = (text: string) => (text.match(/-?\d+(?:\.\d+)?/g) ?? []).sort(
 const schemaKinds = (schema: Schema): Array<string> =>
   schema.anyOf === undefined
     ? schema.type === "array"
-      ? [schema.items?.type ?? "", "array"]
+      ? // An item union of one kind (mute scopes are all objects) states that kind.
+        [...new Set(schema.items === undefined ? [""] : schemaKinds(schema.items)), "array"]
       : [schema.type ?? ""]
     : [...new Set(schema.anyOf.flatMap(schemaKinds))];
 

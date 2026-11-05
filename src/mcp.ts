@@ -18,6 +18,7 @@ import {
   InvalidTopics,
   LedgerError,
   Message,
+  MuteScope,
   NotJoined,
   NotOwner,
   Origin,
@@ -137,6 +138,66 @@ export const Published = Schema.Struct({
   id: Schema.String.annotate({ description: "The new message's id, for replies to name." }),
   ts: Schema.String.annotate({ description: "When it was sent (ISO 8601)." }),
 });
+/**
+ * What bus_publish answers: the sent message's id and ts, or NOT_SENT for an unconfirmed pierce
+ * of all. One object, not a union: structured output needs an object root.
+ */
+export const PublishResult = Schema.Struct({
+  id: Schema.optionalKey(Published.fields.id),
+  ts: Schema.optionalKey(Published.fields.ts),
+  status: Schema.optionalKey(
+    Schema.Literal("NOT_SENT").annotate({
+      description: "Nothing was sent: piercing all needs this exact set confirmed.",
+    })
+  ),
+  bypass: Schema.optionalKey(
+    Schema.Array(Schema.String).annotate({
+      description:
+        "With NOT_SENT: the audience members it would wake despite inactivity or mutes, beyond those it addresses directly.",
+    })
+  ),
+  digest: Schema.optionalKey(
+    Schema.String.annotate({
+      description:
+        "With NOT_SENT: repeat the identical call with this as confirm to send it, piercing exactly bypass.",
+    })
+  ),
+});
+const Activity = Schema.Literals(["active", "inactive", "unknown"]).annotate({
+  description:
+    "Activity at cut; unknown when evidence is damaged or unread, which wakes as active.",
+});
+/** bus_activity's receipt, one object for the same reason; status says which fields it has. */
+export const ActivityResult = Schema.Struct({
+  status: Schema.Literals(["APPLIED", "CONFLICT", "UNKNOWN", "IDENTITY_MISMATCH"]).annotate({
+    description:
+      "APPLIED: in force at its commit. CONFLICT: nothing changed. UNKNOWN: it may have committed; retry only the identical intent with the same operation. IDENTITY_MISMATCH: this operation already records a different intent; nothing was written.",
+  }),
+  operation: Schema.String.annotate({ description: "The operation, lowercased." }),
+  cut: Schema.optionalKey(
+    Schema.Struct({
+      head: Schema.Int.annotate({ description: "The command's own commit." }),
+      incarnation: Schema.String.annotate({
+        description: "The ledger incarnation it was read in.",
+      }),
+    }).annotate({ description: "With APPLIED or CONFLICT: where the verdict was read." })
+  ),
+  activity: Schema.optionalKey(
+    Activity.annotate({ description: "With APPLIED: activity at cut." })
+  ),
+  activeSince: Schema.optionalKey(
+    Schema.String.annotate({ description: "With APPLIED: when it became active, if it is." })
+  ),
+  mutes: Schema.optionalKey(
+    Schema.Array(MuteScope).annotate({ description: "With APPLIED: the mutes in force at cut." })
+  ),
+  reason: Schema.optionalKey(
+    Schema.Literals(["not-joined", "not-holder", "stale-run"]).annotate({
+      description:
+        "With CONFLICT: at its commit the address had no joined holder, another holder, or a newer run (a replay).",
+    })
+  ),
+});
 export const Left = Schema.Struct({
   address: Schema.String.annotate({ description: "The address you left." }),
 });
@@ -171,6 +232,16 @@ export const Peers = Schema.Struct({
       ),
       note: Schema.optionalKey(
         Schema.String.annotate({ description: "What it said it is working on." })
+      ),
+      // Optional so the CLI still decodes older servers, which have no activity.
+      activity: Schema.optionalKey(Activity),
+      activeSince: Schema.optionalKey(
+        Schema.String.annotate({ description: "When it became active, if it is." })
+      ),
+      mutes: Schema.optionalKey(
+        Schema.Array(MuteScope).annotate({
+          description: "Scopes whose ambient mail does not wake it.",
+        })
       ),
     })
   ),
@@ -285,8 +356,45 @@ const Publish = Tool.make("bus_publish", {
           "The id of the message this answers. Links the conversation; only to routes it.",
       })
     ),
+    pierce: Schema.optionalKey(
+      Schema.Union([Schema.Array(Schema.String), Schema.Literal("all")]).annotate({
+        description:
+          'Deliberately wake recipients despite their inactivity or mutes: addresses already in this message\'s audience (others are refused), or "all", which first returns NOT_SENT with the set and a digest to confirm. Never changes their activity.',
+      })
+    ),
+    confirm: Schema.optionalKey(
+      Schema.String.annotate({
+        description: 'The digest a pierce of "all" returned, to send the identical message.',
+      })
+    ),
   }),
-  success: Published,
+  success: PublishResult,
+  failure: Failure,
+}).annotateMerge(Local);
+
+// A write, though not destructive: it changes only the caller's own address.
+const SetActivity = Tool.make("bus_activity", {
+  description:
+    "Set your address's activity, mutes or both. Going inactive is do-not-disturb: programme, topic and project/concern mail stop waking you, but direct mail still wakes you and reactivates you. mutes replaces your muted scopes, whatever your activity. Supply a UUIDv7 operation; a retry with it returns the original receipt. Retry an UNKNOWN only with the identical intent and the same operation.",
+  parameters: Schema.Struct({
+    address: Address,
+    session: Session,
+    operation: Schema.String.annotate({
+      description: "A UUIDv7 naming this change and all its retries.",
+    }),
+    activity: Schema.optionalKey(
+      Schema.Literals(["active", "inactive"]).annotate({
+        description: "inactive for do-not-disturb; active to be woken by ambient mail again.",
+      })
+    ),
+    mutes: Schema.optionalKey(
+      Schema.Array(MuteScope).annotate({
+        description:
+          "Your complete mute set, replacing the current one ([] clears): programme mutes *, topic one #topic, directory every concern topic of a registered directory, concern one concern's topic.",
+      })
+    ),
+  }),
+  success: ActivityResult,
   failure: Failure,
 }).annotateMerge(Local);
 
@@ -549,6 +657,7 @@ const BusToolkit = Toolkit.make(
   Join,
   Takeover,
   Publish,
+  SetActivity,
   Directory,
   Bulletin,
   Orient,
@@ -635,6 +744,9 @@ const peersPreset = Effect.gen(function* () {
         topics: row.topics,
         ...(row.host === undefined ? {} : { host: row.host }),
         ...(row.note === undefined ? {} : { note: row.note }),
+        activity: row.activity,
+        ...(row.activeSince === undefined ? {} : { activeSince: row.activeSince }),
+        mutes: row.mutes,
       });
     }
     cursor = page.next;
@@ -711,7 +823,8 @@ const BusHandlers = BusToolkit.toLayer(
       bus_publish: (params) =>
         bus
           .publish({ ...params, session: params.session })
-          .pipe(Effect.map(({ id, ts }) => ({ id, ts }))),
+          .pipe(Effect.map((sent) => ("status" in sent ? sent : { id: sent.id, ts: sent.ts }))),
+      bus_activity: (params) => bus.activity({ ...params, session: params.session }),
       bus_directory: (params) => updateDirectory(params).pipe(Effect.provide(environment)),
       bus_bulletin: (params) => updateBulletin(params).pipe(Effect.provide(environment)),
       bus_orient: (params) => timedOrient(params),

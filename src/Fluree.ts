@@ -1,9 +1,12 @@
 import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { directAt, logAt } from "./activity-read.ts";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import {
   type Admission,
+  type CommandRead,
+  commandIri,
   type Designation,
   type DesignationResult,
   Ledger,
@@ -842,6 +845,69 @@ export const layerFluree = (config: FlureeConfig) =>
           ),
       });
 
+      /** The command at one cut; a partial node is never an absent one. */
+      const commandAt = (operation: string, cut: Pin) =>
+        Effect.gen(function* () {
+          const subject = commandIri(operation);
+          const predicates = yield* guardedQuery(cut.head, {
+            select: "?predicate",
+            where: { "@id": subject, "?predicate": "?object" },
+          }).pipe(Effect.flatMap(decode(Strings)));
+          if (predicates.length === 0) return { status: "ABSENT", cut } satisfies CommandRead;
+          // A literal subject binds a zero `@t`: bind the IRI through a typed `values` instead.
+          const rows = yield* guardedQuery(cut.head, {
+            select: ["?json", "?t"],
+            values: [["?c"], [[{ "@type": "@id", "@value": subject }]]],
+            where: {
+              "@id": "?c",
+              "@type": "bus:AddressCommand",
+              "bus:command": { "@value": "?json", "@t": "?t" },
+            },
+          }).pipe(Effect.flatMap(decode(Rows)), Effect.option);
+          const row = Option.isSome(rows) && rows.value.length === 1 ? rows.value[0] : undefined;
+          if (row === undefined) return { status: "MALFORMED", cut } satisfies CommandRead;
+          const [json, t] = row;
+          return { status: "FOUND", json, t, cut } satisfies CommandRead;
+        });
+
+      const readCommand = (operation: string) =>
+        bounded(
+          Effect.gen(function* () {
+            const id = yield* guardedIncarnation;
+            if (id !== instance) return { status: "UNAVAILABLE" } satisfies CommandRead;
+            const head = yield* guardedHead;
+            const result = yield* commandAt(operation, { head, incarnation: id });
+            if ((yield* guardedIncarnation) !== id) {
+              return { status: "UNAVAILABLE" } satisfies CommandRead;
+            }
+            return result;
+          })
+        ).pipe(
+          Effect.catch(() => Effect.succeed({ status: "UNAVAILABLE" } satisfies CommandRead)),
+          Effect.withSpan("Ledger.readCommand")
+        );
+
+      /** One update that inserts the command only while its node holds none. */
+      const appendCommand = (operation: string, json: string) =>
+        bounded(
+          guardedSend(
+            HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
+              HttpClientRequest.bodyJsonUnsafe({
+                "@context": context,
+                where: [
+                  ["optional", { "@id": commandIri(operation), "bus:command": "?existing" }],
+                  ["filter", "(not (bound ?existing))"],
+                ],
+                insert: {
+                  "@id": commandIri(operation),
+                  "@type": "bus:AddressCommand",
+                  "bus:command": json,
+                },
+              })
+            )
+          )
+        ).pipe(Effect.asVoid, Effect.withSpan("Ledger.appendCommand"));
+
       return Context.make(
         Ledger,
         Ledger.of({
@@ -854,6 +920,11 @@ export const layerFluree = (config: FlureeConfig) =>
           changes,
           presenceAt,
           admit,
+          appendCommand,
+          readCommand,
+          log: (t) => logAt(gateway, t).pipe(Effect.withSpan("Ledger.log")),
+          direct: (address, after, upTo) =>
+            directAt(gateway, address, after, upTo).pipe(Effect.withSpan("Ledger.direct")),
         })
       ).pipe(Context.add(QueryGateway, gateway));
     })

@@ -700,6 +700,9 @@ describe("aggregates and peers", () => {
         since: expect.any(String),
         t: expect.any(Number),
         note: "public note",
+        activity: "active",
+        activeSince: expect.any(String),
+        mutes: [],
       },
       expect.objectContaining({ address: "codex/b", status: "joined" }),
     ]);

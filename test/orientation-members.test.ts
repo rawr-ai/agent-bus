@@ -120,6 +120,10 @@ const expected = (
   since: `2026-11-01T00:${String(t).padStart(2, "0")}:00.000Z`,
   t,
   host: "fixture-host",
+  activity: "active" as const,
+  // Alice's same-session join at t=10 is a replay: it keeps her anchor at her join at t=2.
+  activeSince: `2026-11-01T00:${String(address === "alice" ? 2 : t).padStart(2, "0")}:00.000Z`,
+  mutes: [],
   association,
   resolution: {
     directory: "REGISTERED" as const,
@@ -180,6 +184,8 @@ const fixture = () => {
             ];
           if (query.select !== undefined && JSON.stringify(query.select) === '["?predicate"]')
             return [];
+          // No address commands are stored here.
+          if (JSON.stringify(query.select) === '["?c","?json","?t"]') return [];
           if (JSON.stringify(query.selectDistinct) === '["?m"]')
             return missingIdAt !== undefined && missingIdAt <= t ? [["urn:unkeyed-presence"]] : [];
           return rows.filter((row) => row[0] <= t);
@@ -231,9 +237,12 @@ describe("orientation members", () => {
       expected("eve", 13, a, [], "REGISTERED"),
     ]);
     expect(Object.keys(filtered.rows[0] ?? {}).sort()).toEqual([
+      "activeSince",
+      "activity",
       "address",
       "association",
       "host",
+      "mutes",
       "resolution",
       "runtime",
       "since",
@@ -604,8 +613,11 @@ const testRealPresenceDamage = async (damage: "missing-json" | "missing-id") => 
           status: "joined",
         });
         expect(Object.keys(result.rows[0] ?? {}).sort()).toEqual([
+          "activeSince",
+          "activity",
           "address",
           "association",
+          "mutes",
           "resolution",
           "runtime",
           "since",

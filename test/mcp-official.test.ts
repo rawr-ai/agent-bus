@@ -170,6 +170,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_join: changes,
       bus_takeover: { ...changes, destructiveHint: true },
       bus_publish: changes,
+      bus_activity: changes,
       bus_directory: changes,
       bus_bulletin: changes,
       bus_orient: lookup,
@@ -240,7 +241,9 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     const required = {
       bus_join: ["address", "associations", "cursor"],
       bus_takeover: ["address", "associations", "cursor"],
-      bus_publish: ["id", "ts"],
+      // A NOT_SENT answer has no id or ts, so nothing is required.
+      bus_publish: undefined,
+      bus_activity: ["status", "operation"],
       bus_directory: ["status", "operation", "expected"],
       bus_bulletin: ["status", "operation", "expected"],
       bus_orient: ["status"],
@@ -372,6 +375,9 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       topics: ["projection"],
       host: hostname(),
       note: "public coordination note",
+      activity: "active",
+      activeSince: expect.any(String),
+      mutes: [],
     });
     for (const name of ["bus_read", "bus_wait", "bus_history", "bus_peers"]) {
       const schema = JSON.stringify(tools.find((tool) => tool.name === name)?.outputSchema);

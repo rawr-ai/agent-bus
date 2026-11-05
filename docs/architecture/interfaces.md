@@ -63,6 +63,7 @@ Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas
 | `bus_join` | Claim a free address, or reconnect to your own, and announce your runtime and topics to the peers |
 | `bus_takeover` | Replace the session that holds an address, naming its join id; only when the human says so |
 | `bus_publish` | Send a message to addresses, `#topic` subscribers or `*` |
+| `bus_activity` | Set your address's activity (do-not-disturb) and muted scopes |
 | `bus_directory` | Register or replace one directory and notify an explicitly named audience |
 | `bus_bulletin` | Publish or withdraw programme or registered-concern guidance and notify its audience |
 | `bus_orient` | Read designated guidance, directory context and explicit associations at one cut |
@@ -118,10 +119,24 @@ Returns what `bus_join` returns. The holder id is checked only while another ses
 | `body` | string | yes | — | The message text, including who, if anyone, is asked to respond |
 | `subject` | string | no | none | A short subject line; `bus_history` searches it |
 | `replyTo` | string | no | none | The id of the message this answers. It does not route or inherit recipients; only `to` determines the reply's audience |
+| `pierce` | string array, or `"all"` | no | none | Wake recipients despite their inactivity or mutes, deliberately. Named addresses must be joined peers this message already reaches; any other is refused and nothing is sent, and those `to` names directly are dropped (direct mail wakes anyway). `"all"` first returns `NOT_SENT` with the set it would wake and a digest. A pierce never changes anyone's activity |
+| `confirm` | string | no | none | The `digest` a pierce of `"all"` returned: the identical call with it sends the message, piercing exactly that set |
 
-Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601).
+Returns the new message's `id` (for replies to name) and `ts` (when it was sent, ISO 8601). A pierce of `"all"` without a matching `confirm` writes nothing and returns instead `status` `NOT_SENT`, `bypass` (the sorted audience members it would wake despite inactivity or mutes: unknown counts as active, and directly addressed members and the sender are left out) and `digest` (a SHA-256 over the sender, recipients, subject, body, kind, reply and that set). Send it by repeating the call with `confirm` set to the digest; if anything changed in between, including the set, it returns `NOT_SENT` again with the new set and digest. Nothing is held between the two calls. The stored message records the pierced set as `pierce`, which never routes; serves older than this field ignore it and deliver normally.
 
 `to` entries remain literal and case-sensitive; join normalisation does not apply here. A `reviews` subscription receives `#reviews`, not `# reviews` or `#Reviews`. The bus does not flag unjoined or wrong-case targets, so check the intended audience with `bus_peers`.
+
+#### `bus_activity`
+
+| Parameter | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `address` | string | yes | — | Your joined address |
+| `session` | string | yes (optional in the schema) | — | As for `bus_join` |
+| `operation` | string | yes | — | A UUIDv7 naming this change and all its retries |
+| `activity` | `active` or `inactive` | one of `activity` and `mutes` | unchanged | `inactive` is do-not-disturb: programme, topic and directory/concern mail stop waking you, while direct mail still wakes and reactivates you. `active` lets ambient mail wake you again |
+| `mutes` | object array | one of `activity` and `mutes` | unchanged | Your complete mute set, replacing the current one; `[]` clears it. Each is `{scope: "programme"}` (`*` mail), `{scope: "topic", topic}`, `{scope: "directory", directory}` (every concern topic the registered directory has when each message commits) or `{scope: "concern", directory, concern}` (that concern's topic then). Duplicates merge and topics normalise as `bus_join`'s do |
+
+Returns `status` and `operation` (lowercased), and with `APPLIED` the `cut` (`head`, the command's own commit, and the ledger `incarnation`), `activity` (`active`, `inactive` or `unknown`) and `mutes` in force there, with `activeSince` (ISO 8601) when it is active; with `CONFLICT`, the `cut` and a `reason`: `not-joined`, `not-holder` or `stale-run` (a replay started a newer run before the command committed). Every accepted call writes one command node, so going inactive again moves the inactivity anchor rather than doing nothing. Its verdict is decided at its own commit: if a takeover or a replay committed first, it is `CONFLICT` and nothing changed. `UNKNOWN` means it may have committed: retry only the identical intent with the same `operation`, which finds the recorded command, returns its original receipt and writes nothing. The same `operation` with a different intent returns `IDENTITY_MISMATCH` and writes nothing. [Delivery](delivery.md) gives the wake law the activity and mutes feed.
 
 #### `bus_directory`
 
@@ -204,7 +219,7 @@ Returns only `addresses`, the complete latest joined holdings for that exact ses
 
 #### `bus_peers`
 
-No parameters. Returns `peers`, read at the current head by paging `bus_run_query`'s `peers` operation: for each joined peer, `address`, `runtime` (the one it joined as), `topics` (the ones it receives `#topic` messages for) and, when present, `host` (the machine it joined from) and `note` (what it said it is working on). Stored `session`, `codexThreadId` and wake state are not returned. Joins written without an owning session are ignored. This is current state, with no `t` input or output, not historical membership.
+No parameters. Returns `peers`, read at the current head by paging `bus_run_query`'s `peers` operation: for each joined peer, `address`, `runtime` (the one it joined as), `topics` (the ones it receives `#topic` messages for) and, when present, `host` (the machine it joined from) and `note` (what it said it is working on), with `activity` (`active`, `inactive` or `unknown`), `activeSince` when known, and `mutes` (`[]` when none), folded at that head as delivery folds them. An older serve returns no activity fields. Stored `session`, `codexThreadId` and wake state are not returned. Joins written without an owning session are ignored. This is current state, with no `t` input or output, not historical membership.
 
 #### `bus_history`
 
@@ -276,6 +291,7 @@ Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and n
 | `bus_join` | false | false | false | false | No |
 | `bus_takeover` | false | **true** | false | false | **Yes**; refused under approval policy `never` |
 | `bus_publish` | false | false | false | false | No |
+| `bus_activity` | false | false | false | false | No |
 | `bus_directory` | false | false | false | false | No |
 | `bus_bulletin` | false | false | false | false | No |
 | `bus_orient` | true | false | false | false | No |
@@ -309,6 +325,10 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | "`<address>` changed while this call was deciding, so nothing was written. Call again: the bus will decide against the address's current state." | `bus_join`, `bus_takeover` or `bus_leave` decided against a presence that another call, from this session or another, changed before the write; the write was refused inside the ledger and the cursor is as it was. Returned only when the current state gives no refusal of its own, which is returned instead | Call again once; the bus decides against the current state. Don't loop on it |
 | "The bus could not confirm whether this `<join\|leave>` of `<address>` was recorded: it may or may not have committed, and nothing was undone. Calling it again is safe, since the bus decides against the address's current state, but that result doesn't show what this attempt did." | The ledger's answer to a join, takeover or leave was lost or unreadable, or the ledger was replaced, and its entry can't be found. The cursor a join set is kept | Call again if you still need the change; its own result or refusal is authoritative for the current state. Neither it nor `bus_peers`, which doesn't show sessions, says whether the unconfirmed attempt landed |
 | "The ledger was replaced while this call read it; nothing was written. Call again." | The ledger was replaced between a join's or leave's presence read and its write | Call again |
+| "`<address>` has not joined the bus; this call wrote nothing (operation `<operation>` was absent at t=`<t>`)." | `bus_activity` for an address with no joined holder at the cut where its operation was absent | `bus_join` first, with a new operation. It says nothing of another attempt with the same operation |
+| "`<address>` belongs to another session; this call wrote nothing (operation `<operation>` was absent at t=`<t>`)." | `bus_activity` from a session that doesn't hold the address at that cut | Join an address of your own |
+| "`<address>` is not in this message's audience: pierce names only joined peers it already reaches. Nothing was sent." | `bus_publish` with a named `pierce` address that isn't a joined peer its `to` reaches, the sender included | Pierce only members of the audience, or add the address to `to` |
+| "operation must be a UUIDv7, the same for every retry. …" | `bus_activity` with an `operation` that isn't a UUIDv7. Each input refusal ends "Nothing was written.", as do "Give activity, mutes or both.", an `activity` other than `active` or `inactive`, or a mute that isn't one of the four scopes | Correct the input; nothing was read or written |
 | "`<address>` has not joined the bus; join first." | The same four tools on an address with no current join: never joined, left, or no cursor on this machine's ledger | `bus_join` first. If a wake text told you not to rejoin, end the turn instead |
 | "Cursor t=<t> is ahead of <ledger> (t=<head>): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again." | A read or wait finds the address's cursor beyond the ledger's end (a wake logs it and skips that address for the pass) | Tell the human; it is theirs to settle ([recover](../runbooks/recover.md#a-cursor-is-ahead-of-the-ledger)). A plain rejoin changes nothing; only a rejoin with `replay`, once the human agrees to receive the past mail again, resets the cursor |
 | "A ledger entry at t=<t> could not be decoded." | A complete read or presence history contains malformed or schema-invalid stored JSON at commit `t`, or a presence whose stored node, sender or entry count doesn't match its JSON | Tell the human the commit; no partial read or ownership inference is made ([recover](../runbooks/recover.md#an-entry-cannot-be-decoded)) |
