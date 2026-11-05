@@ -26,6 +26,7 @@ import {
   busOn,
   commandAssertions,
   commandBoundary,
+  commandIri,
   commandValues,
   context,
   cwd,
@@ -815,9 +816,14 @@ describe("a damaged standing fails the read", () => {
           await takeOver(a, x);
           await unreadable(config, a, successor);
 
-          // Repair: the damaged value retracted, the ledger reads again, the takeover's reset intact.
+          // Repair: the damaged node retracted whole, its type included, so no typed shell is
+          // left; the ledger reads again, the takeover's reset intact.
           await update(config, {
-            remove: { "@id": damaged["@id"], "bus:command": damaged["bus:command"] },
+            remove: {
+              "@id": damaged["@id"],
+              "@type": damaged["@type"],
+              "bus:command": damaged["bus:command"],
+            },
           });
           expect(await peerRow(a, x)).toMatchObject({ activity: "active", mutes: [] });
           expect(
@@ -827,6 +833,33 @@ describe("a damaged standing fails the read", () => {
       TIMEOUT
     );
   }
+
+  test(
+    "an accepted mute whose command value alone is retracted fails the read; restored, the mute reads again",
+    () =>
+      scoped(async (track) => {
+        const config = await freshFluree("retracted-command");
+        const a = await open(track, config);
+        await a.run(joinAs(x));
+        const operation = uuid();
+        expect(plain(await a.run(act(x, { mutes: [programme], operation })))).toMatchObject({
+          status: "APPLIED",
+        });
+        expect(sortedMutes((await peerRow(a, x))?.mutes)).toEqual(sortedMutes([programme]));
+        const [[value] = []] = await commandValues(config, operation);
+        expect(typeof value).toBe("string");
+
+        // The typed node stays without its value: the mute isn't silently lost, the read fails.
+        await update(config, { remove: { "@id": commandIri(operation), "bus:command": value } });
+        expect(await commandValues(config, operation)).toEqual([]);
+        await unreadable(config, a);
+
+        // Repair: the value restored; the accepted mute reads again.
+        await insertRaw(config, rawCommand(operation, String(value)));
+        expect(sortedMutes((await peerRow(a, x))?.mutes)).toEqual(sortedMutes([programme]));
+      }),
+    TIMEOUT
+  );
 
   test(
     "bus_peers over MCP, through the official client, is an error naming the damage",
@@ -912,7 +945,11 @@ describe("a damaged standing fails the read", () => {
       damage: () => insertRaw(config, damaged),
       repair: () =>
         update(config, {
-          remove: { "@id": damaged["@id"], "bus:command": damaged["bus:command"] },
+          remove: {
+            "@id": damaged["@id"],
+            "@type": damaged["@type"],
+            "bus:command": damaged["bus:command"],
+          },
         }),
       /** Mail from y, its id. */
       send: async (

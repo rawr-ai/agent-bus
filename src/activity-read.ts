@@ -46,7 +46,9 @@ const PresenceRows = Schema.Array(
     Schema.NullOr(Schema.String),
   ])
 );
-const CommandRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.Number]));
+const CommandRows = Schema.Array(
+  Schema.Tuple([Schema.String, Schema.NullOr(Schema.String), Schema.NullOr(Schema.Number)])
+);
 const decodeEntry = Schema.decodeUnknownOption(MessageJson);
 const decodeCommand = Schema.decodeUnknownOption(AddressCommandJson, {
   onExcessProperty: "error",
@@ -146,12 +148,13 @@ export const logAt = (gateway: Gateway, t: number) =>
       .pipe(Effect.flatMap(decodeRows(PresenceRows)));
     const commands = yield* gateway
       .jsonld(t, {
+        // Every typed command node, a missing value included: one isn't dropped from the fold.
         select: ["?c", "?json", "?t"],
         where: [
           { "@id": "?c", "@type": "bus:AddressCommand" },
-          { "@id": "?c", "bus:command": { "@value": "?json", "@t": "?t" } },
+          ["optional", { "@id": "?c", "bus:command": { "@value": "?json", "@t": "?t" } }],
         ],
-        orderBy: "?t",
+        orderBy: "?c",
       })
       .pipe(Effect.flatMap(decodeRows(CommandRows)));
     const log: Array<Logged> = [];
@@ -164,6 +167,8 @@ export const logAt = (gateway: Gateway, t: number) =>
     }
     const nodes = new Map<string, Array<readonly [string, number]>>();
     for (const [subject, json, at] of commands) {
+      // A command node with no value has no commit of its own to name: the read's commit does.
+      if (json === null || at === null) return yield* undecodable(t);
       nodes.set(subject, [...(nodes.get(subject) ?? []), [json, at]]);
     }
     for (const [subject, values] of nodes) {

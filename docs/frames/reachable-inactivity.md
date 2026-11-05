@@ -16,7 +16,7 @@ The owner's own words, 2026-11-05:
 ## Adjustment: damaged standing fails the read
 
 The director's decision of 2026-11-05, made after review of the implementation. The rest of this frame keeps the accepted text; where it says a damaged presence or command makes an address `unknown`, this section governs instead.
-- A presence or command entry that can't be read, including a presence the guarded presence read refuses, no longer folds as `unknown` with reason `damaged-log`. The read that needs the standing fails with the existing ledger error, as the guarded presence read already does, and `bus_activity` writes nothing.
+- A presence or command entry that can't be read, including a presence the guarded presence read refuses and a typed node left without its value, no longer folds as `unknown` with reason `damaged-log`. The read that needs the standing fails with the existing ledger error, as the guarded presence read already does, and `bus_activity` writes nothing.
 - Why: `unknown` beside an empty mute set looked authoritative when the accepted mutes might have been lost, and a damaged presence can't be dated or healed by a later reset, since a retraction leaves no commit of its own.
 - `unknown` now means only activity uncertainty from direct mail (`damaged-mail`, `incomplete-scan`), with the standing and its mutes intact.
 - The `peers` query, and so `bus_peers`, the viewer's peers panel and orientation members with activity, fail the same way. This changes `peers`' earlier contract, which skipped an unreadable presence and counted it as damaged; `history`, `messages`, `thread` and `search` keep counting damage.
