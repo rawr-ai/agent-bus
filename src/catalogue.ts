@@ -25,10 +25,11 @@ import {
   Window,
   windowProblem,
 } from "./history-args.ts";
-import { scopeIri } from "./Ledger.ts";
+import { messageIri, scopeIri } from "./Ledger.ts";
 import { checkoutMatches } from "./orientation-model.ts";
 import { DAMAGE_MESSAGE, directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
+import { type QueryEnvelope } from "./query-envelope.ts";
 import {
   largestFitting,
   MAX_QUERY_LENGTH,
@@ -56,7 +57,7 @@ const MAX_GROUPS = 10_000;
 const MAX_DAY_ROWS = 100_000;
 const MAX_WINDOW_DAYS = 366;
 
-const MESSAGE_IRI = "urn:agent-bus:message:";
+const MESSAGE_IRI = messageIri("");
 
 const invalid = (message: string) => new InvalidQuery({ message });
 const invalidResponse = () => new LedgerError({ message: "Fluree returned an invalid response." });
@@ -315,7 +316,12 @@ interface Fetched<Row> {
   readonly more: boolean;
   /** Damaged entries met on this page that hold no position (peers folds them all at once). */
   readonly damagedOutside?: ReadonlyArray<number>;
-  readonly extra?: Readonly<Record<string, unknown>>;
+  readonly extra?: Partial<
+    Pick<
+      typeof QueryEnvelope.Type,
+      "root" | "members" | "missingReplyTargets" | "total" | "totals" | "missingJson"
+    >
+  >;
 }
 
 interface At {
@@ -351,26 +357,9 @@ interface Spec<S extends Schema.Top & { readonly DecodingServices: never }, Row>
   readonly fetch: Fetch<S["Type"], Row>;
 }
 
-export interface Envelope<Row> {
-  readonly name: string;
-  readonly catalogueVersion: number;
-  readonly ledger: string;
-  readonly t: number;
-  readonly currentHeadT?: number;
-  readonly unit: string;
-  readonly args: Readonly<Record<string, unknown>>;
+export type Envelope<Row> = Omit<typeof QueryEnvelope.Type, "rows"> & {
   readonly rows: ReadonlyArray<Row>;
-  readonly damage: "checked" | "not-checked";
-  readonly damaged: number;
-  readonly damagedAt?: ReadonlyArray<number>;
-  readonly damagedTotal: number;
-  readonly exhausted: boolean;
-  readonly complete: boolean;
-  readonly next?: string;
-  readonly note: string;
-  readonly notFound?: ReadonlyArray<string>;
-  readonly [extra: string]: unknown;
-}
+};
 
 export interface RunInput {
   readonly t?: number | undefined;
@@ -1339,7 +1328,7 @@ export const peers = define({
     }),
 });
 
-const DIRECTORY_PREFIX = "urn:agent-bus:orientation:directory:";
+const DIRECTORY_PREFIX = scopeIri({ kind: "directory", directory: "" });
 const SubjectRows = Schema.Array(Schema.Tuple([Schema.String]));
 const isOrientationId = Schema.is(OrientationId);
 

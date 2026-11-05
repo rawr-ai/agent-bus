@@ -547,7 +547,12 @@ describe("entries", () => {
     const a = message({ from: "claude/a", to: ["codex/b"], body: "a" });
     const b = message({ from: "codex/b", to: ["claude/a"], body: "b" });
     await bus.append(a, b);
-    const pinned = (await bus.run("messages", { ids: [a.id] })).t;
+    const first = await bus.run("messages", { ids: [a.id] });
+    expect(first.notFound).toEqual([]);
+    expect(first).not.toHaveProperty("currentHeadT");
+    expect(first).not.toHaveProperty("next");
+    expect(first).not.toHaveProperty("damagedAt");
+    const pinned = first.t;
     const later = message({ from: "claude/a", to: ["codex/b"], body: "later" });
     await bus.append(later);
     const page = await bus.run("messages", { ids: [b.id, later.id, a.id] }, { t: pinned });

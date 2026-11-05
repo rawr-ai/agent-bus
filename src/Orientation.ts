@@ -1,7 +1,7 @@
 import { Clock, Context, Effect } from "effect";
 import { Bus, originFor } from "./Bus.ts";
 import { InvalidQuery, Message } from "./domain.ts";
-import { type DesignationResult, type DesignationScope, Ledger } from "./Ledger.ts";
+import { type DesignationResult, Ledger } from "./Ledger.ts";
 import {
   BULLETIN_BODY_BYTES,
   BULLETIN_UNIT_BYTES,
@@ -9,10 +9,12 @@ import {
   type BulletinScope,
   type BulletinUpdate,
   bulletinFits,
+  bulletinIntent,
   canonicalJson,
   DIRECTORY_METADATA_BYTES,
   type DirectoryRecord,
   type DirectoryUpdate,
+  directoryIntent,
   jsonBytes,
   normalizeAudience,
   normalizeDirectory,
@@ -26,7 +28,7 @@ type Gateway = Context.Service.Shape<typeof QueryGateway>;
 type Store = Context.Service.Shape<typeof Ledger>;
 const invalid = (message: string) => new InvalidQuery({ message });
 
-const directoryScope = (directory: string): DesignationScope => ({ kind: "directory", directory });
+const directoryScope = (directory: string) => ({ kind: "directory" as const, directory });
 const cutFor = (gateway: Gateway) => gateway.pin;
 
 const receipt = (message: Message) =>
@@ -115,14 +117,15 @@ export const updateDirectory = (input: DirectoryUpdate) =>
         if (audience.length === 0)
           return yield* invalid("A directory update requires a nonempty audience.");
         const scope = directoryScope(directory.id);
-        const intent = canonicalJson({
-          action: "replace",
-          scope,
-          expected,
-          directory,
-          audience,
-          publisher: input.from,
-        });
+        const intent = canonicalJson(
+          directoryIntent({
+            scope,
+            expected,
+            directory,
+            audience,
+            publisher: input.from,
+          })
+        );
         const prior = yield* replay(store, operation, intent);
         if (prior !== undefined) return { ...prior, operation, expected };
         const now = new Date(yield* Clock.currentTimeMillis).toISOString();
@@ -207,20 +210,17 @@ export const updateBulletin = (input: BulletinUpdate) =>
             : yield* normalizeAudience(input.recipients, true);
         const expiresAt =
           input.expiresAt === undefined ? undefined : new Date(input.expiresAt).toISOString();
-        const intent = canonicalJson({
-          action: input.action,
-          scope: input.scope,
-          expected,
-          publisher: input.from,
-          ...(input.body === undefined ? {} : { body: input.body }),
-          ...(expiresAt === undefined ? {} : { expiresAt }),
-          audience:
-            input.action === "withdraw"
-              ? { previous: true }
-              : input.scope.kind === "programme"
-                ? { programme: true }
-                : { concernTopic: true, recipients: recipients ?? [] },
-        });
+        const intent = canonicalJson(
+          bulletinIntent({
+            action: input.action,
+            scope: input.scope,
+            expected,
+            publisher: input.from,
+            body: input.body,
+            expiresAt,
+            recipients,
+          })
+        );
         const prior = yield* replay(store, operation, intent);
         if (prior !== undefined) return { ...prior, operation, expected };
         const pin = yield* cutFor(gateway);

@@ -28,17 +28,17 @@ import { updateBulletin, updateDirectory } from "./Orientation.ts";
 import { ORIENT_DEADLINE, orient } from "./OrientationView.ts";
 import {
   BulletinUpdate,
-  BulletinView,
-  Cut,
-  DirectoryRecord,
   DirectoryUpdate,
-  OrientationRecovery,
+  OrientationResult,
   OrientRequest,
   WriteResult,
 } from "./orientation-model.ts";
 import { QueryGateway } from "./Query.ts";
+import { QueryEnvelope } from "./query-envelope.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
+
+export { OrientationResult } from "./orientation-model.ts";
 
 const Failure = Schema.Union([
   LedgerError,
@@ -69,156 +69,6 @@ const PublicMessage = Schema.Struct({
   origin: Schema.optionalKey(PublicOrigin),
 });
 export const Messages = Schema.Struct({ messages: Schema.Array(PublicMessage) });
-
-const OrientationPage = Schema.Struct({
-  name: Schema.String.annotate({ description: "The saved query that owns this page." }),
-  catalogueVersion: Schema.Int.annotate({ description: "The query catalogue version." }),
-  ledger: Schema.String.annotate({ description: "The ledger incarnation read." }),
-  t: Schema.Int.annotate({ description: "The commit read for every row." }),
-  currentHeadT: Schema.optionalKey(
-    Schema.Int.annotate({ description: "The later observed head, when it moved." })
-  ),
-  unit: Schema.String.annotate({ description: "The unit represented by one row." }),
-  args: Schema.Record(Schema.String, Schema.Unknown).annotate({
-    description: "The normalized query arguments.",
-  }),
-  rows: Schema.Array(Schema.Unknown).annotate({
-    description: "Whole rows as described by the saved-query catalogue.",
-  }),
-  damage: Schema.Literals(["checked", "not-checked"]).annotate({
-    description: "Whether entries were checked for damage.",
-  }),
-  damaged: Schema.Int.annotate({ description: "Damaged units encountered on this page." }),
-  damagedAt: Schema.optionalKey(
-    Schema.Array(Schema.Int).annotate({
-      description: "Known commits of damaged units, when known.",
-    })
-  ),
-  damagedTotal: Schema.Int.annotate({
-    description: "Damaged units encountered in this traversal.",
-  }),
-  exhausted: Schema.Boolean.annotate({ description: "Whether no page follows at this cut." }),
-  complete: Schema.Boolean.annotate({
-    description: "Whether the declared relation and projection were read without damage.",
-  }),
-  next: Schema.optionalKey(
-    Schema.String.annotate({ description: "The query-owned continuation, when more units remain." })
-  ),
-  note: Schema.String.annotate({ description: "The query's scope and limits." }),
-});
-export const OrientationResult = Schema.Struct({
-  status: Schema.Literals(["COMPLETE", "INCOMPLETE", "UNAVAILABLE"]).annotate({
-    description:
-      "Aggregate completeness: unavailable may retain valid same-cut sections, including programme guidance.",
-  }),
-  cut: Schema.optionalKey(Cut.annotate({ description: "The ledger cut shared by the result." })),
-  currentHeadT: Schema.optionalKey(
-    Schema.Int.annotate({ description: "The later observed head, when it moved." })
-  ),
-  evaluatedAt: Schema.optionalKey(
-    Schema.String.annotate({ description: "When expiry was evaluated." })
-  ),
-  catalogueVersion: Schema.optionalKey(
-    Schema.Int.annotate({ description: "The separate saved-query catalogue version." })
-  ),
-  programme: Schema.optionalKey(
-    BulletinView.annotate({ description: "The designated programme bulletin." })
-  ),
-  selection: Schema.optionalKey(
-    Schema.Struct({
-      state: Schema.Literals(["SELECTED", "UNRESOLVED", "AMBIGUOUS", "MISSING"]).annotate({
-        description: "The directory selection outcome.",
-      }),
-      basis: Schema.Literals(["none", "alias", "explicit"]).annotate({
-        description: "How the selection was established.",
-      }),
-      directory: Schema.optionalKey(
-        Schema.String.annotate({ description: "The selected or missing directory id." })
-      ),
-    }).annotate({ description: "Directory selection and its basis." })
-  ),
-  directory: Schema.optionalKey(
-    Schema.Struct({
-      revision: Schema.String.annotate({ description: "The designated directory revision." }),
-      value: DirectoryRecord.annotate({
-        description: "The full directory and original provenance.",
-      }),
-    }).annotate({ description: "The selected directory, when resolved." })
-  ),
-  concern: Schema.optionalKey(
-    Schema.Struct({
-      id: Schema.String.annotate({ description: "The selected concern id." }),
-      state: Schema.Literals(["REGISTERED", "UNRESOLVED"]).annotate({
-        description: "Whether this concern is registered at the cut.",
-      }),
-      bulletin: Schema.optionalKey(
-        BulletinView.annotate({ description: "The selected concern's full bulletin." })
-      ),
-    }).annotate({ description: "The selected concern and its full bulletin." })
-  ),
-  summaries: Schema.optionalKey(
-    Schema.Array(
-      Schema.Struct({
-        concern: Schema.String.annotate({ description: "The summarized concern id." }),
-        bulletin: BulletinView.annotate({ description: "Its status without the full body." }),
-        route: Schema.Struct({
-          directory: Schema.String.annotate({ description: "The containing directory id." }),
-          concern: Schema.String.annotate({ description: "The concern to select." }),
-          t: Schema.Int.annotate({ description: "The original ledger cut." }),
-        }).annotate({ description: "Arguments for a same-cut orientation read." }),
-      })
-    ).annotate({ description: "Other concerns' statuses and same-cut read routes." })
-  ),
-  subscriptions: Schema.optionalKey(
-    Schema.Struct({
-      state: Schema.Literal("SEPARATE_QUERY").annotate({
-        description: "Subscriptions are not inferred from associations.",
-      }),
-      query: Schema.Literal("peers").annotate({
-        description: "The query that shows subscriptions.",
-      }),
-      t: Schema.Int.annotate({ description: "The cut to use for that query." }),
-    }).annotate({ description: "Where to inspect separately recorded topic subscriptions." })
-  ),
-  candidates: Schema.optionalKey(
-    OrientationPage.annotate({ description: "Directory candidate page and continuation." })
-  ),
-  members: Schema.optionalKey(
-    OrientationPage.annotate({
-      description: "Resolved explicit association page and continuation.",
-    })
-  ),
-  unresolvedAssociations: Schema.optionalKey(
-    OrientationPage.annotate({
-      description: "Explicit dangling references, not registered membership.",
-    })
-  ),
-  reason: Schema.optionalKey(
-    Schema.Literals(["DAMAGE", "INADMISSIBLE", "FAULT"]).annotate({
-      description: "Why the result is unavailable.",
-    })
-  ),
-  section: Schema.optionalKey(
-    Schema.Literals([
-      "query",
-      "programme",
-      "candidates",
-      "directory",
-      "concern",
-      "summaries",
-      "associations",
-      "result",
-    ]).annotate({ description: "The section that could not be established." })
-  ),
-  message: Schema.optionalKey(
-    Schema.String.annotate({ description: "A safe explanation of the unavailable section." })
-  ),
-  recovery: Schema.optionalKey(
-    OrientationRecovery.annotate({
-      description: "A read-only recovery route, retaining the cut when known.",
-    })
-  ),
-});
 
 const publicMessages = (messages: ReadonlyArray<Message>): typeof Messages.Type => ({
   messages: messages.map((message) => ({
@@ -609,56 +459,7 @@ const RunQuery = Tool.make("bus_run_query", {
       })
     ),
   }),
-  success: Schema.Struct({
-    name: Schema.String,
-    catalogueVersion: Schema.Int,
-    ledger: Schema.String.annotate({ description: "The ledger incarnation read." }),
-    t: Schema.Int.annotate({ description: "The commit every row was read at." }),
-    currentHeadT: Schema.optionalKey(
-      Schema.Int.annotate({ description: "The head when the page finished, if past t." })
-    ),
-    unit: Schema.String.annotate({ description: "What one row is." }),
-    args: Schema.Record(Schema.String, Schema.Unknown).annotate({
-      description: "The arguments as run, defaults included.",
-    }),
-    rows: Schema.Array(Schema.Unknown).annotate({
-      description: "This page's rows, shaped as bus_queries describes for the operation.",
-    }),
-    damage: Schema.Literals(["checked", "not-checked"]).annotate({
-      description:
-        "not-checked: counted from graph predicates; damaged stored entries are not detected.",
-    }),
-    damaged: Schema.Int.annotate({ description: "Unreadable entries passed on this page." }),
-    damagedAt: Schema.optionalKey(
-      Schema.Array(Schema.Int).annotate({ description: "Their commits, up to 20." })
-    ),
-    damagedTotal: Schema.Int.annotate({ description: "Unreadable entries passed so far." }),
-    exhausted: Schema.Boolean.annotate({ description: "No page follows at t." }),
-    complete: Schema.Boolean.annotate({
-      description: "Exhausted, and every record in the traversal was read.",
-    }),
-    next: Schema.optionalKey(
-      Schema.String.annotate({ description: "Pass as cursor for the next page at the same t." })
-    ),
-    note: Schema.String.annotate({ description: "The operation's scope and labelling limits." }),
-    notFound: Schema.optionalKey(Schema.Array(Schema.String)),
-    root: Schema.optionalKey(Schema.String),
-    members: Schema.optionalKey(Schema.Int),
-    missingReplyTargets: Schema.optionalKey(Schema.Array(Schema.String)),
-    total: Schema.optionalKey(Schema.Int),
-    totals: Schema.optionalKey(
-      Schema.Struct({
-        directorToCohort: Schema.Int,
-        observedTrafficDays: Schema.Int,
-        ratio: Schema.NullOr(Schema.Finite),
-      })
-    ),
-    missingJson: Schema.optionalKey(
-      Schema.Int.annotate({
-        description: "A lower bound on damaged entries in scope: those with no stored JSON at all.",
-      })
-    ),
-  }),
+  success: QueryEnvelope,
   failure: Failure,
 }).annotateMerge(Lookup);
 
@@ -890,7 +691,7 @@ const BusHandlers = BusToolkit.toLayer(
             return operation === undefined
               ? Effect.fail(new InvalidQuery({ message: `No saved query is named ${name}.` }))
               : operation.invoke(args ?? {}, { t, cursor }, MAX_ENVELOPE_BYTES);
-          }).pipe(Effect.map((envelope) => envelope as typeof RunQuery.successSchema.Type))
+          })
         ),
       bus_queries: () =>
         queries(

@@ -14,7 +14,7 @@ import * as Cursors from "../src/Cursors.ts";
 import { orientationAssociations } from "../src/catalogue.ts";
 import { InvalidQuery, LedgerError } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
-import { Ledger, scopeIri } from "../src/Ledger.ts";
+import { Ledger, scopeIri, witnessIri } from "../src/Ledger.ts";
 import { updateBulletin, updateDirectory } from "../src/Orientation.ts";
 import { orient } from "../src/OrientationView.ts";
 import { bulletinAt, directoryAt } from "../src/orientation-read.ts";
@@ -148,9 +148,23 @@ test("public MCP writes and read-only orientation expose matching text and struc
       scope: { kind: "programme" },
       action: "publish",
       body: "First programme guidance. TAIL-SENTINEL.",
+      expiresAt: "9999-12-31T23:59:59.1Z",
     });
     expect(written).toMatchObject({ status: "APPLIED", operation, revision: operation });
     const before = await f.run(Effect.flatMap(Ledger, (ledger) => ledger.end));
+    const storedIntent = await f.run(
+      Effect.flatMap(QueryGateway, (gateway) =>
+        gateway.jsonld(before, {
+          select: ["?intent"],
+          where: { "@id": witnessIri(operation), "bus:intent": "?intent" },
+        })
+      )
+    );
+    expect(storedIntent).toEqual([
+      [
+        '{"action":"publish","audience":{"programme":true},"body":"First programme guidance. TAIL-SENTINEL.","expected":null,"expiresAt":"9999-12-31T23:59:59.100Z","publisher":"publisher","scope":{"kind":"programme"}}',
+      ],
+    ]);
     const stale = await call("bus_bulletin", {
       from: "publisher",
       session: "publisher",
