@@ -536,18 +536,27 @@ export const layer = Layer.effect(
             ? previous.value
             : read.cut.head;
         const staged = Option.isNone(previous) || previous.value !== cursor;
-        if (staged) yield* cursors.set(input.address, cursor);
         const unstage = staged ? restore(input.address, previous) : Effect.void;
-        const message = yield* presenceMessage(input.address, presence, input.cwd).pipe(
-          Effect.tapError(() => unstage)
+        // Staging, the message and the restoration after a definite refusal can't be cut
+        // short by cancellation, so a cancelled call never leaves a refused join's cursor
+        // staged. Only the admission itself stays interruptible: cancelled there, its outcome
+        // is unknown, and the cursor is kept.
+        const admission = yield* Effect.uninterruptibleMask((interruptible) =>
+          Effect.gen(function* () {
+            if (staged) yield* cursors.set(input.address, cursor);
+            const message = yield* presenceMessage(input.address, presence, input.cwd).pipe(
+              Effect.tapError(() => unstage)
+            );
+            const admission = yield* interruptible(ledger.admit(message, read.cut)).pipe(
+              Effect.tapError(() => unstage)
+            );
+            if (admission.status === "REFUSED") yield* unstage;
+            return admission;
+          })
         );
-        const admission = yield* ledger
-          .admit(message, read.cut)
-          .pipe(Effect.tapError(() => unstage));
         // A possibly admitted join keeps its cursor: undoing it could skip the owner's mail.
         if (admission.status === "UNKNOWN") return yield* unconfirmed("join", input.address);
         if (admission.status === "REFUSED") {
-          yield* unstage;
           const now = yield* ledger.presenceAt(admission.cut.head);
           yield* decideJoin(input, session, latestPresences(now.entries));
           return yield* conflict(input.address);
