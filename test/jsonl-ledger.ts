@@ -130,7 +130,7 @@ export const layerJsonl = (file: string) =>
 
       // Any line past the basis that is a presence for the address, the same id, or
       // unreadable (which `read` would skip) refuses: the guard may refuse too often, never
-      // too rarely.
+      // too rarely. Command lines pass, as Fluree's command nodes are never presences.
       const admit = (presence: Message, basis: { readonly head: number }) =>
         Effect.gen(function* () {
           // An id already written, at any position, refuses: an entry is admitted once.
@@ -146,7 +146,7 @@ export const layerJsonl = (file: string) =>
           const lines = decoder
             .decode(bytes.subarray(0, complete))
             .split("\n")
-            .filter((line) => line.trim() !== "");
+            .filter((line) => line.trim() !== "" && !line.startsWith(COMMAND_MARK));
           for (const line of lines) {
             const decoded = yield* Effect.option(decode(line));
             if (
@@ -206,19 +206,20 @@ export const layerJsonl = (file: string) =>
           return { status: "FOUND", json: only.json, t: only.end, cut: at } satisfies CommandRead;
         }).pipe(Effect.orElseSucceed((): CommandRead => ({ status: "UNAVAILABLE" })));
 
-      // Conditional within this process, which is as far as the test double needs it to be.
-      const appendCommand = Effect.fn("Ledger.appendCommand")(function* (
-        operation: string,
-        json: string
-      ) {
-        const existing = yield* commandLines(Number.MAX_SAFE_INTEGER);
-        if (existing.some((line) => line.operation === operation)) return;
-        yield* fs
-          .writeFileString(file, `${JSON.stringify({ "@command": operation, command: json })}\n`, {
-            flag: "a",
-          })
-          .pipe(Effect.mapError(ledgerError));
-      });
+      // Conditional within this process, under the file's lock, which is as far as the test
+      // double needs it to be.
+      const appendCommand = (operation: string, json: string) =>
+        Effect.gen(function* () {
+          const existing = yield* commandLines(Number.MAX_SAFE_INTEGER);
+          if (existing.some((line) => line.operation === operation)) return;
+          yield* fs
+            .writeFileString(
+              file,
+              `${JSON.stringify({ "@command": operation, command: json })}\n`,
+              { flag: "a" }
+            )
+            .pipe(Effect.mapError(ledgerError));
+        }).pipe(locked, Effect.withSpan("Ledger.appendCommand"));
 
       const decodeCommand = Schema.decodeUnknownOption(AddressCommandJson, {
         onExcessProperty: "error",

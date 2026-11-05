@@ -65,6 +65,13 @@ const handle = async (layer: LedgerLayer) => {
       ),
     append: (message: Message) => use((ledger) => ledger.append(message)),
     admit: (message: Message, basis: Pin) => use((ledger) => ledger.admit(message, basis)),
+    command: (from: string) =>
+      use((ledger) =>
+        ledger.appendCommand(
+          Bun.randomUUIDv7(),
+          JSON.stringify({ address: from, runtime: "claude", session: "session:a", run: "run" })
+        )
+      ),
   };
 };
 
@@ -138,6 +145,19 @@ for (const backend of backends) {
         const { decider, writer } = await backend.make();
         const basis = await decider.cut();
         await writer.append(note(address));
+        expect((await decider.admit(presence(address, "session:a"), basis)).status).toBe(
+          "ADMITTED"
+        );
+      },
+      TIMEOUT
+    );
+
+    test(
+      "an address command for the address after the basis does not block",
+      async () => {
+        const { decider, writer } = await backend.make();
+        const basis = await decider.cut();
+        await writer.command(address);
         expect((await decider.admit(presence(address, "session:a"), basis)).status).toBe(
           "ADMITTED"
         );
@@ -248,10 +268,10 @@ describe("presence guard (jsonl): two Bus layers on one file", () => {
             ),
         })
       )
-    ).pipe(Layer.provide(layerJsonl(file).pipe(Layer.provide(platform))));
+    ).pipe(Layer.provideMerge(layerJsonl(file).pipe(Layer.provide(platform))));
     const runtime = ManagedRuntime.make(
       Bus.layer.pipe(
-        Layer.provideMerge(ledger as LedgerLayer),
+        Layer.provideMerge(ledger),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )
