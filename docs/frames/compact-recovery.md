@@ -26,6 +26,12 @@ Candidate checks cover exact lifecycle holdings, same-session other-runtime sepa
 
 Installed qualification is deliberately after normal reviewed Mini-first activation, not a process-scoped candidate launcher/server detour. It must retain normal settings, exact Codex hook trust and Claude's shipped async composition; recover only the assigned address, avoid rejoining, and retrieve actual current guidance through non-consuming orientation. Pro follows only after Mini passes. Preserve rollback cohorts and exact trust-change provenance. Until that gate passes the release is incomplete. Ordinary-team adoption requires real ordinary use and is not established by a disposable trial.
 
+### Later Qualification, 2026-11-05
+
+The initial installed Codex candidate exposed its skill but not its hook; the next candidate discovered the hook, but its trial did not establish delivered context. Both trials were rolled back. Source review identified a missing hooks-file envelope and then a JSON-looking plain-text prefix that the native start-hook parser rejects. The corrected package was reviewed and activated normally. Contrary to the original ordering above, the second installation was qualified first, followed by the originally planned first installation.
+
+
+On two separate installed Codex 0.166.0-alpha.6 root-session CLIs, one manual compact each produced complete hook-provenance context and a neutral continuation oriented without rejoining or reading a foreign inbox. One installed Claude Code 2.1.318 root-session CLI likewise recorded complete compact hook context and oriented, then woke for an independently sent direct message and read only its own inbox. Separately, an already-running Claude Desktop-bundled 2.1.309 session recorded complete compact hook context during a handover-triggered manual compact and later read and replied to an independently sent direct message after a Stop-hook wake; its earlier process start was operator-observed. These bounded cases do not establish automatic or child compact, multiple holdings, general desktop refresh or ordinary-team adoption. Current claims and version-sensitive limits are in the platform pages.
 ## Falsifier
 
 Revisit the carrier boundary if a normally installed trusted hook cannot receive native identity/cwd or deliver complete fixed context, or if the ownership observation mutates lifecycle state or hides an incomplete read. Do not patch around those failures with transcript scans, wake probes or another ownership registry.

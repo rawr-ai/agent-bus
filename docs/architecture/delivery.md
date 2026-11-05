@@ -227,7 +227,7 @@ Values also live in the native manifests: Claude's asynchronous wake has `timeou
 
 The native plugin also declares a synchronous compact-only `SessionStart` command, `agent-bus compact-context --runtime` with the native runtime. It reads the native lifecycle payload's identity and cwd and asks `bus_owned_addresses` for all exact session/runtime latest joined holdings. It never uses `bus_wake` as an ownership check. The shared fixed hint quotes the complete address list and cwd as JSON, says not to rejoin, preserves assigned-address boundaries, and routes to non-consuming `bus_orient` for current guidance. It embeds no notes, bulletin bodies or identity values.
 
-This new lookup/helper changes no ledger, cursor, activity, hooked bit, waiter or wake mark. Claude's existing asynchronous compact wake remains separate and intentionally retains its fresh-ring behavior. No-mail compaction can therefore recover ownership context without manufacturing a mail wake. Failures and overflow are quiet rather than a misleading partial ownership list. Native carrier findings and their qualification limits belong to the platform pages; installed native recovery under normal settings and hook composition remains an owner-controlled post-activation release gate.
+This new lookup/helper changes no ledger, cursor, activity, hooked bit, waiter or wake mark. Claude's existing asynchronous compact wake remains separate and intentionally retains its fresh-ring behavior. No-mail compaction can therefore recover ownership context without manufacturing a mail wake. Failures and overflow are quiet rather than a misleading partial ownership list. Native installed recovery has been qualified for the bounded manual CLI cases and composition described on the platform pages; each activation still needs the owner-controlled checks in [install](../runbooks/install.md#after-a-change-to-the-plugin).
 
 ## Rules
 
@@ -353,7 +353,7 @@ Rejected and retired Codex routes:
 | **After `/clear`,** mail to an address the old id held wakes the session once more, through the old hook | Known limit |
 | **A `serve` restart forgets the woken marks,** which may wake a session once more per address with unread mail | Known limit |
 | **`StopFailure` with `asyncRewake`** is documented by Claude Code but wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#hooks)) | Unverified |
-| **Native manual compact carriers** are qualified with distinct platform limits; installed ownership recovery under normal settings, exact trust and existing async composition remains a post-activation release gate ([platforms: Claude Code](../platforms/claude-code.md#hooks), [Codex](../platforms/codex.md#hooks)) | Installed recovery unverified |
+| **Native installed manual compact recovery** has bounded CLI qualification under normal settings, including exact Codex trust and a subsequent Claude async wake. Automatic compaction, children, multiple holdings and ordinary-team adoption are not established ([platforms: Claude Code](../platforms/claude-code.md#hooks), [Codex](../platforms/codex.md#hooks)) | Qualified only as stated |
 
 ## Rests on
 
