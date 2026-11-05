@@ -164,8 +164,20 @@ test("current peers from the real bus keep public fields only", async () => {
       topics: ["review"],
       host: hostname(),
       note: "leading the review",
+      // The serve's own activity fold reaches the viewer as given.
+      activity: "active",
+      activeSince: expect.any(String),
+      mutes: [],
     },
-    { address: "codex/reviewer", runtime: "codex", topics: [], host: hostname() },
+    {
+      address: "codex/reviewer",
+      runtime: "codex",
+      topics: [],
+      host: hostname(),
+      activity: "active",
+      activeSince: expect.any(String),
+      mutes: [],
+    },
   ]);
   expect(JSON.stringify(observation)).not.toContain(marker);
 });

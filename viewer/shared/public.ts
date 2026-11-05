@@ -63,12 +63,32 @@ export const PublicMessageSchema = Schema.Struct({
 });
 export type PublicMessage = typeof PublicMessageSchema.Type;
 
+const ACTIVITIES = ["active", "inactive", "unknown"] as const;
+
+// The serve's mute scopes (src/domain.ts MuteScope); ids are checked for shape only, since the
+// serve already checked them.
+export const PublicMuteSchema = Schema.Union([
+  Schema.Struct({ scope: Schema.Literal("programme") }),
+  Schema.Struct({ scope: Schema.Literal("topic"), topic: Schema.String }),
+  Schema.Struct({ scope: Schema.Literal("directory"), directory: Schema.String }),
+  Schema.Struct({
+    scope: Schema.Literal("concern"),
+    directory: Schema.String,
+    concern: Schema.String,
+  }),
+]);
+export type PublicMute = typeof PublicMuteSchema.Type;
+
+// activity, activeSince and mutes are absent from an older serve's rows, and stay absent here.
 export const PublicPeerSchema = Schema.Struct({
   address: Schema.String,
   runtime: Schema.Literals(RUNTIMES),
   topics: Strings,
   host: OptionalText,
   note: OptionalText,
+  activity: Schema.optionalKey(Schema.Literals(ACTIVITIES)),
+  activeSince: OptionalText,
+  mutes: Schema.optionalKey(Schema.mutable(Schema.Array(PublicMuteSchema))),
 });
 export type PublicPeer = typeof PublicPeerSchema.Type;
 
@@ -325,6 +345,51 @@ const toMessage = (raw: unknown): PublicMessage | undefined => {
   };
 };
 
+// One of the four scopes with exactly its own keys, each text; rebuilt, never passed on.
+const toMute = (raw: unknown): PublicMute | undefined => {
+  if (!isRecord(raw)) return undefined;
+  const scope = own(raw, "scope");
+  const size = Object.keys(raw).length;
+  const topic = text(raw, "topic");
+  const directory = text(raw, "directory");
+  const concern = text(raw, "concern");
+  switch (scope) {
+    case "programme":
+      return size === 1 ? { scope } : undefined;
+    case "topic":
+      return size === 2 && topic !== undefined ? { scope, topic } : undefined;
+    case "directory":
+      return size === 2 && directory !== undefined ? { scope, directory } : undefined;
+    case "concern":
+      return size === 3 && directory !== undefined && concern !== undefined
+        ? { scope, directory, concern }
+        : undefined;
+    default:
+      return undefined;
+  }
+};
+
+// undefined: key absent; null: key present with anything but a list of valid mutes.
+const optionalMutes = (record: Raw): PublicMute[] | undefined | null => {
+  if (!Object.hasOwn(record, "mutes")) return undefined;
+  const value = record.mutes;
+  if (!Array.isArray(value)) return null;
+  const out: PublicMute[] = [];
+  for (let index = 0; index < value.length; index++) {
+    const mute = toMute(value[index]);
+    if (mute === undefined) return null;
+    out.push(mute);
+  }
+  return out;
+};
+
+// undefined: key absent; null: key present with anything but one of the three activities.
+const optionalActivity = (record: Raw): (typeof ACTIVITIES)[number] | undefined | null => {
+  if (!Object.hasOwn(record, "activity")) return undefined;
+  const value = record.activity;
+  return ACTIVITIES.find((candidate) => candidate === value) ?? null;
+};
+
 const toPeer = (raw: unknown): PublicPeer | undefined => {
   if (!isRecord(raw)) return undefined;
   const address = text(raw, "address");
@@ -333,13 +398,19 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
   const topics = stringList(own(raw, "topics"));
   const host = optionalText(raw, "host");
   const note = optionalText(raw, "note");
+  const activity = optionalActivity(raw);
+  const activeSince = optionalText(raw, "activeSince");
+  const mutes = optionalMutes(raw);
   if (
     address === undefined ||
     runtime === undefined ||
     topics === undefined ||
     own(raw, "status") !== "joined" ||
     host === null ||
-    note === null
+    note === null ||
+    activity === null ||
+    activeSince === null ||
+    mutes === null
   ) {
     return undefined;
   }
@@ -349,6 +420,9 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
     topics,
     ...(host === undefined ? {} : { host }),
     ...(note === undefined ? {} : { note }),
+    ...(activity === undefined ? {} : { activity }),
+    ...(activeSince === undefined ? {} : { activeSince }),
+    ...(mutes === undefined ? {} : { mutes }),
   };
 };
 

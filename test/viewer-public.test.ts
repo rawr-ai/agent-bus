@@ -6,6 +6,7 @@ import {
   HistoryObservationSchema,
   MAX_HISTORY_LIMIT,
   PeersObservationSchema,
+  PublicPeerSchema,
   projectHistory,
   projectPeers,
   projectThread,
@@ -719,6 +720,185 @@ describe("peers projection", () => {
     const result = projectPeers(peerPages([peer("a"), peer("b", { status: "left" })]), AT);
     expect(result.peers.map((p) => p.address)).toStrictEqual(["a"]);
     expect(result.omitted).toBe(1);
+  });
+});
+
+// The serve folds activity and mutes per address (src/catalogue.ts PeerRow); the viewer passes
+// them on as given, invents none an older serve did not send, and withholds a row whose
+// activity fields it cannot read, as it withholds other malformed rows.
+describe("peer activity projection", () => {
+  const ALL_SCOPES = [
+    { scope: "topic", topic: "review" },
+    { scope: "programme" },
+    { scope: "concern", directory: "opa", concern: "ux" },
+    { scope: "directory", directory: "opa" },
+  ];
+  const strictPeers = Schema.decodeUnknownExit(PeersObservationSchema);
+
+  test("passes activity, activeSince and mutes through unchanged, inactive peers included", () => {
+    const mutes: Array<Record<string, unknown>> = ALL_SCOPES.map((scope) => ({ ...scope }));
+    const result = projectPeers(
+      peerPages([
+        peer("agent/on", { activity: "active", activeSince: "2026-01-01T09:00:00Z", mutes: [] }),
+        peer("agent/off", { activity: "inactive", activeSince: "2026-01-01T08:00:00Z", mutes }),
+        peer("agent/unread", { activity: "unknown", mutes: [{ scope: "programme" }] }),
+      ]),
+      AT
+    );
+    expect(result.peers).toStrictEqual([
+      {
+        address: "agent/on",
+        runtime: "other",
+        topics: [],
+        activity: "active",
+        activeSince: "2026-01-01T09:00:00Z",
+        mutes: [],
+      },
+      {
+        address: "agent/off",
+        runtime: "other",
+        topics: [],
+        activity: "inactive",
+        activeSince: "2026-01-01T08:00:00Z",
+        // The row's own order: neither sorted nor grouped by scope.
+        mutes: [
+          { scope: "topic", topic: "review" },
+          { scope: "programme" },
+          { scope: "concern", directory: "opa", concern: "ux" },
+          { scope: "directory", directory: "opa" },
+        ],
+      },
+      // Unknown stays unknown: never read as active, and no activeSince is invented.
+      {
+        address: "agent/unread",
+        runtime: "other",
+        topics: [],
+        activity: "unknown",
+        mutes: [{ scope: "programme" }],
+      },
+    ]);
+    expect(result.omitted).toBe(0);
+    // Rebuilt, not aliased: later changes to the input reach no observation.
+    const shown = (result.peers[1] as Record<string, unknown>).mutes as Array<
+      Record<string, unknown>
+    >;
+    expect(shown).not.toBe(mutes);
+    expect(shown[0]).not.toBe(mutes[0]);
+    mutes.push({ scope: "programme" });
+    if (mutes[0]) mutes[0].topic = "changed";
+    expect(shown.length).toBe(4);
+    expect(shown[0]?.topic).toBe("review");
+    // The public schema itself carries the fields: the observation decodes with excess keys
+    // refused.
+    expect(strictPeers(result, { onExcessProperty: "error" })._tag).toBe("Success");
+  });
+
+  test("activeSince is text, never parsed as a date", () => {
+    const result = projectPeers(
+      peerPages([peer("a", { activity: "inactive", activeSince: "not a date", mutes: [] })]),
+      AT
+    );
+    expect(result.peers).toStrictEqual([
+      {
+        address: "a",
+        runtime: "other",
+        topics: [],
+        activity: "inactive",
+        activeSince: "not a date",
+        mutes: [],
+      },
+    ]);
+  });
+
+  test("an older serve's peer has none of the fields, never coerced to active", () => {
+    const result = projectPeers(peerPages([peer("older/a", { host: "h" })]), AT);
+    expect(result.peers).toStrictEqual([
+      { address: "older/a", runtime: "other", topics: [], host: "h" },
+    ]);
+    for (const key of ["activity", "activeSince", "mutes"])
+      expect(Object.hasOwn(result.peers[0] ?? {}, key)).toBe(false);
+    expect(result.omitted).toBe(0);
+  });
+
+  test("each absent field stays absent on its own: mutes without activity invents no activity", () => {
+    const result = projectPeers(
+      peerPages([
+        peer("a", { mutes: [{ scope: "programme" }] }),
+        peer("b", { activity: "inactive" }),
+      ]),
+      AT
+    );
+    expect(result.peers).toStrictEqual([
+      { address: "a", runtime: "other", topics: [], mutes: [{ scope: "programme" }] },
+      { address: "b", runtime: "other", topics: [], activity: "inactive" },
+    ]);
+    expect(result.omitted).toBe(0);
+  });
+
+  const invalid: Array<[string, Record<string, unknown>]> = [
+    ["activity outside the three values", { activity: "idle" }],
+    ["activity in another case", { activity: "Inactive" }],
+    ["activity type", { activity: 1 }],
+    ["activity null", { activity: null }],
+    ["activity present but undefined", { activity: undefined }],
+    ["activeSince type", { activeSince: 5 }],
+    ["activeSince null", { activeSince: null }],
+    ["activeSince present but undefined", { activeSince: undefined }],
+    ["mutes not a list", { mutes: { scope: "programme" } }],
+    ["mutes null", { mutes: null }],
+    ["mutes present but undefined", { mutes: undefined }],
+    ["a mute that is a bare string", { mutes: ["programme"] }],
+    ["a mute that is null", { mutes: [null] }],
+    ["a mute of an unknown scope", { mutes: [{ scope: "everything" }] }],
+    ["a mute without its scope", { mutes: [{ topic: "review" }] }],
+    ["a topic mute without its topic", { mutes: [{ scope: "topic" }] }],
+    ["a topic mute with a non-text topic", { mutes: [{ scope: "topic", topic: 5 }] }],
+    ["a concern mute without its concern", { mutes: [{ scope: "concern", directory: "opa" }] }],
+    [
+      "a directory mute with a non-text directory",
+      { mutes: [{ scope: "directory", directory: 1 }] },
+    ],
+    ["a programme mute with an extra key", { mutes: [{ scope: "programme", topic: "review" }] }],
+    [
+      "a directory mute with a concern key",
+      { mutes: [{ scope: "directory", directory: "opa", concern: "ux" }] },
+    ],
+    [
+      "a concern mute with an extra key",
+      { mutes: [{ scope: "concern", directory: "opa", concern: "ux", note: MARK }] },
+    ],
+    ["one bad mute among good ones", { mutes: [{ scope: "programme" }, { scope: "nope" }] }],
+  ];
+  for (const [name, extra] of invalid) {
+    test(`omits a peer with ${name}`, () => {
+      const result = projectPeers(
+        peerPages([
+          peer("bad", { activity: "active", mutes: [], ...extra }),
+          peer("good", { activity: "active", mutes: [] }),
+        ]),
+        AT
+      );
+      expect(result.peers.map((p) => p.address)).toStrictEqual(["good"]);
+      expect(result.omitted).toBe(1);
+      expect(JSON.stringify(result)).not.toContain(MARK);
+    });
+  }
+
+  test("the public schema accepts the four scope shapes and refuses anything else", () => {
+    const decode = Schema.decodeUnknownExit(PublicPeerSchema);
+    const verdict = (extra: Record<string, unknown>) =>
+      decode(
+        { address: "a", runtime: "other", topics: [], ...extra },
+        { onExcessProperty: "error" }
+      )._tag;
+    expect(verdict({ activity: "inactive", activeSince: "x", mutes: ALL_SCOPES })).toBe("Success");
+    expect(verdict({ activity: "unknown" })).toBe("Success");
+    expect(verdict({})).toBe("Success");
+    expect(verdict({ activity: "idle" })).toBe("Failure");
+    expect(verdict({ activeSince: 1 })).toBe("Failure");
+    expect(verdict({ mutes: [{ scope: "everything" }] })).toBe("Failure");
+    expect(verdict({ mutes: [{ scope: "programme", topic: "t" }] })).toBe("Failure");
+    expect(verdict({ mutes: [{ scope: "concern", directory: "opa" }] })).toBe("Failure");
   });
 });
 
