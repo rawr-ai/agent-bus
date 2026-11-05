@@ -117,7 +117,8 @@ export class Ledger extends Context.Service<
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
     /**
      * Appends `presence` only if no presence for its address was written after `basis`, the
-     * cut its decision read. One attempt, never resent.
+     * cut its decision read. One attempt with a fresh id, never resent: a resent id is never
+     * stored twice, but its status may report the original admission.
      */
     readonly admit: (presence: Message, basis: Pin) => Effect.Effect<Admission, LedgerError>;
   }

@@ -161,6 +161,40 @@ for (const backend of backends) {
       TIMEOUT
     );
 
+    test(
+      "a resend from the original basis never stores a second entry",
+      async () => {
+        const { decider, writer } = await backend.make();
+        const attempt = presence(address, "session:a");
+        const basis = await decider.cut();
+        expect((await decider.admit(attempt, basis)).status).toBe("ADMITTED");
+        // Outside the contract (a fresh id per attempt, never resent): the status may report
+        // the original admission, but the entry is never written twice.
+        await decider.admit(attempt, basis);
+        expect((await writer.ids()).filter((id) => id === attempt.id)).toHaveLength(1);
+      },
+      TIMEOUT
+    );
+
+    test(
+      "valid presence history larger than any query page is read completely",
+      async () => {
+        const { decider, writer } = await backend.make();
+        // About 400 KiB of valid presences, past the 256 KiB bound on bounded query responses.
+        const large = Array.from({ length: 40 }, (_, i) => {
+          const entry = presence(`claude/large-${i}`, `session:${i}`);
+          return new Message({ ...entry, body: "x".repeat(10_000) });
+        });
+        for (const entry of large) await writer.append(entry);
+        const ids = await decider.ids();
+        expect(large.every((entry) => ids.includes(entry.id))).toBe(true);
+        expect(
+          (await decider.admit(presence(address, "session:a"), await decider.cut())).status
+        ).toBe("ADMITTED");
+      },
+      TIMEOUT
+    );
+
     if (backend.name === "jsonl") {
       test(
         "an undecodable line past the basis refuses",
