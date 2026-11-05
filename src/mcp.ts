@@ -245,6 +245,11 @@ export const Peers = Schema.Struct({
       activeSince: Schema.optionalKey(
         Schema.String.annotate({ description: "When it became active, if it is." })
       ),
+      activityReason: Schema.optionalKey(
+        Schema.Literals(ACTIVITY_REASONS).annotate({
+          description: "With unknown activity only: damaged-log, damaged-mail or incomplete-scan.",
+        })
+      ),
       mutes: Schema.optionalKey(
         Schema.Array(MuteScope).annotate({
           description: "Scopes whose ambient mail does not wake it.",
@@ -755,6 +760,7 @@ const peersPreset = Effect.gen(function* () {
         ...(row.note === undefined ? {} : { note: row.note }),
         activity: row.activity,
         ...(row.activeSince === undefined ? {} : { activeSince: row.activeSince }),
+        ...(row.activityReason === undefined ? {} : { activityReason: row.activityReason }),
         mutes: row.mutes,
       });
     }

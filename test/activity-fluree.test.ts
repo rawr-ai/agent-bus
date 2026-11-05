@@ -609,6 +609,52 @@ describe("unknown activity", () => {
   );
 
   test(
+    "I. bus_peers over MCP, through the official client, carries the unknown's reason",
+    () =>
+      scoped(async (track) => {
+        const { config, run } = await inactive(track, "unknown-mcp-peers");
+        await insertRaw(
+          config,
+          rawCommand(uuid(), {
+            address: x,
+            runtime: "claude",
+            session: sid(x),
+            run,
+            activity: "asleep",
+          })
+        );
+        const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+        const port = Number(probe.url.port);
+        probe.stop(true);
+        const runtime = ManagedRuntime.make(
+          Serve.layerHttp({ port, version: "test" }).pipe(
+            Layer.provideMerge(busOn(flureeStore(config, config.url), tempDir()))
+          )
+        );
+        track(runtime, () => runtime.dispose());
+        await runtime.runPromise(Effect.void);
+        const client = new Client({ name: "activity-peers-test", version: "1" });
+        await client.connect(
+          new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
+        );
+        track(client, () => client.close());
+        const result = (await client.callTool({
+          name: "bus_peers",
+          arguments: {},
+        })) as CallToolResult;
+        expect(result.isError).not.toBe(true);
+        const peers = (result.structuredContent as { peers: Array<Record<string, unknown>> }).peers;
+        expect(peers.find((peer) => peer.address === x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
+        // Known activity carries no reason.
+        expect(peers.find((peer) => peer.address === y)).not.toHaveProperty("activityReason");
+      }),
+    TIMEOUT
+  );
+
+  test(
     "I. a damaged presence or a damaged candidate after the anchor makes it unknown",
     () =>
       scoped(async (track) => {
