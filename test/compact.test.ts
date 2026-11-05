@@ -31,6 +31,8 @@ test("compact context uses native payload identity, one read, quoted whole holdi
   expect(calls).toEqual([{ session: "native-session", runtime: "codex" }]);
   expect(Option.isSome(result)).toBe(true);
   if (Option.isNone(result)) return;
+  expect(result.value).toStartWith("agent-bus: The hook observed these addresses: ");
+  expect(["[", "{"]).not.toContain(result.value.trimStart()[0]);
   const addressPrefix = "these addresses: ";
   const addressStart = result.value.indexOf(addressPrefix) + addressPrefix.length;
   const addressEnd = result.value.indexOf(". Hook identity", addressStart);
