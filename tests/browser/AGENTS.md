@@ -11,7 +11,10 @@ deterministic local Chrome checks, not model evaluations or a Playwright adapter
 - Every browser gets a fresh temporary profile. Always await Stagehand and browser
   cleanup, and close owned fixture/static servers even on assertion failure.
 - Set and assert the actual viewport; launch-window size alone is not sufficient.
-- Use synthetic fixture data only. Never connect these tests to the running bus.
+- Fixture lanes use synthetic data only; never point them at the running bus.
+  The explicitly opt-in `test:browser:live` check in the [viewer runbook](../../docs/runbooks/viewer.md#verify-the-viewer)
+  reads an already-running loopback viewer without starting or stopping it or the bus.
+  Keep real content in the page: report only structural flags, counts and timing, never raw content or screenshots.
 - Cleanup limits: these scripts run unsupervised and end Chrome only from their own
   cleanup. A caller's death does not cancel the script: observed runs carried on
   through their remaining browser journeys and only then cleaned up, and nothing

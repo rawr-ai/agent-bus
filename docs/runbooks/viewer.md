@@ -56,7 +56,7 @@ Use Control-C in the viewer terminal. Expected: it stops intake, interrupts acti
 
 ## Verify the viewer
 
-Use the smallest relevant lane during development, then the full uncached check at the story boundary. The browser and workbench commands below use synthetic data, not the running bus, credentials or a user's browser profile. Their launcher refuses root dotenv names before invoking tools, allowlists inherited environment, disables telemetry/cloud and binds owned servers to loopback. Do not run these tools directly to bypass that boundary.
+Use the smallest relevant lane during development, then the full uncached check at the story boundary. Except for the explicitly opt-in live check below, the browser and workbench commands use synthetic data, not the running bus. Browsers use fresh temporary profiles. Their launcher refuses root dotenv names before invoking tools, allowlists inherited environment without provider credentials, disables telemetry/cloud and binds owned servers to loopback. Do not run these tools directly to bypass that boundary.
 
 1. Check pure projection, conversation, Markdown-policy, resource and announcement behavior:
 
