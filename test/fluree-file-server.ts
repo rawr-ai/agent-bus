@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FlureeConfig } from "../src/Fluree.ts";
+import { type Supervised, spawnSupervised } from "./supervised.ts";
 
 export interface FileFlureeServer {
   readonly url: string;
@@ -16,29 +17,13 @@ let serverNumber = 0;
 export const startFileFlureeServer = async (): Promise<FileFlureeServer> => {
   const work = mkdtempSync(join(tmpdir(), "agent-bus-file-fluree-"));
   const number = ++serverNumber;
-  let child: ReturnType<typeof Bun.spawn> | undefined;
+  let child: Supervised | undefined;
   let stopping: Promise<void> | undefined;
   const stop = () => {
     stopping ??= (async () => {
       if (child !== undefined && child.exitCode === null) {
-        const process = child;
-        process.kill();
-        const force = setTimeout(() => process.kill("SIGKILL"), 2_000);
-        let deadline: ReturnType<typeof setTimeout> | undefined;
-        try {
-          await Promise.race([
-            process.exited,
-            new Promise<never>((_, reject) => {
-              deadline = setTimeout(
-                () => reject(new Error("Disposable Fluree did not stop")),
-                5_000
-              );
-            }),
-          ]);
-        } finally {
-          clearTimeout(force);
-          clearTimeout(deadline);
-        }
+        child.kill();
+        await child.exited;
       }
       rmSync(work, { recursive: true, force: true });
     })();
@@ -67,8 +52,13 @@ export const startFileFlureeServer = async (): Promise<FileFlureeServer> => {
     );
     command([fluree, "init"]);
     const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-    const port = Number(probe.url.port);
-    probe.stop(true);
+    const port = (() => {
+      try {
+        return Number(probe.url.port);
+      } finally {
+        probe.stop(true);
+      }
+    })();
     const url = `http://127.0.0.1:${port}`;
     const auth = ["data", "admin"].flatMap((scope) => [
       `--${scope}-auth-mode`,
@@ -76,7 +66,7 @@ export const startFileFlureeServer = async (): Promise<FileFlureeServer> => {
       `--${scope}-auth-trusted-issuer`,
       key.did,
     ]);
-    child = Bun.spawn(
+    child = spawnSupervised(
       [
         fluree,
         "server",

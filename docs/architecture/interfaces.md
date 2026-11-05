@@ -145,10 +145,10 @@ Returns `status`, `operation`, `expected`, and when established `revision`, orig
 | `scope` | object | yes | — | `{kind: "programme"}` or `{kind: "concern", directory, concern}` |
 | `action` | `publish` or `withdraw` | yes | — | Replace guidance or designate a retained withdrawal |
 | `body` | string | no | none | Required on publication; at most 4,096 UTF-8 bytes |
-| `expiresAt` | string | no | none | Optional UTC expiry on publication |
+| `expiresAt` | string | no | none | Optional UTC expiry on publication, with at most three fractional digits |
 | `recipients` | string array | no | none | Concern publication only: deliberate direct recipients in addition to the registered topic |
 
-Returns `status`, `operation`, `expected`, and when established `revision`, original `notification`, observed `current` and `cut`, with the same outcome semantics as `bus_directory`. Withdrawal retains the prior revision's audience.
+Returns `status`, `operation`, `expected`, and when established `revision`, original `notification`, observed `current` and `cut`, with the same outcome semantics as `bus_directory`. Withdrawal retains the prior revision's audience and remains possible after concern removal; a revision from another scope is refused as input.
 
 #### `bus_orient`
 
@@ -160,7 +160,7 @@ Returns `status`, `operation`, `expected`, and when established `revision`, orig
 | `t` | integer | no | head or candidate cursor's cut | Read at this ledger commit |
 | `candidateCursor` | string | no | none | Continue candidate discovery with the same `cwd` and cut |
 
-Returns `status`, `cut`, `currentHeadT`, `evaluatedAt` and `catalogueVersion` when established. `programme` is labelled current, expired, withdrawn or missing. `selection`, `directory`, `concern`, `summaries`, `subscriptions`, `candidates`, `members` and `unresolvedAssociations` carry the requested context when available; candidate and association pages name their query, arguments and continuation. `reason` and `recovery` explain an unavailable result. A complete or incomplete result is not an availability claim about a session; [orientation](orientation.md) defines the logical byte and whole-unit limits.
+Returns `status`, `cut`, `currentHeadT`, `evaluatedAt` and `catalogueVersion` when established. `programme` is labelled current, expired, withdrawn or missing. `selection`, `directory`, `concern`, `summaries`, `subscriptions`, `candidates`, `members` and `unresolvedAssociations` carry the requested context when available; candidate and association pages name their query, arguments and continuation. An aggregate unavailable result may retain readable same-cut facts; `reason`, `section`, `message` and `recovery` explain the affected section. An omitted section is not an empty result. A complete or incomplete result is not an availability claim about a session; [orientation](orientation.md) defines the logical byte and whole-unit limits.
 
 #### `bus_read`
 

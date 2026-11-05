@@ -3,10 +3,10 @@ import { LedgerError, MessageJson } from "./domain.ts";
 import { type DesignationScope, messageIri, revisionIri, scopeIri } from "./Ledger.ts";
 import {
   BULLETIN_BODY_BYTES,
-  BULLETIN_UNIT_BYTES,
   type BulletinRecord,
   BulletinRecord as BulletinRecordSchema,
   type BulletinScope,
+  bulletinFits,
   canonicalJson,
   DIRECTORY_METADATA_BYTES,
   type DirectoryRecord,
@@ -126,8 +126,14 @@ export const revisionAt = (
     }
     if (rows.length !== 1) return yield* damaged();
     const [storedScope, json, notification] = rows[0] ?? [];
-    if (storedScope !== scopeIri(scope) || json === undefined) return yield* damaged();
+    if (storedScope === null || storedScope === undefined || json === undefined)
+      return yield* damaged();
     const record = yield* decodeRecord(json).pipe(Effect.mapError(damaged));
+    const recordScope: DesignationScope =
+      record.kind === "directory"
+        ? { kind: "directory", directory: record.directory.id }
+        : record.scope;
+    if (storedScope !== scopeIri(recordScope)) return yield* damaged();
     if (notification !== messageIri(record.notification) || !utcInstant(record.publishedAt)) {
       return yield* damaged();
     }
@@ -157,8 +163,6 @@ export const revisionAt = (
     const audience = yield* normalizeAudience(record.audience).pipe(Effect.mapError(damaged));
     if (canonicalJson(audience) !== canonicalJson(record.audience)) return yield* damaged();
     if (record.kind === "directory") {
-      if (scope.kind !== "directory" || record.directory.id !== scope.directory)
-        return yield* damaged();
       const normalized = yield* normalizeDirectory(record.directory).pipe(Effect.mapError(damaged));
       if (canonicalJson(record.directory) !== canonicalJson(normalized)) return yield* damaged();
       if (
@@ -173,12 +177,9 @@ export const revisionAt = (
         return yield* damaged();
       }
     } else {
-      if (scope.kind === "directory" || canonicalJson(record.scope) !== canonicalJson(scope)) {
-        return yield* damaged();
-      }
       if (
-        (scope.kind === "programme" && canonicalJson(audience) !== canonicalJson(["*"])) ||
-        jsonBytes(record) > BULLETIN_UNIT_BYTES ||
+        (record.scope.kind === "programme" && canonicalJson(audience) !== canonicalJson(["*"])) ||
+        !bulletinFits(record, revision, Date.parse(record.publishedAt)) ||
         (record.action === "publish" &&
           (record.body === undefined || textBytes(record.body) > BULLETIN_BODY_BYTES)) ||
         (record.action === "withdraw" &&
@@ -188,7 +189,9 @@ export const revisionAt = (
         return yield* damaged();
       }
     }
-    return { revision, value: record };
+    return canonicalJson(recordScope) === canonicalJson(scope)
+      ? { revision, value: record }
+      : undefined;
   });
 
 export const directoryAt = (gateway: Gateway, t: number, directory: string) =>

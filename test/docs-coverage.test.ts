@@ -362,6 +362,7 @@ const NOT_PARAMETERS = [
   "APPLIED",
   "CONFLICT",
   "INCOMPLETE",
+  "UNAVAILABLE",
   "UNKNOWN",
 ];
 

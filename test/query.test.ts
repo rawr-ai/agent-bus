@@ -8,7 +8,7 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import { type Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Context, type Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
@@ -1369,6 +1369,120 @@ describe("transport bounds", () => {
   const DEADLINE = "The query did not finish within 10 seconds; narrow it.";
   const RAW = "SELECT ?id WHERE { ?m bus:id ?id }";
   const RAW_BODY = "SELECT ?body WHERE { ?m bus:body ?body }";
+
+  for (const grant of ["never", "near-deadline"] as const) {
+    test(`join orientation respects one deadline with permit ${grant}`, async () => {
+      const dir = mkdtempSync(join(tmpdir(), "agent-bus-orientation-pool-"));
+      dirs.push(dir);
+      let entered = 0;
+      let allowReads = false;
+      const release: Array<() => void> = [];
+      const stalled = QueryGateway.of({
+        pin: Effect.suspend(() => {
+          if (allowReads) return Effect.succeed({ head: 1, incarnation: "jsonl" });
+          return Effect.callback<{ head: number; incarnation: string }>((resume) => {
+            entered += 1;
+            release.push(() => resume(Effect.succeed({ head: 1, incarnation: "jsonl" })));
+          });
+        }),
+        jsonld: () => Effect.succeed([]),
+        sparql: () => Effect.die("unexpected query"),
+      });
+      const source = layerJsonl(join(dir, "ledger.jsonl")).pipe(Layer.provide(platform));
+      const store = Layer.effectContext(
+        Effect.map(Ledger, (ledger) =>
+          Context.make(Ledger, ledger).pipe(Context.add(QueryGateway, stalled))
+        )
+      ).pipe(Layer.provide(source));
+      const bus = await startBus(store, { testClock: true });
+      const blocker = await bus.connect();
+      const abort = new AbortController();
+      const held = Array.from({ length: 4 }, () =>
+        blocker
+          .callTool({ name: "bus_queries", arguments: {} }, undefined, { signal: abort.signal })
+          .catch(() => undefined)
+      );
+      try {
+        const waitFor = async (predicate: () => Promise<boolean> | boolean) => {
+          const deadline = Date.now() + 3_000;
+          while (!(await predicate())) {
+            if (Date.now() > deadline) throw new Error("Fixture did not reach the expected state");
+            await Bun.sleep(10);
+          }
+        };
+        await waitFor(() => entered === 4);
+        const joining = bus.call("bus_join", {
+          address: "pool-waiter",
+          runtime: "other",
+          session: "pool-session",
+          cwd: "/workspace",
+          orient: true,
+        });
+        await waitFor(async () =>
+          bus.runtime.runPromise(
+            Effect.map(Ledger, (ledger) => ledger.presence).pipe(
+              Effect.flatten,
+              Effect.map((presence) => presence.some(({ from }) => from === "pool-waiter"))
+            )
+          )
+        );
+        const reading =
+          grant === "never" ? bus.call("bus_orient", { cwd: "/workspace" }) : undefined;
+        await Bun.sleep(30);
+        if (grant === "near-deadline") {
+          await bus.adjust("19 seconds");
+          release[0]?.();
+          await waitFor(() => entered === 5);
+          await bus.adjust("1 seconds");
+        } else await bus.adjust("20 seconds");
+        const joined = await joining;
+        expect(joined.isError).not.toBe(true);
+        expect(joined.structuredContent).toMatchObject({
+          address: "pool-waiter",
+          orientation: {
+            status: "UNAVAILABLE",
+            reason: "FAULT",
+            section: "query",
+            recovery: { tool: "bus_orient" },
+          },
+        });
+        if (reading !== undefined) {
+          expect((await reading).structuredContent).toMatchObject({
+            status: "UNAVAILABLE",
+            reason: "FAULT",
+            section: "query",
+            recovery: { tool: "bus_orient" },
+          });
+        }
+        expect(entered).toBe(grant === "never" ? 4 : 5);
+        const presence = await bus.runtime.runPromise(
+          Effect.flatMap(Ledger, (ledger) => ledger.presence)
+        );
+        expect(presence.filter(({ from }) => from === "pool-waiter")).toHaveLength(1);
+        const cursor = (joined.structuredContent as { cursor: number }).cursor;
+        const head = await bus.runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end));
+        allowReads = true;
+        for (const finish of release) finish();
+        abort.abort();
+        await Promise.allSettled(held);
+        const retry = await bus.ok("bus_orient", { cwd: "/workspace" });
+        expect(retry.status).toBe("COMPLETE");
+        expect(await bus.runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end))).toBe(
+          head
+        );
+        expect(
+          await bus.runtime.runPromise(
+            Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get("pool-waiter"))
+          )
+        ).toMatchObject({ _tag: "Some", value: cursor });
+      } finally {
+        for (const finish of release) finish();
+        abort.abort();
+        await Promise.allSettled(held);
+        await blocker.close();
+      }
+    }, 30_000);
+  }
 
   /** A bus whose Fluree requests cross a controlled boundary, with one entry written. */
   const throughBoundary = async (name: string, options: { readonly testClock?: boolean } = {}) => {

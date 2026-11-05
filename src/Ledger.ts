@@ -23,20 +23,6 @@ export const revisionIri = (operation: string) => `urn:agent-bus:revision:${oper
 export const witnessIri = (operation: string) => `urn:agent-bus:witness:${operation}`;
 export const messageIri = (id: string) => `urn:agent-bus:message:${id}`;
 
-/** Current pointers store literal operation IDs; revisions carry a JSON record and scope link. */
-export const orientationPredicates = {
-  scopeKind: "bus:scopeKind",
-  directory: "bus:directory",
-  concern: "bus:concern",
-  currentRevision: "bus:currentRevision",
-  scope: "bus:scope",
-  record: "bus:record",
-  supersedes: "bus:supersedes",
-  notification: "bus:notification",
-  intent: "bus:intent",
-  revision: "bus:revision",
-} as const;
-
 export interface Designation {
   readonly scope: DesignationScope;
   readonly expected: string | null;

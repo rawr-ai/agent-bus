@@ -3,6 +3,9 @@ import { Effect, Schema } from "effect";
 import {
   BULLETIN_BODY_BYTES,
   BULLETIN_UNIT_BYTES,
+  type BulletinRecord,
+  bulletinFits,
+  bulletinView,
   canonicalJson,
   checkoutMatches,
   DIRECTORY_BYTES,
@@ -109,6 +112,87 @@ test("operation ids, dates and byte bounds are not inferred from character count
     description: "é".repeat(9_000),
   });
   expect(await Effect.runPromise(Effect.isFailure(normalizeDirectory(oversized)))).toBe(true);
+});
+
+test("the complete bulletin projection and record both meet their UTF-8 boundary", () => {
+  const revision = "01900000-0000-7000-8000-000000000001";
+  const notification = "01900000-0000-7000-8000-000000000002";
+  const publishedAt = "2026-11-03T00:00:00.000Z";
+  const expiry = "2030-01-01T00:00:00.000Z";
+  const scenarios = [
+    {
+      action: "publish" as const,
+      body: "body",
+      expiresAt: expiry,
+      time: Date.parse(expiry) - 1,
+      state: "CURRENT",
+    },
+    {
+      action: "publish" as const,
+      body: "body",
+      expiresAt: expiry,
+      time: Date.parse(expiry),
+      state: "EXPIRED",
+    },
+    { action: "withdraw" as const, time: Date.parse(expiry), state: "WITHDRAWN" },
+  ];
+  for (const scenario of scenarios) {
+    const record: BulletinRecord = {
+      kind: "bulletin",
+      scope: { kind: "programme" },
+      action: scenario.action,
+      ...(scenario.action === "publish"
+        ? { body: scenario.body, expiresAt: scenario.expiresAt }
+        : {}),
+      publisher: "",
+      publishedAt,
+      notification,
+      audience: ["*"],
+    };
+    const expected = {
+      state: scenario.state,
+      revision,
+      publisher: "",
+      publishedAt,
+      notification,
+      audience: ["*"],
+      ...(scenario.action === "publish"
+        ? { expiresAt: scenario.expiresAt, body: scenario.body }
+        : {}),
+    };
+    const padding = BULLETIN_UNIT_BYTES - Math.max(jsonBytes(record), jsonBytes(expected));
+    const publisher = `${"é".repeat(Math.floor(padding / 2))}${"x".repeat(padding % 2)}`;
+    const boundary = { ...record, publisher };
+    expect(canonicalJson(bulletinView({ revision, value: boundary }, scenario.time, true))).toBe(
+      canonicalJson({ ...expected, publisher })
+    );
+    expect(Math.max(jsonBytes(boundary), jsonBytes({ ...expected, publisher }))).toBe(
+      BULLETIN_UNIT_BYTES
+    );
+    expect(bulletinFits(boundary, revision, scenario.time)).toBe(true);
+    expect(bulletinFits({ ...boundary, publisher: `${publisher}é` }, revision, scenario.time)).toBe(
+      false
+    );
+  }
+  const record: BulletinRecord = {
+    kind: "bulletin",
+    scope: { kind: "programme" },
+    action: "publish",
+    body: "body",
+    publisher: "",
+    publishedAt,
+    notification,
+    audience: ["*"],
+  };
+  const atRecordCap = {
+    ...record,
+    publisher: "x".repeat(BULLETIN_UNIT_BYTES - jsonBytes(record)),
+  };
+  expect(jsonBytes(atRecordCap)).toBe(BULLETIN_UNIT_BYTES);
+  expect(
+    jsonBytes(bulletinView({ revision, value: atRecordCap }, Date.parse(publishedAt), true))
+  ).toBe(BULLETIN_UNIT_BYTES + 2);
+  expect(bulletinFits(atRecordCap, revision, Date.parse(publishedAt))).toBe(false);
 });
 
 test("checkout aliases match lexical descendants without sibling-prefix or symlink inference", () => {

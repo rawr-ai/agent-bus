@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
@@ -13,6 +14,7 @@ import { CATALOGUE_VERSION, history, orientationAssociations } from "../src/cata
 import { Message, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger, messageIri, revisionIri, scopeIri } from "../src/Ledger.ts";
+import { updateBulletin } from "../src/Orientation.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
@@ -132,6 +134,7 @@ const fixture = () => {
   let incarnation = "incarnation-1";
   let current = "project";
   let currentT = 0;
+  let missingIdAt: number | undefined;
   const rows: Array<readonly [number, string, string | null]> = [...timeline];
   const gateway = Layer.succeed(
     QueryGateway,
@@ -161,6 +164,8 @@ const fixture = () => {
           if (subject === messageIri(notice)) return [[JSON.stringify(notification)]];
           if (query.select !== undefined && JSON.stringify(query.select) === '["?predicate"]')
             return [];
+          if (JSON.stringify(query.selectDistinct) === '["?m"]')
+            return missingIdAt !== undefined && missingIdAt <= t ? [["urn:unkeyed-presence"]] : [];
           return rows.filter((row) => row[0] <= t);
         }),
       sparql: () => Effect.die("unexpected sparql"),
@@ -180,6 +185,10 @@ const fixture = () => {
     add: (row: readonly [number, string, string | null]) => {
       rows.push(row);
       head = row[0];
+    },
+    addMissingId: (t: number) => {
+      missingIdAt = t;
+      head = t;
     },
     replace: () => {
       incarnation = "incarnation-2";
@@ -408,6 +417,19 @@ describe("orientation members", () => {
     expect((await f.run(args, { t: 14 })).rows).toEqual([expected("alice", 10, a, ["topic"])]);
   });
 
+  test("an unkeyed typed presence refuses the current relation without changing an older cut", async () => {
+    const f = fixture();
+    const args = { directory: "project", limit: 1 };
+    const first = await f.run(args);
+    expect(first.rows).toEqual([expected("alice", 10, a, ["topic"])]);
+    f.addMissingId(15);
+    await expect(f.run(args)).rejects.toThrow("Orientation data is damaged at this cut.");
+    expect((await f.run(args, { t: 14 })).rows).toEqual(first.rows);
+    const continued = await f.run(args, { cursor: first.next });
+    expect(continued.t).toBe(14);
+    expect(continued.rows).toEqual([expected("eve", 13, a)]);
+  });
+
   test("leaves the existing operation and catalogue cursor identity intact", async () => {
     const f = fixture();
     const first = await f.old({ kinds: ["presence"], limit: 1 });
@@ -423,135 +445,273 @@ afterAll(() => {
   for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
 });
 
-test("real Fluree and public bus_run_query expose the same complete relation", async () => {
+const testRealPresenceDamage = async (damage: "missing-json" | "missing-id") => {
   const server = await startFileFlureeServer();
-  const config = server.freshLedger("orientation-members");
-  const dir = mkdtempSync(join(tmpdir(), "orientation-members-"));
-  dirs.push(dir);
-  const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-  const port = Number(probe.url.port);
-  probe.stop(true);
-  const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
-  const store = layerFluree(config).pipe(Layer.provide(platform));
-  const layer = Serve.layerHttp({ port, version: "test" }).pipe(
-    Layer.provideMerge(
-      Bus.layer.pipe(
-        Layer.provideMerge(store),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
-    )
-  );
-  const runtime = ManagedRuntime.make(layer);
-  const client = new Client({ name: "orientation-test", version: "1" });
   try {
-    await runtime.runPromise(Effect.void);
-    await runtime.runPromise(
-      Effect.flatMap(Ledger, (ledger) =>
-        ledger.designate({
-          scope: { kind: "directory", directory: "project" },
-          expected: null,
-          operation: revision,
-          intent: "fixture",
-          record: JSON.stringify(directoryRecord("project")),
-          notification: new Message(notification),
-        })
-      )
-    );
-    await runtime.runPromise(
-      Effect.flatMap(Ledger, (ledger) =>
-        ledger.append(
-          new Message({
-            id: "real-presence",
-            ts: "2026-11-01T00:00:00.000Z",
-            from: "alice",
-            to: ["*"],
-            kind: "presence",
-            body: "presence",
-            presence: new Presence({
-              runtime: "codex",
-              status: "joined",
-              topics: [],
-              session: "a",
-              associations: [a, b],
-            }),
-          })
+    const config = server.freshLedger("orientation-members");
+    const dir = mkdtempSync(join(tmpdir(), "orientation-members-"));
+    dirs.push(dir);
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const port = (() => {
+      try {
+        return Number(probe.url.port);
+      } finally {
+        probe.stop(true);
+      }
+    })();
+    const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
+    const store = layerFluree(config).pipe(Layer.provide(platform));
+    const layer = Serve.layerHttp({ port, version: "test" }).pipe(
+      Layer.provideMerge(
+        Bus.layer.pipe(
+          Layer.provideMerge(store),
+          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
+          Layer.provide(platform)
         )
       )
     );
-    await client.connect(
-      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
-    );
-    const response = await client.callTool({
-      name: "bus_run_query",
-      arguments: {
-        name: "orientation_associations",
-        args: { directory: "project", concern: "one" },
-      },
-    });
-    expect(response.isError).not.toBe(true);
-    const result = response.structuredContent as {
-      rows: Array<Record<string, unknown>>;
-      complete: boolean;
-      t: number;
-    };
-    expect(result.complete).toBe(true);
-    expect(result.rows).toHaveLength(1);
-    expect(result.rows[0]).toMatchObject({
-      address: "alice",
-      association: a,
-      topics: [],
-      runtime: "codex",
-      status: "joined",
-    });
-    expect(Object.keys(result.rows[0] ?? {}).sort()).toEqual([
-      "address",
-      "association",
-      "resolution",
-      "runtime",
-      "since",
-      "status",
-      "t",
-      "topics",
-    ]);
-    const invalid = new Message({
-      id: "later-invalid",
-      ts: "2026-11-01T00:01:00.000Z",
-      from: "alice",
-      to: ["*"],
-      kind: "presence",
-      body: "presence",
-      presence: new Presence({ runtime: "codex", status: "joined", topics: [], session: "a" }),
-    });
-    const { "bus:json": _json, ...withoutJson } = toNode(invalid, "");
-    await insertRaw(config, withoutJson);
-    const damaged = await client.callTool({
-      name: "bus_run_query",
-      arguments: { name: "orientation_associations", args: { directory: "project" } },
-    });
-    expect(damaged.structuredContent).toMatchObject({
-      rows: [],
-      damage: "checked",
-      damaged: 1,
-      damagedTotal: 1,
-      complete: false,
-    });
-    const historical = await client.callTool({
-      name: "bus_run_query",
-      arguments: {
-        name: "orientation_associations",
-        args: { directory: "project", concern: "one" },
-        t: result.t,
-      },
-    });
-    expect(historical.structuredContent).toMatchObject({
-      rows: [result.rows[0]],
-      damaged: 0,
-      complete: true,
-    });
+    const runtime = ManagedRuntime.make(layer);
+    try {
+      const client = new Client({ name: "orientation-test", version: "1" });
+      try {
+        await runtime.runPromise(Effect.void);
+        const directorySeed = await runtime.runPromise(
+          Effect.flatMap(Ledger, (ledger) =>
+            ledger.designate({
+              scope: { kind: "directory", directory: "project" },
+              expected: null,
+              operation: revision,
+              intent: "fixture",
+              record: JSON.stringify(directoryRecord("project")),
+              notification: new Message(notification),
+            })
+          )
+        );
+        expect(directorySeed.status).toBe("APPLIED");
+        const programmeSeed = await runtime.runPromise(
+          Effect.gen(function* () {
+            const bus = yield* Bus.Bus;
+            yield* bus.join({
+              address: "publisher",
+              runtime: "other",
+              session: "publisher",
+              cwd: "/workspace",
+            });
+            return yield* updateBulletin({
+              from: "publisher",
+              session: "publisher",
+              operation: Bun.randomUUIDv7(),
+              expected: null,
+              scope: { kind: "programme" },
+              action: "publish",
+              body: "Preserved programme guidance.",
+            });
+          })
+        );
+        expect(programmeSeed.status).toBe("APPLIED");
+        await runtime.runPromise(
+          Effect.flatMap(Ledger, (ledger) =>
+            ledger.append(
+              new Message({
+                id: "second-presence",
+                ts: "2026-11-01T00:00:30.000Z",
+                from: "bob",
+                to: ["*"],
+                kind: "presence",
+                body: "presence",
+                presence: new Presence({
+                  runtime: "codex",
+                  status: "joined",
+                  topics: [],
+                  session: "b",
+                  associations: [{ directory: "project", concerns: [] }],
+                }),
+              })
+            )
+          )
+        );
+        await runtime.runPromise(
+          Effect.flatMap(Ledger, (ledger) =>
+            ledger.append(
+              new Message({
+                id: "real-presence",
+                ts: "2026-11-01T00:00:00.000Z",
+                from: "alice",
+                to: ["*"],
+                kind: "presence",
+                body: "presence",
+                presence: new Presence({
+                  runtime: "codex",
+                  status: "joined",
+                  topics: [],
+                  session: "a",
+                  associations: [a, b],
+                }),
+              })
+            )
+          )
+        );
+        const initialCut = await runtime.runPromise(
+          Effect.flatMap(QueryGateway, (gateway) => gateway.pin)
+        );
+        await client.connect(
+          new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
+        );
+        const response = await client.callTool({
+          name: "bus_run_query",
+          arguments: {
+            name: "orientation_associations",
+            args: { directory: "project", concern: "one" },
+          },
+        });
+        expect(response.isError).not.toBe(true);
+        const result = response.structuredContent as {
+          rows: Array<Record<string, unknown>>;
+          complete: boolean;
+          t: number;
+        };
+        expect(result).toMatchObject({ ledger: initialCut.incarnation, t: initialCut.head });
+        expect(result.complete).toBe(true);
+        expect(result.rows).toHaveLength(1);
+        expect(result.rows[0]).toMatchObject({
+          address: "alice",
+          association: a,
+          topics: [],
+          runtime: "codex",
+          status: "joined",
+        });
+        expect(Object.keys(result.rows[0] ?? {}).sort()).toEqual([
+          "address",
+          "association",
+          "resolution",
+          "runtime",
+          "since",
+          "status",
+          "t",
+          "topics",
+        ]);
+        const firstPage = await client.callTool({
+          name: "bus_run_query",
+          arguments: { name: "orientation_associations", args: { directory: "project", limit: 1 } },
+        });
+        const first = firstPage.structuredContent as {
+          rows: Array<Record<string, unknown>>;
+          next: string;
+          t: number;
+        };
+        expect(first).toMatchObject({ ledger: initialCut.incarnation, t: initialCut.head });
+        expect(first.rows[0]).toMatchObject({ address: "alice" });
+        expect(first.next).toBeString();
+        const invalid = new Message({
+          id: "later-invalid",
+          ts: "2026-11-01T00:01:00.000Z",
+          from: "alice",
+          to: ["*"],
+          kind: "presence",
+          body: "presence",
+          presence: new Presence({ runtime: "codex", status: "joined", topics: [], session: "a" }),
+        });
+        const node = toNode(invalid, JSON.stringify(invalid));
+        if (damage === "missing-json") {
+          const { "bus:json": _json, ...withoutJson } = node;
+          await insertRaw(config, withoutJson);
+        } else {
+          const { "bus:id": _id, ...withoutId } = node;
+          await insertRaw(config, withoutId);
+        }
+        const damagedCut = await runtime.runPromise(
+          Effect.flatMap(QueryGateway, (gateway) => gateway.pin)
+        );
+        expect(damagedCut.incarnation).toBe(initialCut.incarnation);
+        expect(damagedCut.head).toBeGreaterThan(initialCut.head);
+        const damaged = await client.callTool({
+          name: "bus_run_query",
+          arguments: { name: "orientation_associations", args: { directory: "project" } },
+        });
+        if (damage === "missing-json") {
+          expect(damaged.structuredContent).toMatchObject({
+            ledger: damagedCut.incarnation,
+            t: damagedCut.head,
+            rows: [],
+            damage: "checked",
+            damaged: 1,
+            damagedTotal: 1,
+            complete: false,
+          });
+        } else {
+          expect(damaged.isError).toBe(true);
+          expect(JSON.stringify(damaged.content)).toContain(
+            "Orientation data is damaged at this cut."
+          );
+          const orientation = CallToolResultSchema.parse(
+            await client.callTool({ name: "bus_orient", arguments: { directory: "project" } })
+          );
+          expect(orientation.structuredContent).toMatchObject({
+            cut: damagedCut,
+            status: "UNAVAILABLE",
+            reason: "DAMAGE",
+            section: "associations",
+            programme: { state: "CURRENT", body: "Preserved programme guidance." },
+            selection: { state: "SELECTED", directory: "project" },
+            directory: { value: { directory: { id: "project" } } },
+            recovery: { tool: "bus_run_query", input: { name: "orientation_associations" } },
+          });
+          const first = orientation.content[0];
+          if (first?.type !== "text") throw new Error("Orientation has no text result");
+          expect(JSON.parse(first.text)).toEqual(orientation.structuredContent);
+        }
+        const historical = await client.callTool({
+          name: "bus_run_query",
+          arguments: {
+            name: "orientation_associations",
+            args: { directory: "project", concern: "one" },
+            t: result.t,
+          },
+        });
+        if (historical.isError)
+          throw new Error("The historical association query was unavailable.");
+        expect(historical.structuredContent).toMatchObject({
+          ledger: initialCut.incarnation,
+          t: initialCut.head,
+          rows: [result.rows[0]],
+          damaged: 0,
+          complete: true,
+        });
+        const continuation = await client.callTool({
+          name: "bus_run_query",
+          arguments: {
+            name: "orientation_associations",
+            args: { directory: "project", limit: 1 },
+            cursor: first.next,
+          },
+        });
+        if (continuation.isError)
+          throw new Error("The historical association continuation was unavailable.");
+        expect(continuation.structuredContent).toMatchObject({
+          ledger: initialCut.incarnation,
+          t: initialCut.head,
+          rows: [{ address: "bob" }],
+          damaged: 0,
+          complete: true,
+        });
+      } finally {
+        await client.close();
+      }
+    } finally {
+      await runtime.dispose();
+    }
   } finally {
-    await client.close();
-    await runtime.dispose();
     await server.stop();
   }
-}, 30_000);
+};
+
+test(
+  "real Fluree handles missing-json presence damage at its cut",
+  () => testRealPresenceDamage("missing-json"),
+  30_000
+);
+test(
+  "real Fluree handles missing-id presence damage at its cut",
+  () => testRealPresenceDamage("missing-id"),
+  30_000
+);

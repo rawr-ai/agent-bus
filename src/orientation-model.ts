@@ -102,7 +102,10 @@ export const BulletinUpdate = Schema.Struct({
     Schema.String.annotate({ description: "Required on publication; at most 4,096 UTF-8 bytes." })
   ),
   expiresAt: Schema.optionalKey(
-    Schema.String.annotate({ description: "Optional UTC expiry of the published bulletin." })
+    Schema.String.annotate({
+      description:
+        "Optional UTC expiry, with at most millisecond precision, normalized to an instant.",
+    })
   ),
   recipients: Schema.optionalKey(
     Schema.Array(Nonempty).annotate({
@@ -274,6 +277,51 @@ const compare = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 const uniqueSorted = (values: ReadonlyArray<string>) => [...new Set(values)].sort(compare);
 export const jsonBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 export const textBytes = (value: string) => Buffer.byteLength(value, "utf8");
+
+/** Project one designated bulletin at an evaluation time, with full content only when selected. */
+export const bulletinView = (
+  revision: { readonly revision: string; readonly value: BulletinRecord } | undefined,
+  time: number,
+  full: boolean
+) => {
+  if (revision === undefined) return { state: "MISSING" as const };
+  const { value } = revision;
+  const state =
+    value.action === "withdraw"
+      ? ("WITHDRAWN" as const)
+      : value.expiresAt !== undefined && time >= Date.parse(value.expiresAt)
+        ? ("EXPIRED" as const)
+        : ("CURRENT" as const);
+  if (!full) {
+    return {
+      state,
+      revision: revision.revision,
+      ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }),
+    };
+  }
+  return {
+    state,
+    revision: revision.revision,
+    publisher: value.publisher,
+    publishedAt: value.publishedAt,
+    notification: value.notification,
+    audience: value.audience,
+    ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }),
+    ...(value.body === undefined ? {} : { body: value.body }),
+  };
+};
+
+/** Both the immutable record and its complete public projection must fit as whole units. */
+export const bulletinFits = (record: BulletinRecord, revision: string, time: number) => {
+  const expiry = record.expiresAt === undefined ? undefined : Date.parse(record.expiresAt);
+  const times = expiry === undefined ? [time] : [time, expiry - 1, expiry];
+  return (
+    jsonBytes(record) <= BULLETIN_UNIT_BYTES &&
+    times.every(
+      (at) => jsonBytes(bulletinView({ revision, value: record }, at, true)) <= BULLETIN_UNIT_BYTES
+    )
+  );
+};
 
 /** Lexical checkout matching: never resolve symlinks or inspect a foreign path. */
 export const checkoutMatches = (alias: string, cwd: string) => {

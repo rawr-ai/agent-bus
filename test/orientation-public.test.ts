@@ -12,8 +12,9 @@ import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { orientationAssociations } from "../src/catalogue.ts";
+import { InvalidQuery, LedgerError } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
-import { Ledger } from "../src/Ledger.ts";
+import { Ledger, scopeIri } from "../src/Ledger.ts";
 import { updateBulletin, updateDirectory } from "../src/Orientation.ts";
 import { orient } from "../src/OrientationView.ts";
 import { bulletinAt, directoryAt } from "../src/orientation-read.ts";
@@ -150,6 +151,22 @@ test("public MCP writes and read-only orientation expose matching text and struc
     });
     expect(written).toMatchObject({ status: "APPLIED", operation, revision: operation });
     const before = await f.run(Effect.flatMap(Ledger, (ledger) => ledger.end));
+    const stale = await call("bus_bulletin", {
+      from: "publisher",
+      session: "publisher",
+      operation: Bun.randomUUIDv7(),
+      expected: null,
+      scope: { kind: "programme" },
+      action: "publish",
+      body: "A stale replacement must not win.",
+    });
+    expect(stale).toMatchObject({ status: "CONFLICT", current: operation });
+    expect(await f.run(Effect.flatMap(Ledger, (ledger) => ledger.end))).toBe(before);
+    const entries = await f.run(Effect.flatMap(Ledger, (ledger) => ledger.read(0)));
+    expect(entries.entries.filter(({ message }) => message.kind === "message")).toHaveLength(1);
+    expect(entries.entries.find(({ message }) => message.kind === "message")?.message.id).toBe(
+      (written as { notification: { id: string } }).notification.id
+    );
     const result = await call("bus_orient", {});
     expect(result).toMatchObject({
       status: "COMPLETE",
@@ -978,6 +995,160 @@ test("an update between component reads cannot mix orientation cuts", async () =
         expect(result).toHaveProperty("currentHeadT", after);
         expect(yield* orient({ directory: "project" })).toMatchObject({
           programme: { body: "Later programme" },
+        });
+      })
+    );
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("withdrawal validates revision scope and survives concern removal and re-registration", async () => {
+  const f = await fixture();
+  try {
+    await f.run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const ledger = yield* Ledger;
+        yield* bus.join(joining("publisher"));
+        yield* bus.join({ ...joining("reader"), topics: ["old-topic"] });
+        const directoryRevision = Bun.randomUUIDv7();
+        yield* updateDirectory({
+          from: "publisher",
+          session: "publisher",
+          operation: directoryRevision,
+          expected: null,
+          directory,
+          audience: ["observer"],
+        });
+        const concernRevision = Bun.randomUUIDv7();
+        const concernInput = {
+          from: "publisher",
+          session: "publisher",
+          operation: concernRevision,
+          expected: null,
+          scope: { kind: "concern" as const, directory: "project", concern: "delivery" },
+          action: "publish" as const,
+          body: "Retained concern guidance",
+          expiresAt: "2030-01-01T00:00:00Z",
+          recipients: ["reader"],
+        };
+        const published = yield* updateBulletin(concernInput);
+        if (published.status !== "APPLIED") throw new Error("concern publication failed");
+        const retry = yield* updateBulletin({
+          ...concernInput,
+          expiresAt: "2030-01-01T00:00:00.000Z",
+        });
+        expect(retry).toMatchObject({
+          status: "APPLIED",
+          revision: concernRevision,
+          notification: published.notification,
+        });
+        expect(
+          (yield* updateBulletin({ ...concernInput, expiresAt: "2030-01-01T00:00:00.001Z" })).status
+        ).toBe("IDENTITY_MISMATCH");
+        const beforeWrongScope = yield* ledger.end;
+        for (const expiresAt of ["2030-02-30T00:00:00Z", "2030-01-01T00:00:00.0001Z"]) {
+          expect(yield* Effect.isFailure(updateBulletin({ ...concernInput, expiresAt }))).toBe(
+            true
+          );
+        }
+        const wrongScope = yield* Effect.flip(
+          updateBulletin({
+            from: "publisher",
+            session: "publisher",
+            operation: Bun.randomUUIDv7(),
+            expected: concernRevision,
+            scope: { kind: "programme" },
+            action: "withdraw",
+          })
+        );
+        expect(wrongScope).toBeInstanceOf(InvalidQuery);
+        expect(wrongScope.message).toContain("not a published bulletin");
+        expect(yield* ledger.end).toBe(beforeWrongScope);
+        yield* bus.take("reader", "reader");
+        const withoutConcern = Bun.randomUUIDv7();
+        yield* updateDirectory({
+          from: "publisher",
+          session: "publisher",
+          operation: withoutConcern,
+          expected: directoryRevision,
+          directory: { ...directory, concerns: [] },
+          audience: ["observer"],
+        });
+        const restored = Bun.randomUUIDv7();
+        yield* updateDirectory({
+          from: "publisher",
+          session: "publisher",
+          operation: restored,
+          expected: withoutConcern,
+          directory,
+          audience: ["observer"],
+        });
+        expect(yield* orient({ directory: "project", concern: "delivery" })).toMatchObject({
+          concern: {
+            state: "REGISTERED",
+            bulletin: {
+              state: "CURRENT",
+              revision: concernRevision,
+              publisher: "publisher",
+              publishedAt: published.notification.ts,
+            },
+          },
+        });
+        expect(yield* bus.take("reader", "reader")).toEqual([]);
+        const removedAgain = Bun.randomUUIDv7();
+        yield* updateDirectory({
+          from: "publisher",
+          session: "publisher",
+          operation: removedAgain,
+          expected: restored,
+          directory: { ...directory, concerns: [] },
+          audience: ["observer"],
+        });
+        const gateway = yield* QueryGateway;
+        let directoryReads = 0;
+        const noDirectory = QueryGateway.of({
+          ...gateway,
+          jsonld: (t, body) => {
+            if (
+              JSON.stringify(body.where).includes(
+                scopeIri({ kind: "directory", directory: "project" })
+              )
+            ) {
+              directoryReads += 1;
+              return Effect.fail(new LedgerError({ message: "directory unavailable" }));
+            }
+            return gateway.jsonld(t, body);
+          },
+        });
+        const withdrawn = yield* updateBulletin({
+          from: "publisher",
+          session: "publisher",
+          operation: Bun.randomUUIDv7(),
+          expected: concernRevision,
+          scope: concernInput.scope,
+          action: "withdraw",
+        }).pipe(Effect.provideService(QueryGateway, noDirectory));
+        if (withdrawn.status !== "APPLIED") throw new Error("removed concern withdrawal failed");
+        expect(directoryReads).toBe(0);
+        expect(withdrawn.notification.to).toEqual(published.notification.to);
+        expect((yield* bus.take("reader", "reader")).map(({ id }) => id)).toEqual([
+          withdrawn.notification.id,
+        ]);
+        yield* updateDirectory({
+          from: "publisher",
+          session: "publisher",
+          operation: Bun.randomUUIDv7(),
+          expected: removedAgain,
+          directory,
+          audience: ["observer"],
+        });
+        expect(yield* orient({ directory: "project", concern: "delivery" })).toMatchObject({
+          concern: {
+            state: "REGISTERED",
+            bulletin: { state: "WITHDRAWN", revision: withdrawn.revision },
+          },
         });
       })
     );

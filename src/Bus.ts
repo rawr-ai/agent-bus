@@ -38,6 +38,8 @@ import {
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 
+export const ORIENTATION_JOIN_TOO_LARGE = "Orientation cannot fit alongside this committed join.";
+
 export interface JoinInput {
   readonly address: string;
   readonly runtime: Runtime;
@@ -464,6 +466,8 @@ export const layer = Layer.effect(
             orientation: {
               status: "UNAVAILABLE",
               reason: "INADMISSIBLE",
+              section: "result",
+              message: ORIENTATION_JOIN_TOO_LARGE,
               recovery: { tool: "bus_orient", input: { cwd: input.cwd } },
             },
           };

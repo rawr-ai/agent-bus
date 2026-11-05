@@ -11,7 +11,12 @@ import * as Serve from "../src/serve.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 const associations = '[{"directory":"bus","concerns":["orientation"]}]';
-const cli = async (port: number, owner: string, ...extra: ReadonlyArray<string>) => {
+const joinCli = async (
+  port: number,
+  owner: string,
+  associated: boolean,
+  ...extra: ReadonlyArray<string>
+) => {
   const child = Bun.spawn(
     [
       process.execPath,
@@ -23,8 +28,7 @@ const cli = async (port: number, owner: string, ...extra: ReadonlyArray<string>)
       "other",
       "--session",
       owner,
-      "--associations",
-      associations,
+      ...(associated ? ["--associations", associations] : []),
       ...extra,
     ],
     {
@@ -42,6 +46,8 @@ const cli = async (port: number, owner: string, ...extra: ReadonlyArray<string>)
   ]);
   return { code, out: (stdout + stderr).trim() };
 };
+const cli = (port: number, owner: string, ...extra: ReadonlyArray<string>) =>
+  joinCli(port, owner, true, ...extra);
 
 const arraySchema = {
   type: "array",
@@ -114,7 +120,16 @@ test("a failed post-join orientation reports the committed join and retries read
 });
 
 /** A recording protocol peer can advertise one contract and deliberately violate its echo. */
-const recordingServer = (mode: "no-output" | "missing" | "mismatch") => {
+const recordingServer = (
+  mode:
+    | "no-output"
+    | "missing"
+    | "mismatch"
+    | "transport"
+    | "orient-missing-output"
+    | "orient-missing-read"
+    | "orient-missing-echo"
+) => {
   const calls: Array<unknown> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -126,9 +141,21 @@ const recordingServer = (mode: "no-output" | "missing" | "mismatch") => {
       if (message.method === "server/discover") {
         result = { ...base, supportedVersions: ["2026-07-28"], capabilities: { tools: {} } };
       } else if (message.method === "tools/list") {
+        const orientMode = mode.startsWith("orient-");
         const outputSchema = {
           type: "object",
-          properties: { associations: arraySchema },
+          properties: {
+            associations: arraySchema,
+            ...(orientMode && mode !== "orient-missing-output"
+              ? {
+                  orientation: {
+                    type: "object",
+                    properties: { status: { type: "string" } },
+                    required: ["status"],
+                  },
+                }
+              : {}),
+          },
           required: ["associations"],
         };
         result = {
@@ -136,13 +163,23 @@ const recordingServer = (mode: "no-output" | "missing" | "mismatch") => {
           tools: [
             {
               name: "bus_join",
-              inputSchema: { type: "object", properties: { associations: arraySchema } },
+              inputSchema: {
+                type: "object",
+                properties: {
+                  associations: arraySchema,
+                  ...(orientMode ? { orient: { type: "boolean" } } : {}),
+                },
+              },
               ...(mode === "no-output" ? {} : { outputSchema }),
             },
+            ...(orientMode && mode !== "orient-missing-read"
+              ? [{ name: "bus_orient", inputSchema: { type: "object", properties: {} } }]
+              : []),
           ],
         };
       } else if (message.method === "tools/call") {
         calls.push(message.params?.arguments);
+        if (mode === "transport") return new Response(null, { status: 503 });
         const joined = {
           address: "other/cli",
           topics: [],
@@ -183,6 +220,67 @@ for (const mode of ["no-output", "missing", "mismatch"] as const) {
   });
 }
 
+test("CLI refuses an unsupported requested orientation before sending any join", async () => {
+  const { server, calls } = recordingServer("missing");
+  try {
+    const result = await joinCli(Number(server.url.port), "owner", false, "--orient");
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("no join was sent");
+    expect(calls).toEqual([]);
+  } finally {
+    server.stop(true);
+  }
+});
+
+test("an ordinary join remains usable with an older descriptor", async () => {
+  const { server, calls } = recordingServer("missing");
+  try {
+    const result = await joinCli(Number(server.url.port), "owner", false);
+    expect(result.code).toBe(0);
+    expect(result.out).toContain("joined as other/cli");
+    expect(calls).toHaveLength(1);
+  } finally {
+    server.stop(true);
+  }
+});
+
+for (const mode of [
+  "orient-missing-output",
+  "orient-missing-read",
+  "orient-missing-echo",
+] as const) {
+  test(`join orientation handles ${mode} without rejoining`, async () => {
+    const { server, calls } = recordingServer(mode);
+    try {
+      const result = await joinCli(Number(server.url.port), "owner", false, "--orient");
+      expect(result.code).toBe(1);
+      if (mode === "orient-missing-echo") {
+        expect(result.out).toContain("Joined as other/cli");
+        expect(result.out).toContain("do not automatically rejoin");
+        expect(calls).toHaveLength(1);
+      } else {
+        expect(result.out).toContain("no join was sent");
+        expect(calls).toEqual([]);
+      }
+    } finally {
+      server.stop(true);
+    }
+  });
+}
+
+test("an ordinary join transport failure warns that it may have committed", async () => {
+  const { server, calls } = recordingServer("transport");
+  try {
+    const result = await joinCli(Number(server.url.port), "owner", false);
+    expect(result.code).toBe(1);
+    expect(result.out).toContain("may have committed");
+    expect(result.out).toContain("do not automatically rejoin");
+    expect(calls).toHaveLength(1);
+  } finally {
+    server.stop(true);
+  }
+});
+
 test("association CLI preserves a real owner refusal without changing presence or cursor", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-orientation-cli-"));
   const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
@@ -216,6 +314,10 @@ test("association CLI preserves a real owner refusal without changing presence o
     expect(refused.code).toBe(1);
     expect(refused.out).toContain("held by another session");
     expect(refused.out).toContain("holder");
+    const refusedPlain = await joinCli(port, "competitor", false);
+    expect(refusedPlain.code).toBe(1);
+    expect(refusedPlain.out).toContain("held by another session");
+    expect(refusedPlain.out).toContain("holder");
     const after = await runtime.runPromise(
       Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;

@@ -8,6 +8,7 @@ import {
   type BulletinRecord,
   type BulletinScope,
   type BulletinUpdate,
+  bulletinFits,
   canonicalJson,
   DIRECTORY_METADATA_BYTES,
   type DirectoryRecord,
@@ -204,13 +205,15 @@ export const updateBulletin = (input: BulletinUpdate) =>
           input.recipients === undefined
             ? undefined
             : yield* normalizeAudience(input.recipients, true);
+        const expiresAt =
+          input.expiresAt === undefined ? undefined : new Date(input.expiresAt).toISOString();
         const intent = canonicalJson({
           action: input.action,
           scope: input.scope,
           expected,
           publisher: input.from,
           ...(input.body === undefined ? {} : { body: input.body }),
-          ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+          ...(expiresAt === undefined ? {} : { expiresAt }),
           audience:
             input.action === "withdraw"
               ? { previous: true }
@@ -221,7 +224,8 @@ export const updateBulletin = (input: BulletinUpdate) =>
         const prior = yield* replay(store, operation, intent);
         if (prior !== undefined) return { ...prior, operation, expected };
         const pin = yield* cutFor(gateway);
-        const parent = yield* liveDirectory(gateway, pin, input.scope);
+        const parent =
+          input.action === "publish" ? yield* liveDirectory(gateway, pin, input.scope) : undefined;
         let audience: ReadonlyArray<string>;
         if (input.action === "withdraw") {
           if (expected === null) return yield* invalid("Withdrawal needs an expected revision.");
@@ -263,13 +267,13 @@ export const updateBulletin = (input: BulletinUpdate) =>
           scope: input.scope,
           action: input.action,
           ...(input.body === undefined ? {} : { body: input.body }),
-          ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+          ...(expiresAt === undefined ? {} : { expiresAt }),
           publisher: input.from,
           publishedAt: now,
           notification: notification.id,
           audience,
         };
-        if (jsonBytes(record) > BULLETIN_UNIT_BYTES)
+        if (!bulletinFits(record, operation, Date.parse(now)))
           return yield* invalid(
             `The projected bulletin exceeds ${BULLETIN_UNIT_BYTES} UTF-8 bytes.`
           );

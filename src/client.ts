@@ -118,6 +118,27 @@ export const supportsAssociations = (tool: McpSchema.Tool): boolean => {
   );
 };
 
+/** A requested join orientation requires both its input and observable output. */
+export const supportsOrientation = (tool: McpSchema.Tool): boolean => {
+  const input = tool.inputSchema;
+  const output = tool.outputSchema;
+  if (!object(input.properties) || !object(output) || !object(output.properties)) return false;
+  const flag = input.properties.orient;
+  const orientation = output.properties.orientation;
+  if (
+    !object(flag) ||
+    flag.type !== "boolean" ||
+    !object(orientation) ||
+    orientation.type !== "object" ||
+    !object(orientation.properties) ||
+    !Array.isArray(orientation.required)
+  ) {
+    return false;
+  }
+  const status = orientation.properties.status;
+  return orientation.required.includes("status") && object(status) && status.type === "string";
+};
+
 /** Join on one fresh connection; verify advertised capability before sending associations. */
 export const join =
   (url: string) =>
@@ -127,7 +148,8 @@ export const join =
   ) =>
     Effect.gen(function* () {
       const client = yield* McpClient.McpClient;
-      const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
+      const tools = yield* client.listTools();
+      const tool = tools.find((candidate) => candidate.name === name);
       if (tool === undefined)
         return yield* new BusCallError({ message: `The bus has no ${name} tool.` });
       const requested = args.associations;
@@ -137,6 +159,15 @@ export const join =
             "The server does not unambiguously advertise association input and effective output; no join was sent. Reconnect to an upgraded server.",
         });
       }
+      if (
+        args.orient === true &&
+        (!supportsOrientation(tool) || !tools.some((candidate) => candidate.name === "bus_orient"))
+      ) {
+        return yield* new BusCallError({
+          message:
+            "The server does not unambiguously advertise join orientation and its read-only retry; no join was sent. Reconnect to an upgraded server.",
+        });
+      }
       const joined = yield* client
         .callTool(
           { tool, schema: Joined, arguments: args },
@@ -144,16 +175,14 @@ export const join =
         )
         .pipe(
           Effect.mapError((error) =>
-            requested === undefined
-              ? new BusCallError({ message: error.reason.message })
-              : error.reason._tag === "ToolError"
-                ? new BusCallError({
-                    message: `${error.reason.message}\nIf the server reported a storage failure, the join may have committed; inspect it read-only rather than automatically rejoining.`,
-                  })
-                : new BusCallError({
-                    message:
-                      "The association join outcome is uncertain and may have committed. Inspect it read-only; do not automatically rejoin.",
-                  })
+            error.reason._tag === "ToolError"
+              ? new BusCallError({
+                  message: `${error.reason.message}\nIf the server reported a storage failure, the join may have committed; inspect it read-only rather than automatically rejoining.`,
+                })
+              : new BusCallError({
+                  message:
+                    "The join outcome is uncertain and may have committed. Inspect it read-only; do not automatically rejoin.",
+                })
           )
         );
       if (
@@ -164,6 +193,11 @@ export const join =
       ) {
         return yield* new BusCallError({
           message: `Joined as ${joined.address}, but the effective associations were absent or mismatched. Inspect them read-only; do not automatically rejoin.`,
+        });
+      }
+      if (args.orient === true && joined.orientation === undefined) {
+        return yield* new BusCallError({
+          message: `Joined as ${joined.address}, but orientation was absent. Retry the read only; do not automatically rejoin.`,
         });
       }
       return joined;

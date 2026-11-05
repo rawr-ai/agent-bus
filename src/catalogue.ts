@@ -471,11 +471,10 @@ const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
     return cursor.t;
   });
 
-const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
+const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
   spec: Spec<S, Row>,
   args: S["Type"],
-  input: RunInput,
-  budget: number | undefined
+  input: RunInput
 ) =>
   Effect.gen(function* () {
     const gateway = yield* QueryGateway;
@@ -509,6 +508,21 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
       return yield* invalid("The cursor's position does not fit this operation.");
     }
     const position = cursor?.p ?? start;
+    return { gateway, normalized, hash, size, cursor, pin, t, position };
+  });
+
+const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
+  spec: Spec<S, Row>,
+  args: S["Type"],
+  input: RunInput,
+  budget: number | undefined
+) =>
+  Effect.gen(function* () {
+    const { gateway, normalized, hash, size, cursor, pin, t, position } = yield* prepareRun(
+      spec,
+      args,
+      input
+    );
     const fetched = yield* spec.fetch(args, { t, position });
     const after = yield* gateway.pin;
     if (after.incarnation !== pin.incarnation) {
@@ -641,6 +655,13 @@ const define = <S extends Schema.Top & { readonly DecodingServices: never }, Row
     );
   return {
     ...spec,
+    /** Resolve and validate this operation's original cut without fetching a page. */
+    resolveCut: (args: S["Encoded"], input: RunInput) =>
+      Effect.flatMap(prepare(args), (decoded) =>
+        prepareRun(spec, decoded, input).pipe(
+          Effect.map(({ pin, t }) => ({ head: t, incarnation: pin.incarnation }))
+        )
+      ),
     /** Typed execution for the presets. */
     run: (args: S["Encoded"], input: RunInput, budget: number | undefined) =>
       Effect.flatMap(prepare(args), (decoded) => run(spec, decoded, input, budget)),
@@ -1319,7 +1340,7 @@ export const peers = define({
 });
 
 const DIRECTORY_PREFIX = "urn:agent-bus:orientation:directory:";
-const DirectoryScopeRows = Schema.Array(Schema.Tuple([Schema.String]));
+const SubjectRows = Schema.Array(Schema.Tuple([Schema.String]));
 const isOrientationId = Schema.is(OrientationId);
 
 export const orientationDirectories = define({
@@ -1356,7 +1377,7 @@ export const orientationDirectories = define({
           offset,
           limit: 201,
         })
-        .pipe(Effect.flatMap(decodeRows(DirectoryScopeRows)));
+        .pipe(Effect.flatMap(decodeRows(SubjectRows)));
       const items: Array<Item<OrientationDirectoryRow>> = [];
       let matched = 0;
       const inspect = (scope: string, index: number) =>
@@ -1452,6 +1473,16 @@ export const orientationAssociations = define({
       const offset = "offset" in at.position ? at.position.offset : 0;
       const selected = yield* directoryAt(gateway, at.t, args.directory);
       const registered = new Set(selected?.value.directory.concerns.map(({ id }) => id) ?? []);
+      // A typed presence without an id has no key or reliable damage location, but may be
+      // the latest state of any address. Never let the keyed fold resurrect an older row.
+      const unkeyed = yield* gateway
+        .jsonld(at.t, {
+          selectDistinct: ["?m"],
+          where: [...typed("?m", ["presence"]), ["minus", { "@id": "?m", "bus:id": "?id" }]],
+          limit: 1,
+        })
+        .pipe(Effect.flatMap(decodeRows(SubjectRows)));
+      if (unkeyed.length > 0) return yield* new LedgerError({ message: DAMAGE_MESSAGE });
       const rows = yield* gateway
         .jsonld(at.t, {
           selectDistinct: ["?t", "?id", "?json"],

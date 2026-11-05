@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schedule, Schema, Stream } from "effect";
+import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";

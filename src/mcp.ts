@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Schema, Semaphore } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
-import { Bus } from "./Bus.ts";
+import { Bus, ORIENTATION_JOIN_TOO_LARGE } from "./Bus.ts";
 import {
   byName,
   type EntryRow,
@@ -25,7 +25,7 @@ import {
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { updateBulletin, updateDirectory } from "./Orientation.ts";
-import { orient } from "./OrientationView.ts";
+import { ORIENT_DEADLINE, orient } from "./OrientationView.ts";
 import {
   BulletinUpdate,
   BulletinView,
@@ -109,7 +109,7 @@ const OrientationPage = Schema.Struct({
 export const OrientationResult = Schema.Struct({
   status: Schema.Literals(["COMPLETE", "INCOMPLETE", "UNAVAILABLE"]).annotate({
     description:
-      "Whether the composed result is complete, has a continuation, or cannot be established.",
+      "Aggregate completeness: unavailable may retain valid same-cut sections, including programme guidance.",
   }),
   cut: Schema.optionalKey(Cut.annotate({ description: "The ledger cut shared by the result." })),
   currentHeadT: Schema.optionalKey(
@@ -197,6 +197,21 @@ export const OrientationResult = Schema.Struct({
     Schema.Literals(["DAMAGE", "INADMISSIBLE", "FAULT"]).annotate({
       description: "Why the result is unavailable.",
     })
+  ),
+  section: Schema.optionalKey(
+    Schema.Literals([
+      "query",
+      "programme",
+      "candidates",
+      "directory",
+      "concern",
+      "summaries",
+      "associations",
+      "result",
+    ]).annotate({ description: "The section that could not be established." })
+  ),
+  message: Schema.optionalKey(
+    Schema.String.annotate({ description: "A safe explanation of the unavailable section." })
   ),
   recovery: Schema.optionalKey(
     OrientationRecovery.annotate({
@@ -428,7 +443,7 @@ const Directory = Tool.make("bus_directory", {
 
 const Bulletin = Tool.make("bus_bulletin", {
   description:
-    "Publish or withdraw a programme or registered concern bulletin. Programme notices go to *; concern notices go to its registered topic plus explicitly named direct recipients. Withdrawal retains the prior audience. Supply a UUIDv7 operation and the exact current revision; after UNKNOWN retry only the identical intent with the same operation id. A committed notice does not prove it was read.",
+    "Publish programme or registered concern guidance, or withdraw an existing designation even after concern removal. Programme notices go to *; concern notices go to its registered topic plus explicitly named direct recipients. Withdrawal retains the prior audience. Supply a UUIDv7 operation and the exact current revision; after UNKNOWN retry only the identical intent with the same operation id. A committed notice does not prove it was read.",
   parameters: BulletinUpdate,
   success: WriteResult,
   failure: Failure,
@@ -438,7 +453,7 @@ const Bulletin = Tool.make("bus_bulletin", {
 
 const Orient = Tool.make("bus_orient", {
   description:
-    "Read designated programme guidance, directory candidates or one selected directory, its concern summaries and optional full concern bulletin, and explicit current associations at one ledger cut. It does not join, subscribe, read mail or move a cursor. Pass a candidate continuation back with the same cwd, or use the members page's saved-query continuation at the same cut. An unavailable result is not an empty or complete result.",
+    "Read designated programme guidance, directory candidates or one selected directory, its concern summaries and optional full concern bulletin, and explicit current associations at one ledger cut. It does not join, subscribe, read mail or move a cursor. Pass a candidate continuation back with the same cwd, or use the members page's saved-query continuation at the same cut. Unavailable is an aggregate status: safely read sections remain labelled at the same cut, and section/message/recovery identify the failure.",
   parameters: OrientRequest,
   success: OrientationResult,
   failure: Failure,
@@ -798,15 +813,31 @@ const BusHandlers = BusToolkit.toLayer(
     const pool = yield* Semaphore.make(QUERY_PERMITS);
     const queries = <A, E>(effect: Effect.Effect<A, E, QueryGateway>) =>
       effect.pipe(Effect.provideService(QueryGateway, gateway), pool.withPermits(1));
+    const timedOrient = (input: typeof OrientRequest.Type, budget?: number) =>
+      queries(orient(input, budget)).pipe(
+        Effect.timeoutOrElse({
+          duration: ORIENT_DEADLINE,
+          orElse: () =>
+            Effect.succeed({
+              status: "UNAVAILABLE" as const,
+              reason: "FAULT" as const,
+              section: "query" as const,
+              message: "Orientation did not finish within its deadline.",
+              recovery: { tool: "bus_orient" as const, input },
+            }),
+        })
+      );
     const withOrientation = <T extends object>(joined: T, cwd: string) => {
       const fallback = {
         status: "UNAVAILABLE" as const,
         reason: "INADMISSIBLE" as const,
+        section: "result" as const,
+        message: ORIENTATION_JOIN_TOO_LARGE,
         recovery: { tool: "bus_orient" as const, input: { cwd } },
       };
       const occupied = Buffer.byteLength(JSON.stringify({ ...joined, orientation: null }), "utf8");
       const remaining = Math.max(0, MAX_ENVELOPE_BYTES - occupied + 4);
-      return queries(orient({ cwd }, remaining)).pipe(
+      return timedOrient({ cwd }, remaining).pipe(
         Effect.catchTag("InvalidQuery", () => Effect.succeed(fallback)),
         Effect.map((orientation) => ({
           ...joined,
@@ -841,7 +872,7 @@ const BusHandlers = BusToolkit.toLayer(
           .pipe(Effect.map(({ id, ts }) => ({ id, ts }))),
       bus_directory: (params) => updateDirectory(params).pipe(Effect.provide(environment)),
       bus_bulletin: (params) => updateBulletin(params).pipe(Effect.provide(environment)),
-      bus_orient: (params) => queries(orient(params)),
+      bus_orient: (params) => timedOrient(params),
       bus_read: ({ address, session, limit }) =>
         bus.take(address, session, limit).pipe(Effect.map(publicMessages)),
       bus_wait: ({ address, session, timeoutSeconds }) =>

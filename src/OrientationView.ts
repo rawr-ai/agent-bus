@@ -1,82 +1,85 @@
 import { Clock, Effect, Schema } from "effect";
-import { byName, CATALOGUE_VERSION, MAX_ENVELOPE_BYTES } from "./catalogue.ts";
+import {
+  byName,
+  CATALOGUE_VERSION,
+  MAX_ENVELOPE_BYTES,
+  orientationDirectories,
+} from "./catalogue.ts";
 import { InvalidQuery, LedgerError } from "./domain.ts";
 import {
-  type BulletinRecord,
+  bulletinView,
   jsonBytes,
   type OrientationRecovery,
   OrientationRecovery as OrientationRecoverySchema,
   type OrientRequest,
 } from "./orientation-model.ts";
-import { bulletinAt, DAMAGE_MESSAGE, directoryAt, type Revision } from "./orientation-read.ts";
+import { bulletinAt, DAMAGE_MESSAGE, directoryAt } from "./orientation-read.ts";
 import { QueryGateway } from "./Query.ts";
 
 const Candidates = Schema.Array(
   Schema.Struct({ id: Schema.String, name: Schema.String, revision: Schema.String })
 );
-const ORIENT_DEADLINE = "20 seconds";
+export const ORIENT_DEADLINE = "20 seconds";
+type Section =
+  | "query"
+  | "programme"
+  | "candidates"
+  | "directory"
+  | "concern"
+  | "summaries"
+  | "associations"
+  | "result";
 const invalid = (message: string) => new InvalidQuery({ message });
 class OrientationUnavailable extends Schema.TaggedError<OrientationUnavailable>()(
   "OrientationUnavailable",
   {
     reason: Schema.Literals(["DAMAGE", "INADMISSIBLE", "FAULT"]),
+    section: Schema.Literals([
+      "query",
+      "programme",
+      "candidates",
+      "directory",
+      "concern",
+      "summaries",
+      "associations",
+      "result",
+    ]),
     message: Schema.String,
     recovery: Schema.optionalKey(OrientationRecoverySchema),
   }
 ) {}
 const unavailable = (
   reason: "DAMAGE" | "INADMISSIBLE" | "FAULT",
+  section: Section,
   message: string,
   recovery?: OrientationRecovery
 ) =>
-  new OrientationUnavailable({ reason, message, ...(recovery === undefined ? {} : { recovery }) });
+  new OrientationUnavailable({
+    reason,
+    section,
+    message,
+    ...(recovery === undefined ? {} : { recovery }),
+  });
 
-/** Expiry is evaluated at read time; it never changes the designated revision. */
-const bulletinView = (
-  revision: Revision<BulletinRecord> | undefined,
-  time: number,
-  full: boolean
-) => {
-  if (revision === undefined) return { state: "MISSING" as const };
-  const { value } = revision;
-  const state =
-    value.action === "withdraw"
-      ? ("WITHDRAWN" as const)
-      : value.expiresAt !== undefined && time >= Date.parse(value.expiresAt)
-        ? ("EXPIRED" as const)
-        : ("CURRENT" as const);
-  if (!full) {
-    return {
-      state,
-      revision: revision.revision,
-      ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }),
-    };
-  }
-  return {
-    state,
-    revision: revision.revision,
-    publisher: value.publisher,
-    publishedAt: value.publishedAt,
-    notification: value.notification,
-    audience: value.audience,
-    ...(value.expiresAt === undefined ? {} : { expiresAt: value.expiresAt }),
-    ...(value.body === undefined ? {} : { body: value.body }),
-  };
-};
+const sectionError =
+  (section: Section, message: string, recovery?: OrientationRecovery) =>
+  (error: LedgerError | InvalidQuery) =>
+    unavailable(
+      error instanceof InvalidQuery
+        ? "INADMISSIBLE"
+        : error.message === DAMAGE_MESSAGE
+          ? "DAMAGE"
+          : "FAULT",
+      section,
+      message,
+      recovery
+    );
 
 /** One independent read. It never joins, subscribes, advances a cursor or sends a message. */
 const readOrient = (input: OrientRequest, budget: number) =>
   Effect.gen(function* () {
     if (jsonBytes(input) > 16_384) {
       return yield* invalid("The orientation request exceeds 16,384 UTF-8 bytes.");
-    }
-    const gateway = yield* QueryGateway;
-    const first = yield* gateway.pin;
-    if (
-      input.t !== undefined &&
-      (!Number.isInteger(input.t) || input.t < 1 || input.t > first.head)
-    ) {
-      return yield* invalid(`t must be a commit from 1 to ${first.head}.`);
     }
     if (input.directory !== undefined && input.candidateCursor !== undefined) {
       return yield* invalid("A candidate cursor cannot be combined with an explicit directory.");
@@ -87,56 +90,119 @@ const readOrient = (input: OrientRequest, budget: number) =>
     if (input.cwd !== undefined && !input.cwd.startsWith("/")) {
       return yield* invalid("cwd must be an absolute path.");
     }
-    const time = yield* Clock.currentTimeMillis;
-    const candidateOperation = byName("orientation_directories");
-    const candidates =
-      input.directory !== undefined || input.cwd === undefined
-        ? undefined
-        : yield* Effect.gen(function* () {
-            if (candidateOperation === undefined) {
-              return yield* unavailable("FAULT", "Directory candidate discovery is unavailable.");
-            }
-            return yield* candidateOperation.invoke(
-              { cwd: input.cwd, limit: 20 },
-              { t: input.t, cursor: input.candidateCursor },
-              MAX_ENVELOPE_BYTES
-            );
-          });
-    const t = candidates?.t ?? input.t ?? first.head;
-    const cut = { head: t, incarnation: candidates?.ledger ?? first.incarnation };
-    if (cut.incarnation !== first.incarnation) {
-      return yield* unavailable("FAULT", "The ledger was replaced while orientation began.");
+    const gateway = yield* QueryGateway;
+    const first = yield* gateway.pin;
+    if (
+      input.t !== undefined &&
+      (!Number.isInteger(input.t) || input.t < 1 || input.t > first.head)
+    ) {
+      return yield* invalid(`t must be a commit from 1 to ${first.head}.`);
     }
-    return yield* Effect.gen(function* () {
+    // The saved query owns cursor validation, including argument binding and incarnation.
+    const candidateCut =
+      input.directory === undefined && input.cwd !== undefined
+        ? yield* orientationDirectories.resolveCut(
+            { cwd: input.cwd, limit: 20 },
+            { t: input.t, cursor: input.candidateCursor }
+          )
+        : undefined;
+    const cut = candidateCut ?? { head: input.t ?? first.head, incarnation: first.incarnation };
+    if (cut.incarnation !== first.incarnation) {
+      return yield* unavailable("FAULT", "query", "The ledger changed while orientation began.");
+    }
+    const t = cut.head;
+    const time = yield* Clock.currentTimeMillis;
+    const evaluatedAt = new Date(time).toISOString();
+    const retry: OrientationRecovery = { tool: "bus_orient", input: { ...input, t } };
+    const partial: Record<string, unknown> = {};
+    const candidateOperation = byName("orientation_directories");
+    const outcome = yield* Effect.gen(function* () {
       const programme = bulletinView(
-        yield* bulletinAt(gateway, t, { kind: "programme" }),
+        yield* bulletinAt(gateway, t, { kind: "programme" }).pipe(
+          Effect.mapError(
+            sectionError("programme", "Programme guidance is unavailable at this cut.", retry)
+          )
+        ),
         time,
         true
       );
-      if (candidates !== undefined && candidates.damagedTotal > 0) {
-        return yield* unavailable(
-          "DAMAGE",
-          "Directory candidate discovery encountered damaged data."
-        );
+      partial.programme = programme;
+      let candidatePage;
+      if (input.directory === undefined && input.cwd !== undefined) {
+        partial.selection = { state: "UNRESOLVED", basis: "alias" };
+        const message =
+          "Directory discovery is unavailable. If you know a directory id, select it explicitly at this cut.";
+        if (candidateOperation === undefined) {
+          return yield* unavailable("FAULT", "candidates", message, retry);
+        }
+        const recovery: OrientationRecovery = {
+          tool: "bus_run_query",
+          input: {
+            name: "orientation_directories",
+            args: { cwd: input.cwd, limit: 20 },
+            t,
+            ...(input.candidateCursor === undefined ? {} : { cursor: input.candidateCursor }),
+          },
+        };
+        candidatePage = yield* candidateOperation
+          .invoke(
+            { cwd: input.cwd, limit: 20 },
+            { t, cursor: input.candidateCursor },
+            MAX_ENVELOPE_BYTES
+          )
+          .pipe(Effect.mapError(sectionError("candidates", message, recovery)));
+        partial.candidates = candidatePage;
+        if (candidatePage.damagedTotal > 0) {
+          return yield* unavailable("DAMAGE", "candidates", message, recovery);
+        }
       }
       const candidateRows =
-        candidates === undefined
+        candidatePage === undefined
           ? []
-          : yield* Schema.decodeUnknownEffect(Candidates)(candidates.rows).pipe(
-              Effect.mapError(() => unavailable("DAMAGE", "Directory candidate data is damaged."))
+          : yield* Schema.decodeUnknownEffect(Candidates)(candidatePage.rows).pipe(
+              Effect.mapError(() =>
+                unavailable(
+                  "DAMAGE",
+                  "candidates",
+                  "Directory candidate data is damaged; select a known directory id at this cut.",
+                  retry
+                )
+              )
             );
       const automatic =
         input.directory === undefined &&
         input.candidateCursor === undefined &&
-        candidates?.complete === true &&
+        candidatePage?.complete === true &&
         candidateRows.length === 1
           ? candidateRows[0]?.id
           : undefined;
       const selected = input.directory ?? automatic;
+      if (selected !== undefined) {
+        partial.selection = {
+          state: "UNRESOLVED",
+          basis: input.directory === undefined ? "alias" : "explicit",
+          directory: selected,
+        };
+      }
       const directory =
-        selected === undefined ? undefined : yield* directoryAt(gateway, t, selected);
+        selected === undefined
+          ? undefined
+          : yield* directoryAt(gateway, t, selected).pipe(
+              Effect.mapError(
+                sectionError(
+                  "directory",
+                  "The selected directory is unavailable at this cut.",
+                  retry
+                )
+              )
+            );
       if (automatic !== undefined && directory === undefined) {
-        return yield* unavailable("DAMAGE", "A discovered directory is missing at the same cut.");
+        return yield* unavailable(
+          "DAMAGE",
+          "directory",
+          "A discovered directory is missing at the same cut.",
+          retry
+        );
       }
       const selection =
         selected === undefined
@@ -151,21 +217,46 @@ const readOrient = (input: OrientRequest, budget: number) =>
                 basis: input.directory === undefined ? ("alias" as const) : ("explicit" as const),
                 directory: selected,
               };
-      if (input.concern !== undefined && selected === undefined) {
-        return yield* invalid("Select a directory before selecting one of its concerns.");
-      }
+      partial.selection = selection;
+      if (directory !== undefined) partial.directory = directory;
       const concern = directory?.value.directory.concerns.find(({ id }) => id === input.concern);
+      if (input.concern !== undefined) {
+        partial.concern = {
+          id: input.concern,
+          state: concern === undefined ? "UNRESOLVED" : "REGISTERED",
+        };
+      }
+      if (directory !== undefined) {
+        partial.subscriptions = { state: "SEPARATE_QUERY", query: "peers", t };
+      }
       const summaries = [];
-      let selectedBulletin = bulletinView(undefined, time, true);
       if (directory !== undefined && selected !== undefined) {
         for (const definition of directory.value.directory.concerns) {
+          const selectedConcern = definition.id === input.concern;
+          const recovery: OrientationRecovery = {
+            tool: "bus_orient",
+            input: { directory: selected, concern: definition.id, t },
+          };
           const current = yield* bulletinAt(gateway, t, {
             kind: "concern",
             directory: selected,
             concern: definition.id,
-          });
-          if (definition.id === input.concern) selectedBulletin = bulletinView(current, time, true);
-          else {
+          }).pipe(
+            Effect.mapError(
+              sectionError(
+                selectedConcern ? "concern" : "summaries",
+                "A concern bulletin is unavailable at this cut.",
+                recovery
+              )
+            )
+          );
+          if (selectedConcern) {
+            partial.concern = {
+              id: definition.id,
+              state: "REGISTERED",
+              bulletin: bulletinView(current, time, true),
+            };
+          } else {
             summaries.push({
               concern: definition.id,
               bulletin: bulletinView(current, time, false),
@@ -173,70 +264,60 @@ const readOrient = (input: OrientRequest, budget: number) =>
             });
           }
         }
+        partial.summaries = summaries;
       }
+      const { candidates: _candidates, ...required } = partial;
       const base = {
-        status: "COMPLETE" as "COMPLETE" | "INCOMPLETE",
+        status: "COMPLETE",
         cut,
-        evaluatedAt: new Date(time).toISOString(),
+        evaluatedAt,
         catalogueVersion: CATALOGUE_VERSION,
-        programme,
-        selection,
-        ...(directory === undefined ? {} : { directory }),
-        ...(input.concern === undefined
-          ? {}
-          : {
-              concern:
-                concern === undefined
-                  ? { id: input.concern, state: "UNRESOLVED" as const }
-                  : { id: input.concern, state: "REGISTERED" as const, bulletin: selectedBulletin },
-            }),
-        summaries,
-        ...(directory === undefined
-          ? {}
-          : {
-              subscriptions: {
-                state: "SEPARATE_QUERY" as const,
-                query: "peers" as const,
-                t,
-              },
-            }),
+        ...required,
       };
       if (jsonBytes(base) > budget) {
         return yield* unavailable(
           "INADMISSIBLE",
-          "Required orientation units exceed the logical result limit."
+          "result",
+          "Required orientation units exceed the logical result limit.",
+          retry
         );
       }
-      let candidatePage = candidates;
       if (candidatePage !== undefined && candidateOperation !== undefined) {
         const pageBudget = Math.max(0, budget - jsonBytes(base) - 1_024);
         if (jsonBytes(candidatePage) > pageBudget) {
+          const recovery: OrientationRecovery = {
+            tool: "bus_run_query",
+            input: {
+              name: "orientation_directories",
+              args: { cwd: input.cwd, limit: 20 },
+              t,
+              ...(input.candidateCursor === undefined ? {} : { cursor: input.candidateCursor }),
+            },
+          };
           candidatePage = yield* candidateOperation
             .invoke({ cwd: input.cwd, limit: 20 }, { t, cursor: input.candidateCursor }, pageBudget)
             .pipe(
-              Effect.mapError((error) =>
-                error instanceof InvalidQuery
-                  ? unavailable("INADMISSIBLE", "A directory candidate cannot fit at this cut.", {
-                      tool: "bus_run_query",
-                      input: {
-                        name: "orientation_directories",
-                        args: { cwd: input.cwd, limit: 20 },
-                        t,
-                        ...(input.candidateCursor === undefined
-                          ? {}
-                          : { cursor: input.candidateCursor }),
-                      },
-                    })
-                  : error
+              Effect.mapError(
+                sectionError(
+                  "candidates",
+                  "A directory candidate cannot fit at this cut.",
+                  recovery
+                )
               )
             );
         }
+        partial.candidates = candidatePage;
       }
       let memberPage;
       if (selected !== undefined) {
         const associations = byName("orientation_associations");
         if (associations === undefined) {
-          return yield* unavailable("FAULT", "Association discovery is unavailable.");
+          return yield* unavailable(
+            "FAULT",
+            "associations",
+            "Association discovery is unavailable.",
+            retry
+          );
         }
         const pageBudget = Math.max(
           0,
@@ -248,71 +329,83 @@ const readOrient = (input: OrientRequest, budget: number) =>
           projection: "membership",
           limit: 50,
         };
-        memberPage = yield* associations.invoke(args, { t }, pageBudget).pipe(
-          Effect.mapError((error) =>
-            error instanceof InvalidQuery
-              ? unavailable("INADMISSIBLE", "A required membership unit cannot fit at this cut.", {
-                  tool: "bus_run_query",
-                  input: { name: "orientation_associations", args, t },
-                })
-              : error
-          )
-        );
+        const recovery: OrientationRecovery = {
+          tool: "bus_run_query",
+          input: { name: "orientation_associations", args, t },
+        };
+        memberPage = yield* associations
+          .invoke(args, { t }, pageBudget)
+          .pipe(
+            Effect.mapError(
+              sectionError(
+                "associations",
+                "Association discovery is unavailable at this cut.",
+                recovery
+              )
+            )
+          );
         if (memberPage.damagedTotal > 0) {
           return yield* unavailable(
             "DAMAGE",
-            "Membership cannot be determined because a presence is damaged."
+            "associations",
+            "Membership cannot be determined because a presence is damaged.",
+            recovery
           );
         }
+        if (directory === undefined || (input.concern !== undefined && concern === undefined)) {
+          partial.unresolvedAssociations = memberPage;
+        } else partial.members = memberPage;
       }
-      const after = yield* gateway.pin;
-      if (after.incarnation !== cut.incarnation) {
-        return yield* unavailable("FAULT", "The ledger was replaced during orientation.");
-      }
-      const result = {
-        ...base,
-        status:
-          (candidatePage !== undefined && !candidatePage.complete) ||
-          (memberPage !== undefined && !memberPage.complete)
-            ? ("INCOMPLETE" as const)
-            : ("COMPLETE" as const),
-        ...(after.head > t ? { currentHeadT: after.head } : {}),
-        ...(candidatePage === undefined ? {} : { candidates: candidatePage }),
-        ...(memberPage === undefined
-          ? {}
-          : directory === undefined || (input.concern !== undefined && concern === undefined)
-            ? { unresolvedAssociations: memberPage }
-            : { members: memberPage }),
+      return {
+        complete:
+          (candidatePage === undefined || candidatePage.complete) &&
+          (memberPage === undefined || memberPage.complete),
       };
-      if (jsonBytes(result) > budget) {
-        return yield* unavailable(
-          "INADMISSIBLE",
-          "The orientation result exceeds the logical byte limit."
-        );
-      }
-      return result;
     }).pipe(
-      Effect.catchTags({
-        LedgerError: (error) =>
-          Effect.succeed({
-            status: "UNAVAILABLE" as const,
-            cut,
-            evaluatedAt: new Date(time).toISOString(),
-            catalogueVersion: CATALOGUE_VERSION,
-            reason: error.message === DAMAGE_MESSAGE ? ("DAMAGE" as const) : ("FAULT" as const),
-            recovery: { tool: "bus_orient" as const, input: { ...input, t } },
-          }),
-        OrientationUnavailable: (error) =>
-          Effect.succeed({
-            status: "UNAVAILABLE" as const,
-            cut,
-            evaluatedAt: new Date(time).toISOString(),
-            catalogueVersion: CATALOGUE_VERSION,
-            reason: error.reason,
-            recovery: error.recovery ?? { tool: "bus_orient" as const, input: { ...input, t } },
-          }),
-      })
+      Effect.map((value) => ({ value })),
+      Effect.catchTag("OrientationUnavailable", (failure) => Effect.succeed({ failure }))
     );
+    // A partial result is still tied to the original incarnation, not a replacement ledger.
+    const after = yield* gateway.pin;
+    if (after.incarnation !== cut.incarnation) {
+      return yield* unavailable("FAULT", "query", "The ledger changed during orientation.");
+    }
+    const shared = {
+      cut,
+      evaluatedAt,
+      catalogueVersion: CATALOGUE_VERSION,
+      ...(after.head > t ? { currentHeadT: after.head } : {}),
+    };
+    const result =
+      "failure" in outcome
+        ? {
+            status: "UNAVAILABLE" as const,
+            ...shared,
+            ...partial,
+            reason: outcome.failure.reason,
+            section: outcome.failure.section,
+            message: outcome.failure.message,
+            recovery: outcome.failure.recovery ?? retry,
+          }
+        : {
+            status: outcome.value.complete ? ("COMPLETE" as const) : ("INCOMPLETE" as const),
+            ...shared,
+            ...partial,
+          };
+    if (jsonBytes(result) <= budget) return result;
+    const minimal = {
+      status: "UNAVAILABLE" as const,
+      ...shared,
+      reason: "INADMISSIBLE" as const,
+      section: "result" as const,
+      message: "The orientation result exceeds the logical byte limit.",
+      recovery: retry,
+    };
+    const withProgramme = {
+      ...minimal,
+      ...(partial.programme === undefined ? {} : { programme: partial.programme }),
+    };
+    return jsonBytes(withProgramme) <= budget ? withProgramme : minimal;
   });
 
 export const orient = (input: OrientRequest, budget = MAX_ENVELOPE_BYTES) =>
@@ -322,12 +415,16 @@ export const orient = (input: OrientRequest, budget = MAX_ENVELOPE_BYTES) =>
         Effect.succeed({
           status: "UNAVAILABLE" as const,
           reason: "FAULT" as const,
+          section: "query" as const,
+          message: "Orientation could not establish a reliable ledger cut.",
           recovery: { tool: "bus_orient" as const, input },
         }),
       OrientationUnavailable: (error) =>
         Effect.succeed({
           status: "UNAVAILABLE" as const,
           reason: error.reason,
+          section: error.section,
+          message: error.message,
           recovery: error.recovery ?? { tool: "bus_orient" as const, input },
         }),
     }),
@@ -337,6 +434,8 @@ export const orient = (input: OrientRequest, budget = MAX_ENVELOPE_BYTES) =>
         Effect.succeed({
           status: "UNAVAILABLE" as const,
           reason: "FAULT" as const,
+          section: "query" as const,
+          message: "Orientation did not finish within its deadline.",
           recovery: { tool: "bus_orient" as const, input },
         }),
     })
