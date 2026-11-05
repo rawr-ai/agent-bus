@@ -217,7 +217,8 @@ const numbersIn = (text: string) => (text.match(/-?\d+(?:\.\d+)?/g) ?? []).sort(
 const schemaKinds = (schema: Schema): Array<string> =>
   schema.anyOf === undefined
     ? schema.type === "array"
-      ? [schema.items?.type ?? "", "array"]
+      ? // An item union of one kind (mute scopes are all objects) states that kind.
+        [...new Set(schema.items === undefined ? [""] : schemaKinds(schema.items)), "array"]
       : [schema.type ?? ""]
     : [...new Set(schema.anyOf.flatMap(schemaKinds))];
 
@@ -576,6 +577,22 @@ describe("the skill fits what hosts show", () => {
 
   test("SKILL.md is at most 7,000 bytes", () => {
     expect(Buffer.byteLength(skill, "utf8")).toBeLessThanOrEqual(7_000);
+  });
+
+  // Trimming toward the budget must not cut a route: every tool is named in the skill, and the
+  // file hosts load links every reference, so guidance kept there (going inactive with
+  // bus_activity, say) stays reachable from it.
+  test("every tool is reachable from it", () => {
+    const whole = SKILL_FILES.map(read).join("\n");
+    const named = new Set(whole.match(/(?<![A-Za-z0-9_])bus_[A-Za-z0-9_]+/g));
+    expect(tools.map((tool) => tool.name).filter((name) => !named.has(name))).toEqual([]);
+    const references = SKILL_FILES.filter((path) => path.includes("/references/"));
+    expect(references.length).toBeGreaterThan(0);
+    expect(
+      references.filter(
+        (path) => !skill.includes(`](${path.replace("plugin/skills/agent-bus/", "")})`)
+      )
+    ).toEqual([]);
   });
 
   test("its description is at most 1,024 characters", () => {

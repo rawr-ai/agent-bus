@@ -70,8 +70,10 @@ export const searchRow = <M extends object>(message: M, t: number, score: number
   score,
 });
 
-/** A current peer row: a joined presence and the commit that wrote it. */
+/** A current peer row: a joined presence, the commit that wrote it, active and unmuted. */
 export const peerRow = <P extends object>(peer: P, t: number) => ({
+  activity: "active" as const,
+  mutes: [],
   ...peer,
   status: "joined" as const,
   t,

@@ -1,7 +1,9 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
 import { Effect, Option, Schema } from "effect";
+import { activitiesAt, type Shown } from "./activity-read.ts";
 import {
+  ACTIVITY_REASONS,
   Association,
   canonicalAssociations,
   InvalidQuery,
@@ -11,6 +13,7 @@ import {
   MAX_ASSOCIATION_BYTES,
   type Message,
   MessageJson,
+  MuteScope,
   OrientationId,
   Runtime,
 } from "./domain.ts";
@@ -143,6 +146,40 @@ export const CountRow = Schema.Struct({
 });
 export type CountRow = typeof CountRow.Type;
 
+/** An address's activity and mutes at the query's cut, folded as delivery folds them. */
+const activityFields = {
+  activity: Schema.Literals(["active", "inactive", "unknown"]).annotate({
+    description:
+      "inactive is do-not-disturb: ambient mail does not wake it, direct mail does and reactivates it. unknown means damaged or unread evidence; delivery treats it as active.",
+  }),
+  activeSince: Schema.optionalKey(
+    Text.annotate({
+      description: "When it became active: its reset, its last activation or reactivating mail.",
+    })
+  ),
+  activityReason: Schema.optionalKey(
+    Schema.Literals(ACTIVITY_REASONS).annotate({
+      description:
+        "With unknown only, why: damaged-mail (an unreadable direct message after it went inactive) or incomplete-scan (the direct-mail scan hit its cap or did not complete).",
+    })
+  ),
+  mutes: Schema.Array(MuteScope).annotate({
+    description: "The scopes whose ambient mail does not wake it; [] when none.",
+  }),
+};
+
+const shownFields = (shown: Shown | undefined) => {
+  // activitiesAt reads every listed address or fails the query, so a missing one is a defect:
+  // no activity or mutes are ever made up for it.
+  if (shown === undefined) throw new Error("A listed peer's activity was not read.");
+  return {
+    activity: shown.activity,
+    ...optionalKey("activeSince", shown.activeSince),
+    ...optionalKey("activityReason", shown.activityReason),
+    mutes: [...shown.mutes],
+  };
+};
+
 export const PeerRow = Schema.Struct({
   address: Text,
   runtime: Runtime,
@@ -152,6 +189,7 @@ export const PeerRow = Schema.Struct({
   t: Int.annotate({ description: "The commit of that presence." }),
   host: Schema.optionalKey(Text),
   note: Schema.optionalKey(Text),
+  ...activityFields,
 });
 export type PeerRow = typeof PeerRow.Type;
 
@@ -178,6 +216,11 @@ export const OrientationAssociationRow = Schema.Struct({
   note: Schema.optionalKey(
     Text.annotate({ description: "The recorded note, in the full projection when present." })
   ),
+  // Activity belongs to the full projection: membership keeps only the association relation.
+  activity: Schema.optionalKey(activityFields.activity),
+  activeSince: activityFields.activeSince,
+  activityReason: activityFields.activityReason,
+  mutes: Schema.optionalKey(activityFields.mutes),
   association: Association.annotate({
     description: "The complete explicit association for this directory.",
   }),
@@ -1301,6 +1344,11 @@ export const peers = define({
       const all = [...latestPresences(decoded).values()]
         .filter((peer) => args.includeLeft === true || peer.presence.status === "joined")
         .sort((a, b) => (a.address < b.address ? -1 : a.address > b.address ? 1 : 0));
+      const shown = yield* activitiesAt(
+        gateway,
+        at.t,
+        all.map((peer) => peer.address)
+      );
       const items = all.slice(offset, offset + size).map((peer, index): Item<PeerRow> => {
         const t = commits.get(peer.joinId) ?? 0;
         return {
@@ -1314,6 +1362,7 @@ export const peers = define({
             t,
             ...optionalKey("host", peer.host),
             ...optionalKey("note", peer.presence.note),
+            ...shownFields(shown.get(peer.address)),
           },
           at: { offset: offset + index + 1 },
           label: `${peer.address} (t=${t})`,
@@ -1521,6 +1570,14 @@ export const orientationAssociations = define({
         .sort((a, b) =>
           a.peer.address < b.peer.address ? -1 : a.peer.address > b.peer.address ? 1 : 0
         );
+      const shown =
+        args.projection === "membership"
+          ? new Map<string, Shown>()
+          : yield* activitiesAt(
+              gateway,
+              at.t,
+              all.map(({ peer }) => peer.address)
+            );
       const items = all
         .slice(offset, offset + size)
         .map(({ peer, association }, index): Item<OrientationAssociationRow> => {
@@ -1539,6 +1596,7 @@ export const orientationAssociations = define({
                     t,
                     ...optionalKey("host", peer.host),
                     ...optionalKey("note", peer.presence.note),
+                    ...shownFields(shown.get(peer.address)),
                   }),
               association,
               resolution: {

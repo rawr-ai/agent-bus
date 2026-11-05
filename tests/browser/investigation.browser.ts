@@ -190,6 +190,48 @@ async function main() {
         "peers remain available during history failure"
       );
 
+      // Activity as the serve reports it, through the public projection: active shows nothing,
+      // inactive and unknown (with its reason) are labelled, and mute ids stay inert text.
+      stage = "peer activity";
+      const peerRows = await page.evaluate(() =>
+        Array.from(document.querySelectorAll(".peer-row")).map((row) => ({
+          address: row.querySelector(".peer-address")?.textContent ?? "",
+          meta: row.querySelector(".peer-meta")?.textContent ?? "",
+          muted: Array.from(row.querySelectorAll(".peer-topics"))
+            .filter((block) => block.querySelector("span")?.textContent === "Muted")
+            .flatMap((block) =>
+              Array.from(block.querySelectorAll(".audience-value")).map(
+                (value) => value.textContent ?? ""
+              )
+            ),
+          markup: row.querySelector("i") !== null,
+        }))
+      );
+      const shownPeer = (address: string) => {
+        const found = peerRows.find((each) => each.address === address);
+        assert.ok(found, `peer row ${address}`);
+        return found;
+      };
+      for (const address of ["fixture/alice", "fixture/dave"]) {
+        assert.ok(
+          !/Inactive|Activity unknown/.test(shownPeer(address).meta),
+          `${address} shows no activity`
+        );
+        assert.deepEqual(shownPeer(address).muted, [], `${address} shows no mutes`);
+      }
+      assert.ok(shownPeer("fixture/bob").meta.endsWith(" · Inactive"), "inactive label");
+      assert.deepEqual(shownPeer("fixture/bob").muted, [
+        "*",
+        "#<i>beta\\u202e</i>",
+        "concern opa/ux",
+      ]);
+      assert.equal(shownPeer("fixture/bob").markup, false, "a mute id is never markup");
+      assert.ok(
+        shownPeer("fixture/carol").meta.endsWith(" · Activity unknown: damaged mail"),
+        "unknown label with its reason"
+      );
+      assert.deepEqual(shownPeer("fixture/carol").muted, []);
+
       // A conversation is the bus's reply tree, which outlives the history window: when the
       // window moves on, the tree is read again at the new commit and keeps the reader's place.
       stage = "clear and follow";

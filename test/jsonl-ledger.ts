@@ -1,6 +1,14 @@
 import { Effect, FileSystem, Layer, Option, Path, Schema, Semaphore, Stream } from "effect";
-import { LedgerError, type Message, MessageJson } from "../src/domain.ts";
-import { type Admission, type Entry, Ledger } from "../src/Ledger.ts";
+import {
+  AddressCommandJson,
+  type DirectScan,
+  LedgerError,
+  type Logged,
+  type Message,
+  MessageJson,
+  qualifies,
+} from "../src/domain.ts";
+import { type Admission, type CommandRead, type Entry, Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 
 const NEWLINE = 0x0a;
@@ -19,6 +27,15 @@ const lockFor = (file: string) => {
   }
   return Semaphore.withPermit(lock);
 };
+
+/**
+ * Address commands share the file, so an unchanged end proves nothing was written. Their lines
+ * are never a Message: reads pass over them, as Fluree's message reads never see command nodes.
+ */
+const COMMAND_MARK = '{"@command":';
+const CommandLine = Schema.fromJsonString(
+  Schema.Struct({ "@command": Schema.String, command: Schema.String })
+);
 
 /**
  * The tests' ledger: one JSONL file, read from a byte offset. Production uses
@@ -40,6 +57,7 @@ export const layerJsonl = (file: string) =>
       const decode = Schema.decodeUnknownEffect(MessageJson);
 
       const locked = lockFor(file);
+      const decodeCommandLine = Schema.decodeUnknownOption(CommandLine);
       const write = (message: Message) =>
         Effect.gen(function* () {
           const line = yield* encode(message).pipe(Effect.mapError(ledgerError));
@@ -67,7 +85,7 @@ export const layerJsonl = (file: string) =>
         while (start < complete) {
           const stop = bytes.indexOf(NEWLINE, start);
           const text = decoder.decode(bytes.subarray(start, stop));
-          if (text.trim() !== "") {
+          if (text.trim() !== "" && !text.startsWith(COMMAND_MARK)) {
             const decoded = yield* Effect.option(decode(text));
             if (Option.isSome(decoded)) {
               entries.push({ message: decoded.value, end: from + stop + 1 });
@@ -113,7 +131,8 @@ export const layerJsonl = (file: string) =>
 
       // Any line past the basis that is a presence for the address, the same id, or
       // unreadable (which `read` would skip) refuses: the guard may refuse too often, never
-      // too rarely.
+      // too rarely. A whole command line passes, as Fluree's command nodes are never presences;
+      // a damaged one may have been anything, so it refuses.
       const admit = (presence: Message, basis: { readonly head: number }) =>
         Effect.gen(function* () {
           // An id already written, at any position, refuses: an entry is admitted once.
@@ -129,7 +148,11 @@ export const layerJsonl = (file: string) =>
           const lines = decoder
             .decode(bytes.subarray(0, complete))
             .split("\n")
-            .filter((line) => line.trim() !== "");
+            .filter(
+              (line) =>
+                line.trim() !== "" &&
+                !(line.startsWith(COMMAND_MARK) && Option.isSome(decodeCommandLine(line)))
+            );
           for (const line of lines) {
             const decoded = yield* Effect.option(decode(line));
             if (
@@ -150,6 +173,106 @@ export const layerJsonl = (file: string) =>
           } satisfies Admission;
         }).pipe(locked, Effect.withSpan("Ledger.admit"));
 
+      /** Every complete line up to `upTo`, with the offset just past it. */
+      const lines = (upTo: number) =>
+        Effect.map(bytesFrom(0), (bytes) => {
+          const complete = Math.min(bytes.lastIndexOf(NEWLINE) + 1, upTo);
+          const found: Array<{ readonly text: string; readonly end: number }> = [];
+          let start = 0;
+          while (start < complete) {
+            const stop = bytes.indexOf(NEWLINE, start);
+            if (stop + 1 > complete) break;
+            found.push({ text: decoder.decode(bytes.subarray(start, stop)), end: stop + 1 });
+            start = stop + 1;
+          }
+          return found;
+        });
+      const commandLines = (upTo: number) =>
+        Effect.map(lines(upTo), (found) =>
+          found.flatMap(({ text, end }) => {
+            if (!text.startsWith(COMMAND_MARK)) return [];
+            const line = decodeCommandLine(text);
+            return Option.isSome(line)
+              ? [{ operation: line.value["@command"], json: line.value.command, end }]
+              : [];
+          })
+        );
+      const cut = Effect.map(end, (head) => ({ head, incarnation: "jsonl" }));
+
+      const readCommand = (operation: string) =>
+        Effect.gen(function* () {
+          const at = yield* cut;
+          const found = (yield* commandLines(at.head)).filter(
+            (line) => line.operation === operation
+          );
+          const [only] = found;
+          if (only === undefined) return { status: "ABSENT", cut: at } satisfies CommandRead;
+          if (found.length > 1) return { status: "MALFORMED", cut: at } satisfies CommandRead;
+          return { status: "FOUND", json: only.json, t: only.end, cut: at } satisfies CommandRead;
+        }).pipe(Effect.orElseSucceed((): CommandRead => ({ status: "UNAVAILABLE" })));
+
+      // Conditional within this process, under the file's lock, which is as far as the test
+      // double needs it to be.
+      const appendCommand = (operation: string, json: string) =>
+        Effect.gen(function* () {
+          const existing = yield* commandLines(Number.MAX_SAFE_INTEGER);
+          if (existing.some((line) => line.operation === operation)) return;
+          yield* fs
+            .writeFileString(
+              file,
+              `${JSON.stringify({ "@command": operation, command: json })}\n`,
+              { flag: "a" }
+            )
+            .pipe(Effect.mapError(ledgerError));
+        }).pipe(locked, Effect.withSpan("Ledger.appendCommand"));
+
+      const decodeCommand = Schema.decodeUnknownOption(AddressCommandJson, {
+        onExcessProperty: "error",
+      });
+      const undecodable = (t: number) =>
+        Effect.fail(new LedgerError({ message: `A ledger entry at t=${t} could not be decoded.` }));
+      const log = (upTo: number) =>
+        Effect.gen(function* () {
+          const logged: Array<Logged> = [];
+          for (const { text, end: t } of yield* lines(upTo)) {
+            if (text.startsWith(COMMAND_MARK)) {
+              const line = decodeCommandLine(text);
+              const command = Option.flatMap(line, (value) => decodeCommand(value.command));
+              if (Option.isNone(line) || Option.isNone(command)) return yield* undecodable(t);
+              logged.push({
+                kind: "command",
+                t,
+                operation: line.value["@command"],
+                command: command.value,
+              });
+              continue;
+            }
+            const message = decode(text);
+            const decoded = yield* Effect.option(message);
+            // A line that can't be read may have been a presence, as Fluree's damaged node is.
+            if (Option.isNone(decoded)) return yield* undecodable(t);
+            if (decoded.value.kind === "presence") {
+              logged.push({ kind: "presence", t, message: decoded.value });
+            }
+          }
+          return logged;
+        });
+
+      const direct = (address: string, after: number, upTo: number) =>
+        Effect.map(read(after), ({ entries }): DirectScan => {
+          for (const entry of entries) {
+            if (entry.end > upTo) break;
+            if (qualifies(entry.message, address)) {
+              return {
+                found: { ts: entry.message.ts, t: entry.end },
+                damaged: false,
+                complete: true,
+              };
+            }
+          }
+          return { damaged: false, complete: true };
+        });
+
       return Ledger.of({
         instance: "jsonl",
         append,
@@ -162,6 +285,10 @@ export const layerJsonl = (file: string) =>
         changes,
         presenceAt,
         admit,
+        appendCommand,
+        readCommand,
+        log,
+        direct,
       });
     })
   ).pipe(

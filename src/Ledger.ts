@@ -1,5 +1,5 @@
 import { Context, type Effect, type Stream } from "effect";
-import type { LedgerError, Message } from "./domain.ts";
+import type { DirectScan, LedgerError, Logged, Message } from "./domain.ts";
 import type { Pin } from "./Query.ts";
 
 /** Server-selected namespaces: callers cannot name an arbitrary ledger subject. */
@@ -22,6 +22,15 @@ export const scopeIri = (scope: DesignationScope): string => {
 export const revisionIri = (operation: string) => `urn:agent-bus:revision:${operation}`;
 export const witnessIri = (operation: string) => `urn:agent-bus:witness:${operation}`;
 export const messageIri = (id: string) => `urn:agent-bus:message:${id}`;
+export const COMMAND_PREFIX = "urn:agent-bus:command:";
+export const commandIri = (operation: string) => `${COMMAND_PREFIX}${operation}`;
+
+/** One operation's command node, read at one cut. */
+export type CommandRead =
+  | { readonly status: "FOUND"; readonly json: string; readonly t: number; readonly cut: Pin }
+  | { readonly status: "ABSENT"; readonly cut: Pin }
+  | { readonly status: "MALFORMED"; readonly cut: Pin }
+  | { readonly status: "UNAVAILABLE" };
 
 export interface Designation {
   readonly scope: DesignationScope;
@@ -121,5 +130,23 @@ export class Ledger extends Context.Service<
      * stored twice, but its status may report the original admission.
      */
     readonly admit: (presence: Message, basis: Pin) => Effect.Effect<Admission, LedgerError>;
+    /**
+     * Writes an address command as its own node, `commandIri(operation)`, only if that node
+     * holds no command yet. A failure says nothing about whether it committed: read it back.
+     */
+    readonly appendCommand: (operation: string, json: string) => Effect.Effect<void, LedgerError>;
+    /** The operation's command at one pinned cut; any failure to read it is UNAVAILABLE. */
+    readonly readCommand: (operation: string) => Effect.Effect<CommandRead>;
+    /** Every presence entry and command node committed at or before `t`, oldest first. */
+    readonly log: (t: number) => Effect.Effect<ReadonlyArray<Logged>, LedgerError>;
+    /**
+     * The direct candidates for `address` committed in (after, upTo]: entries whose recipients
+     * name it, decoded, until the first that qualifies.
+     */
+    readonly direct: (
+      address: string,
+      after: number,
+      upTo: number
+    ) => Effect.Effect<DirectScan, LedgerError>;
   }
 >()("agent-bus/Ledger") {}

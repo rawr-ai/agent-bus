@@ -1,6 +1,36 @@
 import { MAX_PARTICIPANT_LENGTH } from "../../../shared/limits";
-import type { PeersObservation } from "../../../shared/public";
+import type { PeersObservation, PublicMute, PublicPeer } from "../../../shared/public";
 import { Audience, safeText, Text } from "../../Text";
+
+// Active is the ordinary state and shows nothing; an older serve's peer has no activity at all.
+const ACTIVITY_LABEL: Partial<Record<NonNullable<PublicPeer["activity"]>, string>> = {
+  inactive: "Inactive",
+  unknown: "Activity unknown",
+};
+
+const REASON_TEXT: Record<NonNullable<PublicPeer["activityReason"]>, string> = {
+  "damaged-mail": "damaged mail",
+  "incomplete-scan": "incomplete scan",
+};
+
+const activityText = (peer: PublicPeer): string | undefined => {
+  const label = peer.activity && ACTIVITY_LABEL[peer.activity];
+  if (label === undefined) return undefined;
+  return peer.activityReason ? `${label}: ${REASON_TEXT[peer.activityReason]}` : label;
+};
+
+const muteText = (mute: PublicMute): string => {
+  switch (mute.scope) {
+    case "programme":
+      return "*";
+    case "topic":
+      return `#${mute.topic}`;
+    case "directory":
+      return `directory ${mute.directory}`;
+    case "concern":
+      return `concern ${mute.directory}/${mute.concern}`;
+  }
+};
 
 export function PeerList({
   data,
@@ -46,11 +76,18 @@ export function PeerList({
                 · <Text value={peer.host} />
               </>
             )}
+            {activityText(peer) && <> · {activityText(peer)}</>}
           </div>
           {peer.topics.length > 0 && (
             <div className="peer-topics">
               <span>Topics</span>
               <Audience values={peer.topics} />
+            </div>
+          )}
+          {peer.mutes && peer.mutes.length > 0 && (
+            <div className="peer-topics">
+              <span>Muted</span>
+              <Audience values={peer.mutes.map(muteText)} />
             </div>
           )}
           {peer.note && (

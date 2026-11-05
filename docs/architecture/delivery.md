@@ -2,7 +2,7 @@
 
 How agent-bus wakes the session that holds an address when the address has unread mail: the Claude Code hook, and the Codex nudge with its borrow, removal, eligibility and reconcile. Addresses, ownership, the ledger and cursors are in [messaging](messaging.md); where each process runs, in [topology](topology.md); what `serve` may touch and what it trusts, in [connections](connections.md); the tools and configuration, in [interfaces](interfaces.md). The Codex and Claude Code behaviour this rests on is in [platforms](../platforms/README.md).
 
-To learn whether a session will be woken, read the [next section](#will-a-session-be-woken) and its table; to cite a rule, see [Rules](#rules); the mechanism for each runtime, its wake state and its timings lie between them.
+To learn whether a session will be woken, read the [next section](#will-a-session-be-woken) and its table, then [inactivity and mutes](#when-unread-mail-doesnt-wake-inactivity-and-mutes); to cite a rule, see [Rules](#rules); the mechanism for each runtime, its wake state and its timings lie between them.
 
 ## What it does
 
@@ -47,6 +47,22 @@ This is the one table of who is woken; other pages link here. "Within seconds" i
 | A Codex or Claude subagent | **Never directly** | Through its parent. A Codex subagent's queue refuses the nudge (rule 13); a Claude subagent shares its parent's session id, so its mail wakes the parent |
 | Any other client | **No** | It calls `bus_read` or `bus_wait` |
 
+### When unread mail doesn't wake: inactivity and mutes
+
+An owner can set its address inactive, which works like do-not-disturb, or mute scopes of ambient mail, with `bus_activity` ([interfaces](interfaces.md#bus_activity)). Neither changes what is the address's to read: `bus_read` and `bus_wait` return all of it. They change only which unread mail rings the doorbell, by the wake law (rule 16), applied to each message after its routing:
+1. **Mail that names the address directly** wakes it. If it was inactive, that mail also makes it active again: activity is folded from the ledger, and direct mail committed after the address went inactive makes it active, with nothing written.
+2. **Otherwise, mail whose sender pierced the address** wakes it without reactivating it. `bus_publish`'s `pierce` names members of the audience to wake deliberately, or `"all"` of those who would otherwise not be woken, after an "are you sure" round trip.
+3. **Otherwise,** the mail wakes the address only if it is active (or its activity is unknown) and at least one of the ambient routes by which it reaches the address (`*`, or a `#topic` it subscribes to) is not muted. A programme mute covers only `*`, so an unmuted matching topic still wakes.
+
+| Mute | Covers |
+| --- | --- |
+| `{scope: "programme"}` | `*` |
+| `{scope: "topic", topic}` | `#topic` |
+| `{scope: "directory", directory}` | `#t` for every concern topic `t` the registered directory has when the message commits, so a concern added later is covered too |
+| `{scope: "concern", directory, concern}` | `#t` where that concern's topic is `t` when the message commits, so a remapped concern's new topic is covered |
+
+A directory that can't be read, or that isn't registered, covers nothing: the route wakes, erring toward contact. A presence or address command that can't be read is different: it leaves no standing to apply this law to, since the mutes it may have carried can't be known. Rules 1 and 2 need no standing, so the pass's direct and pierced mail still wakes the address and is all the wake rings for; its ambient mail is held back, unread and outside the wake's coverage, until the ledger can be read again, and it then wakes by rule 3 as held-back mail does. A pass with only ambient mail fails, as one with an unreadable entry does. No cursor moves either way. A leave, a join while absent or left, a takeover, or another session's join resets the address to active with no mutes. An ordinary rejoin and a replay keep them.
+
 ### How a message moves
 
 1. A session calls `bus_publish`, directly over MCP or through `agent-bus publish`, and its `serve` appends one entry to the ledger ([messaging](messaging.md)).
@@ -81,8 +97,8 @@ sequenceDiagram
 ```
 
 - **What the hook does.** It calls `bus_wake` with the session id from its input, again and again while each call times out empty. `serve` holds a call until an address the session holds as `claude`, joined from this machine, has unread mail other than what it last woke the session for. The hook then prints one fixed line per address (`formatWake` in `src/claude.ts`) and exits 2. The line tells the session to read its mail with `bus_read` as that address, without calling `bus_join` first; to carry on, without replying or rejoining, when the read returns nothing or is refused as not joined or belonging to another session; and, when the read fails, to try once more, then say so and carry on. It says not to rejoin because a woken session may have lost its join from its context (after a compaction or a resume), and after `/clear` a rejoin would be refused, the old session id holding the address. The woken turn's end starts the next hook, so the session runs nothing itself.
-- **The woken mark.** For each address, `serve` keeps in memory the join and the span of unread mail, first to newest, that it last woke the session for. New mail or a partial read changes the span and wakes the session again; ordinary hooks suppress mail left unread (rule 5). A rejoin or a takeover changes the join, and a `serve` restart forgets the mark, which costs at most one extra wake per address. A mark moves only with a result that is returned; a call that ends without returning puts its marks back.
-- **After compaction.** Compaction can discard an earlier wake from context without reading its mail. Only a hook whose input says `hook_event_name: SessionStart` and `source: compact` calls `bus_wake` with `fresh: true`. That call bypasses unchanged-span suppression, but still checks ownership, uses the address locks and commits ordinary wake marks. Empty/error retries remain fresh because they have emitted nothing; the hook prints at most one response and exits. The following ordinary Stop hook stays suppressed for that same unread span. There is no timer-based reminder, generation cache, cursor reset or rejoin. Resume, startup and clear retain their existing behavior.
+- **The woken mark.** For each address, `serve` keeps in memory the join and the mail it last woke the session for: the ids of the mail that could wake it, while they stay unread, and the read position then. Mail that could wake it but isn't in the mark, or a read since (a partial read), wakes the session again; ordinary hooks suppress mail left unread (rule 5). A rejoin or a takeover changes the join, and a `serve` restart forgets the mark, which costs at most one extra wake per address. A mark moves only with a result that is returned; a call that ends without returning puts its marks back.
+- **After compaction.** Compaction can discard an earlier wake from context without reading its mail. Only a hook whose input says `hook_event_name: SessionStart` and `source: compact` calls `bus_wake` with `fresh: true`. That call bypasses suppression of unchanged mail, but still checks ownership, uses the address locks and commits ordinary wake marks. Empty/error retries remain fresh because they have emitted nothing; the hook prints at most one response and exits. The following ordinary Stop hook stays suppressed for that same unread mail. There is no timer-based reminder, generation cache, cursor reset or rejoin. Resume, startup and clear retain their existing behavior.
 - **One hook per session.** A newer `bus_wake` call from the same session ends the older one, and a hook whose session has gone stops (rule 15). A session that holds no address costs one short call at each arming point.
 - **`hooked`.** Once `serve` has seen a session's hook, that session's Claude joins return `hooked: true`. `serve` keeps this in memory, so after a restart it returns once the hook calls again.
 - **After `/clear`,** the new id holds nothing until it joins again. The hook from before `/clear` keeps waiting under the old id, and fires at most once.
@@ -105,7 +121,7 @@ sequenceDiagram
   participant Writer as The thread's app-server
   Sender->>Ledger: bus_publish, through its own serve
   Ledger-->>Serve: change event
-  Serve->>Serve: under the address's lock, read unread mail,<br/>and skip if this span is covered and not yet due
+  Serve->>Serve: under the address's lock, read unread mail,<br/>and skip if this mail is covered and not yet due
   Serve->>Own: start the bundled codex app-server on stdio
   Serve->>Own: thread/queue/list
   Own->>Queue: storage: read the thread's queue
@@ -138,7 +154,7 @@ sequenceDiagram
 
 #### A Codex address's wake state
 
-`serve` keeps what it knows about each Codex address in memory: the unread span the last attempt covered, the nudge it last added, the reason it last logged, and, for the join alone, a subagent refusal and the back-off. It belongs to the current run of joins (rule 11), and a `serve` restart forgets it. A cycle runs on every ledger change and on the 15 s tick.
+`serve` keeps what it knows about each Codex address in memory: the unread mail the last attempt covered (rule 18), the nudge it last added, the reason it last logged, and, for the join alone, a subagent refusal and the back-off. It belongs to the current run of joins (rule 11), and a `serve` restart forgets it. A cycle runs on every ledger change and on the 15 s tick.
 
 ```mermaid
 stateDiagram-v2
@@ -150,9 +166,9 @@ stateDiagram-v2
     Ready --> Refused : the add was refused, a subagent
     Posted --> Covered : borrow answered, loaded or held, or not eligible
     Posted --> BackedOff : the rollout lookup or borrow failed
-    Covered --> ReconcileDue : the same span still unread when due
+    Covered --> ReconcileDue : nothing new and nothing read when due
     ReconcileDue --> Posted : list again, re-post a nudge that has gone
-    Covered --> Posted : the span changed, new mail or a partial read
+    Covered --> Posted : mail not yet covered, or a partial read
     Covered --> Removed : mail read, our nudge recorded
     BackedOff --> Removed : mail read, our nudge recorded
     Covered --> Ready : mail read, no nudge of ours recorded
@@ -164,8 +180,8 @@ stateDiagram-v2
 ```
 
 - **Ready:** nothing covered. The next cycle with unread mail posts.
-- **Posted:** a nudge waits for the span. Ours is recorded; one found waiting covers the span but isn't recorded. The borrow follows in the same cycle.
-- **Covered:** a nudge waits and the daemon answered the borrow, whether it loaded the thread or another process holds it, or the thread isn't eligible. Nothing more happens for that span until it changes or a reconcile is due (rule 10).
+- **Posted:** a nudge waits for the mail. Ours is recorded; one found waiting covers the mail but isn't recorded. The borrow follows in the same cycle.
+- **Covered:** a nudge waits and the daemon answered the borrow, whether it loaded the thread or another process holds it, or the thread isn't eligible. Nothing more happens for that mail until mail not yet covered arrives, some is read, or a reconcile is due (rule 10).
 - **Reconcile due:** 5 minutes after the covering attempt, then 15 and 60 minutes after each following one, then hourly. The third logs a warning, which names the reason when the thread can't be borrowed.
 - **Removed:** the mail was read while our recorded nudge waited, so `serve` tried to take it back out (rule 7).
 - **Backed off:** an attempt failed. Posting waits 30 s, doubling to 5 minutes; removal doesn't wait (rule 12).
@@ -202,7 +218,7 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 | `UNSUBSCRIBE_TIMEOUT` | 2 s | `src/codex.ts` | `thread/unsubscribe` after the resume. Its failure doesn't fail the borrow |
 | `RELEASE_SECONDS` | 5 s | `src/codex.ts` | The borrow's `thread_unload_delay_secs`: how long the daemon keeps the thread once it is idle and unsubscribed |
 | `FIRST_RETRY`, `LAST_RETRY` | 30 s, 5 min | `src/codex.ts` | The back-off after a failed attempt: 30 s, doubling with each consecutive failure up to 5 min, counted from the failure |
-| `RECONCILE` | 5, 15, 60 min | `src/codex.ts` | The pause after each attempt at the same unread span. The last value repeats, so it is hourly after the third |
+| `RECONCILE` | 5, 15, 60 min | `src/codex.ts` | The pause after each attempt at the same covered mail. The last value repeats, so it is hourly after the third |
 | `RECONCILES_BEFORE_WARNING` | 3 | `src/codex.ts` | The reconcile at which the log warns that the thread isn't reading its mail |
 
 Values also live in the native manifests: Claude's asynchronous wake has `timeout` 2592000 s (30 days); both native synchronous compact commands have `timeout` 5 s around `COMPACT_DEADLINE`'s 4 s observation. The host's outer deadline covers launcher/Bun startup and final output as well, with about a one-second margin. These host timeouts kill the command; they do not extend the helper's deadline.
@@ -219,7 +235,7 @@ This new lookup/helper changes no ledger, cursor, activity, hooked bit, waiter o
 2. **A wake carries no text and marks nothing read.** The Claude wake line and the Codex nudge name only the recipient address and tell the session to call `bus_read`. No body, subject or sender from another session enters a session as its owner's input or as the host's own text.
 3. **A wake passes over only what isn't mail.** With nothing for a subscriber, a wake moves its cursor past the entries its own read would pass over (presences, its own sends, mail for other addresses), and nothing else.
 4. **Each machine wakes only its own joins.** A `serve` wakes only the sessions that joined from its machine (`origin.host`, compared without case or domain), since each machine's queues, threads, daemon and hooks are its own.
-5. **Once per change in unread mail, with explicit recovery points.** A session is woken once for each change in an address's unread span, first to newest: new mail or a partial read. Mail left unread doesn't wake it again, except a Claude compact hook may emit one fresh response, and a Codex thread follows rule 10's schedule.
+5. **Once per change in unread mail, with explicit recovery points.** A session is woken once for each change in an address's unread mail: mail that may wake it and that it wasn't yet woken for, or a partial read. Mail left unread doesn't wake it again, except a Claude compact hook may emit one fresh response, and a Codex thread follows rule 10's schedule.
 6. **One nudge waits per address.** At most one bus nudge waits in a Codex thread's queue for each address, so at most one empty turn follows a read. `serve` lists the whole queue and adds a nudge only when no item starts with that address's nudge sentence. A waiting nudge also covers mail that arrives after it.
 7. **`serve` removes only its own nudge.** It records the `id`, `clientUserMessageId` and exact text that Codex answered its own add with; a nudge found waiting isn't recorded, since the owner can queue the same text. Once the address has no unread mail, it lists the queue under the address's lock and deletes the recorded item only if it still has both ids and exactly that text. It never deletes by prefix, adopts a found nudge, or touches any other item, and it forgets the record whatever happened. This is tried once, with failures logged at debug level and not retried. The owner chose this policy, accepting the race in [Limits](#for-codex-threads).
 8. **`serve` loads a thread only by a borrow, only to run its nudge.** It starts or steers no turn, waits for none, and passes no permission settings. The only load it asks for is the daemon's borrow: `thread/resume` with `excludeTurns` and a 5 s release, then `thread/unsubscribe`. The writer lock refuses the borrow while another process holds the thread, so a thread never has a second writer.
@@ -231,24 +247,34 @@ This new lookup/helper changes no ledger, cursor, activity, hooked bit, waiter o
    - a last turn that wasn't interrupted: a last status event that isn't a `turn_aborted` for `interrupted` or `budget_limited`. A fork by reference with no turn of its own takes its status from its lineage, which its file doesn't hold, so it isn't borrowed.
 
    Anything unreadable, unrecognised or slower than 5 s to read is not eligible. An ineligible thread still gets its nudge.
-10. **Covered mail is reconciled until it is read.** An attempt covers the unread span once a nudge waits and the daemon has answered the borrow, or the thread is ineligible. While that span stays unread, `serve` attempts it again 5 minutes after the attempt that covered it, then 15 and 60 minutes after each following attempt, then hourly: it re-posts a nudge that has gone and borrows again. After the third reconcile it logs a warning, which names the reason when the thread can't be borrowed. New mail, a partial read, a new run of joins or a `serve` restart starts over.
-11. **Wake state belongs to a run of joins.** A run is a join and the ordinary rejoins that renew it, which the ledger records as `rejoinOf`, naming the run's first join ([messaging](messaging.md)). The covered span, the recorded nudge and the logged reason (logged again when it changes or after an eligible attempt) carry over an ordinary rejoin, so a woken thread that calls `bus_join` before reading isn't nudged again for the same mail. A `replay`, a join after a leave, and a takeover start a new run, which is woken afresh. A borrow's result applies only to the run it was for. A subagent refusal and the back-off belong to the join itself, and an ordinary rejoin clears them.
+10. **Covered mail is reconciled until it is read.** An attempt covers the unread mail that may wake the thread once a nudge waits and the daemon has answered the borrow, or the thread is ineligible. While no other such mail arrives and nothing is read, `serve` attempts it again 5 minutes after the attempt that covered it, then 15 and 60 minutes after each following attempt, then hourly: it re-posts a nudge that has gone and borrows again. After the third reconcile it logs a warning, which names the reason when the thread can't be borrowed. New mail, a partial read, a new run of joins or a `serve` restart starts over.
+11. **Wake state belongs to a run of joins.** A run is a join and the ordinary rejoins that renew it, which the ledger records as `rejoinOf`, naming the run's first join ([messaging](messaging.md)). The covered mail, the recorded nudge and the logged reason (logged again when it changes or after an eligible attempt) carry over an ordinary rejoin, so a woken thread that calls `bus_join` before reading isn't nudged again for the same mail. A `replay`, a join after a leave, and a takeover start a new run, which is woken afresh. A borrow's result applies only to the run it was for. A subagent refusal and the back-off belong to the join itself, and an ordinary rejoin clears them.
 12. **Mail the bus can't wake for is held, never dropped.** A failed Codex attempt (a missing CLI, a thread with no rollout yet, the queue or the daemon not answering) is retried after 30 s, then after a delay that doubles to 5 minutes, with the mail kept unread. The back-off holds off posting, not removal. The Claude hook retries a failing call every 5 s, for up to 10 minutes. A refusal or an unreachable bus ends a CLI command with its message.
 13. **A subagent's refused nudge holds that join.** Its mail stays unread for `bus_read`, and it is nudged again only after a rejoin, ordinary or not, or a `serve` restart.
 14. **The address's lock bounds the post and the removal.** Joins, leaves, reads, posts and removals for one address run one at a time, so a nudge acts on the subscriber's current state. The Codex work of a post or a removal under the lock is bounded by 6 s; the ledger read before it and the app-server's shutdown after it (500 ms, then a kill) add to that hold. The app-server is ended before the lock is released, so an add that timed out can't land after a takeover. Reading the rollout and the borrow run after the lock is released, so the owner's read never waits on the daemon.
 15. **One hook waits per Claude session.** A newer `bus_wake` call from the same session ends the older one, and a hook whose session has gone stops.
 16. **Compaction recovers knowledge, not ownership.** The compact ownership lookup/helper is read-only. It supplies fixed context only after one complete exact-session/runtime observation, without joining or reading mail. Session holdings do not assign every inbox to the current agent's role. Later ownership refusals remain authoritative; unavailable, malformed, timed-out or oversized recovery emits nothing.
+17. **The wake law decides which unread mail wakes.** It is applied per address and message after the read that collects unread mail, never in routing, so mail it holds back stays unread rather than being passed over. Direct mail wakes, and reactivates an inactive address; a stored pierce wakes without reactivating; other mail wakes only an active or unknown address through an unmuted ambient route. Activity is read at the pass's cut and mute coverage at each message's commit. When the address's standing can't be read, only its direct and pierced mail wakes; ambient mail stays unread, and a pass with nothing else fails. The Claude hook, the compact hook's fresh response and the Codex nudge all apply it; `bus_read` and `bus_wait` don't.
+18. **A pass with only held-back mail does nothing.** When unread mail is pending but none of it may wake, the pass acknowledges nothing, posts no nudge, records no Codex coverage and leaves the cursor and the Claude wake mark where they were. A Codex nudge already queued stays queued.
+19. **The wake mark is the join plus the ids of the mail that may wake, and the read position.** It moves only when that set is non-empty, and it keeps every id the same join was woken for while that mail stays unread, never just the first and last. So making an inactive address active again, by `bus_activity` or by direct mail, rings once for unread mail that was held back while it was inactive, even between mail it was woken for, because that mail was never in a mark. Going inactive, which only shrinks the mail that may wake, rings nothing, and mail the same join was already woken for doesn't ring again when it may wake again. A fresh compact response still rings for unchanged unread mail, as rule 5 allows. The Claude mark and the Codex coverage share one rule (`cover` in `src/Bus.ts`).
 
 ## Why
 
 ### The Claude wake
 
 - **A hook, not a monitor.** Plugin monitors don't start in stream-json mode, which is how the desktop app runs Claude Code, so a monitor would never wake the sessions the owner works in. An `asyncRewake` hook wakes idle sessions in stream-json mode and in the terminal alike, so the plugin has no monitor: each session has one waiting hook, which the host starts again at each arming point.
-- **A wake mark per span, not per message.** Ordinary hooks wake again only when the unread span changes, so an ignored wake isn't repeated and a session that read part of its mail is woken for the rest. A compact hook is an explicit exception because compaction can erase the earlier wake from context. Its process exits after one nonempty result, so retry recovery needs no ordered event ids or persistent deduplication state.
+- **A wake mark that remembers what it rang for.** Ordinary hooks wake again only for mail not yet rung for or after a read, so an ignored wake isn't repeated and a session that read part of its mail is woken for the rest. It keeps every id rather than the first and last: once the wake law holds some mail back, the mail that may wake can change in the middle (held-back mail becoming eligible) or shrink (going inactive), and a first-to-last span would miss the one and ring for the other. It is bounded by the unread mail. A compact hook is an explicit exception because compaction can erase the earlier wake from context. Its process exits after one nonempty result, so retry recovery needs no ordered event ids or persistent deduplication state.
 - **Rejected: a background `agent-bus wait`.** The model had to restart it after every wake, and a forgotten restart stopped delivery without any sign. `bus_wait` stays as the wait within a turn.
 - **Rejected: `serve` posting into the session's inbox socket.** `serve` isn't the session's own child, so a session that bypasses permissions holds the message, and the desktop drops it after five minutes.
 - **Rejected: a hook-started watcher posting to that socket.** It would be a long-lived process per session, as the hook is, but would depend on an undocumented frame format and need supervision of its own. `asyncRewake` gives the same wake through a documented exit code.
 - **Rejected: channels.** They are terminal only, behind an allowlist or a development flag.
+
+### Inactivity and mutes
+
+- **Held back, never passed over.** The wake law runs after the read that collects unread mail, not in routing, so mail an inactive address isn't woken for is still unread when it reads. Putting it in routing would have counted suppressed mail as read.
+- **Reactivation rings the backlog once.** A session that goes inactive and is later woken by direct mail, or activates itself, should learn that ambient mail arrived meanwhile, once. Ringing again for mail its join was already woken for would repeat a doorbell it ignored (rule 5). The wake mark already records exactly the mail it was woken for, so the rule needs no state beyond it.
+- **Activity is folded, not stored.** Commands are their own nodes, and activity at any cut is folded from presences, commands and direct mail. A delivered message never writes activity, so reactivation by direct mail costs no write and a replay or a takeover can't be raced by a stored flag.
+- **Pierce "all" asks first.** The sender sees exactly whom it would wake, and confirms that set by digest. Nothing is held between the two calls, so a stale confirmation is just refused with the new set.
 
 ### The Codex wake
 
@@ -287,6 +313,10 @@ Rejected and retired Codex routes:
 | **Unread mail is re-read on every pass.** Each delivery cycle and each pass of a waiting `bus_wake`, at every ledger change and every 15 s tick, reads each address from its oldest unread entry, however long the mail waits. An in-memory scan mark per join would end it if it starts to cost | Known limit |
 | **One `serve` per machine.** Locks, the woken marks and the Codex wake state are per process, and a wake can move a cursor past non-mail. A second `serve` on the same ledger and machine could add duplicate nudges or move a cursor back. Checks run extra `serve`s only with a store of their own | Known limit |
 
+| **Activity reads grow with history.** A pass with pending ambient mail folds the address's activity from every presence and command in the ledger at its cut, and `bus_peers` and orientation members do the same per query. Cost grows with the number of presences and commands, not with mail | Known limit |
+| **Do-not-disturb holds per machine.** Each `serve` wakes only its own joins, so an address joined from a machine whose `serve` predates `bus_activity` is woken as before. Its commands are kept and apply once that `serve` is upgraded | Known limit, by design ([deploy](../runbooks/deploy.md)) |
+| **A direct-mail scan stops at 10,000 candidates** after the address went inactive, and its activity is then unknown, which wakes as active | Known limit |
+
 ### For Codex threads
 
 | Limit | Status |
@@ -296,7 +326,7 @@ Rejected and retired Codex routes:
 | **Only a nudge this `serve` added in the current run of joins is removed.** One found waiting (an add whose answer timed out, one from an earlier run, or one from before a `serve` restart) covers the mail but runs once, empty, after a mid-turn read | Known limit |
 | **An owner's edit of our nudge** landing in the short window between the list and the delete is deleted with it, since Codex deletes by id with no check on content ([platforms: Codex](../platforms/codex.md#the-shared-queue)). It is the only owner input removal can touch | Accepted risk, chosen by the owner |
 | **Removal holds the address's lock** on the first cycle after a read, for Codex work of up to 6 s plus the app-server's shutdown, so a `bus_read` or `bus_wait` by the same thread can wait that long. The post already does the same | Known limit |
-| **A queued item of a shape `serve` doesn't know reads as no text.** If Codex changed the item format, a waiting nudge could go unrecognised and a second be added for the next unread span; the covered span still limits this to one per span. A recorded nudge listed in that shape would read as edited and be left | Known limit |
+| **A queued item of a shape `serve` doesn't know reads as no text.** If Codex changed the item format, a waiting nudge could go unrecognised and a second be added when mail not yet covered arrives; coverage still limits this to one per new mail or read. A recorded nudge listed in that shape would read as edited and be left | Known limit |
 | **The queue methods (`thread/queue/*`) are experimental.** `serve` uses the desktop's bundled CLI, so protocol and app move together. A change shows as logged errors, and the mail waits unread | Accepted risk |
 | **Eligibility depends on Codex's rollout format,** since no Codex call reports the stored settings. A format change makes threads ineligible, with a warning, which leaves them as they were before borrowing. Compressed rollouts (`.jsonl.zst`) aren't found, so they aren't borrowed | Accepted dependency |
 | **An administrator's `requirements.toml` can override `never`** with a warning, not an error, so a thread read as `never` could run under another policy ([platforms: Codex](../platforms/codex.md#what-a-resume-restores)) | Accepted risk |
@@ -352,4 +382,5 @@ Fluree ([platforms: Fluree](../platforms/fluree.md#the-event-stream)): the event
 
 The frames that made delivery, indexed with what superseded what in [frames](../frames/README.md):
 - **Codex:** [codex-wake](../frames/codex-wake.md) (the writer-lock incident), [queue-wake](../frames/queue-wake.md) (the nudge in the thread's own queue), [one-codex-route](../frames/one-codex-route.md) (one route for every thread), [simplification-pass](../frames/simplification-pass.md) (the `Stop` hook retired), [load-on-mail](../frames/load-on-mail.md) (the borrow, eligibility and reconcile) and [nudge-hygiene](../frames/nudge-hygiene.md) (runs of joins, removal, interrupted threads).
+- **Inactivity:** [reachable-inactivity](../frames/reachable-inactivity.md) (activity, mutes, the wake law and pierce). Review found that a first-to-last wake mark lost the wake for held-back mail that became eligible and rang again when mail was only held back, so both runtimes now record the ids rung for plus the read position (rule 18); the frame keeps its original wording.
 - **Claude Code:** [claude-wake](../frames/claude-wake.md) (the `asyncRewake` hook) and [finish-swap](../frames/finish-swap.md) (the one-manifest plugin, and `wait` removed).

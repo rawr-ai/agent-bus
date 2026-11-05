@@ -136,14 +136,46 @@ export const historyOf = (
 /** A peer row the viewer withholds on purpose: its runtime is not one the bus records. */
 const MALFORMED_PEER = { runtime: "unsupported", topics: [] };
 
+/** A scope a peer mutes, as the serve's peers rows carry it. */
+export type StoryMute =
+  | { readonly scope: "programme" }
+  | { readonly scope: "topic"; readonly topic: string }
+  | { readonly scope: "directory"; readonly directory: string }
+  | { readonly scope: "concern"; readonly directory: string; readonly concern: string };
+
+/** The fields an older serve, before reachable inactivity, never sends. */
+const ACTIVITY_KEYS = new Set(["activity", "activityReason", "activeSince", "mutes"]);
+
+/** A current peer with the activity the serve folded for it; by default active and unmuted. */
+export interface StoryPeer {
+  readonly address: string;
+  readonly activity?: "active" | "inactive" | "unknown";
+  /** Why activity is unknown; the serve sends it only beside unknown. */
+  readonly activityReason?: "damaged-mail" | "incomplete-scan";
+  readonly activeSince?: string;
+  readonly mutes?: ReadonlyArray<StoryMute>;
+}
+
 /**
  * Current peers at the latest commit. `omitted` adds deliberately malformed rows, so a story
- * can show the projection withholding them; no bus would send them.
+ * can show the projection withholding them; no bus would send them. An `older` serve predates
+ * reachable inactivity and sends no activity, activeSince or mutes for any peer.
  */
-export const peersOf = (addresses: string[], omitted = 0): PeersObservation => {
+export const peersOf = (
+  peers: ReadonlyArray<string | StoryPeer>,
+  omitted = 0,
+  serve: "current" | "older" = "current"
+): PeersObservation => {
   const t = Math.max(head, 1);
+  const rowOf = (peer: string | StoryPeer) => {
+    const { address, ...activity } = typeof peer === "string" ? { address: peer } : peer;
+    const row = peerRow({ address, runtime: "other", topics: [], ...activity }, t);
+    return serve === "current"
+      ? row
+      : Object.fromEntries(Object.entries(row).filter(([key]) => !ACTIVITY_KEYS.has(key)));
+  };
   const rows = [
-    ...addresses.map((address) => peerRow({ address, runtime: "other", topics: [] }, t)),
+    ...peers.map(rowOf),
     ...Array.from({ length: omitted }, (_, index) =>
       peerRow({ address: `story-malformed-${index}`, ...MALFORMED_PEER }, t)
     ),

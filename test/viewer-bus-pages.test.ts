@@ -5,6 +5,7 @@ import {
   historyOf,
   peersOf,
   resetStoryBus,
+  type StoryPeer,
   storyBusPages,
   threadOf,
 } from "../stories/story-bus.ts";
@@ -199,6 +200,22 @@ describe("the browser fixture", () => {
   });
 });
 
+/** Peers of every activity and every mute scope, in a deliberately unsorted mute order. */
+const ACTIVITY_PEERS: ReadonlyArray<string | StoryPeer> = [
+  "agent/on",
+  { address: "agent/away", activity: "inactive", activeSince: "2026-01-01T08:00:00Z" },
+  { address: "agent/unread", activity: "unknown" },
+  {
+    address: "agent/quiet",
+    mutes: [
+      { scope: "topic", topic: "review" },
+      { scope: "programme" },
+      { scope: "concern", directory: "opa", concern: "ux" },
+      { scope: "directory", directory: "opa" },
+    ],
+  },
+];
+
 describe("the story bus", () => {
   const message = (id: string, replyTo?: string): PublicMessage => ({
     id,
@@ -244,6 +261,31 @@ describe("the story bus", () => {
     expect(tree.exhausted).toBe(true);
     expect(cut.messages.map((item) => item.id)).toEqual(["a", "b"]);
     expect(peers.peers.map((peer) => peer.address)).toEqual(["agent/lead"]);
+  });
+
+  test("a current serve's activity and mutes are rows the bus could send; an older serve has none", () => {
+    resetStoryBus();
+    const activityKeys = ["activity", "activeSince", "mutes"];
+    peersOf(ACTIVITY_PEERS);
+    peersOf(ACTIVITY_PEERS, 0, "older");
+    const [current, older] = storyBusPages().map(record);
+    if (current === undefined || older === undefined) throw new Error("expected two pages");
+    expectEnvelope(current);
+    expect(refusedRows(current)).toEqual([]);
+    const currentRows = current.rows as Array<Record<string, unknown>>;
+    expect(currentRows.map((row) => row.activity)).toEqual([
+      "active",
+      "inactive",
+      "unknown",
+      "active",
+    ]);
+    expectEnvelope(older);
+    // The same rows with only the three fields left out.
+    expect(older.rows).toEqual(
+      currentRows.map((row) =>
+        Object.fromEntries(Object.entries(row).filter(([key]) => !activityKeys.includes(key)))
+      )
+    );
   });
 
   test("withheld peers are deliberately malformed rows, and only they", () => {

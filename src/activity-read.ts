@@ -1,0 +1,267 @@
+import { type Context, Effect, Option, Schema } from "effect";
+import {
+  type Activity,
+  type ActivityReason,
+  AddressCommandJson,
+  activityAt,
+  type DirectScan,
+  foldStanding,
+  LedgerError,
+  type Logged,
+  MessageJson,
+  type MuteScope,
+  needsScan,
+  qualifies,
+} from "./domain.ts";
+import { COMMAND_PREFIX, messageIri } from "./Ledger.ts";
+import type { QueryGateway } from "./Query.ts";
+
+/**
+ * The one indexed basis for activity (docs/frames/reachable-inactivity.md, "One basis"): the
+ * presence and command log, and the direct candidates after an anchor, read at one pinned
+ * commit. The Fluree ledger serves delivery from it, and the catalogue serves queries.
+ */
+type Gateway = Context.Service.Shape<typeof QueryGateway>;
+
+/** Direct candidates read per query, and the most read before a scan is incomplete. */
+const DIRECT_PAGE = 200;
+const DIRECT_PAGES = 50;
+
+const invalidResponse = () => new LedgerError({ message: "Fluree returned an invalid response." });
+const decodeRows =
+  <S extends Schema.Top & { readonly DecodingServices: never }>(schema: S) =>
+  (value: unknown) =>
+    Schema.decodeUnknownEffect(schema)(value).pipe(Effect.mapError(invalidResponse));
+
+const EntryRows = Schema.Array(
+  Schema.Tuple([Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
+);
+const PresenceRows = Schema.Array(
+  Schema.Tuple([
+    Schema.String,
+    Schema.NullOr(Schema.Number),
+    Schema.NullOr(Schema.Number),
+    Schema.NullOr(Schema.String),
+    Schema.NullOr(Schema.String),
+    Schema.NullOr(Schema.String),
+  ])
+);
+const CommandRows = Schema.Array(
+  Schema.Tuple([Schema.String, Schema.NullOr(Schema.String), Schema.NullOr(Schema.Number)])
+);
+const decodeEntry = Schema.decodeUnknownOption(MessageJson);
+const decodeCommand = Schema.decodeUnknownOption(AddressCommandJson, {
+  onExcessProperty: "error",
+});
+
+/** Rows of (t, id, json) grouped by key: an entry stored with several JSON values is damaged. */
+const grouped = (rows: ReadonlyArray<readonly [number, string, string | null]>) => {
+  const groups = new Map<string, { t: number; id: string; json: string | null; copies: number }>();
+  for (const [t, id, json] of rows) {
+    const key = JSON.stringify([t, id]);
+    const group = groups.get(key);
+    if (group === undefined) groups.set(key, { t, id, json, copies: 1 });
+    else group.copies += 1;
+  }
+  return [...groups.values()];
+};
+
+/** An entry's decoded message, or nothing when it is missing, malformed, duplicated or misnamed. */
+const entryOf = (group: ReturnType<typeof grouped>[number]) =>
+  group.copies > 1 || group.json === null
+    ? Option.none()
+    : Option.filter(decodeEntry(group.json), (message) => message.id === group.id);
+
+/**
+ * Presence rows of (node, entry t, id t, id, json, from) grouped by node, each at its
+ * entry's own commit, as the guarded presence read and the guard key on it. A node with several
+ * ids, entries or senders, or with neither an id nor an entry, fails the read; one retracted
+ * whole, its type included, is no longer a presence node and can't be seen.
+ */
+const presenceNodes = (
+  rows: ReadonlyArray<
+    readonly [string, number | null, number | null, string | null, string | null, string | null]
+  >
+) => {
+  const nodes = new Map<
+    string,
+    {
+      node: string;
+      t: number | null;
+      id: string | null;
+      json: string | null;
+      from: string | null;
+      copies: number;
+    }
+  >();
+  for (const [node, entryT, idT, id, json, from] of rows) {
+    const t = entryT ?? idT;
+    const found = nodes.get(node);
+    if (found === undefined) nodes.set(node, { node, t, id, json, from, copies: 1 });
+    else found.copies += 1;
+  }
+  return [...nodes.values()];
+};
+
+/**
+ * A presence node's decoded entry, or nothing when it is missing, malformed, duplicated or
+ * misnamed. A session-bearing entry must also be the presence its id names, recorded under its
+ * own sender, as the guarded presence read requires: no standing rests on one it refuses.
+ */
+const presenceOf = (node: ReturnType<typeof presenceNodes>[number]) =>
+  node.copies > 1 || node.json === null || node.id === null
+    ? Option.none()
+    : Option.filter(
+        decodeEntry(node.json),
+        (message) =>
+          message.id === node.id &&
+          (message.presence?.session === undefined ||
+            (message.kind === "presence" &&
+              node.node === messageIri(message.id) &&
+              node.from === message.from))
+      );
+
+/**
+ * A presence or command that can't be read: no standing can be established past it, so the
+ * whole log fails, as the guarded presence read does. An address's activity is never shown from
+ * a standing that may have lost its accepted mutes.
+ */
+const undecodable = (t: number) =>
+  Effect.fail(new LedgerError({ message: `A ledger entry at t=${t} could not be decoded.` }));
+
+/** Every presence entry and command node visible at `t`, in commit order. */
+export const logAt = (gateway: Gateway, t: number) =>
+  Effect.gen(function* () {
+    const presences = yield* gateway
+      .jsonld(t, {
+        // Every typed presence node, each value a row of its own: nothing missing or repeated is
+        // dropped or merged before the fold sees it.
+        select: ["?m", "?jt", "?it", "?id", "?json", "?from"],
+        where: [
+          { "@id": "?m", "@type": "bus:Presence" },
+          ["optional", { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?jt" } }],
+          ["optional", { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?it" } }],
+          ["optional", { "@id": "?m", "bus:from": "?from" }],
+        ],
+        orderBy: "?m",
+      })
+      .pipe(Effect.flatMap(decodeRows(PresenceRows)));
+    const commands = yield* gateway
+      .jsonld(t, {
+        // Every typed command node, a missing value included: one isn't dropped from the fold.
+        select: ["?c", "?json", "?t"],
+        where: [
+          { "@id": "?c", "@type": "bus:AddressCommand" },
+          ["optional", { "@id": "?c", "bus:command": { "@value": "?json", "@t": "?t" } }],
+        ],
+        orderBy: "?c",
+      })
+      .pipe(Effect.flatMap(decodeRows(CommandRows)));
+    const log: Array<Logged> = [];
+    for (const node of presenceNodes(presences)) {
+      // A node with no dated value has no commit of its own to name: the read's commit stands in.
+      if (node.t === null) return yield* undecodable(t);
+      const message = presenceOf(node);
+      if (Option.isNone(message)) return yield* undecodable(node.t);
+      log.push({ kind: "presence", t: node.t, message: message.value });
+    }
+    const nodes = new Map<string, Array<readonly [string, number]>>();
+    for (const [subject, json, at] of commands) {
+      // A command node with no value has no commit of its own to name: the read's commit does.
+      if (json === null || at === null) return yield* undecodable(t);
+      nodes.set(subject, [...(nodes.get(subject) ?? []), [json, at]]);
+    }
+    for (const [subject, values] of nodes) {
+      const [only] = values;
+      const command =
+        values.length === 1 && only !== undefined && subject.startsWith(COMMAND_PREFIX)
+          ? decodeCommand(only[0])
+          : Option.none();
+      const at = Math.max(...values.map(([, commit]) => commit));
+      if (Option.isNone(command)) return yield* undecodable(at);
+      log.push({
+        kind: "command",
+        t: at,
+        operation: subject.slice(COMMAND_PREFIX.length),
+        command: command.value,
+      });
+    }
+    return log.sort((a, b) => a.t - b.t);
+  });
+
+/**
+ * The direct candidates for `address` committed in (after, t], through the indexed `bus:to`,
+ * each decoded from its stored JSON, which alone decides whether it qualifies. An indexed
+ * sender never rules a damaged candidate out. Pages stop at the first qualifying message.
+ */
+export const directAt = (gateway: Gateway, address: string, after: number, t: number) =>
+  Effect.gen(function* () {
+    let damaged = false;
+    let key: readonly [number, string] | undefined;
+    for (let page = 0; page < DIRECT_PAGES; page++) {
+      const rows = yield* gateway
+        .jsonld(t, {
+          selectDistinct: ["?t", "?id", "?json"],
+          where: [
+            { "@id": "?m", "bus:to": address },
+            { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?t" } },
+            ["optional", { "@id": "?m", "bus:json": "?json" }],
+            [
+              "filter",
+              key === undefined
+                ? `(> ?t ${after})`
+                : `(or (> ?t ${key[0]}) (and (= ?t ${key[0]}) (> ?id ${JSON.stringify(key[1])})))`,
+            ],
+          ],
+          orderBy: ["?t", "?id"],
+          limit: DIRECT_PAGE + 1,
+        })
+        .pipe(Effect.flatMap(decodeRows(EntryRows)));
+      const more = rows.length > DIRECT_PAGE;
+      const groups = grouped(rows);
+      // A full page's last entry may have more copies on the next page: leave it to that page.
+      const whole = more && groups.length > 1 ? groups.slice(0, -1) : groups;
+      for (const group of whole) {
+        const message = entryOf(group);
+        if (Option.isNone(message)) damaged = true;
+        else if (qualifies(message.value, address)) {
+          return {
+            found: { ts: message.value.ts, t: group.t },
+            damaged,
+            complete: true,
+          } satisfies DirectScan;
+        }
+        key = [group.t, group.id];
+      }
+      if (!more) return { damaged, complete: true } satisfies DirectScan;
+    }
+    return { damaged, complete: false } satisfies DirectScan;
+  });
+
+/** What queries show of an address's activity at their cut. */
+export interface Shown {
+  readonly activity: Activity;
+  readonly activeSince?: string;
+  /** With unknown only: why. */
+  readonly activityReason?: ActivityReason;
+  readonly mutes: ReadonlyArray<MuteScope>;
+}
+
+/**
+ * Activity and mutes at `t` for each address, from one log read and a direct-candidate scan
+ * for each anchor-inactive address: the same fold delivery uses, never coerced.
+ */
+export const activitiesAt = (gateway: Gateway, t: number, addresses: Iterable<string>) =>
+  Effect.gen(function* () {
+    const log = yield* logAt(gateway, t);
+    const shown = new Map<string, Shown>();
+    for (const address of addresses) {
+      if (shown.has(address)) continue;
+      const standing = foldStanding(address, log);
+      const scan = needsScan(standing)
+        ? yield* directAt(gateway, address, standing.anchor.t, t)
+        : undefined;
+      shown.set(address, { ...activityAt(standing, scan), mutes: [...standing.mutes] });
+    }
+    return shown;
+  });

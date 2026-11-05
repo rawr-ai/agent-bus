@@ -265,6 +265,110 @@ export const RefreshAnnouncesArrivals: Story = {
   },
 };
 
+/** A peer's row on the current peers page, found by its exact address. */
+const peerRowOf = (root: HTMLElement, address: string): HTMLElement => {
+  const row = Array.from(root.querySelectorAll<HTMLElement>(".peer-row")).find(
+    (candidate) => candidate.querySelector(".peer-address")?.textContent === address
+  );
+  if (!row) throw new Error(`No listed peer ${address}`);
+  return row;
+};
+const ACTIVITY_TEXT = ["Inactive", "Activity unknown", "Muted"] as const;
+/** A topic carrying a bidi override: peer-controlled text that must reach the page escaped. */
+const MUTED_TOPIC = "review‮";
+
+/**
+ * The serve's folded activity is shown as read-only text: inactive and unknown peers say so, an
+ * unknown peer with the reason its serve sent, muted scopes are listed in the row's order, and an
+ * active peer or an older serve's peer shows nothing extra. Every peer stays listed.
+ */
+export const PeerActivityShownReadOnly: Story = {
+  beforeEach: () => {
+    script.history = historyOf([request]);
+    script.peers = peersOf([
+      "agent/on",
+      { address: "agent/away", activity: "inactive", activeSince: "2026-01-01T08:00:00Z" },
+      { address: "agent/unread", activity: "unknown" },
+      { address: "agent/mail", activity: "unknown", activityReason: "damaged-mail" },
+      { address: "agent/scan", activity: "unknown", activityReason: "incomplete-scan" },
+      {
+        address: "agent/quiet",
+        activity: "active",
+        mutes: [
+          { scope: "topic", topic: MUTED_TOPIC },
+          { scope: "programme" },
+          { scope: "concern", directory: "opa", concern: "ux" },
+          { scope: "directory", directory: "opa" },
+        ],
+      },
+    ]);
+  },
+  play: async ({ canvasElement }) => {
+    const canvas = within(canvasElement);
+    const textOf = (address: string) => peerRowOf(canvasElement, address).textContent ?? "";
+    const shows = async (address: string, expected: readonly string[]) => {
+      const text = textOf(address);
+      for (const label of ACTIVITY_TEXT)
+        await expect({ address, label, shown: text.includes(label) }).toEqual({
+          address,
+          label,
+          shown: expected.includes(label),
+        });
+    };
+    await userEvent.click(canvas.getByRole("button", { name: "Current peers" }));
+    await waitFor(() => expect(canvasElement.querySelectorAll(".peer-row")).toHaveLength(6));
+
+    await shows("agent/away", ["Inactive"]);
+    await shows("agent/unread", ["Activity unknown"]);
+    // Unknown says why, as text after the label; with no reason sent, the label stands alone.
+    await expect(textOf("agent/unread")).not.toContain("Activity unknown:");
+    for (const [address, shown] of [
+      ["agent/mail", "Activity unknown: damaged mail"],
+      ["agent/scan", "Activity unknown: incomplete scan"],
+    ] as const) {
+      await shows(address, ["Activity unknown"]);
+      await expect({ address, shown: textOf(address).includes(shown) }).toEqual({
+        address,
+        shown: true,
+      });
+    }
+    await shows("agent/quiet", ["Muted"]);
+    await shows("agent/on", []);
+    // Each scope as text after the label, in the row's own order, the topic escaped.
+    const muted = textOf("agent/quiet");
+    const positions = ["Muted", "#review\\u202e", "*", "concern opa/ux", "directory opa"].map(
+      (part) => muted.indexOf(part)
+    );
+    await expect(positions).not.toContain(-1);
+    await expect(positions).toEqual([...positions].sort((a, b) => a - b));
+    await expect(muted).not.toContain("‮");
+    // Read-only: each row's only control is the existing exact-address investigation.
+    for (const row of canvasElement.querySelectorAll<HTMLElement>(".peer-row"))
+      await expect(
+        Array.from(
+          row.querySelectorAll(
+            "button, input, select, textarea, a[href], [role='button'], [role='switch'], [role='checkbox'], [role='menu']"
+          ),
+          (control) => control.textContent
+        )
+      ).toEqual(["Investigate exact address"]);
+    const activeText = textOf("agent/on");
+
+    // The same peers through an older serve, which sends no activity: nothing is invented.
+    script.peers = peersOf(
+      ["agent/on", "agent/away", "agent/unread", "agent/quiet", "agent/older"],
+      0,
+      "older"
+    );
+    await userEvent.click(canvas.getByRole("button", { name: "Refresh current peers" }));
+    await waitFor(() => expect(canvasElement.querySelectorAll(".peer-row")).toHaveLength(5));
+    for (const address of ["agent/on", "agent/away", "agent/unread", "agent/quiet", "agent/older"])
+      await shows(address, []);
+    // An active peer shows exactly what a peer without activity shows.
+    await expect(textOf("agent/on")).toBe(activeText);
+  },
+};
+
 /** A conversation follows the bus: its reply tree is read again at each new history commit. */
 export const ConversationFollowsCommits: Story = {
   beforeEach: () => {

@@ -17,7 +17,7 @@ A refusal changes nothing. Match its wording:
 | "The bus could not confirm whether this `<join\|leave>` of `<address>` was recorded" | It may or may not have committed. Call again if you still need the change: that call's result or refusal is what counts. Don't treat `bus_peers` as proof either way: it doesn't show sessions |
 | "`<address>` has not joined the bus; join first." | `bus_join`, unless a wake told you not to rejoin: then end the turn |
 | A read that says your cursor "is ahead of" the ledger | Tell the human. A plain rejoin keeps that cursor; rejoin with `replay` only if they agree to receive all past mail again |
-| "A ledger entry at t=… could not be decoded." | Tell the human the commit and preserve the cursor. Rejoin, replay and restart do not repair damaged presence history; do not move the cursor as an automatic response |
+| "A ledger entry at t=… could not be decoded." | Tell the human the commit and preserve the cursor. Rejoin, replay and restart do not repair damaged presence or command history; do not move the cursor as an automatic response. After the human's repair, resend any `UNKNOWN` activity request with a new `operation` |
 | A store error, or no answer from the bus | Retry once, then tell the human. Don't start a bus of your own |
 
 The query tools' own errors are in [queries.md](queries.md#errors).

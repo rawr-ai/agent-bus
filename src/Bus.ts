@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { hostname } from "node:os";
 import {
   Clock,
@@ -14,9 +15,17 @@ import {
 } from "effect";
 import { Cursors } from "./Cursors.ts";
 import {
+  type Activity,
+  type ActivityReason,
+  ActivityValue,
+  type AddressCommand,
+  AddressCommandJson,
   type Association,
   Association as AssociationSchema,
+  activityAt,
+  ambientRoutes,
   canonicalAssociations,
+  foldStanding,
   InvalidAssociations,
   InvalidQuery,
   InvalidTopics,
@@ -26,18 +35,26 @@ import {
   MAX_ASSOCIATED_ADDRESS_BYTES,
   MAX_ASSOCIATION_BYTES,
   Message,
+  type MuteScope,
   machine,
   NotJoined,
   NotOwner,
+  needsScan,
+  normalizeMutes,
   Origin,
   Presence,
   PresenceConflict,
   type Runtime,
+  runOf,
+  type Standing,
   type Subscriber,
   topicName,
   validSession,
 } from "./domain.ts";
-import { Ledger } from "./Ledger.ts";
+import { type CommandRead, type Entry, Ledger } from "./Ledger.ts";
+import { canonicalJson } from "./orientation-model.ts";
+import { directoryAt } from "./orientation-read.ts";
+import { type Pin, QueryGateway } from "./Query.ts";
 
 export const ORIENTATION_JOIN_TOO_LARGE = "Orientation cannot fit alongside this committed join.";
 
@@ -67,13 +84,102 @@ export interface PublishInput {
   readonly body: string;
   readonly subject?: string | undefined;
   readonly replyTo?: string | undefined;
+  /**
+   * Audience members to wake despite inactivity or mutes, or "all" of those who would otherwise
+   * be suppressed, which first returns NOT_SENT with that set and a digest to `confirm`.
+   */
+  readonly pierce?: ReadonlyArray<string> | "all" | undefined;
+  /** The digest of a NOT_SENT pierce of all, to send exactly that set. */
+  readonly confirm?: string | undefined;
 }
 
-/** A subscriber as it is under its address's lock, and its unread messages. */
+/** A pierce of all that was not confirmed: nothing was written. */
+export interface NotSent {
+  readonly status: "NOT_SENT";
+  /** The audience members the message would otherwise not wake, sorted. */
+  readonly bypass: ReadonlyArray<string>;
+  /** Pass as `confirm`, with the same message, to send it piercing exactly `bypass`. */
+  readonly digest: string;
+}
+
+/** An owner's change of its address's activity, mutes or both: one written command. */
+export interface ActivityInput {
+  readonly address: string;
+  readonly session: string | undefined;
+  /** A UUIDv7 naming this change and all its retries. */
+  readonly operation: string;
+  readonly activity?: "active" | "inactive" | undefined;
+  /** The complete mute set, replacing the current one. */
+  readonly mutes?: ReadonlyArray<MuteScope> | undefined;
+}
+
+/**
+ * What became of an activity command, decided by its own commit: applied, or refused because
+ * the address had no joined holder, another holder, or a later run by then. UNKNOWN may have
+ * committed: retry only the identical intent with the same operation.
+ */
+export type ActivityResult =
+  | {
+      readonly status: "APPLIED";
+      readonly operation: string;
+      readonly cut: Pin;
+      readonly activity: Activity;
+      readonly activeSince?: string;
+      readonly activityReason?: ActivityReason;
+      readonly mutes: ReadonlyArray<MuteScope>;
+    }
+  | {
+      readonly status: "CONFLICT";
+      readonly operation: string;
+      readonly cut: Pin;
+      readonly reason: "not-joined" | "not-holder" | "stale-run";
+    }
+  | { readonly status: "UNKNOWN"; readonly operation: string }
+  | { readonly status: "IDENTITY_MISMATCH"; readonly operation: string };
+
+type PublishError = LedgerError | NotJoined | NotOwner | InvalidQuery;
+
+/**
+ * A subscriber as it is under its address's lock, and its unread messages that may wake it, with
+ * what a wake needs to tell new mail from mail it already rang for: the ids of all the
+ * subscriber's unread mail, held back or not, and its read position.
+ */
 export interface Pending {
   readonly subscriber: Subscriber;
   readonly messages: ReadonlyArray<Message>;
+  readonly unread: ReadonlyArray<string>;
+  readonly cursor: number;
 }
+
+/** What a wake rang for: the eligible mail, while it stays unread, and the read position then. */
+export interface Coverage {
+  readonly rung: ReadonlyArray<string>;
+  readonly cursor: number;
+}
+
+/**
+ * Whether a wake's eligible mail is news against what an earlier wake of the same join rang for,
+ * and the coverage it moves to. News is eligible mail not yet rung for, or a read since: a partial
+ * read rings again. Held-back mail becoming eligible rings once; suppression shrinking the
+ * eligible set never rings, and mail rung for doesn't ring again when it becomes eligible again.
+ * Coverage keeps only unread mail, so it stays bounded by the unread mail.
+ */
+export const cover = (
+  covered: Coverage | undefined,
+  { messages, unread, cursor }: Pending
+): { readonly news: boolean; readonly coverage: Coverage } => {
+  const rung = new Set(covered?.rung);
+  const news =
+    covered === undefined ||
+    covered.cursor !== cursor ||
+    messages.some((message) => !rung.has(message.id));
+  const still = new Set(unread);
+  for (const message of messages) rung.add(message.id);
+  return {
+    news,
+    coverage: { rung: [...rung].filter((id) => still.has(id)), cursor },
+  };
+};
 
 /** What a session's wake wait found. */
 export interface Woken {
@@ -108,9 +214,20 @@ export class Bus extends Context.Service<
       address: string,
       session: string | undefined
     ) => Effect.Effect<void, LedgerError | NotJoined | NotOwner | PresenceConflict>;
-    readonly publish: (
-      input: PublishInput
-    ) => Effect.Effect<Message, LedgerError | NotJoined | NotOwner>;
+    /** A pierce of "all" without its confirming digest returns NOT_SENT and writes nothing. */
+    readonly publish: {
+      (
+        input: PublishInput & { readonly pierce?: ReadonlyArray<string> | undefined }
+      ): Effect.Effect<Message, PublishError>;
+      (input: PublishInput): Effect.Effect<Message | NotSent, PublishError>;
+    };
+    /**
+     * Sets the owner's activity, mutes or both by writing one command, never a no-op. A
+     * recorded operation returns its original receipt without writing.
+     */
+    readonly activity: (
+      input: ActivityInput
+    ) => Effect.Effect<ActivityResult, LedgerError | NotJoined | NotOwner | InvalidQuery>;
     /** Runs a publisher operation under the same ownership lock as ordinary sends. */
     readonly withOwner: <A, E>(
       address: string,
@@ -125,8 +242,11 @@ export class Bus extends Context.Service<
      * leaves, reads and nudges for one address run one at a time, so a nudge
      * acts on the subscriber's current state. Returns what `nudge` returns, or
      * undefined when it had nothing to act on, in which case `idle`, if given,
-     * runs for the subscriber, still under the lock. This is the Codex
-     * deliverer's path; sessions read through `take` and `wait`.
+     * runs for the subscriber, still under the lock. Unread mail the wake law
+     * suppresses (inactivity, mutes) is handed over only alongside mail that
+     * wakes; with none that wakes, it returns undefined without `idle`, and
+     * nothing is passed over. This is the Codex deliverer's path; sessions
+     * read through `take` and `wait`, unfiltered.
      */
     readonly deliver: <A, E, E2 = never>(
       address: string,
@@ -228,10 +348,10 @@ const associationsOf = (value: ReadonlyArray<Association>) =>
 const sessionHelp =
   "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients.";
 
-/** What an address's owner was last woken for: its join, and its unread mail, first to newest. */
+/** What an address's owner was last woken for: its join, and the mail that wake covered. */
 export interface Mark {
   readonly joinId: string;
-  readonly unread: string;
+  readonly coverage: Coverage;
 }
 
 /** An address's mark as a wake read it under the address's lock, and the mark it would move to. */
@@ -239,6 +359,8 @@ export interface Moved {
   readonly address: string;
   readonly previous: Mark | undefined;
   readonly mark: Mark;
+  /** Whether the mail is news against `previous` (see `cover`). */
+  readonly news: boolean;
 }
 
 /**
@@ -257,9 +379,7 @@ export const commitMarks = (
   for (const read of found) {
     const { address, previous, mark } = read;
     if (woken.get(address) !== previous) continue;
-    if (!fresh && previous?.joinId === mark.joinId && previous.unread === mark.unread) {
-      continue;
-    }
+    if (!fresh && !read.news) continue;
     moved.push(read);
     woken.set(address, mark);
     addresses.push(address);
@@ -281,16 +401,43 @@ export const restoreMarks = (
 };
 
 /** What this machine's bus has seen of an address's owner, for telling a live holder from a dead one. */
-interface Activity {
+interface Seen {
   last?: string;
   waits: number;
 }
+
+const UUID_V7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const isActivityValue = Schema.is(ActivityValue);
+const decodeCommand = Schema.decodeUnknownOption(AddressCommandJson, {
+  onExcessProperty: "error",
+});
+
+/** A command's retry identity: what the caller asked for, never its runtime, run or time. */
+const intentOf = (command: {
+  readonly address: string;
+  readonly session: string | undefined;
+  readonly activity?: string | undefined;
+  readonly mutes?: ReadonlyArray<MuteScope> | undefined;
+}) =>
+  canonicalJson({
+    address: command.address,
+    session: command.session,
+    activity: command.activity,
+    mutes: command.mutes,
+  });
+
+/** Concern topics by directory id at one commit; undefined where the designation is unreadable. */
+type Concerns = Map<
+  string,
+  ReadonlyArray<{ readonly id: string; readonly topic: string }> | undefined
+>;
 
 export const layer = Layer.effect(
   Bus,
   Effect.gen(function* () {
     const ledger = yield* Ledger;
     const cursors = yield* Cursors;
+    const gateway = yield* QueryGateway;
 
     const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
 
@@ -324,24 +471,24 @@ export const layer = Layer.effect(
     /** Sessions whose wake hook has called this bus since it started. */
     const hooked = new Set<string>();
 
-    const activity = new Map<string, Activity>();
-    const activityOf = (address: string) => {
-      let seen = activity.get(address);
+    const seenBy = new Map<string, Seen>();
+    const seenOf = (address: string) => {
+      let seen = seenBy.get(address);
       if (seen === undefined) {
         seen = { waits: 0 };
-        activity.set(address, seen);
+        seenBy.set(address, seen);
       }
       return seen;
     };
     const touch = (address: string) =>
       Effect.map(now, (ts) => {
-        activityOf(address).last = ts;
+        seenOf(address).last = ts;
       });
 
     /** Why a session that doesn't own an address can't join it, and what to do instead. */
     const heldBy = (holder: Subscriber) => {
       const { presence } = holder;
-      const seen = activityOf(holder.address);
+      const seen = seenOf(holder.address);
       const facts = [
         `runtime ${presence.runtime}`,
         ...(holder.host === undefined ? [] : [`on ${holder.host}`]),
@@ -593,10 +740,142 @@ export const layer = Layer.effect(
         yield* touch(address);
       }).pipe(exclusive(address), claiming(address), Effect.withSpan("Bus.leave"));
 
-    const publish = (input: PublishInput) =>
+    /** An address's standing and activity at commit `t`, from the one indexed basis. */
+    const standingAt = (address: string, t: number) =>
       Effect.gen(function* () {
+        const standing = foldStanding(address, yield* ledger.log(t));
+        const scan = needsScan(standing)
+          ? yield* ledger.direct(address, standing.anchor.t, t)
+          : undefined;
+        return { standing, ...activityAt(standing, scan) };
+      });
+
+    /** A directory's concerns at commit `t`, read once per pass; unreadable is undefined. */
+    const concernsAt = (concerns: Concerns, directory: string, t: number) =>
+      Effect.gen(function* () {
+        const key = JSON.stringify([t, directory]);
+        if (concerns.has(key)) return concerns.get(key);
+        const resolved = yield* directoryAt(gateway, t, directory).pipe(
+          Effect.map((found) => found?.value.directory.concerns ?? []),
+          Effect.orElseSucceed(() => undefined)
+        );
+        concerns.set(key, resolved);
+        return resolved;
+      });
+
+    /**
+     * Whether any ambient route escapes the mutes, with directory and concern mutes resolved at
+     * commit `t`. A designation that can't be read covers nothing: muting errs toward contact.
+     */
+    const uncovered = (
+      mutes: ReadonlyArray<MuteScope>,
+      routes: ReadonlyArray<string>,
+      t: number,
+      concerns: Concerns
+    ) =>
+      Effect.gen(function* () {
+        for (const route of routes) {
+          if (route === "*") {
+            if (!mutes.some((mute) => mute.scope === "programme")) return true;
+            continue;
+          }
+          const topic = route.slice(1);
+          if (mutes.some((mute) => mute.scope === "topic" && mute.topic === topic)) continue;
+          let covered = false;
+          for (const mute of mutes) {
+            if (mute.scope !== "directory" && mute.scope !== "concern") continue;
+            const registered = yield* concernsAt(concerns, mute.directory, t);
+            covered =
+              registered?.some(
+                (concern) =>
+                  (mute.scope === "directory" || concern.id === mute.concern) &&
+                  topicName(concern.topic) === topic
+              ) ?? false;
+            if (covered) break;
+          }
+          if (!covered) return true;
+        }
+        return false;
+      });
+
+    /**
+     * Whether ambient mail would leave a peer asleep: inactive, or every route muted at `t`. A
+     * standing that can't be read fails the call: no bypass set is fabricated without it.
+     */
+    const suppressed = (peer: Subscriber, message: Message, t: number, concerns: Concerns) =>
+      Effect.gen(function* () {
+        const { standing, activity } = yield* standingAt(peer.address, t);
+        if (activity === "inactive") return true;
+        if (standing.mutes.length === 0) return false;
+        return !(yield* uncovered(standing.mutes, ambientRoutes(message, peer), t, concerns));
+      });
+
+    /**
+     * The wake law (docs/frames/reachable-inactivity.md): direct mail always wakes, and
+     * reactivates by being direct mail after the anchor; a pierce wakes without reactivating;
+     * otherwise mail wakes an active or unknown address through an unmuted ambient route.
+     * Activity is read at the slice's cut, only when some mail is ambient. Direct and pierced
+     * mail needs no standing, so a standing that can't be read leaves only that mail eligible;
+     * with none, the pass fails, as an unreadable entry does. Either way the ambient mail stays
+     * unread until the ledger can be read again.
+     */
+    const eligibleOf = (subscriber: Subscriber, entries: ReadonlyArray<Entry>, cut: number) =>
+      Effect.gen(function* () {
+        const { address } = subscriber;
+        const reaches = (message: Message) =>
+          message.to.includes(address) || (message.pierce ?? []).includes(address);
+        const all = entries.map((entry) => entry.message);
+        const direct = all.filter(reaches);
+        if (direct.length === all.length) return all;
+        const read =
+          direct.length === 0
+            ? Option.some(yield* standingAt(address, cut))
+            : yield* Effect.option(standingAt(address, cut));
+        if (Option.isNone(read)) return direct;
+        const { standing, activity } = read.value;
+        const concerns: Concerns = new Map();
+        const eligible: Array<Message> = [];
+        for (const { message, end } of entries) {
+          if (
+            reaches(message) ||
+            (activity !== "inactive" &&
+              (standing.mutes.length === 0 ||
+                (yield* uncovered(
+                  standing.mutes,
+                  ambientRoutes(message, subscriber),
+                  end,
+                  concerns
+                ))))
+          ) {
+            eligible.push(message);
+          }
+        }
+        return eligible;
+      });
+
+    const digestOf = (draft: Message, bypass: ReadonlyArray<string>) =>
+      createHash("sha256")
+        .update(
+          canonicalJson({
+            from: draft.from,
+            to: draft.to,
+            subject: draft.subject,
+            body: draft.body,
+            kind: draft.kind,
+            replyTo: draft.replyTo,
+            bypass,
+          })
+        )
+        .digest("hex");
+
+    function publish(
+      input: PublishInput & { readonly pierce?: ReadonlyArray<string> | undefined }
+    ): Effect.Effect<Message, PublishError>;
+    function publish(input: PublishInput): Effect.Effect<Message | NotSent, PublishError>;
+    function publish(input: PublishInput): Effect.Effect<Message | NotSent, PublishError> {
+      return Effect.gen(function* () {
         const sender = yield* owned(input.from, input.session);
-        const message = new Message({
+        const draft = new Message({
           id: Bun.randomUUIDv7(),
           ts: yield* now,
           from: input.from,
@@ -607,9 +886,146 @@ export const layer = Layer.effect(
           ...optional("replyTo", input.replyTo),
           origin: yield* originFor(sender.cwd),
         });
+        if (input.pierce === undefined) {
+          yield* ledger.append(draft);
+          return draft;
+        }
+        const audience = (yield* peers).filter((peer) => isFor(draft, peer));
+        let pierce: Array<string>;
+        if (input.pierce === "all") {
+          const head = yield* ledger.end;
+          const concerns: Concerns = new Map();
+          pierce = [];
+          for (const peer of audience) {
+            if (draft.to.includes(peer.address)) continue;
+            if (yield* suppressed(peer, draft, head, concerns)) pierce.push(peer.address);
+          }
+          pierce.sort();
+          const digest = digestOf(draft, pierce);
+          if (input.confirm !== digest) {
+            return { status: "NOT_SENT", bypass: pierce, digest } satisfies NotSent;
+          }
+        } else {
+          const outside = input.pierce.find(
+            (address) => !audience.some((peer) => peer.address === address)
+          );
+          if (outside !== undefined) {
+            return yield* new InvalidQuery({
+              message: `${outside} is not in this message's audience: pierce names only joined peers it already reaches. Nothing was sent.`,
+            });
+          }
+          pierce = [...new Set(input.pierce)]
+            .filter((address) => !draft.to.includes(address))
+            .sort();
+        }
+        const message = pierce.length === 0 ? draft : new Message({ ...draft, pierce });
         yield* ledger.append(message);
         return message;
       }).pipe(claiming(input.from), Effect.withSpan("Bus.publish"));
+    }
+
+    /** The receipt a recorded command earns at its own commit; any failure to read it is UNKNOWN. */
+    const receiptOf = (
+      found: Extract<CommandRead, { readonly status: "FOUND" }>,
+      address: string,
+      operation: string,
+      intent: string
+    ) =>
+      Effect.gen(function* () {
+        const unknown: ActivityResult = { status: "UNKNOWN", operation };
+        const stored = decodeCommand(found.json);
+        if (Option.isNone(stored)) return unknown;
+        if (intentOf(stored.value) !== intent) {
+          return { status: "IDENTITY_MISMATCH", operation } satisfies ActivityResult;
+        }
+        const standing: Standing = foldStanding(address, yield* ledger.log(found.t));
+        const verdict = standing.verdicts.get(operation);
+        const cut = { head: found.t, incarnation: found.cut.incarnation };
+        if (verdict === undefined) return unknown;
+        if (verdict.status === "CONFLICT") {
+          return {
+            status: "CONFLICT",
+            operation,
+            cut,
+            reason: verdict.reason,
+          } satisfies ActivityResult;
+        }
+        const scan = needsScan(standing)
+          ? yield* ledger.direct(address, standing.anchor.t, found.t)
+          : undefined;
+        return {
+          status: "APPLIED",
+          operation,
+          cut,
+          ...activityAt(standing, scan),
+          mutes: [...standing.mutes],
+        } satisfies ActivityResult;
+      }).pipe(Effect.orElseSucceed((): ActivityResult => ({ status: "UNKNOWN", operation })));
+
+    const activity = (input: ActivityInput) =>
+      Effect.gen(function* () {
+        const refuse = (problem: string) =>
+          new InvalidQuery({ message: `${problem} Nothing was written.` });
+        if (typeof input.operation !== "string" || !UUID_V7.test(input.operation)) {
+          return yield* refuse("operation must be a UUIDv7, the same for every retry.");
+        }
+        const operation = input.operation.toLowerCase();
+        if (input.activity === undefined && input.mutes === undefined) {
+          return yield* refuse("Give activity, mutes or both.");
+        }
+        if (input.activity !== undefined && !isActivityValue(input.activity)) {
+          return yield* refuse('activity must be "active" or "inactive".');
+        }
+        const mutes = input.mutes === undefined ? undefined : normalizeMutes(input.mutes);
+        if (input.mutes !== undefined && mutes === undefined) {
+          return yield* refuse(
+            "Each mute is {scope: programme}, {scope: topic, topic}, {scope: directory, directory} or {scope: concern, directory, concern}, with no other fields."
+          );
+        }
+        // A call that can never own the address is refused before anything is read.
+        if (!validSession(input.session)) return yield* noSession(input.address);
+        const intent = intentOf({ ...input, mutes });
+        const unknown: ActivityResult = { status: "UNKNOWN", operation };
+
+        const recorded = yield* ledger.readCommand(operation);
+        if (recorded.status === "FOUND") {
+          return yield* receiptOf(recorded, input.address, operation, intent);
+        }
+        if (recorded.status !== "ABSENT") return unknown;
+        // Ownership at the cut where the operation was absent: a refusal here wrote nothing, and
+        // says nothing of any other attempt with the same operation. A log that can't be read
+        // fails the call before anything is written.
+        const at = recorded.cut.head;
+        const { holder } = foldStanding(input.address, yield* ledger.log(at));
+        if (holder === undefined || holder.presence.status !== "joined") {
+          return yield* new NotJoined({
+            address: input.address,
+            message: `${input.address} has not joined the bus; this call wrote nothing (operation ${operation} was absent at t=${at}).`,
+          });
+        }
+        if (holder.presence.session !== input.session) {
+          return yield* new NotOwner({
+            address: input.address,
+            message: `${input.address} belongs to another session; this call wrote nothing (operation ${operation} was absent at t=${at}).`,
+          });
+        }
+        yield* touch(input.address);
+        const command: AddressCommand = {
+          address: input.address,
+          runtime: holder.presence.runtime,
+          session: input.session,
+          run: runOf(holder),
+          ts: yield* now,
+          ...optional("activity", input.activity),
+          ...optional("mutes", mutes),
+        };
+        // A lost response may still have committed: only reading the node back decides.
+        yield* Effect.ignore(ledger.appendCommand(operation, JSON.stringify(command)));
+        const written = yield* ledger.readCommand(operation);
+        return written.status === "FOUND"
+          ? yield* receiptOf(written, input.address, operation, intent)
+          : unknown;
+      }).pipe(claiming(input.address), Effect.withSpan("Bus.activity"));
 
     const withOwner = <A, E>(
       address: string,
@@ -639,15 +1055,20 @@ export const layer = Layer.effect(
         if (Option.isNone(cursor)) return yield* notJoined;
 
         const slice = yield* ledger.read(cursor.value);
-        const messages: Array<Message> = [];
-        for (const { message, end } of slice.entries) {
-          if (!isFor(message, subscriber)) continue;
-          messages.push(message);
-          if (limit !== undefined && messages.length >= limit) {
-            return { subscriber, messages, next: end };
-          }
+        const entries: Array<Entry> = [];
+        const batch = (next: number) => ({
+          subscriber,
+          entries,
+          messages: entries.map((entry) => entry.message),
+          from: cursor.value,
+          next,
+        });
+        for (const entry of slice.entries) {
+          if (!isFor(entry.message, subscriber)) continue;
+          entries.push(entry);
+          if (limit !== undefined && entries.length >= limit) return batch(entry.end);
         }
-        return { subscriber, messages, next: slice.next };
+        return batch(slice.next);
       }).pipe(Effect.withSpan("Bus.pending"));
 
     const ack = (address: string, cursor: number) => cursors.set(address, cursor);
@@ -661,8 +1082,20 @@ export const layer = Layer.effect(
         // A peer that left since the deliverer listed peers has nothing to nudge.
         const subscriber = yield* peer(address);
         if (subscriber === undefined) return undefined;
-        const { messages, next } = yield* pending(address, Effect.succeed(subscriber));
-        if (messages.length > 0) return yield* nudge({ subscriber, messages });
+        const { entries, from, next } = yield* pending(address, Effect.succeed(subscriber));
+        if (entries.length > 0) {
+          const eligible = yield* eligibleOf(subscriber, entries, next);
+          if (eligible.length > 0) {
+            return yield* nudge({
+              subscriber,
+              messages: eligible,
+              unread: entries.map((entry) => entry.message.id),
+              cursor: from,
+            });
+          }
+          // Suppressed: nothing wakes it, and its unread mail stays unread and unacknowledged.
+          return undefined;
+        }
         // With nothing for this subscriber, pass over what was read, as its own read would,
         // so later passes don't read it again.
         yield* ack(address, next);
@@ -700,12 +1133,12 @@ export const layer = Layer.effect(
     const wait = (address: string, session: string | undefined, timeoutSeconds?: number) =>
       Effect.acquireUseRelease(
         Effect.sync(() => {
-          activityOf(address).waits += 1;
+          seenOf(address).waits += 1;
         }),
         () => waitFor(address, session, timeoutSeconds),
         () =>
           Effect.sync(() => {
-            activityOf(address).waits -= 1;
+            seenOf(address).waits -= 1;
           })
       );
 
@@ -748,24 +1181,25 @@ export const layer = Layer.effect(
           yield* touch(peer.address);
           if (!counted.has(peer.address)) {
             counted.add(peer.address);
-            activityOf(peer.address).waits += 1;
+            seenOf(peer.address).waits += 1;
           }
-          const unread = yield* deliver(peer.address, ({ subscriber, messages }) =>
-            Effect.succeed(
-              eligible(subscriber)
-                ? {
-                    address: subscriber.address,
-                    // The mark as it was under the lock: if it has moved by the commit (another
-                    // owner's wake, after a takeover), this reading is stale and is dropped.
-                    previous: woken.get(subscriber.address),
-                    mark: {
-                      joinId: subscriber.joinId,
-                      unread: `${messages[0]?.id}..${messages.at(-1)?.id}`,
-                    },
-                  }
-                : undefined
-            )
-          ).pipe(
+          const unread = yield* deliver(peer.address, (found) => {
+            const { subscriber } = found;
+            if (!eligible(subscriber)) return Effect.succeed(undefined);
+            // The mark as it was under the lock: if it has moved by the commit (another
+            // owner's wake, after a takeover), this reading is stale and is dropped.
+            const previous = woken.get(subscriber.address);
+            const { news, coverage } = cover(
+              previous?.joinId === subscriber.joinId ? previous.coverage : undefined,
+              found
+            );
+            return Effect.succeed({
+              address: subscriber.address,
+              previous,
+              mark: { joinId: subscriber.joinId, coverage },
+              news,
+            });
+          }).pipe(
             // A join from this machine without a cursor (a replaced ledger, say), or a failing read,
             // leaves this address for a later pass rather than holding up the others.
             Effect.catchTags({
@@ -821,13 +1255,24 @@ export const layer = Layer.effect(
           (_, exit) =>
             Effect.sync(() => {
               if (wakers.get(session) === mine) wakers.delete(session);
-              for (const address of counted) activityOf(address).waits -= 1;
+              for (const address of counted) seenOf(address).waits -= 1;
               // A mark moves only with the result that names it: undo those whose result was lost.
               restoreMarks(woken, moved, Exit.isSuccess(exit) ? exit.value.addresses : []);
             })
         );
       }).pipe(Effect.withSpan("Bus.wake"));
 
-    return Bus.of({ join, leave, publish, withOwner, peers, deliver, take, wait, wake });
+    return Bus.of({
+      join,
+      leave,
+      publish,
+      activity,
+      withOwner,
+      peers,
+      deliver,
+      take,
+      wait,
+      wake,
+    });
   })
 );

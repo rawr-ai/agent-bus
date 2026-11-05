@@ -204,6 +204,7 @@ async function main() {
         "viewer-observation-states--unavailable-then-observed",
         "viewer-observation-states--failed-refresh-keeps-last-good",
         "viewer-observation-states--refresh-announces-arrivals",
+        "viewer-observation-states--peer-activity-shown-read-only",
         "viewer-observation-states--conversation-follows-commits",
         "viewer-observation-states--thread-retried-at-same-commit",
         "viewer-observation-states--retained-reading",

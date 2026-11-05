@@ -1,7 +1,7 @@
 import { homedir, hostname } from "node:os";
 import { join } from "node:path";
 import { Clock, Duration, Effect, Option, Schema, type Scope, Stream } from "effect";
-import { Bus, type Pending } from "./Bus.ts";
+import { Bus, type Coverage, cover, type Pending } from "./Bus.ts";
 import { machine, type Subscriber } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { readEligibility, type Stored } from "./rollout.ts";
@@ -509,8 +509,8 @@ const reconcileDelay = (reconciles: number) =>
 
 /** Unread mail an attempt covered, and when. */
 interface Covered {
-  /** The unread messages, first to newest. */
-  readonly unread: string;
+  /** The eligible mail it covered, while unread, and the read position then. */
+  readonly coverage: Coverage;
   readonly at: number;
   /** The attempts since the first, on the reconcile schedule. */
   readonly reconciles: number;
@@ -654,17 +654,18 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       });
     };
     const hold = (change: Partial<Hold>) => update({ failures: 0, until: 0, ...change });
-    const post = ({ subscriber, messages }: Pending) =>
+    const post = (found: Pending) =>
       Effect.gen(function* () {
+        const { subscriber } = found;
         attempted = subscriber;
         const threadId = subscriber.presence.codexThreadId;
-        const unread = `${messages[0]?.id}..${messages.at(-1)?.id}`;
         if (threadId === undefined || deliveryTargets([subscriber], host).length === 0) {
           return undefined;
         }
         if ((joined()?.until ?? 0) > now) return undefined;
         const covered = current()?.covered;
-        const again = covered?.unread === unread;
+        const { news, coverage } = cover(covered?.coverage, found);
+        const again = covered !== undefined && !news;
         if (again && now < covered.at + Duration.toMillis(reconcileDelay(covered.reconciles))) {
           return undefined;
         }
@@ -682,7 +683,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
             return { added: !waiting, stored: yield* queue.rollout(threadId) };
           })
         ).pipe(timeLimit("queue nudge", NUDGE_TIMEOUT));
-        return { threadId, unread, reconciles: again ? covered.reconciles + 1 : 0, ...queued };
+        return { threadId, coverage, reconciles: again ? covered.reconciles + 1 : 0, ...queued };
       });
     // Reading the rollout and the borrow run outside the lock: the owner's read needn't wait on them.
     // With the mail read, our nudge would run as an empty turn: remove it if it still waits unchanged.
@@ -742,7 +743,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       const ineligible = woken.eligibility.eligible ? undefined : woken.eligibility.reason;
       const warned = ineligible !== undefined && current()?.warned === ineligible;
       hold({
-        covered: { unread: woken.unread, at, reconciles: woken.reconciles },
+        covered: { coverage: woken.coverage, at, reconciles: woken.reconciles },
         warned: ineligible,
       });
       const posted = woken.added ? "queued a nudge" : "a nudge was already waiting";

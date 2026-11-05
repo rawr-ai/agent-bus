@@ -252,11 +252,33 @@ export const QUARANTINED_ROWS: ReadonlyArray<unknown> = [
   { id: "msg-q-bad", ts: at(4), from: "fixture/erin", to: ["*"], kind: "note", body: "Bad kind." },
 ];
 
-// Separately observed synthetic peers; no liveness or session state is represented.
+// Separately observed synthetic peers; no liveness or session state is represented. Alice and
+// Dave take the ordinary active row. Bob is inactive, with a topic mute carrying markup and a
+// control character that must show as inert text (directory and concern ids can carry neither).
+// Carol's activity is unknown, with its reason.
 export const FIXTURE_PEERS: ReadonlyArray<PublicPeer> = [
   { address: "fixture/alice", runtime: "claude", topics: ["#alpha"], host: "fixture-host" },
-  { address: "fixture/bob", runtime: "codex", topics: ["#alpha", "#beta"], host: "fixture-host" },
-  { address: "fixture/carol", runtime: "human", topics: ["#beta"], note: "Synthetic note" },
+  {
+    address: "fixture/bob",
+    runtime: "codex",
+    topics: ["#alpha", "#beta"],
+    host: "fixture-host",
+    activity: "inactive",
+    activeSince: "2026-01-01T08:00:00Z",
+    mutes: [
+      { scope: "programme" },
+      { scope: "topic", topic: "<i>beta\u202e</i>" },
+      { scope: "concern", directory: "opa", concern: "ux" },
+    ],
+  },
+  {
+    address: "fixture/carol",
+    runtime: "human",
+    topics: ["#beta"],
+    note: "Synthetic note",
+    activity: "unknown",
+    activityReason: "damaged-mail",
+  },
   { address: "fixture/dave", runtime: "other", topics: [] },
 ];
 const QUARANTINED_PEERS: ReadonlyArray<unknown> = [

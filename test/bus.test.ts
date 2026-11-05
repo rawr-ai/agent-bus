@@ -3656,27 +3656,35 @@ describe("claude wake", () => {
     ));
 
   test("marks move only where no other wake moved them, and a lost result puts them back", () => {
-    const mark = (unread: string) => ({ joinId: "join", unread });
-    const woken = new Map([["claude/b", mark("b1..b1")]]);
+    const mark = (...rung: Array<string>): Bus.Mark => ({
+      joinId: "join",
+      coverage: { rung, cursor: 0 },
+    });
+    const woken = new Map([["claude/b", mark("b1")]]);
     const moved: Array<Bus.Moved> = [];
     const found = [
-      { address: "claude/a", previous: undefined, mark: mark("a1..a1") },
+      { address: "claude/a", previous: undefined, mark: mark("a1"), news: true },
       // Read before another wake moved claude/b's mark: stale, so skipped.
-      { address: "claude/b", previous: undefined, mark: mark("b1..b2") },
-      { address: "claude/c", previous: undefined, mark: mark("c1..c1") },
+      { address: "claude/b", previous: undefined, mark: mark("b1", "b2"), news: true },
+      { address: "claude/c", previous: undefined, mark: mark("c1"), news: true },
     ];
     expect(Bus.commitMarks(woken, found, moved)).toEqual(["claude/a", "claude/c"]);
-    // Unchanged unread mail moves nothing.
-    const again = { address: "claude/a", previous: woken.get("claude/a"), mark: mark("a1..a1") };
+    // Mail that is not news moves nothing.
+    const again = {
+      address: "claude/a",
+      previous: woken.get("claude/a"),
+      mark: mark("a1"),
+      news: false,
+    };
     expect(Bus.commitMarks(woken, [again], [])).toEqual([]);
     // claude/a's result was returned; claude/c's was lost, so its mark goes back.
     Bus.restoreMarks(woken, moved, ["claude/a"]);
     expect([...woken.keys()].sort()).toEqual(["claude/a", "claude/b"]);
     // A mark another wake has moved since is left alone.
-    const later = [{ address: "claude/a", previous: undefined, mark: mark("a1..a1") }];
-    woken.set("claude/a", mark("a1..a2"));
+    const later = [{ address: "claude/a", previous: undefined, mark: mark("a1"), news: true }];
+    woken.set("claude/a", mark("a1", "a2"));
     Bus.restoreMarks(woken, later, []);
-    expect(woken.get("claude/a")).toEqual(mark("a1..a2"));
+    expect(woken.get("claude/a")).toEqual(mark("a1", "a2"));
   });
 
   test("a join says whether this bus has seen the session's wake hook", () =>

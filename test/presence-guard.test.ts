@@ -4,15 +4,15 @@
 // as two serves (or two Bus layers in one process, for JSONL) share one ledger. Bus-level
 // interleavings on Fluree are in lifecycle-takeover-race.test.ts.
 import { afterAll, describe, expect, test } from "bun:test";
-import { appendFileSync, mkdtempSync } from "node:fs";
+import { appendFileSync, mkdtempSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { Message, Origin, Presence } from "../src/domain.ts";
+import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import type { Pin } from "../src/Query.ts";
@@ -65,6 +65,14 @@ const handle = async (layer: LedgerLayer) => {
       ),
     append: (message: Message) => use((ledger) => ledger.append(message)),
     admit: (message: Message, basis: Pin) => use((ledger) => ledger.admit(message, basis)),
+    command: (from: string, operation: string = Bun.randomUUIDv7()) =>
+      use((ledger) =>
+        ledger.appendCommand(
+          operation,
+          JSON.stringify({ address: from, runtime: "claude", session: "session:a", run: "run" })
+        )
+      ),
+    readCommand: (operation: string) => use((ledger) => ledger.readCommand(operation)),
   };
 };
 
@@ -138,6 +146,19 @@ for (const backend of backends) {
         const { decider, writer } = await backend.make();
         const basis = await decider.cut();
         await writer.append(note(address));
+        expect((await decider.admit(presence(address, "session:a"), basis)).status).toBe(
+          "ADMITTED"
+        );
+      },
+      TIMEOUT
+    );
+
+    test(
+      "an address command for the address after the basis does not block",
+      async () => {
+        const { decider, writer } = await backend.make();
+        const basis = await decider.cut();
+        await writer.command(address);
         expect((await decider.admit(presence(address, "session:a"), basis)).status).toBe(
           "ADMITTED"
         );
@@ -224,6 +245,50 @@ for (const backend of backends) {
         },
         TIMEOUT
       );
+
+      test(
+        "a malformed command-prefixed line past the basis refuses",
+        async () => {
+          const { decider, file } = await backend.make();
+          const basis = await decider.cut();
+          // A torn command line could have run into anything, a rival presence included.
+          appendFileSync(file, '{"@command":"torn","command":"{\\"addr\n');
+          const attempt = presence(address, "session:a");
+          expect((await decider.admit(attempt, basis)).status).toBe("REFUSED");
+        },
+        TIMEOUT
+      );
+
+      test(
+        "a presence carrying command keys is still a presence to the guard",
+        async () => {
+          const { decider, file } = await backend.make();
+          const basis = await decider.cut();
+          // Only a line written as a command passes; extra keys never make a presence one.
+          const rival = await Effect.runPromise(
+            Schema.encodeEffect(MessageJson)(presence(address, "session:b"))
+          );
+          appendFileSync(file, `${rival.slice(0, -1)},"@command":"x","command":"{}"}\n`);
+          const attempt = presence(address, "session:a");
+          expect((await decider.admit(attempt, basis)).status).toBe("REFUSED");
+        },
+        TIMEOUT
+      );
+
+      test(
+        "two layers writing one command at once store it once",
+        async () => {
+          const { decider, writer, file } = await backend.make();
+          const operation = Bun.randomUUIDv7();
+          await Promise.all([
+            decider.command(address, operation),
+            writer.command(address, operation),
+          ]);
+          expect((await decider.readCommand(operation)).status).toBe("FOUND");
+          expect(readFileSync(file, "utf8").trim().split("\n")).toHaveLength(1);
+        },
+        TIMEOUT
+      );
     }
   });
 }
@@ -248,10 +313,10 @@ describe("presence guard (jsonl): two Bus layers on one file", () => {
             ),
         })
       )
-    ).pipe(Layer.provide(layerJsonl(file).pipe(Layer.provide(platform))));
+    ).pipe(Layer.provideMerge(layerJsonl(file).pipe(Layer.provide(platform))));
     const runtime = ManagedRuntime.make(
       Bus.layer.pipe(
-        Layer.provideMerge(ledger as LedgerLayer),
+        Layer.provideMerge(ledger),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )
