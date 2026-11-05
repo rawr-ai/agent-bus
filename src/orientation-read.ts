@@ -5,17 +5,17 @@ import {
   BULLETIN_BODY_BYTES,
   type BulletinRecord,
   BulletinRecord as BulletinRecordSchema,
-  BulletinScope,
+  type BulletinScope,
   bulletinFits,
   canonicalJson,
   DIRECTORY_METADATA_BYTES,
-  Directory,
   type DirectoryRecord,
   DirectoryRecord as DirectoryRecordSchema,
   jsonBytes,
   normalizeAudience,
   normalizeDirectory,
   OperationId,
+  OrientationIntent,
   textBytes,
   utcInstant,
 } from "./orientation-model.ts";
@@ -49,37 +49,11 @@ const StoredRecord = Schema.fromJsonString(
 const decodeRecord = Schema.decodeUnknownEffect(StoredRecord, { onExcessProperty: "error" });
 const validOperation = Schema.is(OperationId);
 const WitnessRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.String]));
-const Intent = Schema.Union([
-  Schema.Struct({
-    action: Schema.Literal("replace"),
-    scope: Schema.Struct({ kind: Schema.Literal("directory"), directory: Schema.String }),
-    expected: Schema.NullOr(OperationId),
-    directory: Directory,
-    audience: Schema.Array(Schema.String),
-    publisher: Schema.String,
-  }),
-  Schema.Struct({
-    action: Schema.Literals(["publish", "withdraw"]),
-    scope: BulletinScope,
-    expected: Schema.NullOr(OperationId),
-    publisher: Schema.String,
-    body: Schema.optionalKey(Schema.String),
-    expiresAt: Schema.optionalKey(Schema.String),
-    audience: Schema.Union([
-      Schema.Struct({ previous: Schema.Literal(true) }),
-      Schema.Struct({ programme: Schema.Literal(true) }),
-      Schema.Struct({
-        concernTopic: Schema.Literal(true),
-        recipients: Schema.Array(Schema.String),
-      }),
-    ]),
-  }),
-]);
-const decodeIntent = Schema.decodeUnknownEffect(Schema.fromJsonString(Intent), {
+const decodeIntent = Schema.decodeUnknownEffect(Schema.fromJsonString(OrientationIntent), {
   onExcessProperty: "error",
 });
 
-const agrees = (record: RecordValue, intent: typeof Intent.Type) => {
+const agrees = (record: RecordValue, intent: typeof OrientationIntent.Type) => {
   if (record.publisher !== intent.publisher) return false;
   if (record.kind === "directory") {
     return (

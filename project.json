@@ -39,7 +39,11 @@
         "{workspaceRoot}/src/history-args.ts",
         "{workspaceRoot}/src/catalogue.ts",
         "{workspaceRoot}/src/domain.ts",
+        "{workspaceRoot}/src/Ledger.ts",
+        "{workspaceRoot}/src/orientation-model.ts",
+        "{workspaceRoot}/src/orientation-read.ts",
         "{workspaceRoot}/src/Query.ts",
+        "{workspaceRoot}/src/query-envelope.ts",
         "{workspaceRoot}/src/sparql.ts",
         "{workspaceRoot}/viewer/src/features/conversations/model.ts",
         "{workspaceRoot}/viewer/src/markdown-policy.ts",
@@ -65,11 +69,33 @@
         "{workspaceRoot}/test/viewer-announcements.test.ts",
         "{workspaceRoot}/test/preload.ts",
         "{workspaceRoot}/test/fluree-server.ts",
+        "{workspaceRoot}/test/supervised.ts",
         "{workspaceRoot}/tsconfig.json"
       ],
       "outputs": [],
       "options": {
         "command": "bun --no-env-file run test:viewer:unit",
+        "env": { "FORCE_COLOR": "0" }
+      }
+    },
+    "test-orientation-unit": {
+      "executor": "nx:run-commands",
+      "cache": true,
+      "inputs": [
+        "toolchain",
+        "{workspaceRoot}/src/**/*.ts",
+        "{workspaceRoot}/test/orientation-model.test.ts",
+        "{workspaceRoot}/test/orientation-intent.test.ts",
+        "{workspaceRoot}/test/orientation-coherence.test.ts",
+        "{workspaceRoot}/test/orientation-partial.test.ts",
+        "{workspaceRoot}/test/preload.ts",
+        "{workspaceRoot}/test/fluree-server.ts",
+        "{workspaceRoot}/test/supervised.ts",
+        "{workspaceRoot}/tsconfig.json"
+      ],
+      "outputs": [],
+      "options": {
+        "command": "bun --no-env-file run test:orientation:unit",
         "env": { "FORCE_COLOR": "0" }
       }
     },

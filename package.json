@@ -35,7 +35,8 @@
     "storybook:build": "bun --no-env-file scripts/local-tool.ts storybook build --output-dir dist/storybook --disable-telemetry",
     "nx": "bun --no-env-file scripts/local-tool.ts nx",
     "qualify:viewer-cache": "bun --no-env-file scripts/qualify-viewer-cache.ts",
-    "check:fast": "bun --no-env-file scripts/local-tool.ts nx run-many -t typecheck lint test-viewer-unit --parallel=1"
+    "test:orientation:unit": "bun --no-env-file test test/orientation-model.test.ts test/orientation-intent.test.ts test/orientation-coherence.test.ts test/orientation-partial.test.ts",
+    "check:fast": "bun --no-env-file scripts/local-tool.ts nx run-many -t typecheck lint test-viewer-unit test-orientation-unit --parallel=1"
   },
   "nx": {
     "includedScripts": []

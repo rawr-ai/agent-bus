@@ -1,6 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Effect, Schema } from "effect";
 import { InvalidQuery, OrientationId, topicName } from "./domain.ts";
+import { PageEnvelope } from "./query-envelope.ts";
 
 export const DIRECTORY_BYTES = 16_384;
 export const DIRECTORY_METADATA_BYTES = 4_096;
@@ -143,6 +144,62 @@ export const BulletinRecord = Schema.Struct({
   ...Provenance,
 });
 export type BulletinRecord = typeof BulletinRecord.Type;
+
+/** The canonical semantic identity stored in an operation witness. */
+export const OrientationIntent = Schema.Union([
+  Schema.Struct({
+    action: Schema.Literal("replace"),
+    scope: Schema.Struct({ kind: Schema.Literal("directory"), directory: Schema.String }),
+    expected: Schema.NullOr(OperationId),
+    directory: Directory,
+    audience: Schema.Array(Schema.String),
+    publisher: Schema.String,
+  }),
+  Schema.Struct({
+    action: Schema.Literals(["publish", "withdraw"]),
+    scope: BulletinScope,
+    expected: Schema.NullOr(OperationId),
+    publisher: Schema.String,
+    body: Schema.optionalKey(Schema.String),
+    expiresAt: Schema.optionalKey(Schema.String),
+    audience: Schema.Union([
+      Schema.Struct({ previous: Schema.Literal(true) }),
+      Schema.Struct({ programme: Schema.Literal(true) }),
+      Schema.Struct({
+        concernTopic: Schema.Literal(true),
+        recipients: Schema.Array(Schema.String),
+      }),
+    ]),
+  }),
+]);
+export type OrientationIntent = typeof OrientationIntent.Type;
+
+export const directoryIntent = (
+  input: Omit<Extract<OrientationIntent, { readonly action: "replace" }>, "action">
+): OrientationIntent => ({ action: "replace", ...input });
+
+export const bulletinIntent = (input: {
+  readonly action: BulletinUpdate["action"];
+  readonly scope: BulletinScope;
+  readonly expected: string | null;
+  readonly publisher: string;
+  readonly body: string | undefined;
+  readonly expiresAt: string | undefined;
+  readonly recipients: ReadonlyArray<string> | undefined;
+}): OrientationIntent => ({
+  action: input.action,
+  scope: input.scope,
+  expected: input.expected,
+  publisher: input.publisher,
+  ...(input.body === undefined ? {} : { body: input.body }),
+  ...(input.expiresAt === undefined ? {} : { expiresAt: input.expiresAt }),
+  audience:
+    input.action === "withdraw"
+      ? { previous: true }
+      : input.scope.kind === "programme"
+        ? { programme: true }
+        : { concernTopic: true, recipients: input.recipients ?? [] },
+});
 
 export const OrientRequest = Schema.Struct({
   directory: Schema.optionalKey(
@@ -406,3 +463,116 @@ export const utcInstant = (value: string) => {
     Number.isFinite(instant) && new Date(instant).toISOString().slice(0, 19) === value.slice(0, 19)
   );
 };
+export const OrientationResult = Schema.Struct({
+  status: Schema.Literals(["COMPLETE", "INCOMPLETE", "UNAVAILABLE"]).annotate({
+    description:
+      "Aggregate completeness: unavailable may retain valid same-cut sections, including programme guidance.",
+  }),
+  cut: Schema.optionalKey(Cut.annotate({ description: "The ledger cut shared by the result." })),
+  currentHeadT: Schema.optionalKey(
+    Schema.Int.annotate({ description: "The later observed head, when it moved." })
+  ),
+  evaluatedAt: Schema.optionalKey(
+    Schema.String.annotate({ description: "When expiry was evaluated." })
+  ),
+  catalogueVersion: Schema.optionalKey(
+    Schema.Int.annotate({ description: "The separate saved-query catalogue version." })
+  ),
+  programme: Schema.optionalKey(
+    BulletinView.annotate({ description: "The designated programme bulletin." })
+  ),
+  selection: Schema.optionalKey(
+    Schema.Struct({
+      state: Schema.Literals(["SELECTED", "UNRESOLVED", "AMBIGUOUS", "MISSING"]).annotate({
+        description: "The directory selection outcome.",
+      }),
+      basis: Schema.Literals(["none", "alias", "explicit"]).annotate({
+        description: "How the selection was established.",
+      }),
+      directory: Schema.optionalKey(
+        Schema.String.annotate({ description: "The selected or missing directory id." })
+      ),
+    }).annotate({ description: "Directory selection and its basis." })
+  ),
+  directory: Schema.optionalKey(
+    Schema.Struct({
+      revision: Schema.String.annotate({ description: "The designated directory revision." }),
+      value: DirectoryRecord.annotate({
+        description: "The full directory and original provenance.",
+      }),
+    }).annotate({ description: "The selected directory, when resolved." })
+  ),
+  concern: Schema.optionalKey(
+    Schema.Struct({
+      id: Schema.String.annotate({ description: "The selected concern id." }),
+      state: Schema.Literals(["REGISTERED", "UNRESOLVED"]).annotate({
+        description: "Whether this concern is registered at the cut.",
+      }),
+      bulletin: Schema.optionalKey(
+        BulletinView.annotate({ description: "The selected concern's full bulletin." })
+      ),
+    }).annotate({ description: "The selected concern and its full bulletin." })
+  ),
+  summaries: Schema.optionalKey(
+    Schema.Array(
+      Schema.Struct({
+        concern: Schema.String.annotate({ description: "The summarized concern id." }),
+        bulletin: BulletinView.annotate({ description: "Its status without the full body." }),
+        route: Schema.Struct({
+          directory: Schema.String.annotate({ description: "The containing directory id." }),
+          concern: Schema.String.annotate({ description: "The concern to select." }),
+          t: Schema.Int.annotate({ description: "The original ledger cut." }),
+        }).annotate({ description: "Arguments for a same-cut orientation read." }),
+      })
+    ).annotate({ description: "Other concerns' statuses and same-cut read routes." })
+  ),
+  subscriptions: Schema.optionalKey(
+    Schema.Struct({
+      state: Schema.Literal("SEPARATE_QUERY").annotate({
+        description: "Subscriptions are not inferred from associations.",
+      }),
+      query: Schema.Literal("peers").annotate({
+        description: "The query that shows subscriptions.",
+      }),
+      t: Schema.Int.annotate({ description: "The cut to use for that query." }),
+    }).annotate({ description: "Where to inspect separately recorded topic subscriptions." })
+  ),
+  candidates: Schema.optionalKey(
+    PageEnvelope.annotate({ description: "Directory candidate page and continuation." })
+  ),
+  members: Schema.optionalKey(
+    PageEnvelope.annotate({
+      description: "Resolved explicit association page and continuation.",
+    })
+  ),
+  unresolvedAssociations: Schema.optionalKey(
+    PageEnvelope.annotate({
+      description: "Explicit dangling references, not registered membership.",
+    })
+  ),
+  reason: Schema.optionalKey(
+    Schema.Literals(["DAMAGE", "INADMISSIBLE", "FAULT"]).annotate({
+      description: "Why the result is unavailable.",
+    })
+  ),
+  section: Schema.optionalKey(
+    Schema.Literals([
+      "query",
+      "programme",
+      "candidates",
+      "directory",
+      "concern",
+      "summaries",
+      "associations",
+      "result",
+    ]).annotate({ description: "The section that could not be established." })
+  ),
+  message: Schema.optionalKey(
+    Schema.String.annotate({ description: "A safe explanation of the unavailable section." })
+  ),
+  recovery: Schema.optionalKey(
+    OrientationRecovery.annotate({
+      description: "A read-only recovery route, retaining the cut when known.",
+    })
+  ),
+});
