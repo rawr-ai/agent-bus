@@ -16,7 +16,7 @@ The activation decision must name the exact merged source commit and tree, each 
 
 ## Deploy a new version
 
-1. **Identify the primary explicitly** from the deployment record, not from `readlink`: the launcher may be a regular managed file. In that checkout record `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, the running `serve` process and its launcher/runtime binding. Stop if the tree is dirty, attached to a branch, or its identity differs from the approved record. Preserve both old source and exact runtime for rollback. *Unverified* for the revised procedure.
+1. **Identify the primary explicitly** from the deployment record, not from `readlink`: the launcher may be a regular managed file. In that checkout record `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, the running `serve` process and its launcher/runtime binding. Stop if the tree is dirty, attached to a branch, or its identity differs from the approved record. Preserve both old source and exact runtime for rollback. *Observed live 2026-11-05* on both machines.
 
 2. **Check the existing service** with [the query tools' check](#query-tools), [the restart check](#check-that-serve-restarted) and [the end-to-end check](#check-the-bus-end-to-end) on each machine. Record results and arrange an owned real Claude participant for the later wake check. The query check was *Checked read-only 2026-11-02* on both installed endpoints after activation; the preceding release used the containment check instead. The end-to-end command was *Observed live 2026-11-01*.
 
@@ -30,7 +30,7 @@ The activation decision must name the exact merged source commit and tree, each 
    git rev-parse HEAD HEAD^{tree}
    ```
 
-   Expected: the ancestry check succeeds, fast-forward succeeds, and both printed identities match the reviewed release decision. Stop on any mismatch. *Unverified* for this revised procedure.
+   Expected: the ancestry check succeeds, fast-forward succeeds, and both printed identities match the reviewed release decision. Stop on any mismatch. *Observed live 2026-11-05* on both machines' clean, detached primaries; a live rollback (step 8) remains *Unverified*.
 
 5. **Install the reviewed locked dependencies with the approved absolute Bun executable**, after checking its version and identity. In the primary:
 
