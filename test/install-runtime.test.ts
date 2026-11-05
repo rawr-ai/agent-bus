@@ -222,20 +222,30 @@ test("launcher and real plugin hook use the explicit runtime under env-i and ign
   }
 });
 
+test("Codex inline hooks use the upstream hooks-file envelope", () => {
+  // codex rust-v0.165.0-alpha.1.2, core-plugins/src/loader_tests.rs:
+  // load_plugin_hooks_supports_inline_manifest_hooks. This is not a native loader test.
+  const hooksFile = { hooks: { SessionStart: expect.any(Array) } };
+  const pr42EventMap = codexManifest.hooks.hooks;
+  expect(codexManifest.hooks).toEqual(hooksFile);
+  expect(pr42EventMap).not.toEqual(hooksFile);
+});
+
 test("both actual compact manifest commands use the managed runtime without changing async wake declarations", async () => {
   const f = await fixture();
   try {
     expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
     expect(manifest.hooks.Stop[0].hooks[0].command).toBe(hookCommand);
     expect(manifest.hooks.StopFailure[0].hooks[0].command).toBe(hookCommand);
-    for (const [runtime, definition] of [
-      ["claude", manifest],
-      ["codex", codexManifest],
+    for (const [runtime, events] of [
+      ["claude", manifest.hooks],
+      ["codex", codexManifest.hooks.hooks],
     ] as const) {
-      const group = definition.hooks.SessionStart.find(
+      const group = events.SessionStart.find(
         (group: { matcher?: string }) => group.matcher !== undefined
       );
       const hook = group.hooks[0];
+      expect(hook.type).toBe("command");
       expect(hook.async).toBeUndefined();
       expect(hook.asyncRewake).toBeUndefined();
       expect(new RegExp(group.matcher).test("compact")).toBe(true);
