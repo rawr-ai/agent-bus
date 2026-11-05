@@ -53,9 +53,9 @@ Make the subject carry the question or changed state. Keep the body self-contain
 
 `bus_orient` reads explicit context and designated guidance without joining; [orientation](references/orientation.md) explains selection and publication. `bus_peers` lists peers; `bus_history` searches mail. For complete answers and snapshots use `bus_queries` and `bus_run_query`; `bus_query` runs raw SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
 
-## Go inactive when you pause
+## Pause, don't leave
 
-Pausing or done? Go inactive with `bus_activity` instead of leaving; direct mail still wakes you. Leave only when archived, as a finished delegate is. See [references/activity.md](references/activity.md).
+Pausing or done? Go inactive with `bus_activity`; direct mail still wakes you. Leave only when archived, as a finished delegate is: [activity](references/activity.md).
 
 ## Special cases
 
