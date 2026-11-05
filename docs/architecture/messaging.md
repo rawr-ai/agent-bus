@@ -42,6 +42,10 @@ For each address, the latest presence with an owner is its complete state; absen
 
 Each machine's `serve` also keeps, in memory, the last call it has seen for each address and how many waits are open on it. A refused join reports them, so the caller can tell a live holder from a dead one.
 
+### Activity and mutes
+
+An owner sets its address's activity and mutes with `bus_activity`, which writes one command node beside the messages, named by the caller's UUIDv7 operation. It is not a message and not a presence: nobody is notified, and earlier serves ignore it. A command records the holder's runtime, session and run when it was validated, and applies only if, at its own commit, the same session still holds the address in the same run. Otherwise it is a `CONFLICT` and changes nothing, so a takeover or a replay that commits first wins. Activity at any commit is folded from the address's presences and commands, and from direct mail after it went inactive; [delivery](delivery.md#when-unread-mail-doesnt-wake-inactivity-and-mutes) gives what it does to waking. `bus_peers` and orientation members show it as `active`, `inactive` or `unknown` (an entry that may be the address's can't be read), with `activeSince` and the mutes; an inactive address is still a peer, and is never shown as left.
+
 ### Who owns an address
 
 An address belongs to one session, identified by its runtime and the runtime's own id for it. The join fixes both, and every later call presents the id as `session`. One session may hold several addresses. Ownership is recorded in the presence entry, so it survives a `serve` restart. A client whose tool list predates `session` can still pass it as an extra argument, without reconnecting.
@@ -127,6 +131,7 @@ The ledger's config graph enables inline full-text scoring on `bus:body` and `bu
 11. **A cursor belongs to one incarnation of the ledger.** Cursors are kept per ledger instance, named by its first commit, so a replacement store starts every subscriber over instead of skipping messages. A cursor ahead of the ledger fails the read rather than skipping.
 12. **Unreadable entries fail the complete read.** A malformed or schema-invalid entry fails the Fluree read before a cursor, nudge or idle action; the limit on returned mail does not shorten that check. An unreadable presence anywhere in the complete history fails ownership-dependent operations before a cursor or announcement changes.
 13. **Associations are explicit and separate from subscriptions.** On a same-runtime, same-session rejoin while the latest presence is joined, omission preserves them, including with replay; `[]` clears them. Leave retains them only as history. A join after leave or a takeover starts unassociated unless it supplies associations. A new association-bearing join checks its size before the cursor or presence changes; [orientation](orientation.md#rules) owns the bounds and unresolved-reference rules.
+14. **Activity and mutes belong to the holder's run.** Only the owning session may set them, and a command applies at its own commit only while that session's run holds the address. A leave, a join while absent or left, a takeover, or another session's join resets the address to active with no mutes; an ordinary rejoin and a replay keep them. Every accepted command writes, so repeating one moves its anchor rather than doing nothing. A retry with the same operation and intent returns the original verdict without writing; a different intent under it is `IDENTITY_MISMATCH`.
 
 ## Why
 
@@ -194,4 +199,5 @@ Indexed in [frames](../frames/README.md).
 - [nudge-hygiene](../frames/nudge-hygiene.md): runs of joins (`rejoinOf`), topics kept on a rejoin, and takeover as `bus_takeover`.
 - [bus-design-query](../frames/bus-design-query.md): keep full internal presence for ownership and delivery while projecting ordinary public responses.
 - [public-query-containment](../frames/public-query-containment.md): withdrew only public SPARQL, retaining internal reads, representation and delivery; retired by turnaround-query-design.
+- [reachable-inactivity](../frames/reachable-inactivity.md): activity and mutes as commands folded per run, peers shown inactive rather than left.
 - [turnaround-query-design](../frames/turnaround-query-design.md): saved queries and raw SPARQL at a pinned commit, through a gateway separate from delivery's ledger.

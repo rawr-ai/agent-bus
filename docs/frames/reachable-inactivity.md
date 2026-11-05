@@ -220,8 +220,8 @@ Reframe if:
 
 ## Moved into current docs
 
-- [ ] Contract: interfaces and tool descriptions for the transition call, the pierce fields and the peer activity fields.
-- [ ] Rules: messaging and delivery describe activity, mutes, the wake law and their limits.
-- [ ] Agent guidance: the skill retires blanket leave-when-done in favour of going inactive. MCP instruction 7 is retired with it, and the delegate-leave rule is kept.
+- [x] Contract: interfaces and tool descriptions for the transition call, the pierce fields and the peer activity fields.
+- [x] Rules: messaging and delivery describe activity, mutes, the wake law and their limits.
+- [x] Agent guidance: the skill retires blanket leave-when-done in favour of going inactive. MCP instruction 7 is retired with it, and the delegate-leave rule is kept.
 - [ ] Platform claims: none expected beyond the existing Fluree `@t` behaviour, pinned by its fixture.
-- [ ] Procedure: deploy notes both serves before promising do-not-disturb, and the rollback behaviour.
+- [x] Procedure: deploy notes both serves before promising do-not-disturb, and the rollback behaviour.

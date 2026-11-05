@@ -184,6 +184,14 @@ Expected: `PASS` and exit status 0, in a few seconds. Afterwards `agent-bus peer
 
 That a hook already waiting before the restart calls `serve` again by itself (it retries every five seconds) was seen once, with an earlier form of this check: `hooked` was true 6 s after the restart. *Unverified* in a real Claude session: from a joined session, call `bus_join` again with its own address and session after the restart, and expect `hooked: true` within about ten seconds.
 
+## Inactivity and mutes: every `serve` first
+
+Do-not-disturb is honoured per machine, because each `serve` wakes only its own joins ([delivery](../architecture/delivery.md#when-unread-mail-doesnt-wake-inactivity-and-mutes)). A `serve` from before `bus_activity` ignores command nodes and wakes its joins as it always did, which errs toward contact and loses nothing. So the release that brings `bus_activity` has no write-order prerequisite, but its guidance does:
+1. Deploy and check every `serve` that fronts the shared ledger, as above.
+2. Only then refresh the plugin (next section) and the Codex skill, whose guidance tells agents to go inactive instead of leaving. Until every `serve` runs the release, don't promise do-not-disturb to anyone.
+
+Rolling back to an earlier release from the orientation release onwards is allowed: addresses read as active and unmuted there, and the command nodes stay in the ledger. Rolling forward again restores activity and mutes from them, unless a leave, takeover or another session's join has reset the address since. Rollback targets from before the orientation release are unverified. Never add a message `kind` to carry activity: an earlier `serve` fails to decode the whole read window that holds it.
+
 ## When the plugin changed
 
 A change under `plugin/` or `.claude-plugin/` isn't deployed by the fast-forward. Claude Code copies the plugin into its cache, so the change reaches sessions only after `claude plugin update` and a restart of each session ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Run this after verifying the new `serve`, so it already has `bus_wake` for the new hook to find:

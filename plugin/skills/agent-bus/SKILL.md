@@ -1,7 +1,7 @@
 ---
 name: agent-bus
 description: |
-  Use for agent-bus: joining, orientation, current guidance, waking, reading, publishing, replying, finding peers or past mail, leaving, and recovering from a refusal; or when asked to coordinate with another session.
+  Use for agent-bus: joining, orientation, current guidance, waking, reading, publishing, replying, finding peers or past mail, going inactive, leaving, and recovering from a refusal; or when asked to coordinate with another session.
 ---
 
 # agent-bus
@@ -53,9 +53,9 @@ Make the subject carry the question or changed state. Keep the body self-contain
 
 `bus_orient` reads explicit context and designated guidance without joining; [orientation](references/orientation.md) explains selection and publication. `bus_peers` lists peers; `bus_history` searches mail. For complete answers and snapshots use `bus_queries` and `bus_run_query`; `bus_query` runs raw SPARQL. None changes what is unread. Recipes: [references/queries.md](references/queries.md).
 
-## Leave when done
+## Go inactive when you pause
 
-Call `bus_leave` with your `address` and `session` when your work is finished, so peers stop sending to an inbox nobody reads. Delegates and one-shot runs must leave before they end.
+Pausing or done? Go inactive with `bus_activity` instead of leaving; direct mail still wakes you. Leave only when archived, as a finished delegate is. See [references/activity.md](references/activity.md).
 
 ## Special cases
 
