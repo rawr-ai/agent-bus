@@ -10,6 +10,8 @@ export class Cursors extends Context.Service<
   {
     readonly get: (address: string) => Effect.Effect<Option.Option<number>, LedgerError>;
     readonly set: (address: string, cursor: number) => Effect.Effect<void, LedgerError>;
+    /** Removes the address's cursor, restoring its absence; absent already is fine. */
+    readonly clear: (address: string) => Effect.Effect<void, LedgerError>;
   }
 >()("agent-bus/Cursors") {}
 
@@ -48,6 +50,10 @@ export const layerFiles = (dir: string) =>
         yield* fs.rename(temp, file).pipe(Effect.mapError(ledgerError));
       });
 
-      return Cursors.of({ get, set });
+      const clear = Effect.fn("Cursors.clear")(function* (address: string) {
+        yield* fs.remove(fileFor(address), { force: true }).pipe(Effect.mapError(ledgerError));
+      });
+
+      return Cursors.of({ get, set, clear });
     })
   );

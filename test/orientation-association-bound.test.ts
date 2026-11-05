@@ -25,6 +25,11 @@ test("association address admission counts UTF-8 bytes without changing unassoci
           accesses += 1;
           values.set(address, value);
         }),
+      clear: (address) =>
+        Effect.sync(() => {
+          accesses += 1;
+          values.delete(address);
+        }),
     })
   );
   const layer = Bus.layer.pipe(

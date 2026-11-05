@@ -16,7 +16,11 @@ import { layerJsonl } from "./jsonl-ledger.ts";
 test("publication refuses an oversized projection even when its stored record fits", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-projection-bound-"));
   const cursors = Layer.succeed(Cursors)(
-    Cursors.of({ get: () => Effect.succeed(Option.none()), set: () => Effect.void })
+    Cursors.of({
+      get: () => Effect.succeed(Option.none()),
+      set: () => Effect.void,
+      clear: () => Effect.void,
+    })
   );
   const layer = Bus.layer.pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),

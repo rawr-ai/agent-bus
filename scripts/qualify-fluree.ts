@@ -25,6 +25,11 @@
  *    acknowledgement stays unknown until its witness is found, and an
  *    identical replay never notifies twice. Its races overlap at the client;
  *    they cannot show that the two writes overlapped inside Fluree.
+ * 5. Guarded presence, on the same ledger, through the production Ledger: a
+ *    join, takeover or leave lands only if no presence for its address was
+ *    asserted after the commit its decision read. A stale attempt writes
+ *    nothing, another address's presence doesn't block, an admitted id is never
+ *    stored twice, and of two attempts on one basis exactly one lands.
  *
  * The server requires a token, as the installed one does. It runs under a supervisor, so a
  * run killed before its cleanup still stops it ([supervised](../test/supervised.ts)).
@@ -38,8 +43,9 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import * as Catalogue from "../src/catalogue.ts";
-import { Message, MessageJson } from "../src/domain.ts";
+import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
+import { Ledger } from "../src/Ledger.ts";
 import type { QueryGateway } from "../src/Query.ts";
 import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
 import { type Supervised, spawnSupervised } from "../test/supervised.ts";
@@ -139,7 +145,7 @@ const busLayer = (store: Fluree.FlureeConfig = config) =>
     Layer.provide(platform)
   );
 const withBus = <A, E>(
-  effect: Effect.Effect<A, E, Bus.Bus | QueryGateway>,
+  effect: Effect.Effect<A, E, Bus.Bus | QueryGateway | Ledger>,
   store: Fluree.FlureeConfig = config
 ) => Effect.runPromise(Effect.provide(effect, busLayer(store)));
 
@@ -313,6 +319,84 @@ const assertions = async (id: string) =>
       where: [{ "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t", "@op": true } }],
     })
   ).length;
+
+const joined = (from: string, session: string) =>
+  new Message({
+    id: Bun.randomUUIDv7(),
+    ts: new Date().toISOString(),
+    from,
+    to: ["*"],
+    kind: "presence",
+    body: `${from} joined`,
+    origin: new Origin({ host: "qualify", cwd: dir }),
+    presence: new Presence({ runtime: "claude", status: "joined", topics: [], session }),
+  });
+
+const qualifyGuardedPresence = async () => {
+  const x = "claude/presence-x";
+  const outcome = await withBus(
+    Effect.gen(function* () {
+      const ledger = yield* Ledger;
+      const basis = (yield* ledger.presenceAt()).cut;
+      const first = joined(x, "first");
+      const admitted = yield* ledger.admit(first, basis);
+      // Decided at the same basis, so it is stale once the first lands.
+      const stale = joined(x, "stale");
+      const refused = yield* ledger.admit(stale, basis);
+      const after = admitted.status === "ADMITTED" ? admitted.cut : basis;
+      const other = yield* ledger.admit(joined("claude/presence-y", "other"), after);
+      const unblocked = joined(x, "unblocked");
+      const notBlocked = yield* ledger.admit(unblocked, after);
+      const replayBasis = notBlocked.status === "ADMITTED" ? notBlocked.cut : after;
+      const replay = yield* ledger.admit(unblocked, replayBasis);
+      const raceBasis = (yield* ledger.presenceAt()).cut;
+      const racers = [joined("claude/presence-z", "a"), joined("claude/presence-z", "b")];
+      const raced = yield* Effect.all(
+        racers.map((racer) => ledger.admit(racer, raceBasis)),
+        { concurrency: "unbounded" }
+      );
+      return {
+        first,
+        admitted,
+        stale,
+        refused,
+        other,
+        unblocked,
+        notBlocked,
+        replay,
+        racers,
+        raced,
+      };
+    }),
+    GUARDED
+  );
+  check(
+    "a free presence lands at a commit past its basis",
+    outcome.admitted.status === "ADMITTED" && (await assertions(outcome.first.id)) === 1
+  );
+  check(
+    "a stale presence is refused and writes nothing",
+    outcome.refused.status === "REFUSED" && (await assertions(outcome.stale.id)) === 0,
+    outcome.refused.status
+  );
+  check(
+    "another address's presence does not block",
+    outcome.other.status === "ADMITTED" && outcome.notBlocked.status === "ADMITTED"
+  );
+  check(
+    "an admitted id replayed from its own commit is refused and stored once",
+    outcome.replay.status === "REFUSED" && (await assertions(outcome.unblocked.id)) === 1,
+    outcome.replay.status
+  );
+  const landed = await Promise.all(outcome.racers.map((racer) => assertions(racer.id)));
+  check(
+    "of two presences on one basis exactly one lands, and the other writes nothing",
+    outcome.raced.filter((r) => r.status === "ADMITTED").length === 1 &&
+      outcome.raced.filter((r) => r.status === "REFUSED").length === 1 &&
+      [...landed].sort().join() === "0,1",
+    outcome.raced.map((r) => r.status).join(" ")
+  );
+};
 
 type Outcome = "applied" | "not applied" | "identity mismatch" | "unknown";
 interface Sent {
@@ -738,6 +822,7 @@ try {
   );
 
   await qualifyGuardedReplacement();
+  await qualifyGuardedPresence();
 } finally {
   await stop();
   rmSync(dir, { recursive: true, force: true });

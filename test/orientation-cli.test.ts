@@ -90,7 +90,7 @@ test("a failed post-join orientation reports the committed join and retries read
       Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
         const cursors = yield* Cursors.Cursors;
-        const presence = yield* ledger.presence;
+        const presence = yield* Effect.map(ledger.presenceAt(), (read) => read.entries);
         expect(presence).toHaveLength(1);
         return { head: yield* ledger.end, cursor: yield* cursors.get("other/cli") };
       })

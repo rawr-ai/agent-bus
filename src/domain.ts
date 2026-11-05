@@ -124,6 +124,16 @@ export class NotOwner extends Schema.TaggedError<NotOwner>()("NotOwner", {
 }) {}
 
 /**
+ * A join or leave refused at its own commit because the address's presence changed after
+ * the state it decided on, while that change doesn't itself refuse the call. Nothing was
+ * written; calling again decides against the current state.
+ */
+export class PresenceConflict extends Schema.TaggedError<PresenceConflict>()("PresenceConflict", {
+  address: Schema.String,
+  message: Schema.String,
+}) {}
+
+/**
  * A query or its arguments were refused before or instead of reading the
  * store: a malformed or forbidden query, a stale cursor, a missing record.
  * The message quotes only the caller's own input.

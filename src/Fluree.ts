@@ -3,10 +3,12 @@ import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import {
+  type Admission,
   type Designation,
   type DesignationResult,
   Ledger,
   messageIri,
+  type PresenceRead,
   revisionIri,
   type Slice,
   scopeIri,
@@ -68,6 +70,16 @@ const WitnessRows = Schema.Array(
   ])
 );
 const UpdateResponse = Schema.Struct({ t: Schema.Int });
+/** A presence node, its recorded sender when present, its stored entry and that entry's commit. */
+const PresenceRows = Schema.Array(
+  Schema.Tuple([
+    Schema.String,
+    Schema.NullOr(Schema.String),
+    Schema.String,
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  ])
+);
+const Commits = Schema.Array(Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)));
 const AgentJson = Schema.Struct({
   // A column whose values have several datatypes lists them all.
   schema: Schema.optionalKey(
@@ -635,17 +647,137 @@ export const layerFluree = (config: FlureeConfig) =>
         return { entries, next: head } satisfies Slice;
       });
 
-      const presence = query({
-        select: ["?json", "?t"],
-        where: [
-          { "@id": "?m", "@type": "bus:Presence", "bus:json": { "@value": "?json", "@t": "?t" } },
-        ],
-        orderBy: "?t",
-      }).pipe(
-        Effect.flatMap(decode(Rows)),
-        Effect.flatMap((rows) => Effect.forEach(rows, ([json, t]) => decodeMessage(json, t))),
-        Effect.withSpan("Ledger.presence")
-      );
+      const replaced = () =>
+        new LedgerError({
+          message:
+            "The ledger was replaced while this call read it; nothing was written. Call again.",
+        });
+
+      /**
+       * Presence at one cut. An entry that holds a session must also be the node its id names,
+       * recorded under its own sender, with one stored entry: the guard keys on that sender, so
+       * an entry it could miss fails the read rather than the guard.
+       */
+      const presenceAt = (at?: number) =>
+        bounded(
+          Effect.gen(function* () {
+            const id = yield* guardedIncarnation;
+            if (id !== instance) return yield* replaced();
+            const head = at ?? (yield* guardedHead);
+            const rows = yield* guardedQuery(head, {
+              select: ["?m", "?from", "?json", "?t"],
+              where: [
+                {
+                  "@id": "?m",
+                  "@type": "bus:Presence",
+                  "bus:json": { "@value": "?json", "@t": "?t" },
+                },
+                ["optional", { "@id": "?m", "bus:from": "?from" }],
+              ],
+              orderBy: "?t",
+            }).pipe(Effect.flatMap(decode(PresenceRows)));
+            const nodes = new Map<string, number>();
+            for (const [node] of rows) nodes.set(node, (nodes.get(node) ?? 0) + 1);
+            const entries = [];
+            for (const [node, from, json, t] of rows) {
+              const message = yield* decodeMessage(json, t);
+              if (
+                message.presence?.session !== undefined &&
+                (message.kind !== "presence" ||
+                  node !== messageIri(message.id) ||
+                  from !== message.from ||
+                  nodes.get(node) !== 1)
+              ) {
+                return yield* new LedgerError({
+                  message: `A ledger entry at t=${t} could not be decoded.`,
+                });
+              }
+              entries.push(message);
+            }
+            if ((yield* guardedIncarnation) !== id) return yield* replaced();
+            return { entries, cut: { head, incarnation: id } } satisfies PresenceRead;
+          })
+        ).pipe(Effect.withSpan("Ledger.presenceAt"));
+
+      /** The commit of the attempted entry at `head`, if it is there. */
+      const attemptAt = (id: string, head: number) =>
+        guardedQuery(head, {
+          select: "?t",
+          where: { "@id": messageIri(id), "bus:json": { "@value": "?json", "@t": "?t" } },
+        }).pipe(Effect.flatMap(decode(Commits)));
+
+      /**
+       * The insert lands only if no presence for the address had an entry asserted after the
+       * basis (qualified on Fluree 4.2.4: a guard with no solutions commits nothing and answers
+       * with the current head), and only once for its id. The answer is read from the attempted
+       * entry at its own commit, never from the response alone. Fails only before sending.
+       */
+      const admit = (presence: Message, basis: Pin) =>
+        Effect.gen(function* () {
+          if (presence.kind !== "presence" || !validOperation(presence.id)) {
+            return yield* new LedgerError({ message: "Invalid guarded presence input." });
+          }
+          const json = yield* encode(presence).pipe(
+            Effect.mapError(
+              () => new LedgerError({ message: "The ledger entry could not be encoded." })
+            )
+          );
+          const { "@context": _, ...node } = toNode(presence, json);
+          // Narrows, without closing, the window in which a replaced ledger takes the insert.
+          if ((yield* bounded(guardedIncarnation)) !== basis.incarnation) return yield* replaced();
+          const update = guardedSend(
+            HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
+              HttpClientRequest.bodyJsonUnsafe({
+                "@context": context,
+                where: [
+                  [
+                    "optional",
+                    {
+                      "@id": "?other",
+                      "@type": "bus:Presence",
+                      "bus:from": presence.from,
+                      "bus:json": { "@value": "?otherJson", "@t": "?otherT" },
+                    },
+                    ["filter", `(> ?otherT ${basis.head})`],
+                  ],
+                  ["filter", "(not (bound ?otherT))"],
+                  ["optional", { "@id": messageIri(presence.id), "?predicate": "?object" }],
+                  ["filter", "(not (bound ?object))"],
+                ],
+                insert: node,
+              })
+            )
+          ).pipe(Effect.flatMap(decode(UpdateResponse)));
+          // A failed or undecodable response says nothing about whether Fluree committed.
+          const response = yield* Effect.option(bounded(update));
+          return yield* bounded(
+            Effect.gen(function* () {
+              const id = yield* guardedIncarnation;
+              if (id !== basis.incarnation) return { status: "UNKNOWN" } satisfies Admission;
+              const answered = Option.isSome(response) && response.value.t >= 1;
+              const head = answered ? response.value.t : yield* guardedHead;
+              const commits = yield* attemptAt(presence.id, head);
+              if ((yield* guardedIncarnation) !== id)
+                return { status: "UNKNOWN" } satisfies Admission;
+              const commit = commits[0];
+              // Only this request's own commit admits it, which lies past the basis: an entry with
+              // the id at or before the basis, or at a commit other than the answered one,
+              // refused this insert.
+              const own =
+                commit !== undefined && commit > basis.head && (!answered || commit === head);
+              if (commits.length === 1 && commit !== undefined && own) {
+                return {
+                  status: "ADMITTED",
+                  cut: { head: commit, incarnation: id },
+                } satisfies Admission;
+              }
+              if (answered || (commit !== undefined && commit <= basis.head)) {
+                return { status: "REFUSED", cut: { head, incarnation: id } } satisfies Admission;
+              }
+              return { status: "UNKNOWN" } satisfies Admission;
+            })
+          ).pipe(Effect.catch(() => Effect.succeed({ status: "UNKNOWN" } satisfies Admission)));
+        }).pipe(Effect.withSpan("Ledger.admit"));
 
       // Each (re)connection wakes readers once, since commits may have landed while disconnected.
       const events = HttpClientResponse.stream(
@@ -709,7 +841,17 @@ export const layerFluree = (config: FlureeConfig) =>
 
       return Context.make(
         Ledger,
-        Ledger.of({ instance, append, readWitness, designate, read, end, changes, presence })
+        Ledger.of({
+          instance,
+          append,
+          readWitness,
+          designate,
+          read,
+          end,
+          changes,
+          presenceAt,
+          admit,
+        })
       ).pipe(Context.add(QueryGateway, gateway));
     })
   );

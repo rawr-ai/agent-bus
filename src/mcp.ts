@@ -21,6 +21,7 @@ import {
   NotJoined,
   NotOwner,
   Origin,
+  PresenceConflict,
   Runtime,
   validSession,
 } from "./domain.ts";
@@ -45,6 +46,7 @@ const Failure = Schema.Union([
   LedgerError,
   NotJoined,
   NotOwner,
+  PresenceConflict,
   InvalidTopics,
   InvalidAssociations,
   InvalidQuery,

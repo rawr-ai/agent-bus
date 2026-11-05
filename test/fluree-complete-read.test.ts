@@ -30,6 +30,20 @@ const presence = (id: string, session: string) =>
 const malformed = '{"secret":"DO-NOT-LEAK"';
 const invalid = JSON.stringify({ id: "DO-NOT-LEAK", kind: "message" });
 
+/** A stored presence as the pinned read returns it, bound to the node and sender it names. */
+const presenceRow = ([json, t]: readonly [string, number]) => {
+  let named: { id?: unknown; from?: unknown } = {};
+  try {
+    named = JSON.parse(json);
+  } catch {}
+  return [
+    `urn:agent-bus:message:${String(named.id)}`,
+    typeof named.from === "string" ? named.from : null,
+    json,
+    t,
+  ];
+};
+
 /** Only the Fluree HTTP responses are controlled; production Ledger and Bus are used. */
 const fixture = () => {
   let head = 1;
@@ -51,15 +65,20 @@ const fixture = () => {
         inserts += 1;
         return Response.json({});
       }
-      if (path.endsWith("/query")) {
+      // Presence is read at a pinned commit: node, recorded sender, stored entry, commit.
+      if (path.includes("/query") && !path.endsWith("/query")) {
         const query: unknown = await request.json();
-        const body = JSON.stringify(query);
-        if (body.includes("bus:Presence")) {
+        if (JSON.stringify(query).includes("bus:Presence")) {
           presenceSelects.push(
             typeof query === "object" && query !== null && "select" in query ? query.select : null
           );
-          return Response.json(presences);
+          return Response.json(presences.map(presenceRow));
         }
+        return new Response(null, { status: 404 });
+      }
+      if (path.endsWith("/query")) {
+        const query: unknown = await request.json();
+        const body = JSON.stringify(query);
         if (held !== undefined) {
           held();
           held = undefined;
@@ -93,6 +112,7 @@ const fixture = () => {
           cursor = next;
           writes += 1;
         }),
+      clear: () => Effect.void,
     })
   );
   const bus = Bus.layer.pipe(Layer.provideMerge(ledger), Layer.provideMerge(cursors));
@@ -324,7 +344,10 @@ describe("complete Fluree reads", () => {
               },
             ]) {
               f.set({ head: 19, entries: [], presences: [...presences] });
-              expectSafe(yield* Effect.flip(ledger.presence), t);
+              expectSafe(
+                yield* Effect.flip(Effect.map(ledger.presenceAt(), (read) => read.entries)),
+                t
+              );
               expectSafe(yield* Effect.flip(bus.peers), t);
               expectSafe(yield* Effect.flip(ownedAddresses("owner", "codex")), t);
               expectSafe(yield* Effect.flip(bus.take("codex/a", "owner")), t);
@@ -394,7 +417,10 @@ describe("complete Fluree reads", () => {
           expect(
             f
               .presenceSelects()
-              .every((select) => JSON.stringify(select) === JSON.stringify(["?json", "?t"]))
+              .every(
+                (select) =>
+                  JSON.stringify(select) === JSON.stringify(["?m", "?from", "?json", "?t"])
+              )
           ).toBe(true);
         }).pipe(Effect.provide(f.bus))
       );
