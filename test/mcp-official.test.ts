@@ -176,6 +176,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_read: changes,
       bus_wait: changes,
       bus_wake: changes,
+      bus_owned_addresses: lookup,
       bus_peers: lookup,
       bus_history: lookup,
       bus_query: lookup,
@@ -246,6 +247,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_read: ["messages"],
       bus_wait: ["messages"],
       bus_wake: ["addresses", "owns", "superseded"],
+      bus_owned_addresses: ["addresses"],
       bus_peers: ["peers"],
       bus_history: ["messages"],
       bus_query: ["name", "ledger", "t", "unit", "columns", "rows", "complete", "note"],
@@ -326,6 +328,29 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     for (const address of [a, b]) {
       expect(await succeed("bus_leave", { address, session: sid(address) })).toEqual({ address });
     }
+  });
+
+  test("owned addresses are exact addresses-only text and structured results; invalid identity refuses", async () => {
+    const { succeed, refused } = await connect();
+    const address = `${version}/owned-observation`;
+    const session = `private-owned-${version}`;
+    await succeed("bus_join", { ...joining(address), runtime: "codex", session });
+    expect(await succeed("bus_owned_addresses", { session, runtime: "codex" })).toEqual({
+      addresses: [address],
+    });
+    expect(await succeed("bus_owned_addresses", { session, runtime: "claude" })).toEqual({
+      addresses: [],
+    });
+    expect(
+      await succeed("bus_owned_addresses", { session: "never-joined", runtime: "codex" })
+    ).toEqual({ addresses: [] });
+    for (const session of [undefined, "", " ", "$CODEX_THREAD_ID"]) {
+      await refused("bus_owned_addresses", { session, runtime: "codex" }, /usable session id/);
+    }
+    await succeed("bus_leave", { address, session });
+    expect(await succeed("bus_owned_addresses", { session, runtime: "codex" })).toEqual({
+      addresses: [],
+    });
   });
 
   test("peers and ordinary messages omit stored claims in both output encodings", async () => {

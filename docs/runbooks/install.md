@@ -190,13 +190,17 @@ ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$ne
 Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory is the one named by the `Version` that `claude plugin list` shows. Don't pick the newest directory by time: an update writes an `.orphaned_at` marker into the old one, which makes it the newest. A plugin installed before the skill shipped has only the manifest, and `ls` says `No such file or directory` for the skill until the plugin is updated. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache was made before the skill shipped and correctly lacked it (*Checked read-only 2026-10-28*).
 
 What to know about it:
-- **The plugin is a hooks manifest and the agent skill:** `plugin/.claude-plugin/plugin.json` (the three hooks) and `plugin/skills/agent-bus/` (`SKILL.md` and `references/`, with `queries.md` and `runtimes.md`). Claude Code copies all of it into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)). The hook runs the checkout, but the skill is read from the cache, so a change to the skill needs a plugin update.
-- **Its hook runs the checkout,** through `~/.local/bin/agent-bus claude-wake`. A deploy therefore reaches the hook at once, with no plugin update ([delivery](../architecture/delivery.md#claude-code-sessions)).
-- **The hook uses the managed launcher's exact Bun**, not the `PATH` inherited from Claude Code.
+- **The plugin is a hooks manifest and the agent skill:** `plugin/.claude-plugin/plugin.json` (three async wake arming events and synchronous compact recovery) and `plugin/skills/agent-bus/` (`SKILL.md` and `references/`, with `queries.md` and `runtimes.md`). Claude Code copies all of it into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Both wake and compact commands run the checkout, but the skill is read from the cache, so a change to the skill needs a plugin update.
+- **Its hooks run the checkout,** through the managed launcher: `claude-wake` for mail and `compact-context --runtime claude` for ownership context. A deploy therefore reaches the hook at once, with no plugin update ([delivery](../architecture/delivery.md#claude-code-sessions)).
+- **Both commands use the managed launcher's exact Bun**, not the `PATH` inherited from Claude Code.
 - **It needs the same `AGENT_BUS_PORT` as `serve`,** or neither set.
 - **Deploy `serve` before the plugin,** so the hook finds `bus_wake` ([deploy](deploy.md#when-the-plugin-changed)).
 
 ### After a change to the plugin
+
+The package now includes native compact-only ownership recovery for Claude and Codex. Claude retains the existing three async wake arming events; Codex selects `plugin/.codex-plugin/plugin.json` with only its synchronous compact hook. Both invoke the managed launcher's `compact-context --runtime` command. Deploy the server/CLI before refreshing plugin caches, so the new lookup and command exist.
+
+After owner-controlled activation, start an owned native session with its normal settings and installed plugins. In Codex use `/hooks` to review and trust the exact new compact hook; installation alone is not trust. Join an assigned disposable address, use one manual `/compact`, and verify that the session recovers that address without rejoining and reads current guidance through `bus_orient` with absolute cwd, even with no unread mail. Leave the assigned address and close only that owned session. Keep Claude's existing async wake hooks in the composition: do not exclude user settings, use strict MCP isolation, or bypass hook trust. Preserve the prior source/dependency/plugin cohort and exact trust-change provenance for rollback. Expected: normal native installed recovery; *Unverified* until the post-activation qualification completes. The platform pages distinguish already-qualified carriers from this installed behavior.
 
 Only a change under `plugin/` or `.claude-plugin/` needs this:
 

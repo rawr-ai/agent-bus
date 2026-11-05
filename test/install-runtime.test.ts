@@ -18,7 +18,13 @@ const installer = resolve(import.meta.dir, "../scripts/install-launch-agents.sh"
 const manifest = await Bun.file(
   resolve(import.meta.dir, "../plugin/.claude-plugin/plugin.json")
 ).json();
-const hookCommand: string = manifest.hooks.SessionStart[0].hooks[0].command;
+const hookCommand: string = manifest.hooks.SessionStart.find(
+  (group: { hooks: Array<{ asyncRewake?: boolean }> }) =>
+    group.hooks.some((hook) => hook.asyncRewake)
+).hooks[0].command;
+const codexManifest = await Bun.file(
+  resolve(import.meta.dir, "../plugin/.codex-plugin/plugin.json")
+).json();
 const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 async function command(args: string[], env: Record<string, string>, cwd: string, stdin = "") {
@@ -210,6 +216,43 @@ test("launcher and real plugin hook use the explicit runtime under env-i and ign
       const result = await command(args!, { HOME: f.home, PATH: "/usr/bin:/bin" }, f.bus, "{}\n");
       expect(result).toMatchObject({ exitCode: 0, stderr: "" });
       expect(JSON.parse(result.stdout)).toEqual({ runtime: "A", args: expectedArgs, dotenv: null });
+    }
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("both actual compact manifest commands use the managed runtime without changing async wake declarations", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(manifest.hooks.Stop[0].hooks[0].command).toBe(hookCommand);
+    expect(manifest.hooks.StopFailure[0].hooks[0].command).toBe(hookCommand);
+    for (const [runtime, definition] of [
+      ["claude", manifest],
+      ["codex", codexManifest],
+    ] as const) {
+      const group = definition.hooks.SessionStart.find(
+        (group: { matcher?: string }) => group.matcher !== undefined
+      );
+      const hook = group.hooks[0];
+      expect(hook.async).toBeUndefined();
+      expect(hook.asyncRewake).toBeUndefined();
+      expect(new RegExp(group.matcher).test("compact")).toBe(true);
+      expect(new RegExp(group.matcher).test("resume")).toBe(false);
+      expect(hook.timeout).toBe(5);
+      const result = await command(
+        ["/bin/sh", "-c", hook.command],
+        { HOME: f.home, PATH: "/usr/bin:/bin" },
+        f.bus,
+        "{}\n"
+      );
+      expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(JSON.parse(result.stdout)).toEqual({
+        runtime: "A",
+        args: ["compact-context", "--runtime", runtime],
+        dotenv: null,
+      });
     }
   } finally {
     await f.dispose();

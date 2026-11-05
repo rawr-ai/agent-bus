@@ -22,6 +22,7 @@ import {
   NotOwner,
   Origin,
   Runtime,
+  validSession,
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { updateBulletin, updateDirectory } from "./Orientation.ts";
@@ -147,6 +148,12 @@ export const Woken = Schema.Struct({
   }),
   superseded: Schema.Boolean.annotate({
     description: "Whether a newer call from your session ended this one.",
+  }),
+});
+export const OwnedAddresses = Schema.Struct({
+  addresses: Schema.Array(Schema.String).annotate({
+    description:
+      "All addresses currently held by the exact session and runtime, ordered by address; empty when none are held.",
   }),
 });
 export const Peers = Schema.Struct({
@@ -359,6 +366,37 @@ const Wake = Tool.make("bus_wake", {
   failure: Failure,
 }).annotateMerge(Local);
 
+const Owned = Tool.make("bus_owned_addresses", {
+  description:
+    "For native compact recovery hooks, or direct read-only recovery of lost join context: list all latest joined addresses held by the exact session and runtime, ordered by address. These are session-level holdings, not inbox assignments to your role; use only your assigned address. This is not a wake, mail check or ownership claim. Returns no session values, notes or guidance bodies. Changes no cursor, activity, hook observation, waiter or wake mark. Later ownership refusals remain authoritative.",
+  parameters: Schema.Struct({
+    session: Session,
+    runtime: Runtime.annotate({ description: "The exact runtime the addresses joined as." }),
+  }),
+  success: OwnedAddresses,
+  failure: Failure,
+}).annotateMerge(Lookup);
+
+/** Ownership observation deliberately bypasses Bus.owned, which records activity. */
+export const ownedAddresses = Effect.fn("Mcp.ownedAddresses")(function* (
+  session: string | undefined,
+  runtime: Runtime
+) {
+  if (!validSession(session)) {
+    return yield* new InvalidQuery({
+      message: "Pass your runtime's own usable session id as session.",
+    });
+  }
+  const bus = yield* Bus;
+  const peers = yield* bus.peers;
+  return {
+    addresses: peers
+      .filter((peer) => peer.presence.session === session && peer.presence.runtime === runtime)
+      .map((peer) => peer.address)
+      .sort(),
+  };
+});
+
 const ListPeers = Tool.make("bus_peers", {
   description:
     "List the peers currently joined to the bus, with their addresses, runtimes, topics, machines and notes, ordered by address. Stored session claims and wake destinations are not returned. A preset over bus_run_query's peers at the current commit.",
@@ -515,6 +553,7 @@ const BusToolkit = Toolkit.make(
   Read,
   Wait,
   Wake,
+  Owned,
   ListPeers,
   History,
   Query,
@@ -681,6 +720,8 @@ const BusHandlers = BusToolkit.toLayer(
           .wait(address, session, timeoutSeconds ?? MAX_WAIT_SECONDS)
           .pipe(Effect.map(publicMessages)),
       bus_wake: ({ session, fresh }) => bus.wake(session, MAX_WAIT_SECONDS, fresh),
+      bus_owned_addresses: ({ session, runtime }) =>
+        ownedAddresses(session, runtime).pipe(Effect.provideService(Bus, bus)),
       bus_peers: () => queries(peersPreset),
       bus_history: (params) => queries(historyPreset(params)),
       bus_query: ({ query, t }) => queries(runSparql(query, t)),

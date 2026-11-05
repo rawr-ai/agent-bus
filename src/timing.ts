@@ -24,6 +24,10 @@ export const DEFAULT_HISTORY_LIMIT = 50;
 export const IDLE_TIMEOUT_SECONDS = MAX_WAIT_SECONDS + 15;
 /** The deadline of one CLI call to `serve`. */
 export const CALL_TIMEOUT_SECONDS = 30;
+/** Whole synchronous compact recovery, including stdin, connection and tool discovery. */
+export const COMPACT_DEADLINE = Duration.seconds(4);
+/** Complete compact context including its trailing newline; overflow emits nothing. */
+export const COMPACT_OUTPUT_BYTES = 2048;
 /** The Claude wake hook's deadline for one `bus_wake` call. */
 export const WAKE_CALL_TIMEOUT_SECONDS = MAX_WAIT_SECONDS + 5;
 /** The pause between the hook's failing calls. */

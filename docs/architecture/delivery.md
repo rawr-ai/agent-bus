@@ -58,7 +58,7 @@ This is the one table of who is woken; other pages link here. "Within seconds" i
 
 ### Claude Code sessions
 
-The agent-bus plugin (`plugin/`) has one hook, beside the agent skill. It runs `agent-bus claude-wake` in the background (`asyncRewake`) at three arming points: `SessionStart` (startup, resume, `/clear` and compaction), `Stop` (every turn's end) and `StopFailure` (a turn ended by an API error).
+The agent-bus plugin (`plugin/`) preserves the asynchronous mail wake alongside its separate synchronous compact recovery. The Claude manifest runs `agent-bus claude-wake` in the background (`asyncRewake`) at three arming points: `SessionStart` (startup, resume, `/clear` and compaction), `Stop` (every turn's end) and `StopFailure` (a turn ended by an API error).
 
 ```mermaid
 sequenceDiagram
@@ -183,6 +183,8 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 | `DEFAULT_HISTORY_LIMIT` | 50 | `src/mcp.ts` | `bus_history`'s default number of messages |
 | `IDLE_TIMEOUT_SECONDS` | 65 s | `src/serve.ts` | The HTTP server's explicit `idleTimeout`, `MAX_WAIT_SECONDS` + 15, so a long `bus_wake` or `bus_wait` isn't closed while idle connections remain bounded |
 | `CALL_TIMEOUT_SECONDS` | 30 s | `src/client.ts` | The deadline of one CLI call to `serve` |
+| `COMPACT_DEADLINE` | 4 s | `src/compact.ts` | Whole synchronous recovery, including stdin, connection, discovery and the call |
+| `COMPACT_OUTPUT_BYTES` | 2 KiB | `src/compact.ts` | Complete fixed compact context including its newline; overflow emits nothing |
 | `WAKE_CALL_TIMEOUT_SECONDS` | 55 s | `src/claude.ts` | The hook's deadline for one `bus_wake` call: `MAX_WAIT_SECONDS` + 5 |
 | `WAKE_RETRY` | 5 s | `src/claude.ts` | The pause between the hook's failing calls |
 | `WAKE_FAILING_FOR` | 10 min | `src/claude.ts` | How long the hook keeps retrying failing calls before it gives up until the next arming point |
@@ -203,7 +205,13 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 | `RECONCILE` | 5, 15, 60 min | `src/codex.ts` | The pause after each attempt at the same unread span. The last value repeats, so it is hourly after the third |
 | `RECONCILES_BEFORE_WARNING` | 3 | `src/codex.ts` | The reconcile at which the log warns that the thread isn't reading its mail |
 
-One value is set outside code: the hook's `timeout` in `plugin/.claude-plugin/plugin.json`, 2592000 s (30 days), after which Claude Code kills it.
+Values also live in the native manifests: Claude's asynchronous wake has `timeout` 2592000 s (30 days); both native synchronous compact commands have `timeout` 5 s around `COMPACT_DEADLINE`'s 4 s observation. The host's outer deadline covers launcher/Bun startup and final output as well, with about a one-second margin. These host timeouts kill the command; they do not extend the helper's deadline.
+
+### Compact ownership recovery
+
+The native plugin also declares a synchronous compact-only `SessionStart` command, `agent-bus compact-context --runtime` with the native runtime. It reads the native lifecycle payload's identity and cwd and asks `bus_owned_addresses` for all exact session/runtime latest joined holdings. It never uses `bus_wake` as an ownership check. The shared fixed hint quotes the complete address list and cwd as JSON, says not to rejoin, preserves assigned-address boundaries, and routes to non-consuming `bus_orient` for current guidance. It embeds no notes, bulletin bodies or identity values.
+
+This new lookup/helper changes no ledger, cursor, activity, hooked bit, waiter or wake mark. Claude's existing asynchronous compact wake remains separate and intentionally retains its fresh-ring behavior. No-mail compaction can therefore recover ownership context without manufacturing a mail wake. Failures and overflow are quiet rather than a misleading partial ownership list. Native carrier findings and their qualification limits belong to the platform pages; installed native recovery under normal settings and hook composition remains an owner-controlled post-activation release gate.
 
 ## Rules
 
@@ -229,6 +237,7 @@ One value is set outside code: the hook's `timeout` in `plugin/.claude-plugin/pl
 13. **A subagent's refused nudge holds that join.** Its mail stays unread for `bus_read`, and it is nudged again only after a rejoin, ordinary or not, or a `serve` restart.
 14. **The address's lock bounds the post and the removal.** Joins, leaves, reads, posts and removals for one address run one at a time, so a nudge acts on the subscriber's current state. The Codex work of a post or a removal under the lock is bounded by 6 s; the ledger read before it and the app-server's shutdown after it (500 ms, then a kill) add to that hold. The app-server is ended before the lock is released, so an add that timed out can't land after a takeover. Reading the rollout and the borrow run after the lock is released, so the owner's read never waits on the daemon.
 15. **One hook waits per Claude session.** A newer `bus_wake` call from the same session ends the older one, and a hook whose session has gone stops.
+16. **Compaction recovers knowledge, not ownership.** The compact ownership lookup/helper is read-only. It supplies fixed context only after one complete exact-session/runtime observation, without joining or reading mail. Session holdings do not assign every inbox to the current agent's role. Later ownership refusals remain authoritative; unavailable, malformed, timed-out or oversized recovery emits nothing.
 
 ## Why
 
@@ -314,7 +323,7 @@ Rejected and retired Codex routes:
 | **After `/clear`,** mail to an address the old id held wakes the session once more, through the old hook | Known limit |
 | **A `serve` restart forgets the woken marks,** which may wake a session once more per address with unread mail | Known limit |
 | **`StopFailure` with `asyncRewake`** is documented by Claude Code but wasn't probed ([platforms: Claude Code](../platforms/claude-code.md#hooks)) | Unverified |
-| **The compact hook's lifecycle fields** are documented; local tests cover dispatch, retries, races and an actual MCP/CLI invocation, but do not drive a live Claude compaction ([platforms: Claude Code](../platforms/claude-code.md#hooks)) | Host integration unverified |
+| **Native manual compact carriers** are qualified with distinct platform limits; installed ownership recovery under normal settings, exact trust and existing async composition remains a post-activation release gate ([platforms: Claude Code](../platforms/claude-code.md#hooks), [Codex](../platforms/codex.md#hooks)) | Installed recovery unverified |
 
 ## Rests on
 
@@ -338,6 +347,8 @@ Claude Code ([platforms: Claude Code](../platforms/claude-code.md)):
 Fluree ([platforms: Fluree](../platforms/fluree.md#the-event-stream)): the event stream that signals ledger changes.
 
 ## History
+
+- [compact-recovery](../frames/compact-recovery.md): read-only ownership recovery and the current-guidance route after compaction.
 
 The frames that made delivery, indexed with what superseded what in [frames](../frames/README.md):
 - **Codex:** [codex-wake](../frames/codex-wake.md) (the writer-lock incident), [queue-wake](../frames/queue-wake.md) (the nudge in the thread's own queue), [one-codex-route](../frames/one-codex-route.md) (one route for every thread), [simplification-pass](../frames/simplification-pass.md) (the `Stop` hook retired), [load-on-mail](../frames/load-on-mail.md) (the borrow, eligibility and reconcile) and [nudge-hygiene](../frames/nudge-hygiene.md) (runs of joins, removal, interrupted threads).

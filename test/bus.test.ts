@@ -3284,7 +3284,7 @@ describe("one session per address", () => {
 
 describe("claude wake", () => {
   const run = <A, E>(
-    effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>
+    effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors | QueryGateway>
   ): Promise<A> => Effect.runPromise(Effect.provide(effect, jsonl().layer));
   const a = sid("claude/a");
   const joinBoth = (bus: Bus.Bus["Service"]) =>
@@ -3303,6 +3303,102 @@ describe("claude wake", () => {
   // or short when nothing is expected.
   const soon = (bus: Bus.Bus["Service"], session: string) => bus.wake(session, 5);
   const quiet = (bus: Bus.Bus["Service"], session: string) => bus.wake(session, 0.3);
+
+  test("ownership observation returns exact latest lifecycle holdings across runtimes and takeover", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const cwd = process.cwd();
+        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: [] });
+        for (const [address, runtime] of [
+          ["z", "codex"],
+          ["a", "codex"],
+          ["other-runtime", "claude"],
+        ] as const) {
+          yield* bus.join({ address, runtime, session: "shared", cwd });
+        }
+        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: ["a", "z"] });
+        expect(yield* Mcp.ownedAddresses("shared", "claude")).toEqual({
+          addresses: ["other-runtime"],
+        });
+        yield* bus.leave("a", "shared");
+        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: ["z"] });
+        yield* bus.join({ address: "a", runtime: "codex", session: "shared", cwd });
+        const holder = (yield* bus.peers).find((peer) => peer.address === "z");
+        yield* bus.join({
+          address: "z",
+          runtime: "codex",
+          session: "replacement",
+          cwd,
+          takeover: holder?.joinId,
+        });
+        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: ["a"] });
+        expect(yield* Mcp.ownedAddresses("replacement", "codex")).toEqual({ addresses: ["z"] });
+      })
+    ));
+
+  test("ownership observation preserves durable state, activity, hook observation, wake marks and active waiter", () => {
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const port = Number(probe.url.port);
+    probe.stop(true);
+    return run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const cursors = yield* Cursors.Cursors;
+        const ledger = yield* Ledger.Ledger;
+        const gateway = yield* QueryGateway;
+        const environment = Layer.mergeAll(
+          Layer.succeed(Bus.Bus)(bus),
+          Layer.succeed(Ledger.Ledger)(ledger),
+          Layer.succeed(QueryGateway)(gateway)
+        );
+        const http = Serve.layerHttp({ port, version: "test" }).pipe(Layer.provide(environment));
+        const observe = Client.call(`http://127.0.0.1:${port}/mcp`)(
+          "bus_owned_addresses",
+          Mcp.OwnedAddresses,
+          { session: a, runtime: "claude" }
+        );
+        yield* Effect.gen(function* () {
+          yield* joinBoth(bus);
+          const refused = () =>
+            Effect.flip(
+              bus.join({
+                address: "claude/a",
+                runtime: "claude",
+                session: "intruder",
+                cwd: process.cwd(),
+              })
+            );
+          const before = yield* refused();
+          const cursor = yield* cursors.get("claude/a");
+          const head = yield* ledger.end;
+          yield* Effect.sleep("10 millis");
+          expect(yield* observe).toEqual({ addresses: ["claude/a"] });
+          expect(yield* refused()).toEqual(before);
+          expect(yield* cursors.get("claude/a")).toEqual(cursor);
+          expect(yield* ledger.end).toBe(head);
+          expect(
+            (yield* bus.join({
+              address: "claude/a",
+              runtime: "claude",
+              session: a,
+              cwd: process.cwd(),
+            })).hooked
+          ).toBeUndefined();
+          yield* send(bus, "one");
+          expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
+          yield* observe;
+          expect(yield* quiet(bus, a)).toEqual(nothing);
+          const pending = yield* Effect.forkChild(bus.wake(a, 10));
+          yield* Effect.sleep("20 millis");
+          yield* observe;
+          yield* send(bus, "two");
+          expect(yield* Fiber.join(pending)).toEqual({ ...nothing, addresses: ["claude/a"] });
+          expect(bodies(yield* bus.take("claude/a", a))).toEqual(["one", "two"]);
+        }).pipe(Effect.provide(Layer.merge(http, FetchHttpClient.layer)));
+      })
+    );
+  });
 
   test("wakes once for unread mail and again only when it changes, marking nothing read", () =>
     run(
@@ -4040,6 +4136,70 @@ describe("mcp over http", () => {
     );
   });
 
+  test("actual compact CLI reads exact native holdings through MCP, never inherited env identity", () => {
+    const { url, port, layer } = serve();
+    return Effect.runPromise(
+      Effect.gen(function* () {
+        const call = Client.call(url);
+        yield* call("bus_join", Mcp.Joined, {
+          address: "codex/compact-cli",
+          runtime: "codex",
+          session: "native-payload",
+          cwd: process.cwd(),
+        });
+        const cli = (input: string) =>
+          Effect.promise(async () => {
+            const child = Bun.spawn(
+              [
+                process.execPath,
+                "--no-env-file",
+                join(import.meta.dir, "../src/bin.ts"),
+                "compact-context",
+                "--runtime",
+                "codex",
+              ],
+              {
+                stdin: new Blob([input]),
+                stdout: "pipe",
+                stderr: "pipe",
+                timeout: 10_000,
+                env: {
+                  ...process.env,
+                  AGENT_BUS_PORT: String(port),
+                  CODEX_THREAD_ID: "wrong-inherited",
+                  CLAUDE_CODE_SESSION_ID: "also-wrong",
+                },
+              }
+            );
+            const [code, stdout, stderr] = await Promise.all([
+              child.exited,
+              new Response(child.stdout).text(),
+              new Response(child.stderr).text(),
+            ]);
+            return { code, stdout, stderr };
+          });
+        const hook = {
+          session_id: "native-payload",
+          cwd: process.cwd(),
+          hook_event_name: "SessionStart",
+          source: "compact",
+        };
+        const result = yield* cli(JSON.stringify(hook));
+        expect(result).toMatchObject({ code: 0, stderr: "" });
+        expect(result.stdout).toContain('["codex/compact-cli"]');
+        expect(result.stdout).toContain(JSON.stringify({ cwd: process.cwd() }));
+        expect(result.stdout).not.toContain("native-payload");
+        expect(result.stdout).not.toContain("wrong-inherited");
+        expect(yield* cli("{}")).toEqual({ code: 0, stdout: "", stderr: "" });
+        expect(yield* cli(JSON.stringify({ ...hook, session_id: "no-holdings" }))).toEqual({
+          code: 0,
+          stdout: "",
+          stderr: "",
+        });
+      }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
+    );
+  });
+
   test("the CLI looks up an address's runtime on the bus, and refuses one that hasn't joined", () => {
     const { url, layer } = serve("fluree");
     return Effect.runPromise(
@@ -4069,12 +4229,19 @@ describe("mcp over http", () => {
     ) as {
       readonly hooks: Record<
         string,
-        ReadonlyArray<{ readonly hooks: ReadonlyArray<{ readonly command: string }> }>
+        ReadonlyArray<{
+          readonly hooks: ReadonlyArray<{
+            readonly command: string;
+            readonly asyncRewake?: boolean;
+          }>;
+        }>
       >;
     };
     const commands = new Set(
       Object.values(manifest.hooks).flatMap((matchers) =>
-        matchers.flatMap((matcher) => matcher.hooks.map((hook) => hook.command))
+        matchers.flatMap((matcher) =>
+          matcher.hooks.filter((hook) => hook.asyncRewake).map((hook) => hook.command)
+        )
       )
     );
     expect(commands.size).toBe(1);
