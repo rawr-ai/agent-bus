@@ -4186,6 +4186,7 @@ describe("mcp over http", () => {
         };
         const result = yield* cli(JSON.stringify(hook));
         expect(result).toMatchObject({ code: 0, stderr: "" });
+        expect(result.stdout).toStartWith("agent-bus: The hook observed these addresses: ");
         expect(result.stdout).toContain('["codex/compact-cli"]');
         expect(result.stdout).toContain(JSON.stringify({ cwd: process.cwd() }));
         expect(result.stdout).not.toContain("native-payload");

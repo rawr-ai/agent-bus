@@ -49,7 +49,7 @@ export const formatCompact = (
   const session = runtime === "codex" ? "$CODEX_THREAD_ID" : "$CLAUDE_CODE_SESSION_ID";
   const held = asciiJson([...new Set(addresses)].sort());
   const route = asciiJson({ cwd });
-  const text = `[agent-bus] The hook observed these addresses: ${held}. Hook identity can be shared or refer to a parent; this list does not assign inboxes to your role. Recover and use only your assigned address. Do not read all listed inboxes or commandeer delegates' addresses. Do not call bus_join to recover them. Use your own ${session} as session. For current guidance, call bus_orient with ${route}; it consumes no mail. Normal ownership refusals remain authoritative; do not automatically rejoin a refused address. Continue your work.`;
+  const text = `agent-bus: The hook observed these addresses: ${held}. Hook identity can be shared or refer to a parent; this list does not assign inboxes to your role. Recover and use only your assigned address. Do not read all listed inboxes or commandeer delegates' addresses. Do not call bus_join to recover them. Use your own ${session} as session. For current guidance, call bus_orient with ${route}; it consumes no mail. Normal ownership refusals remain authoritative; do not automatically rejoin a refused address. Continue your work.`;
   return Buffer.byteLength(text, "utf8") + 1 <= budget ? Option.some(text) : Option.none();
 };
 
