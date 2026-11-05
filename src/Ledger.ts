@@ -66,6 +66,22 @@ export interface Entry {
   readonly end: number;
 }
 
+/** Every presence entry at one cut, oldest first. */
+export interface PresenceRead {
+  readonly entries: ReadonlyArray<Message>;
+  readonly cut: Pin;
+}
+
+/**
+ * A guarded presence write, decided at its own commit by reading the attempted entry there.
+ * REFUSED wrote nothing: another presence for the address committed after the basis.
+ * UNKNOWN may have committed.
+ */
+export type Admission =
+  | { readonly status: "ADMITTED"; readonly cut: Pin }
+  | { readonly status: "REFUSED"; readonly cut: Pin }
+  | { readonly status: "UNKNOWN" };
+
 export interface Slice {
   readonly entries: ReadonlyArray<Entry>;
   /** Cursor past every complete, decoded entry read. A failed read returns no slice. */
@@ -94,7 +110,16 @@ export class Ledger extends Context.Service<
     readonly read: (from: number) => Effect.Effect<Slice, LedgerError>;
     readonly end: Effect.Effect<number, LedgerError>;
     readonly changes: Stream.Stream<void>;
-    /** Every presence entry, oldest first; the latest per address is that peer's state. */
-    readonly presence: Effect.Effect<ReadonlyArray<Message>, LedgerError>;
+    /**
+     * Every presence entry at commit `at` (the head when omitted), oldest first; the latest
+     * per address is that peer's state. Damage fails the read.
+     */
+    readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
+    /**
+     * Appends `presence` only if no presence for its address was written after `basis`, the
+     * cut its decision read. One attempt with a fresh id, never resent: a resent id is never
+     * stored twice, but its status may report the original admission.
+     */
+    readonly admit: (presence: Message, basis: Pin) => Effect.Effect<Admission, LedgerError>;
   }
 >()("agent-bus/Ledger") {}

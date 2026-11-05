@@ -21,7 +21,7 @@ import {
   InvalidQuery,
   InvalidTopics,
   isFor,
-  type LedgerError,
+  LedgerError,
   latestPresences,
   MAX_ASSOCIATED_ADDRESS_BYTES,
   MAX_ASSOCIATION_BYTES,
@@ -31,6 +31,7 @@ import {
   NotOwner,
   Origin,
   Presence,
+  PresenceConflict,
   type Runtime,
   type Subscriber,
   topicName,
@@ -101,12 +102,12 @@ export class Bus extends Context.Service<
         readonly cursor: number;
         readonly hooked?: true;
       },
-      LedgerError | NotOwner | InvalidTopics | InvalidAssociations | InvalidQuery
+      LedgerError | NotOwner | PresenceConflict | InvalidTopics | InvalidAssociations | InvalidQuery
     >;
     readonly leave: (
       address: string,
       session: string | undefined
-    ) => Effect.Effect<void, LedgerError | NotJoined | NotOwner>;
+    ) => Effect.Effect<void, LedgerError | NotJoined | NotOwner | PresenceConflict>;
     readonly publish: (
       input: PublishInput
     ) => Effect.Effect<Message, LedgerError | NotJoined | NotOwner>;
@@ -294,7 +295,7 @@ export const layer = Layer.effect(
     const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
 
     /** Each address's latest presence, joined or left. */
-    const latest = Effect.map(ledger.presence, latestPresences);
+    const latest = Effect.map(ledger.presenceAt(), (read) => latestPresences(read.entries));
 
     const peers = Effect.map(latest, (all) =>
       Array.from(all.values()).filter((peer) => peer.presence.status === "joined")
@@ -365,54 +366,65 @@ export const layer = Layer.effect(
     const noSession = (address: string) => new NotOwner({ address, message: sessionHelp });
 
     /** The address's current subscriber, when `session` owns it. */
+    const ownedIn = (
+      all: ReadonlyMap<string, Subscriber>,
+      address: string,
+      session: string | undefined
+    ) =>
+      Effect.gen(function* () {
+        if (!validSession(session)) return yield* noSession(address);
+        const subscriber = all.get(address);
+        if (subscriber === undefined || subscriber.presence.status !== "joined") {
+          return yield* new NotJoined({
+            address,
+            message: `${address} has not joined the bus; join first.`,
+          });
+        }
+        if (subscriber.presence.session !== session) return yield* notOwner(subscriber);
+        return subscriber;
+      });
     const owned = Effect.fn("Bus.owned")(function* (address: string, session: string | undefined) {
-      if (!validSession(session)) return yield* noSession(address);
-      const subscriber = yield* peer(address);
-      if (subscriber === undefined) {
-        return yield* new NotJoined({
-          address,
-          message: `${address} has not joined the bus; join first.`,
-        });
-      }
-      if (subscriber.presence.session !== session) return yield* notOwner(subscriber);
+      const subscriber = yield* ownedIn(yield* latest, address, session);
       yield* touch(address);
       return subscriber;
     });
 
-    const announce = Effect.fn("Bus.announce")(function* (
-      address: string,
-      presence: Presence,
-      cwd: string | undefined
-    ) {
-      const message = new Message({
-        id: Bun.randomUUIDv7(),
-        ts: yield* now,
-        from: address,
-        to: ["*"],
-        kind: "presence",
-        body: `${address} ${presence.status}`,
-        origin: yield* originFor(cwd),
-        presence,
-      });
-      yield* ledger.append(message);
-    });
-
-    const join = (input: JoinInput) =>
+    const presenceMessage = (address: string, presence: Presence, cwd: string | undefined) =>
       Effect.gen(function* () {
-        const session = input.session;
-        if (!validSession(session)) return yield* noSession(input.address);
-        // A Codex thread is woken at its own thread id, so it can't name another.
-        if (
-          input.runtime === "codex" &&
-          input.codexThreadId !== undefined &&
-          input.codexThreadId !== session
-        ) {
-          return yield* new NotOwner({
-            address: input.address,
-            message: "codexThreadId must be your own thread id, the same as session.",
-          });
-        }
-        const last = (yield* latest).get(input.address);
+        return new Message({
+          id: Bun.randomUUIDv7(),
+          ts: yield* now,
+          from: address,
+          to: ["*"],
+          kind: "presence",
+          body: `${address} ${presence.status}`,
+          origin: yield* originFor(cwd),
+          presence,
+        });
+      });
+
+    /** Puts an address's cursor back exactly as it was, including its absence. */
+    const restore = (address: string, previous: Option.Option<number>) =>
+      Option.isSome(previous) ? cursors.set(address, previous.value) : cursors.clear(address);
+
+    const conflict = (address: string) =>
+      new PresenceConflict({
+        address,
+        message: `${address} changed while this call was deciding, so nothing was written. Call again: the bus will decide against the address's current state.`,
+      });
+
+    const unconfirmed = (operation: "join" | "leave", address: string) =>
+      new LedgerError({
+        message: `The bus could not confirm whether this ${operation} of ${address} was recorded: it may or may not have committed, and nothing was undone. Calling it again is safe, since the bus decides against the address's current state, but that result doesn't show what this attempt did.`,
+      });
+
+    /**
+     * What a join would write against one presence state, or the refusal it gets. Pure: it
+     * reads and writes nothing, so a refused write can be re-decided without writing.
+     */
+    const decideJoin = (input: JoinInput, session: string, all: ReadonlyMap<string, Subscriber>) =>
+      Effect.gen(function* () {
+        const last = all.get(input.address);
         const mine =
           last !== undefined &&
           last.presence.session === session &&
@@ -489,23 +501,71 @@ export const layer = Layer.effect(
           ...optional("codexThreadId", input.codexThreadId),
           ...optional("note", input.note),
         });
-        // The owner rejoining, or a takeover, keeps unread messages; a new owner
-        // starts at the present, so a left address's mail isn't handed to another
-        // session. The cursor is set before the announcement, so no reply to it
-        // is skipped.
-        const existing = yield* cursors.get(input.address);
+        return { presence, mine, takeover };
+      });
+
+    const join = (input: JoinInput) =>
+      Effect.gen(function* () {
+        const session = input.session;
+        if (!validSession(session)) return yield* noSession(input.address);
+        // A Codex thread is woken at its own thread id, so it can't name another.
+        if (
+          input.runtime === "codex" &&
+          input.codexThreadId !== undefined &&
+          input.codexThreadId !== session
+        ) {
+          return yield* new NotOwner({
+            address: input.address,
+            message: "codexThreadId must be your own thread id, the same as session.",
+          });
+        }
+        const read = yield* ledger.presenceAt();
+        const { presence, mine, takeover } = yield* decideJoin(
+          input,
+          session,
+          latestPresences(read.entries)
+        );
+        // The owner rejoining, or a takeover, keeps unread messages; a new owner starts at
+        // the cut its decision read, so a left address's mail isn't handed to another session.
+        // The cursor is set before the write, so no reply to it is skipped, and only when it
+        // changes, so a refusal has nothing else to undo.
+        const previous = yield* cursors.get(input.address);
         const cursor = input.replay
           ? 0
-          : Option.isSome(existing) && (mine || takeover !== undefined)
-            ? existing.value
-            : yield* ledger.end;
-        yield* cursors.set(input.address, cursor);
-        yield* announce(input.address, presence, input.cwd);
+          : Option.isSome(previous) && (mine || takeover !== undefined)
+            ? previous.value
+            : read.cut.head;
+        const staged = Option.isNone(previous) || previous.value !== cursor;
+        const unstage = staged ? restore(input.address, previous) : Effect.void;
+        // Staging, the message and the restoration after a definite refusal can't be cut
+        // short by cancellation, so a cancelled call never leaves a refused join's cursor
+        // staged. Only the admission itself stays interruptible: cancelled there, its outcome
+        // is unknown, and the cursor is kept.
+        const admission = yield* Effect.uninterruptibleMask((interruptible) =>
+          Effect.gen(function* () {
+            if (staged) yield* cursors.set(input.address, cursor);
+            const message = yield* presenceMessage(input.address, presence, input.cwd).pipe(
+              Effect.tapError(() => unstage)
+            );
+            const admission = yield* interruptible(ledger.admit(message, read.cut)).pipe(
+              Effect.tapError(() => unstage)
+            );
+            if (admission.status === "REFUSED") yield* unstage;
+            return admission;
+          })
+        );
+        // A possibly admitted join keeps its cursor: undoing it could skip the owner's mail.
+        if (admission.status === "UNKNOWN") return yield* unconfirmed("join", input.address);
+        if (admission.status === "REFUSED") {
+          const now = yield* ledger.presenceAt(admission.cut.head);
+          yield* decideJoin(input, session, latestPresences(now.entries));
+          return yield* conflict(input.address);
+        }
         yield* touch(input.address);
         return {
           address: input.address,
           topics: presence.topics,
-          associations,
+          associations: presence.associations ?? [],
           cursor,
           ...(input.runtime === "claude" && hooked.has(session) ? { hooked: true as const } : {}),
         };
@@ -513,7 +573,8 @@ export const layer = Layer.effect(
 
     const leave = (address: string, session: string | undefined) =>
       Effect.gen(function* () {
-        const current = yield* owned(address, session);
+        const read = yield* ledger.presenceAt();
+        const current = yield* ownedIn(latestPresences(read.entries), address, session);
         const presence = new Presence({
           runtime: current.presence.runtime,
           status: "left",
@@ -521,7 +582,15 @@ export const layer = Layer.effect(
           ...optional("associations", current.presence.associations),
           ...optional("session", current.presence.session),
         });
-        yield* announce(address, presence, current.cwd);
+        const message = yield* presenceMessage(address, presence, current.cwd);
+        const admission = yield* ledger.admit(message, read.cut);
+        if (admission.status === "UNKNOWN") return yield* unconfirmed("leave", address);
+        if (admission.status === "REFUSED") {
+          const now = yield* ledger.presenceAt(admission.cut.head);
+          yield* ownedIn(latestPresences(now.entries), address, session);
+          return yield* conflict(address);
+        }
+        yield* touch(address);
       }).pipe(exclusive(address), claiming(address), Effect.withSpan("Bus.leave"));
 
     const publish = (input: PublishInput) =>

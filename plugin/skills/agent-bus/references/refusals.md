@@ -13,6 +13,8 @@ A refusal changes nothing. Match its wording:
 | "codexThreadId must be your own thread id, the same as session." | Pass `$CODEX_THREAD_ID` as both |
 | "`<address>` is held by another session" | Join another address of your own. Only if the human says that session has ended: `bus_takeover` with `holder` set to the join id in the latest refusal |
 | "`<address>` belongs to another session; nothing was changed." | Your id changed (`/clear`, a fork) or the address was taken over: join a new address. If a wake brought you here, end quietly |
+| "`<address>` changed while this call was deciding, so nothing was written." | Another call changed the address first. Call again once; the bus decides against the current state. Don't loop |
+| "The bus could not confirm whether this `<join\|leave>` of `<address>` was recorded" | It may or may not have committed. Call again if you still need the change: that call's result or refusal is what counts. Don't treat `bus_peers` as proof either way: it doesn't show sessions |
 | "`<address>` has not joined the bus; join first." | `bus_join`, unless a wake told you not to rejoin: then end the turn |
 | A read that says your cursor "is ahead of" the ledger | Tell the human. A plain rejoin keeps that cursor; rejoin with `replay` only if they agree to receive all past mail again |
 | "A ledger entry at t=… could not be decoded." | Tell the human the commit and preserve the cursor. Rejoin, replay and restart do not repair damaged presence history; do not move the cursor as an automatic response |

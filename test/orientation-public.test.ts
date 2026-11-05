@@ -1188,7 +1188,7 @@ test("former owner is refused and current owner can replay the original receipt"
           audience: ["reader"],
         };
         const original = yield* updateDirectory(input);
-        const holder = (yield* ledger.presence).at(-1)?.id;
+        const holder = (yield* Effect.map(ledger.presenceAt(), (read) => read.entries)).at(-1)?.id;
         expect(holder).toBeDefined();
         yield* bus.join({ ...joining("publisher", "new-session"), takeover: holder });
         const before = yield* ledger.end;

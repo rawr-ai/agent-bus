@@ -1425,7 +1425,9 @@ describe("transport bounds", () => {
         });
         await waitFor(async () =>
           bus.runtime.runPromise(
-            Effect.map(Ledger, (ledger) => ledger.presence).pipe(
+            Effect.map(Ledger, (ledger) =>
+              Effect.map(ledger.presenceAt(), (read) => read.entries)
+            ).pipe(
               Effect.flatten,
               Effect.map((presence) => presence.some(({ from }) => from === "pool-waiter"))
             )
@@ -1461,7 +1463,9 @@ describe("transport bounds", () => {
         }
         expect(entered).toBe(grant === "never" ? 4 : 5);
         const presence = await bus.runtime.runPromise(
-          Effect.flatMap(Ledger, (ledger) => ledger.presence)
+          Effect.flatMap(Ledger, (ledger) =>
+            Effect.map(ledger.presenceAt(), (read) => read.entries)
+          )
         );
         expect(presence.filter(({ from }) => from === "pool-waiter")).toHaveLength(1);
         const cursor = (joined.structuredContent as { cursor: number }).cursor;

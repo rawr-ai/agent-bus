@@ -1,6 +1,6 @@
-import { Effect, FileSystem, Layer, Option, Path, Schema, Stream } from "effect";
+import { Effect, FileSystem, Layer, Option, Path, Schema, Semaphore, Stream } from "effect";
 import { LedgerError, type Message, MessageJson } from "../src/domain.ts";
-import { type Entry, Ledger } from "../src/Ledger.ts";
+import { type Admission, type Entry, Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 
 const NEWLINE = 0x0a;
@@ -8,6 +8,17 @@ const POLL_INTERVAL = "2 seconds";
 const decoder = new TextDecoder();
 
 const ledgerError = (cause: unknown) => new LedgerError({ message: String(cause) });
+
+/** One write lock per file, shared by every layer in the process, as one Fluree is. */
+const locks = new Map<string, Semaphore.Semaphore>();
+const lockFor = (file: string) => {
+  let lock = locks.get(file);
+  if (lock === undefined) {
+    lock = Semaphore.makeUnsafe(1);
+    locks.set(file, lock);
+  }
+  return Semaphore.withPermit(lock);
+};
 
 /**
  * The tests' ledger: one JSONL file, read from a byte offset. Production uses
@@ -28,12 +39,16 @@ export const layerJsonl = (file: string) =>
       const encode = Schema.encodeEffect(MessageJson);
       const decode = Schema.decodeUnknownEffect(MessageJson);
 
-      const append = Effect.fn("Ledger.append")(function* (message: Message) {
-        const line = yield* encode(message).pipe(Effect.mapError(ledgerError));
-        yield* fs
-          .writeFileString(file, `${line}\n`, { flag: "a" })
-          .pipe(Effect.mapError(ledgerError));
-      });
+      const locked = lockFor(file);
+      const write = (message: Message) =>
+        Effect.gen(function* () {
+          const line = yield* encode(message).pipe(Effect.mapError(ledgerError));
+          yield* fs
+            .writeFileString(file, `${line}\n`, { flag: "a" })
+            .pipe(Effect.mapError(ledgerError));
+        });
+      const append = (message: Message) =>
+        write(message).pipe(locked, Effect.withSpan("Ledger.append"));
 
       const bytesFrom = (from: number) =>
         Effect.tryPromise({
@@ -84,11 +99,56 @@ export const layerJsonl = (file: string) =>
         strategy: "sliding",
       });
 
-      const all = Effect.map(read(0), ({ entries }) => entries.map((entry) => entry.message));
+      const presenceAt = (at?: number) =>
+        Effect.gen(function* () {
+          const head = at ?? (yield* end);
+          const { entries } = yield* read(0);
+          return {
+            entries: entries
+              .filter((entry) => entry.end <= head && entry.message.kind === "presence")
+              .map((entry) => entry.message),
+            cut: { head, incarnation: "jsonl" },
+          };
+        });
 
-      const presence = Effect.map(all, (messages) =>
-        messages.filter((message) => message.kind === "presence")
-      );
+      // Any line past the basis that is a presence for the address, the same id, or
+      // unreadable (which `read` would skip) refuses: the guard may refuse too often, never
+      // too rarely.
+      const admit = (presence: Message, basis: { readonly head: number }) =>
+        Effect.gen(function* () {
+          // An id already written, at any position, refuses: an entry is admitted once.
+          const { entries: written } = yield* read(0);
+          if (written.some((entry) => entry.message.id === presence.id)) {
+            return {
+              status: "REFUSED",
+              cut: { head: yield* end, incarnation: "jsonl" },
+            } satisfies Admission;
+          }
+          const bytes = yield* bytesFrom(basis.head);
+          const complete = bytes.lastIndexOf(NEWLINE) + 1;
+          const lines = decoder
+            .decode(bytes.subarray(0, complete))
+            .split("\n")
+            .filter((line) => line.trim() !== "");
+          for (const line of lines) {
+            const decoded = yield* Effect.option(decode(line));
+            if (
+              Option.isNone(decoded) ||
+              decoded.value.id === presence.id ||
+              (decoded.value.kind === "presence" && decoded.value.from === presence.from)
+            ) {
+              return {
+                status: "REFUSED",
+                cut: { head: yield* end, incarnation: "jsonl" },
+              } satisfies Admission;
+            }
+          }
+          yield* write(presence);
+          return {
+            status: "ADMITTED",
+            cut: { head: yield* end, incarnation: "jsonl" },
+          } satisfies Admission;
+        }).pipe(locked, Effect.withSpan("Ledger.admit"));
 
       return Ledger.of({
         instance: "jsonl",
@@ -100,7 +160,8 @@ export const layerJsonl = (file: string) =>
         read,
         end,
         changes,
-        presence,
+        presenceAt,
+        admit,
       });
     })
   ).pipe(

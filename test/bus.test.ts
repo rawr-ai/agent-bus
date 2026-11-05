@@ -198,7 +198,10 @@ for (const backend of backends) {
           };
           const joined = yield* bus.join(joining);
           expect(joined.topics).toEqual(["reviews", "Release"]);
-          expect((yield* ledger.presence).at(-1)?.presence?.topics).toEqual(joined.topics);
+          expect(
+            (yield* Effect.map(ledger.presenceAt(), (read) => read.entries)).at(-1)?.presence
+              ?.topics
+          ).toEqual(joined.topics);
           expect((yield* bus.peers)[0]?.presence.topics).toEqual(joined.topics);
           yield* bus.join({ ...joining, address: "claude/sender", session: "sender" });
           for (const [to, body] of [
@@ -290,7 +293,10 @@ for (const backend of backends) {
             ],
           });
           expect(initial.associations).toEqual(expected);
-          expect((yield* ledger.presence).at(-1)?.presence?.associations).toEqual(expected);
+          expect(
+            (yield* Effect.map(ledger.presenceAt(), (read) => read.entries)).at(-1)?.presence
+              ?.associations
+          ).toEqual(expected);
           expect((yield* bus.join(joining)).associations).toEqual(expected);
           expect((yield* bus.join({ ...joining, replay: true })).associations).toEqual(expected);
           const beforeInvalid = yield* cursors.get(joining.address);
@@ -304,10 +310,15 @@ for (const backend of backends) {
           expect((yield* bus.join({ ...joining, associations: [] })).associations).toEqual([]);
           yield* bus.join({ ...joining, associations: expected });
           yield* bus.leave(joining.address, joining.session);
-          expect((yield* ledger.presence).at(-1)?.presence?.associations).toEqual(expected);
+          expect(
+            (yield* Effect.map(ledger.presenceAt(), (read) => read.entries)).at(-1)?.presence
+              ?.associations
+          ).toEqual(expected);
           expect((yield* bus.join(joining)).associations).toEqual([]);
           yield* bus.join({ ...joining, associations: expected });
-          const holder = (yield* ledger.presence).at(-1)?.id;
+          const holder = (yield* Effect.map(ledger.presenceAt(), (read) => read.entries)).at(
+            -1
+          )?.id;
           expect(holder).toBeDefined();
           const takeover = yield* bus.join({ ...joining, session: "owner-b", takeover: holder });
           expect(takeover.associations).toEqual([]);
@@ -432,7 +443,7 @@ for (const backend of backends) {
           expect(rejoined.topics).toEqual(["reviews", "##legacy"]);
           expect(Option.some(rejoined.cursor)).toEqual(before);
           expect(yield* cursors.get(joining.address)).toEqual(before);
-          const presences = yield* ledger.presence;
+          const presences = yield* Effect.map(ledger.presenceAt(), (read) => read.entries);
           expect(presences.at(-1)?.presence?.topics).toEqual(["reviews", "##legacy"]);
           expect(presences.at(-1)?.presence?.rejoinOf).toBe(legacy.id);
           expect(presences.find(({ id }) => id === legacy.id)?.presence?.topics).toEqual([
