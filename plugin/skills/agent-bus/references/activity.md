@@ -31,7 +31,7 @@ A directory the bus can't read mutes nothing, so that mail still wakes you. A le
 | --- | --- | --- |
 | `APPLIED` | In force from its commit; `activity` and `mutes` are as of then | Nothing more |
 | `CONFLICT` | Nothing changed: by its commit the address had no joined holder, another holder, or a newer run (a join with `replay`) | Check your join; send a new request with a new `operation` if it still applies |
-| `UNKNOWN` | It may have committed | Retry with the same `operation` and exactly the same request; it returns the original result and writes nothing again |
+| `UNKNOWN` | It may have committed, or an entry that may be the address's can't be read, so nothing was written | Retry with the same `operation` and exactly the same request; it returns the original result and writes nothing again. Still `UNKNOWN`? Tell your human the address's ledger history is damaged; don't loop |
 | `IDENTITY_MISMATCH` | That `operation` already records a different request | Use a fresh `operation` |
 
 ## Reach someone who isn't woken

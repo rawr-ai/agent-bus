@@ -57,6 +57,7 @@ export const layerJsonl = (file: string) =>
       const decode = Schema.decodeUnknownEffect(MessageJson);
 
       const locked = lockFor(file);
+      const decodeCommandLine = Schema.decodeUnknownOption(CommandLine);
       const write = (message: Message) =>
         Effect.gen(function* () {
           const line = yield* encode(message).pipe(Effect.mapError(ledgerError));
@@ -130,7 +131,8 @@ export const layerJsonl = (file: string) =>
 
       // Any line past the basis that is a presence for the address, the same id, or
       // unreadable (which `read` would skip) refuses: the guard may refuse too often, never
-      // too rarely. Command lines pass, as Fluree's command nodes are never presences.
+      // too rarely. A whole command line passes, as Fluree's command nodes are never presences;
+      // a damaged one may have been anything, so it refuses.
       const admit = (presence: Message, basis: { readonly head: number }) =>
         Effect.gen(function* () {
           // An id already written, at any position, refuses: an entry is admitted once.
@@ -146,7 +148,11 @@ export const layerJsonl = (file: string) =>
           const lines = decoder
             .decode(bytes.subarray(0, complete))
             .split("\n")
-            .filter((line) => line.trim() !== "" && !line.startsWith(COMMAND_MARK));
+            .filter(
+              (line) =>
+                line.trim() !== "" &&
+                !(line.startsWith(COMMAND_MARK) && Option.isSome(decodeCommandLine(line)))
+            );
           for (const line of lines) {
             const decoded = yield* Effect.option(decode(line));
             if (
@@ -181,7 +187,6 @@ export const layerJsonl = (file: string) =>
           }
           return found;
         });
-      const decodeCommandLine = Schema.decodeUnknownOption(CommandLine);
       const commandLines = (upTo: number) =>
         Effect.map(lines(upTo), (found) =>
           found.flatMap(({ text, end }) => {

@@ -13,7 +13,7 @@ import {
   needsScan,
   qualifies,
 } from "./domain.ts";
-import { COMMAND_PREFIX } from "./Ledger.ts";
+import { COMMAND_PREFIX, messageIri } from "./Ledger.ts";
 import type { QueryGateway } from "./Query.ts";
 
 /**
@@ -35,6 +35,17 @@ const decodeRows =
 
 const EntryRows = Schema.Array(
   Schema.Tuple([Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
+);
+const PresenceRows = Schema.Array(
+  Schema.Tuple([
+    Schema.String,
+    Schema.NullOr(Schema.Number),
+    Schema.NullOr(Schema.Number),
+    Schema.NullOr(Schema.Number),
+    Schema.NullOr(Schema.String),
+    Schema.NullOr(Schema.String),
+    Schema.NullOr(Schema.String),
+  ])
 );
 const CommandRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.Number]));
 const decodeEntry = Schema.decodeUnknownOption(MessageJson);
@@ -60,6 +71,70 @@ const entryOf = (group: ReturnType<typeof grouped>[number]) =>
     ? Option.none()
     : Option.filter(decodeEntry(group.json), (message) => message.id === group.id);
 
+/**
+ * Presence rows of (node, entry t, id t, sender t, id, json, from) grouped by node. A valid
+ * entry is ordered by its own commit, as the guarded presence read and the guard key on it; a
+ * damaged node counts from the latest commit of anything stored on it, so a later alteration
+ * is never dated before a reset that would hide it. A node with several ids, entries or
+ * senders is damaged; one with neither an id nor an entry holds nothing to read.
+ */
+const presenceNodes = (
+  rows: ReadonlyArray<
+    readonly [
+      string,
+      number | null,
+      number | null,
+      number | null,
+      string | null,
+      string | null,
+      string | null,
+    ]
+  >
+) => {
+  const nodes = new Map<
+    string,
+    {
+      node: string;
+      t: number;
+      latest: number;
+      id: string | null;
+      json: string | null;
+      from: string | null;
+      copies: number;
+    }
+  >();
+  for (const [node, entryT, idT, fromT, id, json, from] of rows) {
+    const t = entryT ?? idT;
+    if (t === null) continue;
+    const latest = Math.max(t, idT ?? t, fromT ?? t);
+    const found = nodes.get(node);
+    if (found === undefined) nodes.set(node, { node, t, latest, id, json, from, copies: 1 });
+    else {
+      found.copies += 1;
+      found.latest = Math.max(found.latest, latest);
+    }
+  }
+  return [...nodes.values()];
+};
+
+/**
+ * A presence node's decoded entry, or nothing when it is missing, malformed, duplicated or
+ * misnamed. A session-bearing entry must also be the presence its id names, recorded under its
+ * own sender, as the guarded presence read requires: no standing rests on one it refuses.
+ */
+const presenceOf = (node: ReturnType<typeof presenceNodes>[number]) =>
+  node.copies > 1 || node.json === null || node.id === null
+    ? Option.none()
+    : Option.filter(
+        decodeEntry(node.json),
+        (message) =>
+          message.id === node.id &&
+          (message.presence?.session === undefined ||
+            (message.kind === "presence" &&
+              node.node === messageIri(message.id) &&
+              node.from === message.from))
+      );
+
 /** The address a damaged command names, when its JSON says that much. */
 const legibleAddress = (json: string) => {
   try {
@@ -78,15 +153,18 @@ export const logAt = (gateway: Gateway, t: number) =>
   Effect.gen(function* () {
     const presences = yield* gateway
       .jsonld(t, {
-        selectDistinct: ["?t", "?id", "?json"],
+        // Every typed presence node, each value a row of its own: nothing missing or repeated is
+        // dropped or merged before the fold sees it.
+        select: ["?m", "?jt", "?it", "?ft", "?id", "?json", "?from"],
         where: [
           { "@id": "?m", "@type": "bus:Presence" },
-          { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?t" } },
-          ["optional", { "@id": "?m", "bus:json": "?json" }],
+          ["optional", { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?jt" } }],
+          ["optional", { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?it" } }],
+          ["optional", { "@id": "?m", "bus:from": { "@value": "?from", "@t": "?ft" } }],
         ],
-        orderBy: ["?t", "?id"],
+        orderBy: "?m",
       })
-      .pipe(Effect.flatMap(decodeRows(EntryRows)));
+      .pipe(Effect.flatMap(decodeRows(PresenceRows)));
     const commands = yield* gateway
       .jsonld(t, {
         select: ["?c", "?json", "?t"],
@@ -98,12 +176,12 @@ export const logAt = (gateway: Gateway, t: number) =>
       })
       .pipe(Effect.flatMap(decodeRows(CommandRows)));
     const log: Array<Logged> = [];
-    for (const group of grouped(presences)) {
-      const message = entryOf(group);
+    for (const node of presenceNodes(presences)) {
+      const message = presenceOf(node);
       log.push(
         Option.isSome(message)
-          ? { kind: "presence", t: group.t, message: message.value }
-          : { kind: "damaged", t: group.t }
+          ? { kind: "presence", t: node.t, message: message.value }
+          : { kind: "damaged", t: node.latest }
       );
     }
     const nodes = new Map<string, Array<readonly [string, number]>>();

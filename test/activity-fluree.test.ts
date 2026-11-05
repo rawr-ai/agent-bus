@@ -12,7 +12,7 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import * as Bus from "../src/Bus.ts";
 import { orientationAssociations, peers } from "../src/catalogue.ts";
-import { Message, Origin, Presence } from "../src/domain.ts";
+import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { toNode } from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
 import { messageIri, scopeIri } from "../src/Ledger.ts";
@@ -689,6 +689,187 @@ describe("unknown activity", () => {
           activity: "unknown",
           activityReason: "damaged-mail",
         });
+      }),
+    TIMEOUT
+  );
+});
+
+describe("presence identity: no standing rests on a record the guarded read refuses", () => {
+  /**
+   * A joined presence for x naming the successor session, stored as a join stores it, with its
+   * node or its recorded sender optionally replaced. The guarded presence read refuses an entry
+   * whose node isn't the one its id names or whose sender isn't its own.
+   */
+  const successorRecord = (identity: { readonly node?: string; readonly from?: string } = {}) => {
+    const message = new Message({
+      id: uuid(),
+      ts: new Date().toISOString(),
+      from: x,
+      to: ["*"],
+      kind: "presence",
+      body: `${x} joined`,
+      origin: new Origin({ host: hostname(), cwd }),
+      presence: new Presence({
+        runtime: "claude",
+        status: "joined",
+        topics: [],
+        session: successor,
+      }),
+    });
+    return {
+      ...toNode(message, Schema.encodeSync(MessageJson)(message)),
+      ...(identity.node === undefined ? {} : { "@id": identity.node }),
+      ...(identity.from === undefined ? {} : { "bus:from": identity.from }),
+    };
+  };
+
+  /** x held by its own session, then `record` inserted raw after the join. */
+  const heldThen = async (
+    track: <T>(resource: T, close: () => unknown) => T,
+    name: string,
+    record: Record<string, unknown>
+  ) => {
+    const config = await freshFluree(name);
+    const a = await open(track, config);
+    await a.run(joinAs(x));
+    await insertRaw(config, record);
+    return { config, a };
+  };
+
+  /** A bus_activity call that must write nothing: UNKNOWN, no node for its operation, same head. */
+  const writesNothing = async (
+    config: FlureeConfig,
+    serve: BusServe,
+    session: string | undefined
+  ) => {
+    const operation = uuid();
+    const head = await serve.run(end);
+    const result = plain(
+      await serve.run(
+        act(x, { activity: "inactive", operation, ...(session === undefined ? {} : { session }) })
+      )
+    );
+    expect(result).toEqual({ status: "UNKNOWN", operation });
+    expect(await commandValues(config, operation)).toEqual([]);
+    expect(await serve.run(end)).toBe(head);
+  };
+
+  for (const [mismatch, identity] of [
+    ["recorded sender is another address", { from: "claude/elsewhere" }],
+    ["node is not the one its id names", { node: messageIri(uuid()) }],
+  ] as const) {
+    test(
+      `a later successor-session record whose ${mismatch} authorizes no one, and reads as unknown`,
+      () =>
+        scoped(async (track) => {
+          const { config, a } = await heldThen(track, "identity", successorRecord(identity));
+          // The session the record names gains nothing from it.
+          await writesNothing(config, a, successor);
+          // The prior holder can't mutate past damage that may be its own address's either.
+          await writesNothing(config, a, undefined);
+          // Reads keep the existing unknown, damaged-log: delivery's contact policy is unchanged.
+          expect(await peerRow(a, x)).toMatchObject({
+            activity: "unknown",
+            activityReason: "damaged-log",
+          });
+        }),
+      TIMEOUT
+    );
+  }
+
+  test(
+    "a later presence node with an entry but no bus:id is damage, not silently dropped",
+    () =>
+      scoped(async (track) => {
+        const { "bus:id": _, ...record } = successorRecord();
+        const { config, a } = await heldThen(track, "identity-no-id", record);
+        await writesNothing(config, a, undefined);
+        expect(await peerRow(a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
+      }),
+    TIMEOUT
+  );
+
+  /** Replaces one stored value on a node at a new commit: a retraction and an assertion. */
+  const alter = async (
+    config: FlureeConfig,
+    node: string,
+    predicate: string,
+    from: string,
+    to: string
+  ) => {
+    const response = await fetch(
+      `${config.url}/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          "@context": context,
+          delete: { "@id": node, [predicate]: from },
+          insert: { "@id": node, [predicate]: to },
+        }),
+      }
+    );
+    if (!response.ok) throw new Error(`alteration failed: HTTP ${response.status}`);
+  };
+
+  for (const predicate of ["bus:from", "bus:id"] as const) {
+    test(
+      `a later alteration of the reset join's ${predicate} is damage at its own commit, never an earlier reset`,
+      () =>
+        scoped(async (track) => {
+          const config = await freshFluree("identity-altered");
+          const a = await open(track, config);
+          await a.run(joinAs(x));
+          const reset = (await a.run(holderOf(x)))?.joinId ?? "";
+          expect(
+            plain(await a.run(act(x, { activity: "inactive", mutes: [programme] })))
+          ).toMatchObject({ status: "APPLIED" });
+          // The same session rejoining continues the run: activity and mutes carry over.
+          await a.run(joinAs(x));
+          expect(await runOf(a, x)).toBe(reset);
+          const before = await peerRow(a, x);
+          expect(before).toMatchObject({ activity: "inactive" });
+          expect(sortedMutes(before?.mutes)).toEqual(sortedMutes([programme]));
+
+          await alter(
+            config,
+            messageIri(reset),
+            predicate,
+            predicate === "bus:from" ? x : reset,
+            predicate === "bus:from" ? "claude/elsewhere" : uuid()
+          );
+          // Dated at the reset's commit, the damage would sit before the rejoin, which would then
+          // read as a reset that silently clears the mute and reports active.
+          expect(await peerRow(a, x)).toMatchObject({
+            activity: "unknown",
+            activityReason: "damaged-log",
+          });
+        }),
+      TIMEOUT
+    );
+  }
+
+  // Control: the same record with consistent identity is an ordinary takeover by the successor.
+  // The applicability races (CONFLICT not-holder, stale-run, not-joined) are covered above in
+  // "bus_activity: the command applicability race".
+  test(
+    "control: the consistent record makes the successor the holder; the prior session is refused",
+    () =>
+      scoped(async (track) => {
+        const { config, a } = await heldThen(track, "identity-control", successorRecord());
+        const operation = uuid();
+        expect(
+          plain(await a.run(act(x, { activity: "inactive", operation, session: successor })))
+        ).toMatchObject({ status: "APPLIED", operation, activity: "inactive" });
+        expect(await commandValues(config, operation)).toHaveLength(1);
+        const head = await a.run(end);
+        const refused = await a.run(Effect.flip(act(x, { activity: "active" })));
+        expect(refused._tag).toBe("NotOwner");
+        expect(refused.message).toContain("belongs to another session; this call wrote nothing");
+        expect(await a.run(end)).toBe(head);
       }),
     TIMEOUT
   );

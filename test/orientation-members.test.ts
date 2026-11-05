@@ -32,6 +32,21 @@ type State = {
 };
 
 // Explicit stored states, not join behavior or production normalization as the oracle.
+/** The sender a stored entry names, as `bus:from` records it; none when it is unreadable. */
+const senderOf = (json: string | null) => {
+  try {
+    const value: unknown = JSON.parse(json ?? "");
+    return typeof value === "object" &&
+      value !== null &&
+      "from" in value &&
+      typeof value.from === "string"
+      ? value.from
+      : null;
+  } catch {
+    return null;
+  }
+};
+
 const entry = (t: number, state: State) => {
   const id = `presence-${t}`;
   const ts = `2026-11-01T00:${String(t).padStart(2, "0")}:00.000Z`;
@@ -186,6 +201,12 @@ const fixture = () => {
             return [];
           // No address commands are stored here.
           if (JSON.stringify(query.select) === '["?c","?json","?t"]') return [];
+          // The activity log reads each presence's node and recorded sender too, stored as
+          // Fluree stores a written entry.
+          if (JSON.stringify(query.select) === '["?m","?jt","?it","?ft","?id","?json","?from"]')
+            return rows
+              .filter((row) => row[0] <= t)
+              .map(([at, id, json]) => [messageIri(id), at, at, at, id, json, senderOf(json)]);
           if (JSON.stringify(query.selectDistinct) === '["?m"]')
             return missingIdAt !== undefined && missingIdAt <= t ? [["urn:unkeyed-presence"]] : [];
           return rows.filter((row) => row[0] <= t);

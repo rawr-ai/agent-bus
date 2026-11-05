@@ -985,7 +985,10 @@ export const layer = Layer.effect(
         // Ownership at the cut where the operation was absent: a refusal here wrote nothing, and
         // says nothing of any other attempt with the same operation.
         const at = recorded.cut.head;
-        const { holder } = foldStanding(input.address, yield* ledger.log(at));
+        const { holder, damaged } = foldStanding(input.address, yield* ledger.log(at));
+        // An entry that may be the address's can't be read, so who holds it can't be established:
+        // nothing is written, as when the ledger can't be read.
+        if (damaged) return unknown;
         if (holder === undefined || holder.presence.status !== "joined") {
           return yield* new NotJoined({
             address: input.address,
