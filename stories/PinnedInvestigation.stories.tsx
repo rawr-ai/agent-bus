@@ -593,11 +593,27 @@ const LONG: InvestigationReference = {
     participants: [`#${"long-participant-".repeat(12)}`, "#review"],
   },
 };
+/**
+ * The page's ThemeToggle applies the stored preference (its key in viewer/src/ThemeToggle.tsx),
+ * else the host's colour scheme, over the story's theme global; storing dark makes the story's
+ * theme independent of the host. Restores the previous value, or its absence.
+ */
+const VIEWER_THEME_KEY = "agent-bus-viewer-theme";
+const preferDark = () => {
+  const previous = localStorage.getItem(VIEWER_THEME_KEY);
+  localStorage.setItem(VIEWER_THEME_KEY, "dark");
+  return () => {
+    if (previous === null) localStorage.removeItem(VIEWER_THEME_KEY);
+    else localStorage.setItem(VIEWER_THEME_KEY, previous);
+  };
+};
 export const DarkNarrow: Story = {
   globals: { theme: "dark", viewport: { value: "narrow", isRotated: false } },
   args: { reference: LONG },
-  beforeEach: () =>
-    script(page([entry(1, { subject: `Long ${"subject-".repeat(20)}` }), entry(2)], {}, LONG)),
+  beforeEach: () => {
+    script(page([entry(1, { subject: `Long ${"subject-".repeat(20)}` }), entry(2)], {}, LONG));
+    return preferDark();
+  },
   play: async ({ canvasElement }) => {
     await expect(document.documentElement.dataset.theme).toBe("dark");
     await expect(window.innerWidth).toBe(320);
