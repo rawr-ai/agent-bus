@@ -4,17 +4,19 @@
   "author": { "name": "rawr-ai" },
   "repository": "https://github.com/rawr-ai/agent-bus",
   "hooks": {
-    "SessionStart": [
-      {
-        "matcher": "^compact$",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "PATH=\"$HOME/.local/bin:$HOME/.bun/bin:$PATH\" exec \"$HOME/.local/bin/agent-bus\" compact-context --runtime codex",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
+    "hooks": {
+      "SessionStart": [
+        {
+          "matcher": "^compact$",
+          "hooks": [
+            {
+              "type": "command",
+              "command": "PATH=\"$HOME/.local/bin:$HOME/.bun/bin:$PATH\" exec \"$HOME/.local/bin/agent-bus\" compact-context --runtime codex",
+              "timeout": 5
+            }
+          ]
+        }
+      ]
+    }
   }
 }
