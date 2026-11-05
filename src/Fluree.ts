@@ -665,7 +665,7 @@ export const layerFluree = (config: FlureeConfig) =>
             if (id !== instance) return yield* replaced();
             const head = at ?? (yield* guardedHead);
             // The complete history through the ordinary query, uncapped as every presence read
-            // has been, pinned at the cut: valid history of any size must not fail ownership.
+            // has been, pinned at the cut: no application byte cap, so a complete result or a failure.
             const rows = yield* query({
               from: `${config.ledger}@t:${head}`,
               select: ["?m", "?from", "?json", "?t"],
