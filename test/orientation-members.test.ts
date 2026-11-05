@@ -13,8 +13,9 @@ import * as Cursors from "../src/Cursors.ts";
 import { CATALOGUE_VERSION, history, orientationAssociations } from "../src/catalogue.ts";
 import { Message, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
-import { Ledger, messageIri, revisionIri, scopeIri } from "../src/Ledger.ts";
+import { Ledger, messageIri, revisionIri, scopeIri, witnessIri } from "../src/Ledger.ts";
 import { updateBulletin } from "../src/Orientation.ts";
+import { canonicalJson } from "../src/orientation-model.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
@@ -162,6 +163,21 @@ const fixture = () => {
               ],
             ];
           if (subject === messageIri(notice)) return [[JSON.stringify(notification)]];
+          if (subject === witnessIri(revision))
+            return [
+              [
+                canonicalJson({
+                  action: "replace",
+                  scope: { kind: "directory", directory: current },
+                  expected: null,
+                  directory: directoryRecord(current, currentT < 15).directory,
+                  audience: ["reader"],
+                  publisher: "publisher",
+                }),
+                revision,
+                messageIri(notice),
+              ],
+            ];
           if (query.select !== undefined && JSON.stringify(query.select) === '["?predicate"]')
             return [];
           if (JSON.stringify(query.selectDistinct) === '["?m"]')
@@ -481,7 +497,14 @@ const testRealPresenceDamage = async (damage: "missing-json" | "missing-id") => 
               scope: { kind: "directory", directory: "project" },
               expected: null,
               operation: revision,
-              intent: "fixture",
+              intent: canonicalJson({
+                action: "replace",
+                scope: { kind: "directory", directory: "project" },
+                expected: null,
+                directory: directoryRecord("project").directory,
+                audience: ["reader"],
+                publisher: "publisher",
+              }),
               record: JSON.stringify(directoryRecord("project")),
               notification: new Message(notification),
             })

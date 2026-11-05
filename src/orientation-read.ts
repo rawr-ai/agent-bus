@@ -1,14 +1,15 @@
 import { Context, Effect, Schema } from "effect";
 import { LedgerError, MessageJson } from "./domain.ts";
-import { type DesignationScope, messageIri, revisionIri, scopeIri } from "./Ledger.ts";
+import { type DesignationScope, messageIri, revisionIri, scopeIri, witnessIri } from "./Ledger.ts";
 import {
   BULLETIN_BODY_BYTES,
   type BulletinRecord,
   BulletinRecord as BulletinRecordSchema,
-  type BulletinScope,
+  BulletinScope,
   bulletinFits,
   canonicalJson,
   DIRECTORY_METADATA_BYTES,
+  Directory,
   type DirectoryRecord,
   DirectoryRecord as DirectoryRecordSchema,
   jsonBytes,
@@ -47,6 +48,71 @@ const StoredRecord = Schema.fromJsonString(
 );
 const decodeRecord = Schema.decodeUnknownEffect(StoredRecord, { onExcessProperty: "error" });
 const validOperation = Schema.is(OperationId);
+const WitnessRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.String]));
+const Intent = Schema.Union([
+  Schema.Struct({
+    action: Schema.Literal("replace"),
+    scope: Schema.Struct({ kind: Schema.Literal("directory"), directory: Schema.String }),
+    expected: Schema.NullOr(OperationId),
+    directory: Directory,
+    audience: Schema.Array(Schema.String),
+    publisher: Schema.String,
+  }),
+  Schema.Struct({
+    action: Schema.Literals(["publish", "withdraw"]),
+    scope: BulletinScope,
+    expected: Schema.NullOr(OperationId),
+    publisher: Schema.String,
+    body: Schema.optionalKey(Schema.String),
+    expiresAt: Schema.optionalKey(Schema.String),
+    audience: Schema.Union([
+      Schema.Struct({ previous: Schema.Literal(true) }),
+      Schema.Struct({ programme: Schema.Literal(true) }),
+      Schema.Struct({
+        concernTopic: Schema.Literal(true),
+        recipients: Schema.Array(Schema.String),
+      }),
+    ]),
+  }),
+]);
+const decodeIntent = Schema.decodeUnknownEffect(Schema.fromJsonString(Intent), {
+  onExcessProperty: "error",
+});
+
+const agrees = (record: RecordValue, intent: typeof Intent.Type) => {
+  if (record.publisher !== intent.publisher) return false;
+  if (record.kind === "directory") {
+    return (
+      intent.action === "replace" &&
+      canonicalJson(intent.scope) ===
+        canonicalJson({ kind: "directory", directory: record.directory.id }) &&
+      canonicalJson(intent.directory) === canonicalJson(record.directory) &&
+      canonicalJson(intent.audience) === canonicalJson(record.audience)
+    );
+  }
+  if (
+    intent.action === "replace" ||
+    intent.action !== record.action ||
+    canonicalJson(intent.scope) !== canonicalJson(record.scope) ||
+    intent.body !== record.body ||
+    intent.expiresAt !== record.expiresAt
+  )
+    return false;
+  if (intent.action === "withdraw") return "previous" in intent.audience;
+  if (record.scope.kind === "programme") {
+    return (
+      "programme" in intent.audience && canonicalJson(record.audience) === canonicalJson(["*"])
+    );
+  }
+  if (!("concernTopic" in intent.audience)) return false;
+  const topics = record.audience.filter((entry) => entry.startsWith("#"));
+  const direct = record.audience.filter((entry) => !entry.startsWith("#"));
+  return (
+    topics.length === 1 &&
+    !direct.includes("*") &&
+    canonicalJson(direct) === canonicalJson(intent.audience.recipients)
+  );
+};
 
 /** Read the current pointer once, refusing a partially damaged scope instead of guessing absence. */
 const pointerAt = (gateway: Gateway, t: number, scope: DesignationScope) =>
@@ -137,6 +203,37 @@ export const revisionAt = (
     if (notification !== messageIri(record.notification) || !utcInstant(record.publishedAt)) {
       return yield* damaged();
     }
+    const witnesses = yield* gateway
+      .jsonld(t, {
+        select: ["?intent", "?revision", "?notification"],
+        where: {
+          "@id": witnessIri(revision),
+          "@type": "bus:OrientationWitness",
+          "bus:intent": "?intent",
+          "bus:revision": "?revision",
+          "bus:notification": "?notification",
+        },
+      })
+      .pipe(
+        Effect.flatMap((rows) =>
+          Schema.decodeUnknownEffect(WitnessRows)(rows).pipe(Effect.mapError(damaged))
+        )
+      );
+    if (witnesses.length !== 1) return yield* damaged();
+    const [intentJson, witnessRevision, witnessNotification] = witnesses[0] ?? [];
+    if (
+      intentJson === undefined ||
+      witnessRevision !== revision ||
+      witnessNotification !== notification
+    )
+      return yield* damaged();
+    const intent = yield* decodeIntent(intentJson).pipe(Effect.mapError(damaged));
+    if (
+      canonicalJson(intent) !== intentJson ||
+      (intent.expected !== null && intent.expected !== intent.expected.toLowerCase()) ||
+      !agrees(record, intent)
+    )
+      return yield* damaged();
     const messages = yield* gateway
       .jsonld(t, {
         select: ["?json"],

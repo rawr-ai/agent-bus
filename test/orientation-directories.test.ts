@@ -5,7 +5,8 @@ import { TestClock } from "effect/testing";
 import { listing, orientationDirectories } from "../src/catalogue.ts";
 import { Message } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
-import { Ledger, messageIri, revisionIri, scopeIri } from "../src/Ledger.ts";
+import { Ledger, messageIri, revisionIri, scopeIri, witnessIri } from "../src/Ledger.ts";
+import { canonicalJson } from "../src/orientation-model.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
 
@@ -34,6 +35,15 @@ const record = (id: string, alias: string) =>
     publishedAt: ts,
     notification: notice,
     audience: ["reader"],
+  });
+const intent = (id: string, alias: string) =>
+  canonicalJson({
+    action: "replace",
+    scope: { kind: "directory", directory: id },
+    expected: null,
+    directory: directory(id, alias),
+    audience: ["reader"],
+    publisher: "publisher",
   });
 
 const fixture = (
@@ -102,6 +112,8 @@ const fixture = (
             if (damage[current] === "notice-multiple") return [[notification], [notification]];
             return [[notification]];
           }
+          if (subject === witnessIri(revision))
+            return [[intent(current, entries.get(current) ?? ""), revision, messageIri(notice)]];
           return [];
         }),
     })
@@ -265,7 +277,7 @@ test("file-backed Fluree validates and discovers a current directory through the
           scope: { kind: "directory", directory: "project" },
           expected: null,
           operation: revision,
-          intent: "fixture",
+          intent: intent("project", "/repo"),
           record: record("project", "/repo"),
           notification: message,
         })

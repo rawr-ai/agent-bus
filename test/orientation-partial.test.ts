@@ -2,13 +2,14 @@ import { expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
 import { MAX_ENVELOPE_BYTES } from "../src/catalogue.ts";
 import { LedgerError } from "../src/domain.ts";
-import { messageIri, revisionIri, scopeIri } from "../src/Ledger.ts";
+import { messageIri, revisionIri, scopeIri, witnessIri } from "../src/Ledger.ts";
 import { orient } from "../src/OrientationView.ts";
 import {
   BULLETIN_BODY_BYTES,
   BULLETIN_UNIT_BYTES,
   type BulletinRecord,
   bulletinView,
+  canonicalJson,
   DIRECTORY_BYTES,
   jsonBytes,
 } from "../src/orientation-model.ts";
@@ -149,6 +150,27 @@ const fixture = (mode: Mode) => {
             ];
           if (subject === messageIri(programmeNotice))
             return [[notice(programmeNotice, selectedProgramme.publisher)]];
+          if (subject === witnessIri(programmeRevision))
+            return [
+              [
+                canonicalJson({
+                  action: selectedProgramme.action,
+                  scope: programmeScope,
+                  expected: null,
+                  publisher: selectedProgramme.publisher,
+                  ...(selectedProgramme.body === undefined ? {} : { body: selectedProgramme.body }),
+                  ...(selectedProgramme.expiresAt === undefined
+                    ? {}
+                    : { expiresAt: selectedProgramme.expiresAt }),
+                  audience:
+                    selectedProgramme.action === "withdraw"
+                      ? { previous: true }
+                      : { programme: true },
+                }),
+                programmeRevision,
+                messageIri(programmeNotice),
+              ],
+            ];
           for (const entry of directories) {
             if (subject === scopeIri(entry.scope))
               return predicates ? [] : [["directory", entry.id, null, entry.revision]];
@@ -161,6 +183,21 @@ const fixture = (mode: Mode) => {
                 ],
               ];
             if (subject === messageIri(entry.notification)) return [[notice(entry.notification)]];
+            if (subject === witnessIri(entry.revision))
+              return [
+                [
+                  canonicalJson({
+                    action: "replace",
+                    scope: entry.scope,
+                    expected: null,
+                    directory: entry.record.directory,
+                    audience: ["*"],
+                    publisher: "director",
+                  }),
+                  entry.revision,
+                  messageIri(entry.notification),
+                ],
+              ];
           }
           if (
             mode === "summary-fault" &&
