@@ -10,6 +10,7 @@ import * as Cursors from "./Cursors.ts";
 import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
 import { defaultCodex, localHost } from "./codex.ts";
+import { compactRecovery, readCompactInput } from "./compact.ts";
 import { Association, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import * as Ledger from "./Ledger.ts";
@@ -320,6 +321,24 @@ const claudeWakeHook = Command.make("claude-wake", {}, () =>
   )
 );
 
+const compactContext = Command.make(
+  "compact-context",
+  { runtime: Flag.Literals("runtime", ["claude", "codex"]) },
+  ({ runtime }) =>
+    Effect.gen(function* () {
+      const context = yield* compactRecovery(
+        runtime,
+        readCompactInput(() => Bun.stdin.stream()),
+        endpoint
+      );
+      if (Option.isSome(context)) yield* Console.log(context.value);
+    })
+).pipe(
+  Command.withDescription(
+    "The plugin's synchronous compact hook: recover held addresses and the current-guidance route, without changing bus state"
+  )
+);
+
 const fail = (error: { readonly message: string }) =>
   Console.error(error.message).pipe(
     Effect.andThen(
@@ -331,7 +350,15 @@ const fail = (error: { readonly message: string }) =>
 
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
-  Command.withSubcommands([serve, joinCommand, orientCommand, publish, peers, claudeWakeHook])
+  Command.withSubcommands([
+    serve,
+    joinCommand,
+    orientCommand,
+    publish,
+    peers,
+    claudeWakeHook,
+    compactContext,
+  ])
 );
 
 Command.run(cli, { version: VERSION }).pipe(

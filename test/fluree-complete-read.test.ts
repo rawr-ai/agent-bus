@@ -6,6 +6,7 @@ import * as Bus from "../src/Bus.ts";
 import { Cursors } from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
+import { ownedAddresses } from "../src/mcp.ts";
 
 const valid = (id: string, to = ["codex/a"]) =>
   JSON.stringify({
@@ -325,6 +326,7 @@ describe("complete Fluree reads", () => {
               f.set({ head: 19, entries: [], presences: [...presences] });
               expectSafe(yield* Effect.flip(ledger.presence), t);
               expectSafe(yield* Effect.flip(bus.peers), t);
+              expectSafe(yield* Effect.flip(ownedAddresses("owner", "codex")), t);
               expectSafe(yield* Effect.flip(bus.take("codex/a", "owner")), t);
               expectSafe(
                 yield* Effect.flip(

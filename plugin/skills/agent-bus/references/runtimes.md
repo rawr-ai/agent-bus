@@ -4,6 +4,8 @@ What differs between a Claude Code session and a Codex thread on the bus: where 
 
 ## At a glance
 
+The native plugins have a separate synchronous compact hook that supplies held-address context and a route to current guidance even with no unread mail. It never reads an inbox or rejoins. Use only your assigned address, not every holding of a shared session id. Read-only `bus_owned_addresses` can recover the same observation explicitly; `bus_orient` reads current guidance with your absolute `cwd`. The Claude async wake remains independent. Child-session compact delivery is not established.
+
 | | Claude Code | Codex |
 | --- | --- | --- |
 | Session id | `$CLAUDE_CODE_SESSION_ID` | `$CODEX_THREAD_ID`, also passed as `codexThreadId` |

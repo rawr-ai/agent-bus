@@ -8,6 +8,16 @@
   "hooks": {
     "SessionStart": [
       {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PATH=\"$HOME/.local/bin:$HOME/.bun/bin:$PATH\" exec \"$HOME/.local/bin/agent-bus\" compact-context --runtime claude",
+            "timeout": 5
+          }
+        ]
+      },
+      {
         "hooks": [
           {
             "type": "command",
