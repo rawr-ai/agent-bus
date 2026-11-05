@@ -415,7 +415,7 @@ export const layer = Layer.effect(
 
     const unconfirmed = (operation: "join" | "leave", address: string) =>
       new LedgerError({
-        message: `The bus could not confirm whether this ${operation} of ${address} was recorded: it may have committed, and nothing was undone. Check bus_peers before calling again: it shows whether ${address} is listed under your session.`,
+        message: `The bus could not confirm whether this ${operation} of ${address} was recorded: it may or may not have committed, and nothing was undone. Calling it again is safe, since the bus decides against the address's current state, but that result doesn't show what this attempt did.`,
       });
 
     /**
