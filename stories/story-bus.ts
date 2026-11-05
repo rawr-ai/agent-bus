@@ -144,12 +144,14 @@ export type StoryMute =
   | { readonly scope: "concern"; readonly directory: string; readonly concern: string };
 
 /** The fields an older serve, before reachable inactivity, never sends. */
-const ACTIVITY_KEYS = new Set(["activity", "activeSince", "mutes"]);
+const ACTIVITY_KEYS = new Set(["activity", "activityReason", "activeSince", "mutes"]);
 
 /** A current peer with the activity the serve folded for it; by default active and unmuted. */
 export interface StoryPeer {
   readonly address: string;
   readonly activity?: "active" | "inactive" | "unknown";
+  /** Why activity is unknown; the serve sends it only beside unknown. */
+  readonly activityReason?: "damaged-log" | "damaged-mail" | "incomplete-scan";
   readonly activeSince?: string;
   readonly mutes?: ReadonlyArray<StoryMute>;
 }

@@ -236,6 +236,10 @@ export const fakeCodex = () => {
     openQueue,
     daemon,
     waiting: (thread: string) => (items.get(thread) ?? []).map(({ text }) => text),
+    /** The thread runs its waiting items as turns, reading nothing: whatever was queued has gone. */
+    ran: (thread: string) => items.set(thread, []),
+    /** Every item added so far, across threads: a new nudge is one more. */
+    adds: () => added,
   };
 };
 

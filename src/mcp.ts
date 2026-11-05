@@ -12,6 +12,7 @@ import {
   search as searchQuery,
 } from "./catalogue.ts";
 import {
+  ACTIVITY_REASONS,
   Association,
   InvalidAssociations,
   InvalidQuery,
@@ -187,6 +188,12 @@ export const ActivityResult = Schema.Struct({
   ),
   activeSince: Schema.optionalKey(
     Schema.String.annotate({ description: "With APPLIED: when it became active, if it is." })
+  ),
+  activityReason: Schema.optionalKey(
+    Schema.Literals(ACTIVITY_REASONS).annotate({
+      description:
+        "With APPLIED and unknown activity only: damaged-log, damaged-mail or incomplete-scan.",
+    })
   ),
   mutes: Schema.optionalKey(
     Schema.Array(MuteScope).annotate({ description: "With APPLIED: the mutes in force at cut." })
@@ -396,7 +403,9 @@ const SetActivity = Tool.make("bus_activity", {
   }),
   success: ActivityResult,
   failure: Failure,
-}).annotateMerge(Local);
+})
+  .annotateMerge(Local)
+  .annotate(Tool.Strict, true);
 
 const Directory = Tool.make("bus_directory", {
   description:

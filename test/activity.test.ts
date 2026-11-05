@@ -4,12 +4,18 @@
 // sentinel that makes "rang nothing" an observation rather than a timeout.
 import { describe, expect, test } from "bun:test";
 import { hostname } from "node:os";
-import { Effect, Layer, Option } from "effect";
+import { join } from "node:path";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { deliverOnce, type Holds } from "../src/codex.ts";
+import { activityAt, type Standing } from "../src/domain.ts";
 import * as Ledger from "../src/Ledger.ts";
+import * as ServeHttp from "../src/serve.ts";
 import {
   act,
   activityOf,
@@ -660,6 +666,128 @@ describe("reachable inactivity: Codex delivery", () => {
         expect(holds.get(codexAddress)?.refused).toBe(true);
       })
     ));
+
+  // Wake coverage (rules 5, 10, 17, 18): a nudge covers the eligible mail it was posted for and
+  // the read position it saw. Each attempt below first lets any waiting nudge run (`ran`), so a
+  // new add is observable; the test clock never reaches a reconcile unless a test advances it,
+  // so an add is a new nudge, not the schedule.
+  const pierced = (body: string) => say(sender, ["*"], body, { pierce: [codexAddress] });
+  /** Whether one deliverer pass added a nudge, after the previous one ran without reading. */
+  const nudged = (
+    codex: { ran: (thread: string) => unknown; adds: () => number },
+    deliver: Effect.Effect<void, unknown, Bus.Bus>
+  ) =>
+    Effect.gen(function* () {
+      codex.ran(thread);
+      const before = codex.adds();
+      yield* deliver;
+      return codex.adds() > before;
+    });
+
+  test("wake coverage, case 1: reactivation nudges once for ambient mail held back between two pierces", () =>
+    run(
+      Effect.gen(function* () {
+        const codex = yield* setup;
+        applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
+        yield* pierced("A");
+        yield* say(sender, ["*"], "B");
+        yield* pierced("C");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        applied(yield* act(codexAddress, { activity: "active", session: thread }));
+        // B was never covered: one new nudge, then nothing.
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        expect(bodies(yield* takeAll(codexAddress, thread))).toEqual(["A", "B", "C"]);
+      })
+    ));
+
+  test("wake coverage, case 2: going inactive with nothing new posts no nudge", () =>
+    run(
+      Effect.gen(function* () {
+        const codex = yield* setup;
+        yield* say(sender, ["*"], "A");
+        yield* say(sender, [codexAddress], "B");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
+        // Eligible mail shrinks to B, which was covered: not news.
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        expect(bodies(yield* takeAll(codexAddress, thread))).toEqual(["A", "B"]);
+      })
+    ));
+
+  test("wake coverage, case 2: reactivating after a pass while inactive posts no nudge", () =>
+    run(
+      Effect.gen(function* () {
+        const codex = yield* setup;
+        yield* say(sender, ["*"], "A");
+        yield* say(sender, [codexAddress], "B");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
+        // Whatever this pass does (case 2's shrink, asserted above), it is not asserted here.
+        yield* nudged(codex, codex.deliver);
+        applied(yield* act(codexAddress, { activity: "active", session: thread }));
+        // A and B were both covered by the first nudge.
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        expect(bodies(yield* takeAll(codexAddress, thread))).toEqual(["A", "B"]);
+      })
+    ));
+
+  test("wake coverage, rule 10: a shrink of eligible mail at a due reconcile keeps the schedule", () =>
+    run(
+      Effect.gen(function* () {
+        const codex = yield* setup;
+        yield* say(sender, ["*"], "A");
+        yield* say(sender, [codexAddress], "B");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        yield* TestClock.adjust("5 minutes");
+        applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
+        // Due: the first reconcile re-posts the nudge that has gone.
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        // The next is 15 minutes after it, not 5: the shrink was the same mail, not new mail.
+        yield* TestClock.adjust("5 minutes");
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        yield* TestClock.adjust("9 minutes");
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        yield* TestClock.adjust("1 minute");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+      })
+    ));
+
+  test("wake coverage pins: new mail and a partial read nudge, unchanged mail does not, a takeover starts over", () =>
+    run(
+      Effect.gen(function* () {
+        const bus = yield* Bus.Bus;
+        const codex = yield* setup;
+        applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
+        yield* pierced("A");
+        yield* say(sender, ["*"], "B");
+        yield* pierced("C");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        // Mail left unread with nothing new.
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        // New eligible mail.
+        yield* pierced("D");
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        // A partial read leaving eligible mail it was already nudged for (C, D) nudges again.
+        expect(bodies(yield* bus.take(codexAddress, thread, 1))).toEqual(["A"]);
+        expect(yield* nudged(codex, codex.deliver)).toBe(true);
+        expect(yield* nudged(codex, codex.deliver)).toBe(false);
+        // A takeover starts a new run, woken afresh in the successor's thread.
+        const holder = (yield* bus.peers).find((peer) => peer.address === codexAddress);
+        yield* bus.join({
+          address: codexAddress,
+          runtime: "codex",
+          session: "t-2",
+          codexThreadId: "t-2",
+          cwd: process.cwd(),
+          takeover: holder?.joinId,
+        });
+        yield* codex.deliver;
+        expect(codex.waiting("t-2").length).toBe(1);
+        expect(bodies(yield* takeAll(codexAddress, "t-2"))).toEqual(["B", "C", "D"]);
+      })
+    ));
 });
 
 // DRA pin: explicit reactivation rings once for eligible unread mail its join's last wake mark
@@ -719,3 +847,322 @@ for (const backend of backends) {
     );
   });
 }
+
+// Wake coverage (rules 5, 17 and 18, with O4's eligible subset): a ring covers the eligible mail it
+// rang for, the read position it saw and the join. Eligible mail rings only when it holds mail not
+// yet rung for, or the owner has read since, or the join changed, or a compact asks afresh. A
+// shrink of the eligible set is never news. On the JSONL delivery double only.
+{
+  const jsonlBackend = backends.find((each) => each.name === "jsonl");
+  if (jsonlBackend === undefined) throw new Error("no JSONL backend");
+  const run = (effect: Parameters<Serve["run"]>[0]) => within(jsonlBackend.open, effect);
+  const pierced = (body: string) => say(y, ["*"], body, { pierce: [x] });
+
+  /** x inactive with pierced A, ambient B held back and pierced C, and one ring for them. */
+  const heldBetweenPierces = Effect.gen(function* () {
+    yield* joinAs(x);
+    yield* withSentinel(x, y);
+    yield* takeAll(x);
+    applied(yield* act(x, { activity: "inactive" }));
+    yield* pierced("A");
+    yield* say(y, ["*"], "B");
+    yield* pierced("C");
+    expect(yield* rung(x, y)).toContain(x);
+    expect(yield* rung(x, y)).not.toContain(x);
+  });
+
+  /** x active with ambient A and direct B, rung once for both. */
+  const wokenForBoth = Effect.gen(function* () {
+    yield* joinAs(x);
+    yield* withSentinel(x, y);
+    yield* takeAll(x);
+    yield* say(y, ["*"], "A");
+    yield* say(y, [x], "B");
+    expect(yield* rung(x, y)).toContain(x);
+  });
+
+  describe("wake coverage: Claude wake (jsonl)", () => {
+    test(
+      "case 1: reactivation rings once for ambient mail held back between two pierces",
+      () =>
+        run(
+          Effect.gen(function* () {
+            yield* heldBetweenPierces;
+            applied(yield* act(x, { activity: "active" }));
+            expect(yield* rung(x, y)).toContain(x);
+            expect(yield* rung(x, y)).not.toContain(x);
+            expect(bodies(yield* takeAll(x))).toEqual(["A", "B", "C"]);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "case 2: going inactive with nothing new rings nothing",
+      () =>
+        run(
+          Effect.gen(function* () {
+            yield* wokenForBoth;
+            applied(yield* act(x, { activity: "inactive" }));
+            expect(yield* rung(x, y)).not.toContain(x);
+            expect(bodies(yield* takeAll(x))).toEqual(["A", "B"]);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "case 2: reactivating after a pass while inactive rings nothing",
+      () =>
+        run(
+          Effect.gen(function* () {
+            yield* wokenForBoth;
+            applied(yield* act(x, { activity: "inactive" }));
+            // Whatever this pass does (the shrink, asserted above), it is not asserted here.
+            yield* rung(x, y);
+            applied(yield* act(x, { activity: "active" }));
+            expect(yield* rung(x, y)).not.toContain(x);
+            expect(bodies(yield* takeAll(x))).toEqual(["A", "B"]);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "pin: new eligible mail rings; held-back mail and unchanged mail do not",
+      () =>
+        run(
+          Effect.gen(function* () {
+            yield* heldBetweenPierces;
+            yield* say(y, ["*"], "held");
+            expect(yield* rung(x, y)).not.toContain(x);
+            yield* pierced("D");
+            expect(yield* rung(x, y)).toContain(x);
+            expect(yield* rung(x, y)).not.toContain(x);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "pin: a partial read leaving eligible mail already rung for rings again, once",
+      () =>
+        run(
+          Effect.gen(function* () {
+            const bus = yield* Bus.Bus;
+            yield* heldBetweenPierces;
+            expect(bodies(yield* bus.take(x, sid(x), 1))).toEqual(["A"]);
+            // C was rung for, but the owner has read since.
+            expect(yield* rung(x, y)).toContain(x);
+            expect(yield* rung(x, y)).not.toContain(x);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "pin: reading only held-back mail is a read too, so eligible mail already rung for rings again",
+      () =>
+        run(
+          Effect.gen(function* () {
+            const bus = yield* Bus.Bus;
+            yield* heldBetweenPierces;
+            expect(bodies(yield* bus.take(x, sid(x), 1))).toEqual(["A"]);
+            expect(yield* rung(x, y)).toContain(x);
+            // B was held back and never rung for; reading it leaves C, already rung for.
+            expect(bodies(yield* bus.take(x, sid(x), 1))).toEqual(["B"]);
+            expect(yield* rung(x, y)).toContain(x);
+            expect(yield* rung(x, y)).not.toContain(x);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "pin: a rejoin rings again for eligible mail already rung for, and a takeover rings its new owner",
+      () =>
+        run(
+          Effect.gen(function* () {
+            const bus = yield* Bus.Bus;
+            yield* heldBetweenPierces;
+            yield* joinAs(x);
+            expect(yield* rung(x, y)).toContain(x);
+            expect(yield* rung(x, y)).not.toContain(x);
+            const holder = (yield* bus.peers).find((peer) => peer.address === x);
+            const successor = "session:successor";
+            yield* bus.join({
+              address: x,
+              runtime: "claude",
+              session: successor,
+              cwd: process.cwd(),
+              takeover: holder?.joinId,
+            });
+            expect((yield* bus.wake(successor, 5)).addresses).toEqual([x]);
+            expect(bodies(yield* takeAll(x, successor))).toEqual(["A", "B", "C"]);
+          })
+        ),
+      TIMEOUT
+    );
+
+    test(
+      "pin: a fresh compact pass rings unchanged mail; an ordinary pass after it does not",
+      () =>
+        run(
+          Effect.gen(function* () {
+            yield* heldBetweenPierces;
+            expect(yield* rung(x, y, true)).toContain(x);
+            expect(yield* rung(x, y)).not.toContain(x);
+            expect(bodies(yield* takeAll(x))).toEqual(["A", "B", "C"]);
+          })
+        ),
+      TIMEOUT
+    );
+  });
+}
+
+// bus_activity is a strict MCP tool, like bus_directory and bus_bulletin: an excess key at any
+// level is refused at the boundary rather than dropped, so a malformed mute is never narrowed or
+// widened into another scope. Driven by the official SDK client over the in-process HTTP layer
+// on the JSONL double, where commands share the ledger file: an unchanged end means nothing
+// was written.
+describe("bus_activity over MCP: strict input (jsonl)", () => {
+  const mutes = [{ scope: "topic", topic: "review" }];
+
+  /** x joined, and made inactive with mutes by a valid bus_activity call, served over MCP. */
+  const overMcp = async (
+    check: (tools: {
+      readonly call: (args: Record<string, unknown>) => Promise<CallToolResult>;
+      readonly runtime: ManagedRuntime.ManagedRuntime<Bus.Bus | Ledger.Ledger, unknown>;
+    }) => Promise<void>
+  ) => {
+    const dir = tempDir();
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const port = Number(probe.url.port);
+    probe.stop(true);
+    const runtime = ManagedRuntime.make(
+      ServeHttp.layerHttp({ port, version: "test" }).pipe(
+        Layer.provideMerge(busOn(jsonlStore(join(dir, "ledger.jsonl")), dir))
+      )
+    );
+    const client = new Client({ name: "activity-strict-test", version: "1" });
+    try {
+      await runtime.runPromise(joinAs(x));
+      await client.connect(
+        new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
+      );
+      await client.listTools();
+      const call = (args: Record<string, unknown>) =>
+        client.callTool({
+          name: "bus_activity",
+          arguments: { address: x, session: sid(x), ...args },
+        }) as Promise<CallToolResult>;
+      const valid = await call({ operation: uuid(), activity: "inactive", mutes });
+      expect(valid.isError).not.toBe(true);
+      expect(valid.structuredContent).toMatchObject({ status: "APPLIED", activity: "inactive" });
+      await check({ call, runtime });
+    } finally {
+      await client.close();
+      await runtime.dispose();
+    }
+  };
+
+  test(
+    "a valid call applies, and its activity and mutes read back",
+    () =>
+      overMcp(async ({ runtime }) => {
+        expect(await runtime.runPromise(activityOf(x, [topic("review")]))).toBe("inactive");
+        const kept = plain(await runtime.runPromise(act(x, { activity: "inactive" })));
+        expect(sortedMutes(kept.mutes)).toEqual(sortedMutes(mutes));
+      }),
+    TIMEOUT
+  );
+
+  const cases: Array<[string, Record<string, unknown>]> = [
+    ["a programme mute with a topic", { mutes: [{ scope: "programme", topic: "review" }] }],
+    [
+      "a directory mute with a concern",
+      { mutes: [{ scope: "directory", directory: "opa", concern: "ux" }] },
+    ],
+    ["an unknown top-level key", { mutes: [], note: "not a field" }],
+  ];
+  for (const [name, extra] of cases) {
+    test(
+      `${name} is refused and writes nothing`,
+      () =>
+        overMcp(async ({ call, runtime }) => {
+          const operation = uuid();
+          const head = await runtime.runPromise(end);
+          // Refused: a tool error or a protocol error, either way not a receipt.
+          const outcome = await call({ operation, activity: "active", ...extra }).then(
+            (result) => (result.isError === true ? "refused" : plain(result.structuredContent)),
+            () => "refused"
+          );
+          expect(outcome).toBe("refused");
+          expect(await runtime.runPromise(end)).toBe(head);
+          const command = await runtime.runPromise(
+            Effect.flatMap(Ledger.Ledger, (ledger) => ledger.readCommand(operation))
+          );
+          expect(command.status).toBe("ABSENT");
+          // Read back: a mute-only restatement reports the activity, then an activity-only
+          // restatement reports the mutes, both as the valid call left them.
+          expect(await runtime.runPromise(activityOf(x, [topic("review")]))).toBe("inactive");
+          const kept = plain(await runtime.runPromise(act(x, { activity: "inactive" })));
+          expect(sortedMutes(kept.mutes)).toEqual(sortedMutes(mutes));
+        }),
+      TIMEOUT
+    );
+  }
+});
+
+// Unknown activity names why (activityReason): damage in the address's own log, an unreadable
+// direct candidate after the inactive anchor, or a candidate scan that hit its cap or did not
+// complete. It is present only when activity is unknown. Damage is read first, as the fold does.
+describe("activity reason", () => {
+  const standing = (value: "active" | "inactive", damaged = false): Standing => ({
+    holder: undefined,
+    anchor: { value, t: 1, ts: value === "active" ? "" : "2026-01-01T00:00:00Z" },
+    mutes: [],
+    damaged,
+    verdicts: new Map(),
+  });
+  const scan = (extra: { damaged?: boolean; complete?: boolean; found?: boolean } = {}) => ({
+    damaged: extra.damaged ?? false,
+    complete: extra.complete ?? true,
+    ...(extra.found === true ? { found: { ts: "2026-01-02T00:00:00Z", t: 2 } } : {}),
+  });
+
+  test("unknown carries exactly one of the three reasons", () => {
+    const reason = (...args: Parameters<typeof activityAt>) => plain(activityAt(...args));
+    expect(reason(standing("inactive", true), undefined)).toEqual({
+      activity: "unknown",
+      activityReason: "damaged-log",
+    });
+    expect(reason(standing("active", true), undefined)).toMatchObject({
+      activity: "unknown",
+      activityReason: "damaged-log",
+    });
+    expect(reason(standing("inactive"), scan({ damaged: true }))).toEqual({
+      activity: "unknown",
+      activityReason: "damaged-mail",
+    });
+    expect(reason(standing("inactive"), scan({ complete: false }))).toEqual({
+      activity: "unknown",
+      activityReason: "incomplete-scan",
+    });
+    // A scan that never ran did not complete.
+    expect(reason(standing("inactive"), undefined)).toEqual({
+      activity: "unknown",
+      activityReason: "incomplete-scan",
+    });
+  });
+
+  test("active and inactive never carry a reason", () => {
+    for (const [name, result] of [
+      ["active", activityAt(standing("active"), undefined)],
+      ["inactive", activityAt(standing("inactive"), scan())],
+      ["reactivated", activityAt(standing("inactive"), scan({ found: true }))],
+    ] as const) {
+      expect({ name, has: Object.hasOwn(result, "activityReason") }).toEqual({ name, has: false });
+    }
+  });
+});

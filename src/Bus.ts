@@ -16,6 +16,7 @@ import {
 import { Cursors } from "./Cursors.ts";
 import {
   type Activity,
+  type ActivityReason,
   ActivityValue,
   type AddressCommand,
   AddressCommandJson,
@@ -124,6 +125,7 @@ export type ActivityResult =
       readonly cut: Pin;
       readonly activity: Activity;
       readonly activeSince?: string;
+      readonly activityReason?: ActivityReason;
       readonly mutes: ReadonlyArray<MuteScope>;
     }
   | {
@@ -137,11 +139,47 @@ export type ActivityResult =
 
 type PublishError = LedgerError | NotJoined | NotOwner | InvalidQuery;
 
-/** A subscriber as it is under its address's lock, and its unread messages. */
+/**
+ * A subscriber as it is under its address's lock, and its unread messages that may wake it, with
+ * what a wake needs to tell new mail from mail it already rang for: the ids of all the
+ * subscriber's unread mail, held back or not, and its read position.
+ */
 export interface Pending {
   readonly subscriber: Subscriber;
   readonly messages: ReadonlyArray<Message>;
+  readonly unread: ReadonlyArray<string>;
+  readonly cursor: number;
 }
+
+/** What a wake rang for: the eligible mail, while it stays unread, and the read position then. */
+export interface Coverage {
+  readonly rung: ReadonlyArray<string>;
+  readonly cursor: number;
+}
+
+/**
+ * Whether a wake's eligible mail is news against what an earlier wake of the same join rang for,
+ * and the coverage it moves to. News is eligible mail not yet rung for, or a read since: a partial
+ * read rings again. Held-back mail becoming eligible rings once; suppression shrinking the
+ * eligible set never rings, and mail rung for doesn't ring again when it becomes eligible again.
+ * Coverage keeps only unread mail, so it stays bounded by the unread mail.
+ */
+export const cover = (
+  covered: Coverage | undefined,
+  { messages, unread, cursor }: Pending
+): { readonly news: boolean; readonly coverage: Coverage } => {
+  const rung = new Set(covered?.rung);
+  const news =
+    covered === undefined ||
+    covered.cursor !== cursor ||
+    messages.some((message) => !rung.has(message.id));
+  const still = new Set(unread);
+  for (const message of messages) rung.add(message.id);
+  return {
+    news,
+    coverage: { rung: [...rung].filter((id) => still.has(id)), cursor },
+  };
+};
 
 /** What a session's wake wait found. */
 export interface Woken {
@@ -310,10 +348,10 @@ const associationsOf = (value: ReadonlyArray<Association>) =>
 const sessionHelp =
   "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients.";
 
-/** What an address's owner was last woken for: its join, and its unread mail, first to newest. */
+/** What an address's owner was last woken for: its join, and the mail that wake covered. */
 export interface Mark {
   readonly joinId: string;
-  readonly unread: string;
+  readonly coverage: Coverage;
 }
 
 /** An address's mark as a wake read it under the address's lock, and the mark it would move to. */
@@ -321,6 +359,8 @@ export interface Moved {
   readonly address: string;
   readonly previous: Mark | undefined;
   readonly mark: Mark;
+  /** Whether the mail is news against `previous` (see `cover`). */
+  readonly news: boolean;
 }
 
 /**
@@ -339,9 +379,7 @@ export const commitMarks = (
   for (const read of found) {
     const { address, previous, mark } = read;
     if (woken.get(address) !== previous) continue;
-    if (!fresh && previous?.joinId === mark.joinId && previous.unread === mark.unread) {
-      continue;
-    }
+    if (!fresh && !read.news) continue;
     moved.push(read);
     woken.set(address, mark);
     addresses.push(address);
@@ -1011,6 +1049,7 @@ export const layer = Layer.effect(
           subscriber,
           entries,
           messages: entries.map((entry) => entry.message),
+          from: cursor.value,
           next,
         });
         for (const entry of slice.entries) {
@@ -1032,10 +1071,17 @@ export const layer = Layer.effect(
         // A peer that left since the deliverer listed peers has nothing to nudge.
         const subscriber = yield* peer(address);
         if (subscriber === undefined) return undefined;
-        const { entries, next } = yield* pending(address, Effect.succeed(subscriber));
+        const { entries, from, next } = yield* pending(address, Effect.succeed(subscriber));
         if (entries.length > 0) {
           const eligible = yield* eligibleOf(subscriber, entries, next);
-          if (eligible.length > 0) return yield* nudge({ subscriber, messages: eligible });
+          if (eligible.length > 0) {
+            return yield* nudge({
+              subscriber,
+              messages: eligible,
+              unread: entries.map((entry) => entry.message.id),
+              cursor: from,
+            });
+          }
           // Suppressed: nothing wakes it, and its unread mail stays unread and unacknowledged.
           return undefined;
         }
@@ -1126,22 +1172,23 @@ export const layer = Layer.effect(
             counted.add(peer.address);
             seenOf(peer.address).waits += 1;
           }
-          const unread = yield* deliver(peer.address, ({ subscriber, messages }) =>
-            Effect.succeed(
-              eligible(subscriber)
-                ? {
-                    address: subscriber.address,
-                    // The mark as it was under the lock: if it has moved by the commit (another
-                    // owner's wake, after a takeover), this reading is stale and is dropped.
-                    previous: woken.get(subscriber.address),
-                    mark: {
-                      joinId: subscriber.joinId,
-                      unread: `${messages[0]?.id}..${messages.at(-1)?.id}`,
-                    },
-                  }
-                : undefined
-            )
-          ).pipe(
+          const unread = yield* deliver(peer.address, (found) => {
+            const { subscriber } = found;
+            if (!eligible(subscriber)) return Effect.succeed(undefined);
+            // The mark as it was under the lock: if it has moved by the commit (another
+            // owner's wake, after a takeover), this reading is stale and is dropped.
+            const previous = woken.get(subscriber.address);
+            const { news, coverage } = cover(
+              previous?.joinId === subscriber.joinId ? previous.coverage : undefined,
+              found
+            );
+            return Effect.succeed({
+              address: subscriber.address,
+              previous,
+              mark: { joinId: subscriber.joinId, coverage },
+              news,
+            });
+          }).pipe(
             // A join from this machine without a cursor (a replaced ledger, say), or a failing read,
             // leaves this address for a later pass rather than holding up the others.
             Effect.catchTags({

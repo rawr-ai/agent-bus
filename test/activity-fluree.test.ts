@@ -549,6 +549,8 @@ describe("legacy readers and rollback", () => {
   );
 });
 
+// Each unknown names why (activityReason): damage in its own log, or an unreadable direct
+// candidate after its inactive anchor. A capped scan is pinned at activityAt (activity.test.ts).
 describe("unknown activity", () => {
   /** x joined and inactive on a fresh ledger, with a sentinel and sender. */
   const inactive = async (track: <T>(resource: T, close: () => unknown) => T, name: string) => {
@@ -581,7 +583,10 @@ describe("unknown activity", () => {
           })
         );
         await a.run(say(y, [x], "later direct"));
-        expect(await peerRow(a, x)).toMatchObject({ activity: "unknown" });
+        expect(await peerRow(a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
         await a.run(takeAll(x));
         await a.run(say(y, ["*"], "ambient"));
         expect(await a.run(rung(x, y))).toContain(x);
@@ -595,7 +600,10 @@ describe("unknown activity", () => {
       scoped(async (track) => {
         const { config, a } = await inactive(track, "unknown-undecodable");
         await insertRaw(config, rawCommand(uuid(), "{not json"));
-        expect(await peerRow(a, x)).toMatchObject({ activity: "unknown" });
+        expect(await peerRow(a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
       }),
     TIMEOUT
   );
@@ -615,7 +623,10 @@ describe("unknown activity", () => {
           "bus:to": ["*"],
           "bus:json": "{damaged",
         });
-        expect(await peerRow(a, x)).toMatchObject({ activity: "unknown" });
+        expect(await peerRow(a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-log",
+        });
 
         const other = await inactive(track, "unknown-candidate");
         const candidate = uuid();
@@ -628,7 +639,10 @@ describe("unknown activity", () => {
           "bus:to": [x],
           "bus:json": "{damaged",
         });
-        expect(await peerRow(other.a, x)).toMatchObject({ activity: "unknown" });
+        expect(await peerRow(other.a, x)).toMatchObject({
+          activity: "unknown",
+          activityReason: "damaged-mail",
+        });
       }),
     TIMEOUT
   );

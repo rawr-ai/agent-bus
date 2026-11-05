@@ -902,6 +902,74 @@ describe("peer activity projection", () => {
   });
 });
 
+// Unknown activity names why (src/catalogue.ts PeerRow activityReason). The viewer passes the
+// reason on only beside "unknown", invents none, and withholds a row whose reason it cannot read
+// or that names a reason for a known activity, as it withholds other malformed rows.
+describe("peer activity reason projection", () => {
+  const REASONS = ["damaged-log", "damaged-mail", "incomplete-scan"] as const;
+  const strictPeers = Schema.decodeUnknownExit(PeersObservationSchema);
+
+  test("each of the three reasons passes through beside unknown", () => {
+    const result = projectPeers(
+      peerPages(
+        REASONS.map((reason) =>
+          peer(`agent/${reason}`, { activity: "unknown", activityReason: reason, mutes: [] })
+        )
+      ),
+      AT
+    );
+    expect(result.peers).toStrictEqual(
+      REASONS.map((reason) => ({
+        address: `agent/${reason}`,
+        runtime: "other",
+        topics: [],
+        activity: "unknown",
+        activityReason: reason,
+        mutes: [],
+      }))
+    );
+    expect(result.omitted).toBe(0);
+    expect(strictPeers(result, { onExcessProperty: "error" })._tag).toBe("Success");
+  });
+
+  test("an absent reason stays absent: unknown is never given one", () => {
+    const result = projectPeers(
+      peerPages([peer("agent/unread", { activity: "unknown", mutes: [] })]),
+      AT
+    );
+    expect(result.peers).toStrictEqual([
+      { address: "agent/unread", runtime: "other", topics: [], activity: "unknown", mutes: [] },
+    ]);
+    expect(result.omitted).toBe(0);
+  });
+
+  const invalid: Array<[string, Record<string, unknown>]> = [
+    ["a reason outside the three values", { activity: "unknown", activityReason: "damaged" }],
+    ["a reason in another case", { activity: "unknown", activityReason: "Damaged-log" }],
+    ["a reason of another type", { activity: "unknown", activityReason: 1 }],
+    ["a null reason", { activity: "unknown", activityReason: null }],
+    ["a reason present but undefined", { activity: "unknown", activityReason: undefined }],
+    ["a reason carrying private text", { activity: "unknown", activityReason: MARK }],
+    ["a reason beside active", { activity: "active", activityReason: "damaged-log" }],
+    ["a reason beside inactive", { activity: "inactive", activityReason: "damaged-mail" }],
+    ["a reason with no activity", { activityReason: "incomplete-scan" }],
+  ];
+  for (const [name, extra] of invalid) {
+    test(`omits a peer with ${name}`, () => {
+      const result = projectPeers(
+        peerPages([
+          peer("bad", { mutes: [], ...extra }),
+          peer("good", { activity: "unknown", activityReason: "damaged-log", mutes: [] }),
+        ]),
+        AT
+      );
+      expect(result.peers.map((p) => p.address)).toStrictEqual(["good"]);
+      expect(result.omitted).toBe(1);
+      expect(JSON.stringify(result)).not.toContain(MARK);
+    });
+  }
+});
+
 describe("thread projection", () => {
   const request = { id: "root", ledger: LEDGER, t: SNAPSHOT_T };
   const tree = (rows: unknown[], extra: Record<string, unknown> = {}) => [

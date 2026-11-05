@@ -3,6 +3,7 @@ import { isAbsolute } from "node:path";
 import { Effect, Option, Schema } from "effect";
 import { activitiesAt, type Shown } from "./activity-read.ts";
 import {
+  ACTIVITY_REASONS,
   Association,
   canonicalAssociations,
   InvalidQuery,
@@ -156,6 +157,12 @@ const activityFields = {
       description: "When it became active: its reset, its last activation or reactivating mail.",
     })
   ),
+  activityReason: Schema.optionalKey(
+    Schema.Literals(ACTIVITY_REASONS).annotate({
+      description:
+        "With unknown only, why: damaged-log (an unreadable entry in its own log), damaged-mail (an unreadable direct message after it went inactive) or incomplete-scan (the direct-mail scan hit its cap or did not complete).",
+    })
+  ),
   mutes: Schema.Array(MuteScope).annotate({
     description: "The scopes whose ambient mail does not wake it; [] when none.",
   }),
@@ -164,6 +171,7 @@ const activityFields = {
 const shownFields = (shown: Shown | undefined) => ({
   activity: shown?.activity ?? "unknown",
   ...optionalKey("activeSince", shown?.activeSince),
+  ...optionalKey("activityReason", shown?.activityReason),
   mutes: [...(shown?.mutes ?? [])],
 });
 
@@ -206,6 +214,7 @@ export const OrientationAssociationRow = Schema.Struct({
   // Activity belongs to the full projection: membership keeps only the association relation.
   activity: Schema.optionalKey(activityFields.activity),
   activeSince: activityFields.activeSince,
+  activityReason: activityFields.activityReason,
   mutes: Schema.optionalKey(activityFields.mutes),
   association: Association.annotate({
     description: "The complete explicit association for this directory.",

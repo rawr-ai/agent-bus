@@ -1,6 +1,7 @@
 import { type Context, Effect, Option, Schema } from "effect";
 import {
   type Activity,
+  type ActivityReason,
   AddressCommandJson,
   activityAt,
   type DirectScan,
@@ -189,6 +190,8 @@ export const directAt = (gateway: Gateway, address: string, after: number, t: nu
 export interface Shown {
   readonly activity: Activity;
   readonly activeSince?: string;
+  /** With unknown only: why. */
+  readonly activityReason?: ActivityReason;
   readonly mutes: ReadonlyArray<MuteScope>;
 }
 

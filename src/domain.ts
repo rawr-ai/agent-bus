@@ -439,6 +439,19 @@ export interface DirectScan {
 
 export type Activity = "active" | "inactive" | "unknown";
 
+/**
+ * Why activity is unknown: an unreadable entry in the address's own log, an unreadable direct
+ * candidate after the inactive anchor, or a candidate scan that hit its cap or never completed.
+ */
+export const ACTIVITY_REASONS = ["damaged-log", "damaged-mail", "incomplete-scan"] as const;
+export type ActivityReason = (typeof ACTIVITY_REASONS)[number];
+
+/** Activity at a cut; a reason accompanies unknown, and only unknown. */
+export type ActivityAt =
+  | { readonly activity: "active"; readonly activeSince?: string }
+  | { readonly activity: "inactive" }
+  | { readonly activity: "unknown"; readonly activityReason: ActivityReason };
+
 /** Whether activity at a cut depends on direct mail after the anchor. */
 export const needsScan = (standing: Standing) =>
   !standing.damaged && standing.anchor.value === "inactive";
@@ -447,17 +460,18 @@ export const needsScan = (standing: Standing) =>
  * Activity at a cut ("Activity at a cut"): damage first, then the anchor, then the first
  * qualifying direct message after it; a damaged candidate or an incomplete scan is unknown.
  */
-export const activityAt = (
-  standing: Standing,
-  scan: DirectScan | undefined
-): { readonly activity: Activity; readonly activeSince?: string } => {
-  if (standing.damaged) return { activity: "unknown" };
+export const activityAt = (standing: Standing, scan: DirectScan | undefined): ActivityAt => {
+  if (standing.damaged) return { activity: "unknown", activityReason: "damaged-log" };
   if (standing.anchor.value === "active") {
     return standing.anchor.ts === ""
       ? { activity: "active" }
       : { activity: "active", activeSince: standing.anchor.ts };
   }
   if (scan?.found !== undefined) return { activity: "active", activeSince: scan.found.ts };
-  if (scan === undefined || scan.damaged || !scan.complete) return { activity: "unknown" };
+  // Damage found is the more specific reason, so it wins over a capped scan.
+  if (scan?.damaged === true) return { activity: "unknown", activityReason: "damaged-mail" };
+  if (scan === undefined || !scan.complete) {
+    return { activity: "unknown", activityReason: "incomplete-scan" };
+  }
   return { activity: "inactive" };
 };

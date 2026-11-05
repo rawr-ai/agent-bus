@@ -278,9 +278,9 @@ const ACTIVITY_TEXT = ["Inactive", "Activity unknown", "Muted"] as const;
 const MUTED_TOPIC = "review‮";
 
 /**
- * The serve's folded activity is shown as read-only text: inactive and unknown peers say so,
- * muted scopes are listed in the row's order, and an active peer or an older serve's peer shows
- * nothing extra. Every peer stays listed.
+ * The serve's folded activity is shown as read-only text: inactive and unknown peers say so, an
+ * unknown peer with the reason its serve sent, muted scopes are listed in the row's order, and an
+ * active peer or an older serve's peer shows nothing extra. Every peer stays listed.
  */
 export const PeerActivityShownReadOnly: Story = {
   beforeEach: () => {
@@ -289,6 +289,9 @@ export const PeerActivityShownReadOnly: Story = {
       "agent/on",
       { address: "agent/away", activity: "inactive", activeSince: "2026-01-01T08:00:00Z" },
       { address: "agent/unread", activity: "unknown" },
+      { address: "agent/log", activity: "unknown", activityReason: "damaged-log" },
+      { address: "agent/mail", activity: "unknown", activityReason: "damaged-mail" },
+      { address: "agent/scan", activity: "unknown", activityReason: "incomplete-scan" },
       {
         address: "agent/quiet",
         activity: "active",
@@ -314,10 +317,23 @@ export const PeerActivityShownReadOnly: Story = {
         });
     };
     await userEvent.click(canvas.getByRole("button", { name: "Current peers" }));
-    await waitFor(() => expect(canvasElement.querySelectorAll(".peer-row")).toHaveLength(4));
+    await waitFor(() => expect(canvasElement.querySelectorAll(".peer-row")).toHaveLength(7));
 
     await shows("agent/away", ["Inactive"]);
     await shows("agent/unread", ["Activity unknown"]);
+    // Unknown says why, as text after the label; with no reason sent, the label stands alone.
+    await expect(textOf("agent/unread")).not.toContain("Activity unknown:");
+    for (const [address, shown] of [
+      ["agent/log", "Activity unknown: damaged log"],
+      ["agent/mail", "Activity unknown: damaged mail"],
+      ["agent/scan", "Activity unknown: incomplete scan"],
+    ] as const) {
+      await shows(address, ["Activity unknown"]);
+      await expect({ address, shown: textOf(address).includes(shown) }).toEqual({
+        address,
+        shown: true,
+      });
+    }
     await shows("agent/quiet", ["Muted"]);
     await shows("agent/on", []);
     // Each scope as text after the label, in the row's own order, the topic escaped.

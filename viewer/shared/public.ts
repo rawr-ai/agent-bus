@@ -64,6 +64,7 @@ export const PublicMessageSchema = Schema.Struct({
 export type PublicMessage = typeof PublicMessageSchema.Type;
 
 const ACTIVITIES = ["active", "inactive", "unknown"] as const;
+const ACTIVITY_REASONS = ["damaged-log", "damaged-mail", "incomplete-scan"] as const;
 
 // The serve's mute scopes (src/domain.ts MuteScope); ids are checked for shape only, since the
 // serve already checked them.
@@ -79,7 +80,8 @@ export const PublicMuteSchema = Schema.Union([
 ]);
 export type PublicMute = typeof PublicMuteSchema.Type;
 
-// activity, activeSince and mutes are absent from an older serve's rows, and stay absent here.
+// activity, activeSince, activityReason and mutes are absent from an older serve's rows, and stay
+// absent here. A reason accompanies unknown activity only.
 export const PublicPeerSchema = Schema.Struct({
   address: Schema.String,
   runtime: Schema.Literals(RUNTIMES),
@@ -88,6 +90,7 @@ export const PublicPeerSchema = Schema.Struct({
   note: OptionalText,
   activity: Schema.optionalKey(Schema.Literals(ACTIVITIES)),
   activeSince: OptionalText,
+  activityReason: Schema.optionalKey(Schema.Literals(ACTIVITY_REASONS)),
   mutes: Schema.optionalKey(Schema.mutable(Schema.Array(PublicMuteSchema))),
 });
 export type PublicPeer = typeof PublicPeerSchema.Type;
@@ -390,6 +393,13 @@ const optionalActivity = (record: Raw): (typeof ACTIVITIES)[number] | undefined 
   return ACTIVITIES.find((candidate) => candidate === value) ?? null;
 };
 
+// undefined: key absent; null: key present with anything but one of the three reasons.
+const optionalReason = (record: Raw): (typeof ACTIVITY_REASONS)[number] | undefined | null => {
+  if (!Object.hasOwn(record, "activityReason")) return undefined;
+  const value = record.activityReason;
+  return ACTIVITY_REASONS.find((candidate) => candidate === value) ?? null;
+};
+
 const toPeer = (raw: unknown): PublicPeer | undefined => {
   if (!isRecord(raw)) return undefined;
   const address = text(raw, "address");
@@ -400,6 +410,7 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
   const note = optionalText(raw, "note");
   const activity = optionalActivity(raw);
   const activeSince = optionalText(raw, "activeSince");
+  const activityReason = optionalReason(raw);
   const mutes = optionalMutes(raw);
   if (
     address === undefined ||
@@ -410,6 +421,8 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
     note === null ||
     activity === null ||
     activeSince === null ||
+    activityReason === null ||
+    (activityReason !== undefined && activity !== "unknown") ||
     mutes === null
   ) {
     return undefined;
@@ -422,6 +435,7 @@ const toPeer = (raw: unknown): PublicPeer | undefined => {
     ...(note === undefined ? {} : { note }),
     ...(activity === undefined ? {} : { activity }),
     ...(activeSince === undefined ? {} : { activeSince }),
+    ...(activityReason === undefined ? {} : { activityReason }),
     ...(mutes === undefined ? {} : { mutes }),
   };
 };

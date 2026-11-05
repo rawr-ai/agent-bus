@@ -8,6 +8,18 @@ const ACTIVITY_LABEL: Partial<Record<NonNullable<PublicPeer["activity"]>, string
   unknown: "Activity unknown",
 };
 
+const REASON_TEXT: Record<NonNullable<PublicPeer["activityReason"]>, string> = {
+  "damaged-log": "damaged log",
+  "damaged-mail": "damaged mail",
+  "incomplete-scan": "incomplete scan",
+};
+
+const activityText = (peer: PublicPeer): string | undefined => {
+  const label = peer.activity && ACTIVITY_LABEL[peer.activity];
+  if (label === undefined) return undefined;
+  return peer.activityReason ? `${label}: ${REASON_TEXT[peer.activityReason]}` : label;
+};
+
 const muteText = (mute: PublicMute): string => {
   switch (mute.scope) {
     case "programme":
@@ -65,9 +77,7 @@ export function PeerList({
                 · <Text value={peer.host} />
               </>
             )}
-            {peer.activity && ACTIVITY_LABEL[peer.activity] && (
-              <> · {ACTIVITY_LABEL[peer.activity]}</>
-            )}
+            {activityText(peer) && <> · {activityText(peer)}</>}
           </div>
           {peer.topics.length > 0 && (
             <div className="peer-topics">
