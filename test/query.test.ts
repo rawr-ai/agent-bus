@@ -223,6 +223,18 @@ describe("catalogue", () => {
       expect(page.unit).toBe(operation.unit);
       expect(page.note).toBe(operation.note);
     }
+    // Search's scoring is not fixed by t, so what an agent reads about it must not promise a
+    // stable ranked traversal. The note returned with every page is the one compared above.
+    const listed = (listing.operations as Array<Json>).find(
+      (operation) => operation.name === "search"
+    );
+    expect({
+      note: listed?.note.includes("stable ordering across pages is not guaranteed"),
+      repeatsOrOmits: listed?.note.includes("offset pages can repeat or omit matches"),
+      score: listed?.row.properties.score.description.includes(
+        "the score can differ on a later evaluation at the same t"
+      ),
+    }).toEqual({ note: true, repeatsOrOmits: true, score: true });
     expect(listing.raw.tool).toBe("bus_query");
     expect(await bus.refused("bus_run_query", { name: "nonsense" })).toContain("name");
     expect(

@@ -26,7 +26,7 @@ Both are presets over saved queries at the current head. They report no snapshot
 | The same, within one conversation | `{"query": "rollback", "participant": "<address>"}` |
 
 - **`participant` matches exactly,** against the sender or one literal recipient. Mail you got through a topic or `*` shows under `#<topic>` or `*`, not under your address.
-- **`query` is ranked text search** over bodies and subjects, with stemming ("deploy adapters" finds "Deploying the adapter"). Joins and leaves aren't searched. A brand-new ledger's text index can find nothing at first: omit `query` and use `participant` instead.
+- **`query` is ranked text search** over bodies and subjects, with stemming ("deploy adapters" finds "Deploying the adapter"). Joins and leaves aren't searched. A brand-new ledger's text index can find nothing at first: omit `query` and use `participant` instead. Its ranking isn't fixed by a snapshot (see paging below).
 
 These are explicit public fields. They do not sanitize text a sender pasted into a body or note.
 
@@ -48,6 +48,7 @@ Every result is one page read at one commit. Read what it says before concluding
 
 - **t is the snapshot.** Every row was read there; currentHeadT appears when the bus has moved on since.
 - **To page, pass the result's next back as `cursor`** with the same `name` and `args`. The next page reads the same `t`, so mail sent meanwhile neither shifts nor repeats rows. Keep paging until exhausted is true.
+- **Search is the exception.** Its pages read the same messages, but Fluree's scoring isn't fixed by `t`, so the order can change between pages: offset pages can then repeat or omit matches, and exhausted doesn't prove every match was returned. A stable ranked order across pages is intended, not yet guaranteed.
 - **complete is the only claim of a whole answer:** exhausted, with every entry decoded and none damaged. Ranked search and the predicate counts (counts, director-dm-volume) never claim it; their damage is "not-checked" and missingJson is only a lower bound.
 - **damaged and damagedTotal count unreadable entries** passed on this page and so far. Report them rather than treating the answer as whole.
 - **A thread follows replyTo links only.** Related mail sent without a reply link is outside it; pair thread with history when the whole job matters. It runs from the nearest top those links reach at `t`; a reply to an id that isn't an entry at `t` cuts it there, missingReplyTargets lists those ids, and root is then absent.

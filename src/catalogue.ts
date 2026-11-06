@@ -134,7 +134,10 @@ const entryRow = (message: Message, t: number): EntryRow => ({
 
 export const SearchRow = Schema.Struct({
   ...EntryRow.fields,
-  score: Schema.Finite.annotate({ description: "Full-text relevance at t; higher is better." }),
+  score: Schema.Finite.annotate({
+    description:
+      "Full-text relevance for this evaluation; higher is better. Message data is read at t, but the score can differ on a later evaluation at the same t.",
+  }),
 });
 export type SearchRow = typeof SearchRow.Type;
 
@@ -1090,7 +1093,7 @@ export const search = define({
   unit: "ranked match",
   paging: "offset",
   coverage: "ranked",
-  note: "Ranked matches with stemming, best first, ties in commit order; never a complete relation. A new ledger's index can briefly find nothing. Joins and leaves are not searched.",
+  note: "Ranked matches with stemming, best first, ties in commit order; never a complete relation. Messages are read at t, but the scoring statistics are not necessarily fixed by t, so stable ordering across pages is not guaranteed: if relative order changes between pages, offset pages can repeat or omit matches, and exhausted does not prove every match was returned. A new ledger's index can briefly find nothing. Joins and leaves are not searched.",
   Args: SearchArgs,
   Row: SearchRow,
   example: { text: "deploy rollback", limit: 10 },
