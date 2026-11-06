@@ -13,7 +13,7 @@ import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { CATALOGUE_VERSION, operationNames } from "../src/catalogue.ts";
+import { CATALOGUE_VERSION, operationNames, search } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -639,6 +639,7 @@ describe("entries", () => {
       senderOnly: message({ from: a, to: [c], body: "kiwi sender only" }),
       recipientOnly: message({ from: c, to: [b], body: "kiwi recipient only" }),
       bodySubject: message({ from: b, to: [c], body: "kiwi kiwi kiwi body", subject: "kiwi" }),
+      subjectOnly: message({ from: b, to: [a], body: "plain words", subject: "kiwi" }),
       unrelated: message({ from: c, to: ["claude/d"], body: "kiwi unrelated" }),
     };
     await bus.append(...Object.values(clean));
@@ -673,17 +674,15 @@ describe("entries", () => {
       everything = await bus.run("search", { text: "kiwi", limit: 50 });
     }
     expect(everything.rows.length + everything.damaged).toBe(entries);
-    // Scores rest on corpus statistics, so the oracle is the unfiltered ranking at the same t.
+    expect(everything).toMatchObject({ exhausted: true });
+    // Scores rest on corpus statistics, so the oracle is the complete unfiltered ranking at the
+    // same t, narrowed by each decoded row's own sender and recipients.
     const pinned = { t: everything.t };
-    const shown = (rows: ReadonlyArray<Json>) =>
-      rows.map((row) => ({ id: row.id, t: row.t, score: row.score, body: row.body }));
     const narrowedTo = (participants: ReadonlyArray<string>) =>
-      shown(
-        (everything.rows as Array<Json>).filter(
-          (row) =>
-            participants.includes(row.from) ||
-            (row.to as Array<string>).some((to) => participants.includes(to))
-        )
+      (everything.rows as Array<Json>).filter(
+        (row) =>
+          participants.includes(row.from) ||
+          (row.to as Array<string>).some((to) => participants.includes(to))
       );
 
     const cases = [
@@ -696,18 +695,26 @@ describe("entries", () => {
           clean.senderOnly,
           clean.recipientOnly,
           clean.bodySubject,
+          clean.subjectOnly,
           late.inScope,
         ],
         damaged: 3,
       },
       {
         participants: [a],
-        ids: [clean.self, clean.both, clean.senderOnly, late.inScope],
+        ids: [clean.self, clean.both, clean.senderOnly, clean.subjectOnly, late.inScope],
         damaged: 3,
       },
       {
         participants: [b],
-        ids: [clean.both, clean.repeated, clean.recipientOnly, clean.bodySubject, late.inScope],
+        ids: [
+          clean.both,
+          clean.repeated,
+          clean.recipientOnly,
+          clean.bodySubject,
+          clean.subjectOnly,
+          late.inScope,
+        ],
         damaged: 2,
       },
       { participants: ["#t"], ids: [clean.topic], damaged: 1 },
@@ -719,7 +726,7 @@ describe("entries", () => {
         { text: "kiwi", participants: expected.participants, limit: 50 },
         pinned
       );
-      expect(shown(page.rows)).toEqual(narrowedTo(expected.participants));
+      expect(page.rows).toEqual(narrowedTo(expected.participants));
       expect(ids(page.rows).sort()).toEqual(expected.ids.map((m) => m.id).sort());
       expect(page).toMatchObject({ damaged: expected.damaged, exhausted: true, complete: false });
     }
@@ -730,7 +737,7 @@ describe("entries", () => {
       JSON.parse(Buffer.from(cursor.slice(4), "base64url").toString()).p.offset as number;
     for (const limit of [1, 2]) {
       const pages = await bus.all("search", { text: "kiwi", participants: [a, b], limit }, pinned);
-      expect(shown(rowsOf(pages))).toEqual(narrowedTo([a, b]));
+      expect(rowsOf(pages)).toEqual(narrowedTo([a, b]));
       expect(ids(rowsOf(pages))).not.toContain(multi.id);
       expect(pages.map((page) => page.damaged).reduce((x: number, y: number) => x + y, 0)).toBe(3);
       expect(pages.at(-1)).toMatchObject({ damagedTotal: 3, exhausted: true });
@@ -745,54 +752,34 @@ describe("entries", () => {
     }
   });
 
-  test("a participant-filtered search costs no more than the unfiltered search it narrows", async () => {
-    const config = await freshLedger("search-cost");
-    const bus = await startBus(flureeStore(config));
-    // The first append writes the ledger's full-text config; the rest go in two raw batches.
-    await bus.append(message({ from: "claude/a1", to: ["*"], body: "alpha seed" }));
-    const addresses = Array.from({ length: 30 }, (_, k) =>
-      k % 2 === 0 ? `codex/b${k}` : `claude/a${k}`
+  test("search applies a participant filter as an outer union, not a correlated exists", async () => {
+    // A shape guard, not integration proof: a correlated exists after the scoring made Fluree
+    // test every scored row, and on a ledger of a few thousand messages it failed with HTTP 507.
+    const queries: Array<Json> = [];
+    const gateway = QueryGateway.of({
+      pin: Effect.succeed({ head: 1, incarnation: "stub" }),
+      jsonld: (_t, query) =>
+        Effect.sync(() => {
+          queries.push(query);
+          return [];
+        }),
+      sparql: () => Effect.die("unexpected query"),
+    });
+    await Effect.runPromise(
+      search
+        .fetch(
+          { text: "kiwi", participants: ["claude/a"], limit: 5 },
+          { t: 1, position: { offset: 0 } }
+        )
+        .pipe(Effect.provideService(QueryGateway, gateway))
     );
-    const words = "alpha beta gamma delta epsilon zeta eta theta iota kappa".split(" ");
-    const filler = Array.from({ length: 1_000 }, (_, k) =>
-      message({
-        from: addresses[k % 30] as string,
-        to:
-          k % 7 === 0
-            ? ["#coord"]
-            : k % 11 === 0
-              ? [addresses[(k + 3) % 30] as string, addresses[(k + 5) % 30] as string]
-              : [addresses[(k * 13 + 1) % 30] as string],
-        body: Array.from({ length: 40 }, (_, j) => words[(k * 7 + j * 3) % 10]).join(" "),
-      })
-    );
-    for (const batch of [filler.slice(0, 500), filler.slice(500)]) {
-      await insertRaw(config, { "@graph": batch.map((m) => toNode(m, encodeJson(m))) });
-    }
-    const unfiltered = { text: "alpha", limit: 50 };
-    const filtered = { ...unfiltered, participants: ["claude/a1"] };
-    let page = await bus.run("search", unfiltered);
-    for (let attempt = 0; attempt < 50 && page.rows.length < 50; attempt++) {
-      await Bun.sleep(100);
-      page = await bus.run("search", unfiltered);
-    }
-    const pinned = { t: page.t };
-    /** The median of three timed runs after one warm-up, each a full 50-row page. */
-    const timed = async (args: Json) => {
-      await bus.run("search", args, pinned);
-      const runs: Array<number> = [];
-      for (let k = 0; k < 3; k++) {
-        const started = performance.now();
-        const result = await bus.run("search", args, pinned);
-        runs.push(performance.now() - started);
-        expect(result.rows).toHaveLength(50);
-      }
-      return runs.sort((x, y) => x - y)[1] as number;
-    };
-    // Narrowing must not cost more than the search it narrows. A correlated participant check
-    // tested every scored row against every membership: about 12 times the unfiltered search
-    // here, and HTTP 507 on a ledger of a few thousand messages.
-    expect(await timed(filtered)).toBeLessThan(2 * (await timed(unfiltered)));
+    const where = queries[0]?.where as Array<unknown>;
+    expect(where).toContainEqual([
+      "union",
+      { "@id": "?m", "bus:from": "?p" },
+      { "@id": "?m", "bus:to": "?p" },
+    ]);
+    expect(JSON.stringify(where)).not.toContain('"exists"');
   });
 });
 
