@@ -24,6 +24,7 @@ import {
   NotOwner,
   Origin,
   PresenceConflict,
+  QueryCapacity,
   Runtime,
   validSession,
 } from "./domain.ts";
@@ -39,6 +40,12 @@ import {
 } from "./orientation-model.ts";
 import { QueryGateway } from "./Query.ts";
 import { QueryEnvelope } from "./query-envelope.ts";
+import {
+  callScoped,
+  PROCESS_POLICY,
+  RankedSelections,
+  make as selectionStore,
+} from "./RankedSelections.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
 
@@ -52,6 +59,7 @@ const Failure = Schema.Union([
   InvalidTopics,
   InvalidAssociations,
   InvalidQuery,
+  QueryCapacity,
 ]);
 // Numbers are Finite or Int: Schema.Number's JSON Schema also admits "NaN" and "Infinity"
 // strings, and drops the description and bounds clients are shown.
@@ -534,7 +542,7 @@ const History = Tool.make("bus_history", {
     query: Schema.optionalKey(
       Schema.String.annotate({
         description:
-          "Words to search subjects and bodies for; the best matches, by Fluree's current full-text scores, are returned instead of the newest.",
+          "Words to search subjects and bodies for; the best matches, from one evaluation of Fluree's full-text scores, are returned instead of the newest. If too few of the matches one call can rank are readable to reach limit, the call fails rather than return fewer.",
       })
     ),
     participant: Schema.optionalKey(
@@ -600,7 +608,7 @@ const Query = Tool.make("bus_query", {
 }).annotateMerge(Lookup);
 
 const RunQuery = Tool.make("bus_run_query", {
-  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search reads the same data, but its scoring and order across pages can change: see its note). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Results are at most ${MAX_ENVELOPE_BYTES} bytes; whole rows are kept.`,
+  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search continues the ranking of its first page while the bus holds it: see its note and selection). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Results are at most ${MAX_ENVELOPE_BYTES} bytes; whole rows are kept.`,
   parameters: Schema.Struct({
     name: Schema.Literals(operationNames).annotate({ description: "The saved query to run." }),
     args: Schema.optionalKey(
@@ -705,9 +713,11 @@ const publicEntry = (row: EntryRow): typeof PublicMessage.Type => ({
 /**
  * bus_history: without query, history backward from head (the newest window);
  * with query, search's best matches. Either pages at one t until limit, then
- * shows the messages newest last.
+ * shows the messages newest last. A search pages one ranking of its own, held only for this
+ * call and sized to the limit; when that ranking was cut and still yields fewer readable messages
+ * than the limit, the call fails rather than return a short answer as if it were complete.
  */
-const historyPreset = (input: {
+export const historyPreset = (input: {
   readonly query?: string | undefined;
   readonly participant?: string | undefined;
   readonly limit?: number | undefined;
@@ -734,6 +744,11 @@ const historyPreset = (input: {
             );
       rows.push(...page.rows);
       cursor = page.next;
+      if (cursor === undefined && rows.length < wanted && page.selection?.truncated === true) {
+        return yield* new QueryCapacity({
+          message: `The search ranked ${page.selection.entries} matches, the most one call holds, and fewer than ${wanted} of them could be read. Narrow the search or lower limit.`,
+        });
+      }
     } while (cursor !== undefined && rows.length < wanted);
     const kept = rows.slice(0, wanted);
     const ordered =
@@ -742,7 +757,9 @@ const historyPreset = (input: {
         : // Ids are time-ordered UUIDv7s, which break ties between messages sent in the same millisecond.
           kept.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
     return { messages: ordered.map(publicEntry) };
-  });
+  }).pipe(
+    Effect.provideServiceEffect(RankedSelections, callScoped(input.limit ?? DEFAULT_HISTORY_LIMIT))
+  );
 
 /** bus_peers: every page of peers at head, joined addresses only. */
 const peersPreset = Effect.gen(function* () {
@@ -779,8 +796,14 @@ const BusHandlers = BusToolkit.toLayer(
     );
     // One pool for every query operation, presets included.
     const pool = yield* Semaphore.make(QUERY_PERMITS);
-    const queries = <A, E>(effect: Effect.Effect<A, E, QueryGateway>) =>
-      effect.pipe(Effect.provideService(QueryGateway, gateway), pool.withPermits(1));
+    // The rankings that searches page across calls, shared by every session this server serves.
+    const selections = yield* selectionStore(PROCESS_POLICY);
+    const queries = <A, E>(effect: Effect.Effect<A, E, QueryGateway | RankedSelections>) =>
+      effect.pipe(
+        Effect.provideService(QueryGateway, gateway),
+        Effect.provideService(RankedSelections, selections),
+        pool.withPermits(1)
+      );
     const timedOrient = (input: typeof OrientRequest.Type, budget?: number) =>
       queries(orient(input, budget)).pipe(
         Effect.timeoutOrElse({

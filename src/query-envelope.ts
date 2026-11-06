@@ -101,4 +101,20 @@ export const QueryEnvelope = Schema.Struct({
       description: "A lower bound on damaged entries in scope: those with no stored JSON at all.",
     })
   ),
+  selection: Schema.optionalKey(
+    Schema.Struct({
+      entries: Schema.Int.annotate({
+        description: "Entries in this traversal's ranking, evaluated once on its first page.",
+      }),
+      truncated: Schema.Boolean.annotate({
+        description: "Whether matches ranked below those entries were left out of the ranking.",
+      }),
+      expiresAt: Schema.optionalKey(
+        Schema.String.annotate({
+          description:
+            "When the bus stops holding the ranking for this traversal's cursors; present only while one is held.",
+        })
+      ),
+    }).annotate({ description: "Search only: the ranking this traversal pages through." })
+  ),
 });

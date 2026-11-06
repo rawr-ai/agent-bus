@@ -47,6 +47,7 @@ import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import type { QueryGateway } from "../src/Query.ts";
+import * as Selections from "../src/RankedSelections.ts";
 import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
 import { type Supervised, spawnSupervised } from "../test/supervised.ts";
 
@@ -155,7 +156,16 @@ const check = (label: string, ok: boolean, detail = "") => {
 };
 
 const search = (text: string) =>
-  withBus(Catalogue.search.run({ text, limit: 10 }, {}, undefined)).then((page) => page.rows);
+  withBus(
+    Catalogue.search
+      .run({ text, limit: 10 }, {}, undefined)
+      .pipe(
+        Effect.provideServiceEffect(
+          Selections.RankedSelections,
+          Selections.make(Selections.PROCESS_POLICY)
+        )
+      )
+  ).then((page) => page.rows);
 
 /** One history page at `t`, or the page after `cursor`. */
 const historyPage = (input: { readonly t?: number; readonly cursor?: string }) =>

@@ -18,6 +18,7 @@ import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
+import * as Selections from "../src/RankedSelections.ts";
 import * as Serve from "../src/serve.ts";
 import { READABLE_PREDICATES } from "../src/sparql.ts";
 import { boundary, chunked, padded, stallBeforeHeaders, stallMidBody } from "./fluree-boundary.ts";
@@ -223,18 +224,21 @@ describe("catalogue", () => {
       expect(page.unit).toBe(operation.unit);
       expect(page.note).toBe(operation.note);
     }
-    // Search's scoring is not fixed by t, so what an agent reads about it must not promise a
-    // stable ranked traversal. The note returned with every page is the one compared above.
+    // Search's scoring is not fixed by t: what an agent reads says a traversal keeps one ranking,
+    // a new search at the same t may not, and how a kept ranking ends. The note returned with
+    // every page is the one compared above.
     const listed = (listing.operations as Array<Json>).find(
       (operation) => operation.name === "search"
     );
     expect({
-      note: listed?.note.includes("stable ordering across pages is not guaranteed"),
-      repeatsOrOmits: listed?.note.includes("offset pages can repeat or omit matches"),
+      once: listed?.note.includes("The ranking is evaluated once"),
+      newSearch: listed?.note.includes("a new search at the same t can rank differently"),
+      held: listed?.note.includes("held by this bus until selection.expiresAt"),
+      refusedNotShortened: listed?.note.includes("refused rather than shortened"),
       score: listed?.row.properties.score.description.includes(
-        "the score can differ on a later evaluation at the same t"
+        "a new search at the same t can score differently"
       ),
-    }).toEqual({ note: true, repeatsOrOmits: true, score: true });
+    }).toEqual({ once: true, newSearch: true, held: true, refusedNotShortened: true, score: true });
     expect(listing.raw.tool).toBe("bus_query");
     expect(await bus.refused("bus_run_query", { name: "nonsense" })).toContain("name");
     expect(
@@ -639,7 +643,7 @@ describe("entries", () => {
     expect(narrowed.rows).toEqual([]);
   });
 
-  test("participant-filtered search is the unfiltered ranking narrowed to its participants, each stored entry once, paged by stored-copy rows", async () => {
+  test("participant-filtered search is the unfiltered ranking narrowed to its participants, each stored entry once, paged by entries", async () => {
     const config = await freshLedger("search-participants");
     const bus = await startBus(flureeStore(config));
     const [a, b, c] = ["claude/a", "codex/b", "claude/c"];
@@ -743,8 +747,8 @@ describe("entries", () => {
       expect(page).toMatchObject({ damaged: expected.damaged, exhausted: true, complete: false });
     }
 
-    // Paged one or two at a time, the traversal is the same ranking, and the copied entry is
-    // consumed whole: three stored-copy rows, not one per membership or text row.
+    // Paged one or two at a time, the traversal is the same ranking, and positions count entries:
+    // the copied entry is consumed whole, as one damaged item, not one per stored copy or text row.
     const offsetOf = (cursor: string) =>
       JSON.parse(Buffer.from(cursor.slice(4), "base64url").toString()).p.offset as number;
     for (const limit of [1, 2]) {
@@ -759,7 +763,7 @@ describe("entries", () => {
           .map(
             (page, k, paged) => offsetOf(page.next) - (k === 0 ? 0 : offsetOf(paged[k - 1]?.next))
           );
-        expect(steps.filter((step) => step !== 1)).toEqual([3]);
+        expect(steps.filter((step) => step !== 1)).toEqual([]);
       }
     }
   });
@@ -783,7 +787,13 @@ describe("entries", () => {
           { text: "kiwi", participants: ["claude/a"], limit: 5 },
           { t: 1, position: { offset: 0 } }
         )
-        .pipe(Effect.provideService(QueryGateway, gateway))
+        .pipe(
+          Effect.provideService(QueryGateway, gateway),
+          Effect.provideServiceEffect(
+            Selections.RankedSelections,
+            Selections.make(Selections.PROCESS_POLICY)
+          )
+        )
     );
     const where = queries[0]?.where as Array<unknown>;
     expect(where).toContainEqual([
