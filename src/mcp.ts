@@ -534,7 +534,7 @@ const History = Tool.make("bus_history", {
     query: Schema.optionalKey(
       Schema.String.annotate({
         description:
-          "Words to search subjects and bodies for; the best matches are returned instead of the newest.",
+          "Words to search subjects and bodies for; the best matches, by Fluree's current full-text scores, are returned instead of the newest.",
       })
     ),
     participant: Schema.optionalKey(
@@ -600,7 +600,7 @@ const Query = Tool.make("bus_query", {
 }).annotateMerge(Lookup);
 
 const RunQuery = Tool.make("bus_run_query", {
-  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t. exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Results are at most ${MAX_ENVELOPE_BYTES} bytes; whole rows are kept.`,
+  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search reads the same data, but its scoring and order across pages can change: see its note). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Results are at most ${MAX_ENVELOPE_BYTES} bytes; whole rows are kept.`,
   parameters: Schema.Struct({
     name: Schema.Literals(operationNames).annotate({ description: "The saved query to run." }),
     args: Schema.optionalKey(
