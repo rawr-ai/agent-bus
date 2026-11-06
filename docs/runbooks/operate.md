@@ -14,7 +14,7 @@ The commands use the default labels, ports and state directory, and run on the m
 | Codex daemon (not a LaunchAgent: Codex starts it) | none | Any machine with Codex | none (a Unix socket) | `~/.codex/app-server-control/app-server.log` |
 
 - **The plists** are in `~/Library/LaunchAgents/<label>.plist`. Each has `KeepAlive`, so launchd restarts a process that exits, at most every 10 s. `gui/$(id -u)` in the commands is your user's launchd domain.
-- **`serve` is the process sessions depend on.** A restart of it costs at most one extra wake per address, and it forgets which Claude hooks have called until they call again ([topology](../architecture/topology.md#where-state-lives)). Restarting Fluree leaves `serve` running ([Restart `serve`, Fluree or the tunnel](#restart-serve-fluree-or-the-tunnel)).
+- **`serve` is the process sessions depend on.** A restart of it costs at most one extra wake per address, forgets which Claude hooks have called until they call again, and ends every held search ranking, so a search's next page is refused and the search must start again ([topology](../architecture/topology.md#where-state-lives)). Restarting Fluree leaves `serve` running ([Restart `serve`, Fluree or the tunnel](#restart-serve-fluree-or-the-tunnel)).
 - **Every step's expected result ends with its mark** ([runbook shape](../../AGENTS.md#page-shapes)): *Rehearsed* on a disposable instance, *Checked read-only* on the running bus, or *Unverified*.
 - **Don't try changes out on the running bus.** Use [an isolated bus](#run-an-isolated-bus-for-checks).
 

@@ -420,8 +420,11 @@ test("a page trimmed to its byte budget keeps the ranking for the rest", async (
   }
   expect(pages.length).toBeGreaterThan(1);
   expect(pages[0]?.selection?.expiresAt).toBeString();
-  expect(new Set(pages.flatMap((page) => ids(page.rows))).size).toBe(6);
   expect(ledger.evaluations()).toBe(2);
+  // Evaluation 0 sized the budget; the traversal is evaluation 1 exactly, which ranks differently.
+  const traversed = ranked(pages.flatMap((page) => page.rows));
+  expect(traversed).toEqual([...(ledger.orderings[1] ?? [])]);
+  expect(traversed).not.toEqual([...(ledger.orderings[0] ?? [])]);
   await runtime.dispose();
 });
 

@@ -527,6 +527,7 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 
 Frames are indexed in [frames/README](../frames/README.md).
 
+- [search-retained-selection](../frames/search-retained-selection.md): search evaluates its ranking once per traversal and the bus holds it for later pages, with bounded capacity and expiry.
 - [turnaround-query-design](../frames/turnaround-query-design.md): the saved-query catalogue, pinned snapshots and cursors, explicit completeness, and raw SPARQL restored under validation and caps.
 - [public-query-containment](../frames/public-query-containment.md): temporarily withdrew public SPARQL with a fixed refusal; retired by turnaround-query-design.
 - [bus-design-query](../frames/bus-design-query.md): independent public message and peer projection, with upstream error bodies omitted; query evaluation is a separate boundary.

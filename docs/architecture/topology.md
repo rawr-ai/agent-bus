@@ -93,7 +93,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | `fluree-key.json` | Bus host: `~/.agent-bus/fluree-key.json`, mode 0600 | The installer | The key the Fluree server trusts tokens from |
 | The launcher | Each machine: `~/.local/bin/agent-bus` | The installer | Managed executable binding Bun and the checkout's `src/bin.ts`; used by the hook and `serve` |
 | The plugin | Each machine: Claude Code's plugin cache | `claude plugin install` | The manifest, `plugin/.claude-plugin/plugin.json`, and the `agent-bus` skill, `plugin/skills/agent-bus/` |
-| `serve`'s memory | Each machine | `serve` | Two locks per address (one for reads and deliveries, one for ownership and sends); which sessions' hooks have called (`hooked`); each address's last call and open waits; the marks of what each session was last woken for, and each session's current wake wait; and, for Codex peers, the back-off, refused joins, covered mail, logged reason and recorded nudge. Lost on restart, which costs at most one extra wake per address |
+| `serve`'s memory | Each machine | `serve` | Two locks per address (one for reads and deliveries, one for ownership and sends); which sessions' hooks have called (`hooked`); each address's last call and open waits; the marks of what each session was last woken for, and each session's current wake wait; for Codex peers, the back-off, refused joins, covered mail, logged reason and recorded nudge; and the rankings that searches hold for their later pages (each entry's commit, id, score and node names, never message text), each until its 10-minute expiry. Lost on restart, which costs at most one extra wake per address and ends every held search: its cursor is then refused, and the search starts again ([interfaces](interfaces.md#limits)) |
 | Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only lists, adds to and deletes its own nudges from the queue, and reads a thread's record | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
 
 `~/.agent-bus` is `AGENT_BUS_DIR` when that is set, and `serve`'s port is `AGENT_BUS_PORT` (8096 by default).
@@ -105,7 +105,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 3. **Servers listen on loopback only.** Fluree is on `127.0.0.1:8095` and `serve` on `127.0.0.1:8096`. Nothing listens on a network address.
 4. **Another machine reaches Fluree only through an SSH tunnel,** on the same local port, so its `config.json` names the same URL as the bus host's.
 5. **A `serve` wakes only the peers that joined from its own machine.** Each machine's Codex queues and Claude sessions are its own; no wake crosses machines.
-6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail.
+6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail; a held search ranking holds entry ids, scores and node names, and every page reads its messages from the ledger.
 7. **`serve` and the hook use the same managed launcher** and canonical checkout. Source and runtime changes are controlled together at deploy ([deploy](../runbooks/deploy.md)). Already-running hooks retain their loaded code and runtime until they rearm.
 8. **Each ledger instance has its own cursor directory.** The path names the ledger and its first commit ([messaging rule 11](messaging.md#rules) says what follows).
 9. **`serve` won't start without a `config.json` that names a Fluree ledger.** There is no fallback store.
@@ -124,7 +124,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | --- | --- |
 | Unit tests run on a JSONL ledger, plus the Fluree suites when the `fluree` CLI is installed. Fluree is also covered by `bun run qualify:fluree` and live use | **Accepted** |
 | Nothing but the port a `serve` binds keeps a second one off a machine: another `serve` on a different `AGENT_BUS_PORT` against the same ledger would have its own locks and marks | **Known limit** (inferred from the code) |
-| `serve`'s memory is lost on restart, which costs at most one extra wake per address | **Accepted** |
+| `serve`'s memory is lost on restart, which costs at most one extra wake per address and ends held search rankings, whose next pages are then refused | **Accepted** |
 | A deploy changes the code the hook runs at once, and `serve`'s only at its restart | **Known limit** |
 
 ## Rests on
@@ -142,3 +142,4 @@ The frames that made these choices are indexed in [frames](../frames/README.md):
 - [claude-wake](../frames/claude-wake.md) and [finish-swap](../frames/finish-swap.md): the hook, the launcher link and the one-file plugin.
 - [codex-wake](../frames/codex-wake.md): the two Codex app-servers on a machine, and SSH projects.
 - [agent-bus-toolchain-upgrade](../frames/agent-bus-toolchain-upgrade.md): the managed runtime binding and its qualification.
+- [search-retained-selection](../frames/search-retained-selection.md): search rankings held in `serve`'s memory for a traversal's later pages.

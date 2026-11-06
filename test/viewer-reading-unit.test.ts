@@ -14,7 +14,7 @@ import {
   reconcileReadingUnit,
 } from "../viewer/src/reading-unit";
 import { treeLabel, upstreamNotes, windowLabel } from "../viewer/src/snapshot-labels";
-import { busPage, entryRow } from "./bus-pages";
+import { busPage, entryRow, searchRow } from "./bus-pages";
 import { PRESENCE_TREE, presenceTreePage, presenceTreeRows } from "./presence-tree";
 
 const message = (id: string): PublicMessage => ({
@@ -357,6 +357,47 @@ describe("from the bus's pages to the label a reader sees", () => {
   };
   const history = { name: "history", args: { limit: 50 }, ledger: LEDGER, t: T } as const;
   const rows = [row("a", 1), row("b", 2, "a")];
+
+  test("a ranking cut by the bus's bound: its matches only, ranked, never complete", () => {
+    // Two calls of one held ranking, the bus having kept 3 entries and cut the matches below them:
+    // the traversal ends with fewer rows than asked for, which is the end of the ranking, not of
+    // the matches.
+    const search = {
+      name: "search",
+      args: { text: "q", limit: 50 },
+      ledger: LEDGER,
+      t: T,
+    } as const;
+    const hit = (id: string, t: number, score: number) =>
+      searchRow(
+        { id, ts: "opaque time", from: "sender", to: ["#alpha"], kind: "message", body: id },
+        t,
+        score
+      );
+    const selection = { entries: 3, truncated: true };
+    const pages = [
+      busPage({
+        ...search,
+        rows: [hit("c", 3, 9), hit("a", 1, 7)],
+        next: "held",
+        extra: { selection: { ...selection, expiresAt: "2026-11-06T00:10:00.000Z" } },
+      }),
+      busPage({ ...search, rows: [hit("b", 2, 5)], extra: { selection } }),
+    ];
+    expect(pages.at(-1)).toMatchObject({ exhausted: true, complete: false });
+    expect(pages.at(-1)?.next).toBeUndefined();
+    const observation = projectHistory(pages, { limit: 50, query: "q" }, "at");
+    expect(observation.messages.map((m) => m.id)).toEqual(["a", "b", "c"]);
+    expect(observation).toMatchObject({
+      window: "ranked",
+      complete: false,
+      omitted: 0,
+      damaged: 0,
+    });
+    expect(
+      windowLabel(observation.window, observation.snapshot, 3, observation.criteria, 0, 0)
+    ).toBe("Best matches at commit 40; ranked, not complete");
+  });
 
   test("clean and exhausted: all entries, the whole tree", () => {
     expect(window({ ...history, rows })).toBe("All entries at commit 40");

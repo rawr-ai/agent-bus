@@ -5,6 +5,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
@@ -13,6 +16,7 @@ import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
+import { PROCESS_POLICY } from "../src/RankedSelections.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
 import { ObservationReader, ObservationUnavailable, readerLayer } from "../viewer/server/reader.ts";
@@ -41,6 +45,8 @@ const bus = ManagedRuntime.make(
   )
 );
 const reader = ManagedRuntime.make(readerLayer({ busPort }));
+// A direct MCP client, for calls the viewer does not make.
+const direct = new Client({ name: "viewer-reader-bus-test", version: "1" });
 const marker = "private-session-never-observed";
 
 let sent: { root: string; reply: string; other: string };
@@ -82,6 +88,7 @@ beforeAll(async () => {
   );
 });
 afterAll(async () => {
+  await direct.close();
   await reader.dispose();
   await bus.dispose();
   rmSync(dir, { recursive: true, force: true });
@@ -367,20 +374,41 @@ const writeMatches = async (word: string, count: number) => {
   return messages.map((m) => m.id);
 };
 
-/** A text search, retried while a new commit's full-text index can still find nothing. */
-const searchFor = async (query: string, limit: number, expected: number) => {
-  let found = await read((r) => r.history({ limit, query }));
-  for (let attempt = 0; attempt < 50 && found.messages.length < expected; attempt++) {
-    await Bun.sleep(100);
-    found = await read((r) => r.history({ limit, query }));
+const call = async (name: string, args: Record<string, unknown>) => {
+  if (direct.transport === undefined) {
+    await direct.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${busPort}/mcp`))
+    );
   }
-  return found;
+  const result = (await direct.callTool({ name, arguments: args })) as CallToolResult;
+  if (result.isError) throw new Error(`${name} refused`);
+  return result.structuredContent as Record<string, unknown>;
 };
+
+/**
+ * Waits until a new commit's full-text index finds every match, through bus_history, whose
+ * ranking is its own call's and never held by the bus, so waiting leaves no ranking behind.
+ */
+const indexed = async (query: string, expected: number) => {
+  const found = () =>
+    call("bus_history", { query, limit: expected }).then(
+      (result) => (result.messages as ReadonlyArray<unknown>).length
+    );
+  for (let attempt = 0; attempt < 50 && (await found()) < expected; attempt++) {
+    await Bun.sleep(100);
+  }
+  expect(await found()).toBe(expected);
+};
+
+/** Rankings this file's reads have left held by the bus, for the capacity test's exact count. */
+let held = 0;
 
 test("a search over several pages continues the bus's one ranking call by call", async () => {
   // Seven matches of about 20 KB need three calls; each continues the ranking held by the bus.
   const ids = await writeMatches("zebra", 7);
-  const found = await searchFor("zebra", 200, ids.length);
+  await indexed("zebra", ids.length);
+  const found = await read((r) => r.history({ limit: 200, query: "zebra" }));
+  held += 1;
   expect(found.messages.map((message) => message.id).sort()).toEqual(ids);
   expect(found.window).toBe("ranked");
   expect(found.complete).toBe(false);
@@ -389,12 +417,14 @@ test("a search over several pages continues the bus's one ranking call by call",
 // Last in this file: it fills the bus's store of rankings for the rest of its lifetime.
 test("when the bus holds all the rankings it can, a search needing another call is unavailable, and one call still serves", async () => {
   await writeMatches("yak", 7);
-  await searchFor("yak", 2, 2);
-  // Each two-row read of seven matches leaves a ranking held. Earlier reads in this file hold a
-  // few already (how many depends on index retries), so the refusal comes within 128 more.
+  await indexed("yak", 7);
+  // A traversal held before the store fills keeps its ranking after it fills.
+  const first = await call("bus_run_query", { name: "search", args: { text: "yak", limit: 2 } });
+  held += 1;
+  // Each two-row read of seven matches leaves a ranking held, until the store holds all it can.
   let served = 0;
   let refusal: unknown;
-  while (refusal === undefined && served <= 128) {
+  while (refusal === undefined && served <= PROCESS_POLICY.records) {
     refusal = await read((r) => r.history({ limit: 2, query: "yak" })).then(
       () => {
         served += 1;
@@ -404,8 +434,14 @@ test("when the bus holds all the rankings it can, a search needing another call 
     );
   }
   expect(refusal).toBeInstanceOf(ObservationUnavailable);
-  expect(served).toBeGreaterThan(119);
-  expect(served).toBeLessThan(128);
+  expect(served).toBe(PROCESS_POLICY.records - held);
+  const second = await call("bus_run_query", {
+    name: "search",
+    args: { text: "yak", limit: 2 },
+    t: first.t,
+    cursor: first.next,
+  });
+  expect(second.rows).toHaveLength(2);
   const single = await read((r) => r.history({ limit: 200, query: "broadcast" }));
   expect(single.messages.map((message) => message.id)).toEqual([sent.other]);
 });

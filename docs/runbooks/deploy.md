@@ -6,7 +6,7 @@ Use this to put a new version of agent-bus into service: the primary-checkout ru
 
 The primary checkout stays clean and detached at the exact approved deployed commit. It is live source for `serve` and the Claude hook, not a development worktree. Never edit or switch it for development. Graphite owns development and merging; the commands below are the narrow activation and rollback exception. Coordinate with the deployment owner before changing any primary or shared branch metadata.
 
-A source change reaches a newly started hook immediately, but reaches `serve` only on restart; an already-waiting hook retains its loaded code and runtime until it rearms. Restarting `serve` loses its in-memory wake state, not the ledger. Plugin changes require a separate cache refresh ([When the plugin changed](#when-the-plugin-changed)).
+A source change reaches a newly started hook immediately, but reaches `serve` only on restart; an already-waiting hook retains its loaded code and runtime until it rearms. Restarting `serve` loses its in-memory wake state and held search rankings (a search in progress must start again), not the ledger. Plugin changes require a separate cache refresh ([When the plugin changed](#when-the-plugin-changed)).
 
 **Rehearsed 2026-11-02:** the source, frozen-dependency, launcher and launchd transition and complete cohort rollback passed on a disposable same-path installation, including an old waiting hook to the new server and a new waiting hook to the restored server. Configuration, credentials and the Fluree process were unchanged; all owned jobs and processes were removed. A rehearsal alone is not a release decision. The existing [end-to-end check](#check-the-bus-end-to-end) uses a stand-in hook and is not a real session wake.
 
