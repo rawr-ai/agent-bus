@@ -391,10 +391,10 @@ test("when the bus holds all the rankings it can, a search needing another call 
   await writeMatches("yak", 7);
   await searchFor("yak", 2, 2);
   // Each two-row read of seven matches leaves a ranking held. Earlier reads in this file hold a
-  // few already (how many depends on index retries), so the refusal comes within 64 more.
+  // few already (how many depends on index retries), so the refusal comes within 128 more.
   let served = 0;
   let refusal: unknown;
-  while (refusal === undefined && served <= 64) {
+  while (refusal === undefined && served <= 128) {
     refusal = await read((r) => r.history({ limit: 2, query: "yak" })).then(
       () => {
         served += 1;
@@ -404,8 +404,8 @@ test("when the bus holds all the rankings it can, a search needing another call 
     );
   }
   expect(refusal).toBeInstanceOf(ObservationUnavailable);
-  expect(served).toBeGreaterThan(55);
-  expect(served).toBeLessThan(64);
+  expect(served).toBeGreaterThan(119);
+  expect(served).toBeLessThan(128);
   const single = await read((r) => r.history({ limit: 200, query: "broadcast" }));
   expect(single.messages.map((message) => message.id)).toEqual([sent.other]);
 });

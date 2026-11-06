@@ -8,6 +8,8 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
+import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
 import { Context, type Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
@@ -764,6 +766,20 @@ describe("entries", () => {
             (page, k, paged) => offsetOf(page.next) - (k === 0 ? 0 : offsetOf(paged[k - 1]?.next))
           );
         expect(steps.filter((step) => step !== 1)).toEqual([]);
+        // A client still holding the result schema from before selection existed accepts these
+        // pages: the SDK's own validator, given that schema, finds every one valid.
+        const current = bus.tools.find((tool) => tool.name === "bus_run_query")
+          ?.outputSchema as JsonSchemaType;
+        const { selection: _selection, ...before } = current.properties ?? {};
+        const cached = new AjvJsonSchemaValidator().getValidator({
+          ...current,
+          properties: before,
+        });
+        expect(typeof pages[0]?.selection?.expiresAt).toBe("string");
+        const advertised = new AjvJsonSchemaValidator().getValidator(current);
+        expect(pages.map((page) => [cached(page).valid, advertised(page).valid])).toEqual(
+          pages.map(() => [true, true])
+        );
       }
     }
   });

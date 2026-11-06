@@ -62,15 +62,16 @@ export interface Policy {
 }
 
 /**
- * A process's selections: about a quarter of a megabyte each, sixteen megabytes and 64 selections
- * in all.
+ * A process's selections: about a quarter of a megabyte each, 32 megabytes and 128 selections in
+ * all. A viewer refreshing every 15 seconds and abandoning two traversals each time holds 80 at
+ * most, leaving room for others.
  */
 export const PROCESS_POLICY: Policy = {
   entries: 1_000,
   subjects: 2_000,
   bytes: 256 * 1024,
-  totalBytes: 16 * 1024 * 1024,
-  records: 64,
+  totalBytes: 32 * 1024 * 1024,
+  records: 128,
   ttlMillis: 10 * 60 * 1000,
 };
 
@@ -151,7 +152,7 @@ export const make = (policy: Policy) =>
                 const earliest = Math.min(...[...held.values()].map((record) => record.expiresAt));
                 return Effect.fail(
                   new QueryCapacity({
-                    message: `The bus is holding as many ranked searches as it can; this search needs more than one page. Retry after ${new Date(earliest).toISOString()}, or use a larger limit or narrower words.`,
+                    message: `The bus is holding as many ranked searches as it can; this search needs more than one page. Retry after ${new Date(earliest).toISOString()}, or narrow the search.`,
                   })
                 );
               }

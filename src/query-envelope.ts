@@ -104,7 +104,8 @@ export const QueryEnvelope = Schema.Struct({
   selection: Schema.optionalKey(
     Schema.Struct({
       entries: Schema.Int.annotate({
-        description: "Entries in this traversal's ranking, evaluated once on its first page.",
+        description:
+          "Entries retained from this traversal's ranking, evaluated once on its first page.",
       }),
       truncated: Schema.Boolean.annotate({
         description: "Whether matches ranked below those entries were left out of the ranking.",

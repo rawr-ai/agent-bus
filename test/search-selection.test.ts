@@ -1,13 +1,14 @@
 // Search's kept rankings, over a stub gateway whose scores move on every evaluation: the
 // Fluree behaviour that let offset pages repeat or omit matches, made certain.
 import { expect, test } from "bun:test";
-import { Deferred, Effect, Exit, Fiber, Layer, ManagedRuntime, Schema } from "effect";
+import { Clock, Deferred, Effect, Exit, Fiber, Layer, ManagedRuntime, Schema } from "effect";
 import { TestClock } from "effect/testing";
 import { search } from "../src/catalogue.ts";
 import { LedgerError, Message, MessageJson } from "../src/domain.ts";
 import { historyPreset } from "../src/mcp.ts";
 import { QueryGateway } from "../src/Query.ts";
 import {
+  descriptorBytes,
   type Policy,
   PROCESS_POLICY,
   RankedSelections,
@@ -266,6 +267,79 @@ test("the store refuses a selection with more entries than its bound, rather tha
     )
   );
   expect(refused._tag).toBe("QueryCapacity");
+});
+
+test("the process store holds a viewer's abandoned traversals with room to spare, and refuses beyond its bounds", async () => {
+  const runtime = ManagedRuntime.make(TestClock.layer());
+  const store = await runtime.runPromise(selectionStore(PROCESS_POLICY));
+  const start = await runtime.runPromise(Clock.currentTimeMillis);
+  let n = 0;
+  // The largest selection the policy admits: one entry whose accounting is exactly its byte bound.
+  const largest = (extra = 0) => {
+    n += 1;
+    const id = `m${n}`;
+    const subject = "s".repeat(PROCESS_POLICY.bytes - 24 - id.length + extra);
+    return { entries: [{ t: 1, id, score: 1, subjects: [subject] }], truncated: false };
+  };
+  const admit = (selection = largest()) =>
+    runtime.runPromise(
+      Effect.exit(store.admit(selection, { incarnation: "stub", t: 1, hash: "h", size: 1 }))
+    );
+  expect(descriptorBytes(largest().entries)).toBe(PROCESS_POLICY.bytes);
+
+  // A viewer refreshing every 15 seconds for the whole expiry, abandoning two traversals each time.
+  const viewer: Array<boolean> = [];
+  for (let tick = 0; tick < 40; tick += 1) {
+    if (tick > 0) await runtime.runPromise(TestClock.adjust("15 seconds"));
+    for (const _ of [1, 2]) viewer.push(Exit.isSuccess(await admit()));
+  }
+  expect(viewer).toEqual(Array.from({ length: 80 }, () => true));
+  // Room remains for 32 more at once, and from then on each one is refused explicitly.
+  const others: Array<boolean> = [];
+  for (let k = 0; k < 32; k += 1) others.push(Exit.isSuccess(await admit()));
+  expect(others).toEqual(Array.from({ length: 32 }, () => true));
+  let held = 112;
+  while (held <= PROCESS_POLICY.records && Exit.isSuccess(await admit())) held += 1;
+  expect(held).toBe(128);
+  const refused = await runtime.runPromise(
+    Effect.flip(store.admit(largest(), { incarnation: "stub", t: 1, hash: "h", size: 1 }))
+  );
+  expect(refused).toMatchObject({
+    _tag: "QueryCapacity",
+    message: expect.stringContaining(
+      `Retry after ${new Date(start + PROCESS_POLICY.ttlMillis).toISOString()}, or narrow the search.`
+    ),
+  });
+  // One byte over a selection's own bound is refused whatever room there is.
+  await runtime.runPromise(TestClock.adjust("10 minutes"));
+  expect(Exit.isFailure(await admit(largest(1)))).toBe(true);
+  expect(Exit.isSuccess(await admit())).toBe(true);
+  await runtime.dispose();
+});
+
+test("the rolling expiry returns room two at a time as a viewer's oldest traversals end", async () => {
+  const runtime = ManagedRuntime.make(TestClock.layer());
+  const store = await runtime.runPromise(selectionStore(PROCESS_POLICY));
+  const one = (id: string) => ({
+    entries: [
+      { t: 1, id, score: 1, subjects: ["s".repeat(PROCESS_POLICY.bytes - 24 - id.length)] },
+    ],
+    truncated: false,
+  });
+  const admit = (id: string) =>
+    runtime
+      .runPromise(
+        Effect.exit(store.admit(one(id), { incarnation: "stub", t: 1, hash: "h", size: 1 }))
+      )
+      .then(Exit.isSuccess);
+  const results: Array<boolean> = [];
+  for (let tick = 0; tick < 64; tick += 1) {
+    if (tick > 0) await runtime.runPromise(TestClock.adjust("15 seconds"));
+    results.push(await admit(`a${tick}`), await admit(`b${tick}`));
+  }
+  // After the first 40 ticks, two expire as each tick admits two, so the store never fills.
+  expect(results).toEqual(Array.from({ length: 128 }, () => true));
+  await runtime.dispose();
 });
 
 test("a full store refuses a search that needs another page, and still serves one that does not", async () => {
