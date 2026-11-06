@@ -542,7 +542,7 @@ const History = Tool.make("bus_history", {
     query: Schema.optionalKey(
       Schema.String.annotate({
         description:
-          "Words to search subjects and bodies for; the best matches, from one evaluation of Fluree's full-text scores, are returned instead of the newest. If too few of the matches one call can rank are readable to reach limit, the call fails rather than return fewer.",
+          "Words to search subjects and bodies for; the best matches, from one evaluation of Fluree's full-text scores, are returned instead of the newest. If the ranking had to be cut and still yields fewer readable messages than limit, the call fails rather than return fewer; when the matches run out, fewer are returned.",
       })
     ),
     participant: Schema.optionalKey(

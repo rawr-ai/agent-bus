@@ -10,8 +10,9 @@ import { QueryCapacity } from "./domain.ts";
  * Everything else is immutable at `t` and re-read for each page. No message body is kept.
  *
  * A selection that serves more than one call is held by the serving process until its absolute
- * expiry, final page included, so any page it issued can be read again until then. A process
- * restart, expiry or ledger replacement ends it; continuing then means starting a new search.
+ * expiry, final page included, so any cursor it issued can be passed again for the same page until
+ * then; repeating the first request starts a new evaluation. A process restart, expiry or ledger
+ * replacement ends it; continuing then means starting a new search.
  */
 
 /** One entry as the ranking selected it. */
@@ -43,7 +44,7 @@ export interface Binding {
 
 export interface Retained extends Selection, Binding {
   readonly handle: string;
-  /** Epoch milliseconds after which the handle is no longer found. */
+  /** Epoch milliseconds from which the handle is no longer found. */
   readonly expiresAt: number;
 }
 
@@ -177,16 +178,24 @@ export const make = (policy: Policy) =>
   });
 
 /**
+ * The most entries one call-scoped selection keeps, however many a call wants: the ranking query
+ * asks for one more, so no request can make it larger.
+ */
+export const CALL_ENTRIES = 10_000;
+
+/**
  * A store for one call that pages a search to `wanted` matches itself (bus_history): it never
  * outlives the call, so it has no expiry or shared total, and its selection may hold `wanted`
- * entries, within a fixed byte bound.
+ * entries, up to CALL_ENTRIES and within a fixed byte bound.
  */
-export const callScoped = (wanted: number) =>
-  make({
-    entries: Math.max(PROCESS_POLICY.entries, wanted),
-    subjects: 2 * Math.max(PROCESS_POLICY.entries, wanted),
+export const callScoped = (wanted: number) => {
+  const entries = Math.min(Math.max(PROCESS_POLICY.entries, wanted), CALL_ENTRIES);
+  return make({
+    entries,
+    subjects: 2 * entries,
     bytes: CALL_BYTES,
     totalBytes: CALL_BYTES,
     records: 1,
     ttlMillis: Number.POSITIVE_INFINITY,
   });
+};

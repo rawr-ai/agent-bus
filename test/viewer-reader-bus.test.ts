@@ -403,8 +403,10 @@ const indexed = async (query: string, expected: number) => {
 /** Rankings this file's reads have left held by the bus, for the capacity test's exact count. */
 let held = 0;
 
-test("a search over several pages continues the bus's one ranking call by call", async () => {
-  // Seven matches of about 20 KB need three calls; each continues the ranking held by the bus.
+test("a search over several calls returns every match once, as one ranked window", async () => {
+  // Seven matches of about 20 KB need three calls, each continuing the ranking the bus holds. The
+  // viewer shows matches in commit order, so their ranked order is checked against the stub in
+  // test/search-selection.test.ts; here, that every match arrives once.
   const ids = await writeMatches("zebra", 7);
   await indexed("zebra", ids.length);
   const found = await read((r) => r.history({ limit: 200, query: "zebra" }));

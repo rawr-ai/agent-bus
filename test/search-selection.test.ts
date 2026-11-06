@@ -8,6 +8,8 @@ import { LedgerError, Message, MessageJson } from "../src/domain.ts";
 import { historyPreset } from "../src/mcp.ts";
 import { QueryGateway } from "../src/Query.ts";
 import {
+  CALL_ENTRIES,
+  callScoped,
   descriptorBytes,
   type Policy,
   PROCESS_POLICY,
@@ -16,7 +18,7 @@ import {
 } from "../src/RankedSelections.ts";
 
 const encodeJson = Schema.encodeSync(MessageJson);
-const HEAD = 5_000;
+const HEAD = 20_000;
 
 const messageAt = (n: number) =>
   new Message({
@@ -53,12 +55,15 @@ const stubLedger = (
     messages.map((message, k) => [`urn:agent-bus:message:${message.id}`, { message, t: k + 1 }])
   );
   const orderings: Array<ReadonlyArray<Ranked>> = [];
+  /** The row limit each ranking query asked Fluree for. */
+  const rankLimits: Array<number> = [];
   const hydrated: Array<number> = [];
   const gateway = QueryGateway.of({
     pin: Effect.succeed({ head: HEAD, incarnation: "stub" }),
     jsonld: (at, query: Json) => {
       if ((query.select as Array<string> | undefined)?.some((v) => v.includes("collect"))) {
         return Effect.sync(() => {
+          rankLimits.push(query.limit as number);
           const shift = orderings.length;
           const ranked = messages
             .map((message, k) => ({
@@ -103,6 +108,7 @@ const stubLedger = (
     messages,
     orderings,
     evaluations: () => orderings.length,
+    rankLimits,
     hydrated,
   };
 };
@@ -163,7 +169,7 @@ test("a traversal evaluates its ranking once, and limit-1 pages are that ranking
   await runtime.dispose();
 });
 
-test("a kept ranking serves any page it issued, final page included, until it expires", async () => {
+test("a kept ranking serves the page any of its cursors names, final page included, until it expires", async () => {
   const ledger = stubLedger(3);
   const runtime = runtimeOf(ledger.gateway);
   const one = await runtime.runPromise(search.run({ text: "kiwi", limit: 2 }, {}, undefined));
@@ -333,12 +339,17 @@ test("the rolling expiry returns room two at a time as a viewer's oldest travers
       )
       .then(Exit.isSuccess);
   const results: Array<boolean> = [];
-  for (let tick = 0; tick < 64; tick += 1) {
+  // Three expiries' worth: 240 admissions, far more than the store's 128 at once.
+  for (let tick = 0; tick < 120; tick += 1) {
     if (tick > 0) await runtime.runPromise(TestClock.adjust("15 seconds"));
     results.push(await admit(`a${tick}`), await admit(`b${tick}`));
   }
   // After the first 40 ticks, two expire as each tick admits two, so the store never fills.
-  expect(results).toEqual(Array.from({ length: 128 }, () => true));
+  expect(results).toEqual(Array.from({ length: 240 }, () => true));
+  // It holds exactly the last 40 ticks' 80: 48 more fit, and the next is refused.
+  const more: Array<boolean> = [];
+  for (let k = 0; k <= 48; k += 1) more.push(await admit(`c${k}`));
+  expect(more).toEqual([...Array.from({ length: 48 }, () => true), false]);
   await runtime.dispose();
 });
 
@@ -400,6 +411,65 @@ test("bus_history pages one ranking of its own, holds nothing in the process sto
   expect(refused._tag).toBe("QueryCapacity");
   expect(admitted).toEqual([]);
   await shortRuntime.dispose();
+});
+
+test("bus_history ranks at most CALL_ENTRIES however large its limit, and a short answer is only natural exhaustion", async () => {
+  const huge = 1_000_000;
+  const policy = (await Effect.runPromise(callScoped(huge))).policy;
+  expect(policy).toMatchObject({
+    entries: CALL_ENTRIES,
+    subjects: 2 * CALL_ENTRIES,
+    bytes: 4 * 1024 * 1024,
+    totalBytes: 4 * 1024 * 1024,
+    records: 1,
+  });
+  expect(CALL_ENTRIES).toBe(10_000);
+
+  const admitted: Array<unknown> = [];
+  const runWith = (ledger: ReturnType<typeof stubLedger>) =>
+    ManagedRuntime.make(
+      Layer.mergeAll(
+        Layer.succeed(QueryGateway, ledger.gateway),
+        Layer.effect(
+          RankedSelections,
+          Effect.map(selectionStore(PROCESS_POLICY), (store) =>
+            RankedSelections.of({
+              ...store,
+              admit: (selection, binding) => {
+                admitted.push(binding);
+                return store.admit(selection, binding);
+              },
+            })
+          )
+        )
+      )
+    );
+
+  // Every match ranked and read: fewer than asked is the whole answer, from one bounded query.
+  const few = stubLedger(3);
+  const fewRuntime = runWith(few);
+  const all = await fewRuntime.runPromise(historyPreset({ query: "kiwi", limit: huge }));
+  expect(all.messages.map((m) => m.id).sort()).toEqual(few.messages.map((m) => m.id).sort());
+  expect(few.rankLimits).toEqual([CALL_ENTRIES + 1]);
+  await fewRuntime.dispose();
+
+  // More matches than the cap: the ranking is cut short of the limit, so the call fails rather
+  // than return the 10,000 it could, still from one bounded query.
+  const many = stubLedger(CALL_ENTRIES + 50);
+  const manyRuntime = runWith(many);
+  const refused = await manyRuntime.runPromise(
+    Effect.flip(historyPreset({ query: "kiwi", limit: huge }))
+  );
+  expect(refused._tag).toBe("QueryCapacity");
+  expect(many.rankLimits).toEqual([CALL_ENTRIES + 1]);
+  // Up to the cap, the same ledger answers in full.
+  const capped = await manyRuntime.runPromise(
+    historyPreset({ query: "kiwi", limit: CALL_ENTRIES })
+  );
+  expect(new Set(capped.messages.map((m) => m.id)).size).toBe(CALL_ENTRIES);
+  expect(many.rankLimits).toEqual([CALL_ENTRIES + 1, CALL_ENTRIES + 1]);
+  await manyRuntime.dispose();
+  expect(admitted).toEqual([]);
 });
 
 test("a page trimmed to its byte budget keeps the ranking for the rest", async () => {
