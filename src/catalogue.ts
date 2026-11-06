@@ -15,6 +15,7 @@ import {
   MessageJson,
   MuteScope,
   OrientationId,
+  QueryCapacity,
   Runtime,
 } from "./domain.ts";
 import {
@@ -34,6 +35,14 @@ import { DAMAGE_MESSAGE, directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import { type QueryEnvelope } from "./query-envelope.ts";
 import {
+  checkBounds,
+  HANDLE_LENGTH,
+  RankedSelections,
+  type Retained,
+  type Selected,
+  type Selection,
+} from "./RankedSelections.ts";
+import {
   largestFitting,
   MAX_QUERY_LENGTH,
   MAX_SPARQL_ROWS,
@@ -49,8 +58,19 @@ import {
  * incarnation; see docs/frames/turnaround-query-design.md.
  */
 
-/** Bumped by any change to an operation's rows, order, unit, defaults or arguments. */
+/**
+ * Bumped by any change to an operation's rows, order, unit, defaults or arguments that applies
+ * across the catalogue. A change confined to one operation's continuation is revised locally
+ * instead, in that operation's cursor variant (SEARCH_REVISION), so other operations' cursors and
+ * pinned first pages stay valid.
+ */
 export const CATALOGUE_VERSION = 1;
+/**
+ * Search cursors' own revision. Revision 1: a search's offset counts entries of one retained
+ * ranking, named by the cursor's handle. Earlier search cursors, which counted stored-copy rows
+ * of a ranking evaluated again for each page, carry no revision and are refused.
+ */
+const SEARCH_REVISION = 1;
 /** The largest `bus_run_query` or `bus_query` result, as UTF-8 JSON. */
 export const MAX_ENVELOPE_BYTES = 65_536;
 const MAX_CURSOR_LENGTH = 1024;
@@ -136,7 +156,7 @@ export const SearchRow = Schema.Struct({
   ...EntryRow.fields,
   score: Schema.Finite.annotate({
     description:
-      "Full-text relevance for this evaluation; higher is better. Message data is read at t, but the score can differ on a later evaluation at the same t.",
+      "Full-text relevance from this traversal's one ranking evaluation; higher is better. Every page of a traversal shares it, but a new search at the same t can score differently.",
   }),
 });
 export type SearchRow = typeof SearchRow.Type;
@@ -358,6 +378,8 @@ type Item<Row> =
 interface Fetched<Row> {
   /** Candidates after the position, in order, up to the page size. */
   readonly items: ReadonlyArray<Item<Row>>;
+  /** For a retaining operation: the traversal's ranking, which later pages continue. */
+  readonly selection?: Selection;
   /** Whether candidates remain after these at t. */
   readonly more: boolean;
   /** Damaged entries met on this page that hold no position (peers folds them all at once). */
@@ -373,14 +395,16 @@ interface Fetched<Row> {
 interface At {
   readonly t: number;
   readonly position: Position;
+  /** For a retaining operation's later pages: the selection its cursor names. */
+  readonly retained?: Retained;
 }
 
-type Fetch<A, Row> = (
-  args: A,
-  at: At
-) => Effect.Effect<Fetched<Row>, LedgerError | InvalidQuery, QueryGateway>;
+type QueryError = LedgerError | InvalidQuery | QueryCapacity;
+type QueryServices = QueryGateway | RankedSelections;
 
-interface Spec<S extends Schema.Top & { readonly DecodingServices: never }, Row> {
+type Fetch<A, Row, R> = (args: A, at: At) => Effect.Effect<Fetched<Row>, QueryError, R>;
+
+interface Spec<S extends Schema.Top & { readonly DecodingServices: never }, Row, R = QueryGateway> {
   readonly name: string;
   readonly purpose: string;
   readonly unit: string;
@@ -392,6 +416,11 @@ interface Spec<S extends Schema.Top & { readonly DecodingServices: never }, Row>
    * complete; predicates: never complete, since damaged bus:json is not checked.
    */
   readonly coverage: "entries" | "ranked" | "predicates";
+  /**
+   * Evaluates its ordering once per traversal and continues that selection on later pages
+   * (search). Its cursors are a variant of their own that names the selection.
+   */
+  readonly retains?: true;
   readonly note: string;
   readonly Args: S;
   readonly Row: Schema.Top;
@@ -400,7 +429,7 @@ interface Spec<S extends Schema.Top & { readonly DecodingServices: never }, Row>
   readonly normalize: (args: S["Type"]) => Effect.Effect<S["Type"], InvalidQuery>;
   readonly pageSize: (args: S["Type"]) => number;
   readonly start: (args: S["Type"], t: number) => Position;
-  readonly fetch: Fetch<S["Type"], Row>;
+  readonly fetch: Fetch<S["Type"], Row, R>;
 }
 
 export type Envelope<Row> = Omit<typeof QueryEnvelope.Type, "rows"> & {
@@ -419,7 +448,7 @@ const PositionSchema = Schema.Union([
   Schema.Struct({ before: Schema.Tuple([Int, Text]) }),
   Schema.Struct({ offset: Int.check(Schema.isGreaterThanOrEqualTo(0)) }),
 ]);
-const CursorSchema = Schema.Struct({
+const cursorFields = {
   v: Schema.Literal(1),
   cv: Int,
   op: Text,
@@ -429,13 +458,25 @@ const CursorSchema = Schema.Struct({
   n: Int.check(Schema.isGreaterThanOrEqualTo(1)),
   p: PositionSchema,
   u: Int.check(Schema.isGreaterThanOrEqualTo(0)),
+};
+/** A retaining operation's cursor: its own revision and the handle of the selection it pages. */
+const SelectionCursor = Schema.Struct({
+  ...cursorFields,
+  r: Schema.Literal(SEARCH_REVISION),
+  s: Text.check(Schema.isMinLength(HANDLE_LENGTH)).check(Schema.isMaxLength(HANDLE_LENGTH)),
 });
+const CursorSchema = Schema.Union([SelectionCursor, Schema.Struct(cursorFields)]);
 type Cursor = typeof CursorSchema.Type;
+/** The selection a cursor names, when it is a retaining operation's. */
+const handleOf = (cursor: Cursor): string | undefined =>
+  "s" in cursor ? (cursor as typeof SelectionCursor.Type).s : undefined;
 const decodeCursorJson = Schema.decodeUnknownEffect(Schema.fromJsonString(CursorSchema), {
   onExcessProperty: "error",
 });
 
 const CURSOR_PREFIX = "bq1.";
+/** A fixed ISO instant that measures like any real expiry while a page is sized. */
+const STAND_IN_EXPIRY = Date.parse("2000-01-01T00:00:00.000Z");
 
 const encodeCursor = (cursor: Cursor) =>
   `${CURSOR_PREFIX}${Buffer.from(JSON.stringify(cursor)).toString("base64url")}`;
@@ -506,8 +547,19 @@ const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
     return cursor.t;
   });
 
-const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
-  spec: Spec<S, Row>,
+/**
+ * The selection store of a retaining operation. Its fetch requires the store, so wherever such an
+ * operation runs the store is provided; other operations never reach this.
+ */
+const selectionsOf = (spec: { readonly name: string }) =>
+  Effect.flatMap(Effect.serviceOption(RankedSelections), (store) =>
+    Option.isSome(store)
+      ? Effect.succeed(store.value)
+      : Effect.die(new Error(`${spec.name} needs the ranked-selection store.`))
+  );
+
+const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R>(
+  spec: Spec<S, Row, R>,
   args: S["Type"],
   input: RunInput
 ) =>
@@ -533,6 +585,14 @@ const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never },
       if (cursor.n !== size) {
         return yield* invalid(`The cursor was issued for page size ${cursor.n}, not ${size}.`);
       }
+      if (spec.retains === true && handleOf(cursor) === undefined) {
+        return yield* invalid(
+          `This ${spec.name} cursor predates kept rankings. Start a new ${spec.name}, passing t=${cursor.t} to keep the snapshot; its ranking is evaluated again, so its order can differ.`
+        );
+      }
+      if (spec.retains !== true && handleOf(cursor) !== undefined) {
+        return yield* invalid("The cursor's position does not fit this operation.");
+      }
     }
 
     // Pin first: every name and input below resolves at this commit.
@@ -543,32 +603,62 @@ const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never },
       return yield* invalid("The cursor's position does not fit this operation.");
     }
     const position = cursor?.p ?? start;
-    return { gateway, normalized, hash, size, cursor, pin, t, position };
+    let retained: Retained | undefined;
+    const handle = cursor === undefined ? undefined : handleOf(cursor);
+    if (handle !== undefined) {
+      const found = yield* (yield* selectionsOf(spec)).lookup(handle);
+      const record = Option.getOrUndefined(found);
+      if (
+        record === undefined ||
+        record.incarnation !== pin.incarnation ||
+        record.t !== t ||
+        record.hash !== hash ||
+        record.size !== size
+      ) {
+        return yield* invalid(
+          `This ${spec.name}'s ranking is no longer held: it expired, the bus restarted, or the cursor is from another server. Start a new ${spec.name}, passing t=${t} to keep the snapshot; its ranking is evaluated again, so its order can differ.`
+        );
+      }
+      retained = record;
+    }
+    return { gateway, normalized, hash, size, cursor, pin, t, position, retained };
   });
 
-const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
-  spec: Spec<S, Row>,
+const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R>(
+  spec: Spec<S, Row, R>,
   args: S["Type"],
   input: RunInput,
   budget: number | undefined
 ) =>
   Effect.gen(function* () {
-    const { gateway, normalized, hash, size, cursor, pin, t, position } = yield* prepareRun(
-      spec,
-      args,
-      input
-    );
-    const fetched = yield* spec.fetch(args, { t, position });
+    const { gateway, normalized, hash, size, cursor, pin, t, position, retained } =
+      yield* prepareRun(spec, args, input);
+    const fetched = yield* spec.fetch(args, {
+      t,
+      position,
+      ...(retained === undefined ? {} : { retained }),
+    });
     const after = yield* gateway.pin;
     if (after.incarnation !== pin.incarnation) {
       return yield* new LedgerError({
         message: "The ledger was replaced while the query ran; run it again.",
       });
     }
+    const selections = spec.retains === true ? yield* selectionsOf(spec) : undefined;
+    /** Whether the selection's expiry is shown: only a selection kept across calls has one. */
+    const expires = selections !== undefined && Number.isFinite(selections.policy.ttlMillis);
 
     const previous = cursor?.u ?? 0;
     const outside = fetched.damagedOutside ?? [];
-    const envelope = (kept: number): Envelope<Row> => {
+    const standIn = { handle: "-".repeat(HANDLE_LENGTH), expiresAt: STAND_IN_EXPIRY };
+    /**
+     * The page of the first `kept` items. A retaining operation's continuation names `held`; while
+     * a page is being sized it is not yet admitted, and a stand-in of the same length is measured.
+     */
+    const envelope = (
+      kept: number,
+      held: Pick<Retained, "handle" | "expiresAt"> | undefined = retained
+    ): Envelope<Row> => {
       const items = fetched.items.slice(0, kept);
       const rows: Array<Row> = [];
       const damagedAt: Array<number> = [...outside];
@@ -585,6 +675,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
       const last = items.at(-1);
       const damagedTotal = previous + damaged;
       const exhausted = !more;
+      const shown = held ?? (more ? standIn : undefined);
       return {
         name: spec.name,
         catalogueVersion: CATALOGUE_VERSION,
@@ -612,17 +703,54 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
                 n: size,
                 p: last.at,
                 u: damagedTotal,
+                ...(spec.retains === true && shown !== undefined
+                  ? { r: SEARCH_REVISION, s: shown.handle }
+                  : {}),
               }),
             }
           : {}),
+        ...(fetched.selection === undefined
+          ? {}
+          : {
+              selection: {
+                entries: fetched.selection.entries.length,
+                truncated: fetched.selection.truncated,
+                ...(expires && shown !== undefined
+                  ? { expiresAt: new Date(shown.expiresAt).toISOString() }
+                  : {}),
+              },
+            }),
         note: spec.note,
         ...(spec.name === "messages" ? { notFound } : {}),
         ...fetched.extra,
       };
     };
+    /**
+     * The page as served: a continuation that needs the selection kept admits it first, so a
+     * refusal comes before any page or cursor is shown.
+     */
+    const serve = (kept: number) =>
+      Effect.gen(function* () {
+        const more = fetched.more || kept < fetched.items.length;
+        if (
+          selections === undefined ||
+          retained !== undefined ||
+          !more ||
+          fetched.selection === undefined
+        ) {
+          return envelope(kept);
+        }
+        const admitted = yield* selections.admit(fetched.selection, {
+          incarnation: pin.incarnation,
+          t,
+          hash,
+          size,
+        });
+        return envelope(kept, admitted);
+      });
 
     const all = fetched.items.length;
-    if (budget === undefined || bytes(envelope(all)) <= budget) return envelope(all);
+    if (budget === undefined || bytes(envelope(all)) <= budget) return yield* serve(all);
     // Without pages, a result is whole or refused: a trimmed one would pair some rows with
     // totals over all of them, and offer a cursor that nothing accepts.
     if (spec.paging === "none") {
@@ -658,7 +786,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
           : `The result exceeds the ${budget}-byte limit; narrow the query.`
       );
     }
-    return envelope(consumed);
+    return yield* serve(consumed);
   });
 
 /** One catalogue operation, with typed access for the presets and erased access for dispatch. */
@@ -676,11 +804,11 @@ export interface Operation {
     args: unknown,
     input: RunInput,
     budget: number | undefined
-  ) => Effect.Effect<Envelope<unknown>, LedgerError | InvalidQuery, QueryGateway>;
+  ) => Effect.Effect<Envelope<unknown>, QueryError, QueryServices>;
 }
 
-const define = <S extends Schema.Top & { readonly DecodingServices: never }, Row>(
-  spec: Spec<S, Row>
+const define = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R = QueryGateway>(
+  spec: Spec<S, Row, R>
 ) => {
   const decodeArgs = Schema.decodeUnknownEffect(spec.Args, { onExcessProperty: "error" });
   const prepare = (raw: unknown) =>
@@ -829,21 +957,6 @@ const groupCandidates = <R extends Candidate>(
 };
 
 const TotalRows = Schema.Array(Schema.Tuple([Schema.Number]));
-
-/** How many bus:json values one entry holds at t (search's rows for it, one per copy). */
-const storedCopies = (t: number, id: string) =>
-  Effect.flatMap(QueryGateway, (gateway) =>
-    gateway
-      .jsonld(t, {
-        select: ["(as (count-distinct ?json) ?n)"],
-        values: [["?m"], [[entryIri(id)]]],
-        where: [{ "@id": "?m", "bus:json": "?json" }],
-      })
-      .pipe(
-        Effect.flatMap(decodeRows(TotalRows)),
-        Effect.map((rows) => rows[0]?.[0] ?? 0)
-      )
-  );
 
 /** A grouped candidate's entry, or nothing when it is damaged or stored more than once. */
 const decodeGroup = <R extends Candidate>(group: Group<R>) =>
@@ -1083,9 +1196,88 @@ export const thread = define({
     }),
 });
 
-const SearchRows = Schema.Array(
-  Schema.Tuple([Schema.Number, Schema.String, Schema.NullOr(Schema.String), Schema.Finite])
+const SelectionRows = Schema.Array(
+  Schema.Tuple([Schema.Number, Schema.String, Schema.Finite, Schema.Array(Schema.String)])
 );
+const EncodingRows = Schema.Array(
+  Schema.Tuple([Schema.String, Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
+);
+
+/**
+ * A search traversal's ranking, evaluated once: one row per entry (t, id), with its best score
+ * and every typed node that matched as that entry, best first and ties in commit order. Matches
+ * ranked below the store's entry limit are cut and the cut is reported.
+ */
+const selectRanked = (
+  args: { readonly text: string; readonly participants?: ReadonlyArray<string> | undefined },
+  t: number
+) =>
+  Effect.gen(function* () {
+    const gateway = yield* QueryGateway;
+    const { policy } = yield* RankedSelections;
+    const rows = yield* gateway
+      .jsonld(t, {
+        select: ["?t", "?id", "(as (max ?score) ?best)", "(as (collect-distinct ?m) ?subjects)"],
+        ...valuesOf([
+          ["?q", [args.text]],
+          ["?p", args.participants ?? []],
+        ]),
+        where: [
+          ...typed("?m", ["message"]),
+          candidate("?m"),
+          ["union", { "@id": "?m", "bus:body": "?text" }, { "@id": "?m", "bus:subject": "?text" }],
+          ["bind", "?score", "(fulltext ?text ?q)"],
+          ["filter", "(> ?score 0)"],
+          // A positive match, not a correlated exists: Fluree then starts from the
+          // participants' messages instead of testing every scored row, whose cost grew with
+          // the square of the ledger. Grouping by entry folds each membership row into it.
+          ...(args.participants === undefined ? [] : [participantMatch("?m")]),
+        ],
+        groupBy: ["?t", "?id"],
+        orderBy: [["desc", "?best"], "?t", "?id"],
+        limit: policy.entries + 1,
+      })
+      .pipe(Effect.flatMap(decodeRows(SelectionRows)));
+    const entries = rows
+      .slice(0, policy.entries)
+      .map(([entryT, id, score, subjects]): Selected => ({ t: entryT, id, score, subjects }));
+    yield* checkBounds(policy, entries);
+    return { entries, truncated: rows.length > policy.entries } satisfies Selection;
+  });
+
+/**
+ * Each selected entry's stored encodings at t, read through the subjects that formed it. The
+ * same JSON on several subjects is one encoding; differing or missing ones are several.
+ */
+const encodingsOf = (t: number, entries: ReadonlyArray<Selected>) =>
+  Effect.gen(function* () {
+    if (entries.length === 0) return [];
+    const gateway = yield* QueryGateway;
+    const subjects = [...new Set(entries.flatMap((entry) => entry.subjects))];
+    const rows = yield* gateway
+      .jsonld(t, {
+        selectDistinct: ["?m", "?t", "?id", "?json"],
+        values: [["?m"], subjects.map((subject) => [{ "@type": "@id", "@value": subject }])],
+        where: [candidate("?m"), storedJson("?m")],
+      })
+      .pipe(Effect.flatMap(decodeRows(EncodingRows)));
+    const bySubject = new Map<string, Array<(typeof rows)[number]>>();
+    for (const row of rows) bySubject.set(row[0], [...(bySubject.get(row[0]) ?? []), row]);
+    const encodings: Array<ReadonlySet<string | null>> = [];
+    for (const entry of entries) {
+      const found = new Set<string | null>();
+      for (const subject of entry.subjects) {
+        const own = (bySubject.get(subject) ?? []).filter(
+          ([, entryT, id]) => entryT === entry.t && id === entry.id
+        );
+        // Data at t does not change, so a selected subject always reads back.
+        if (own.length === 0) return yield* invalidResponse();
+        for (const [, , , json] of own) found.add(json);
+      }
+      encodings.push(found);
+    }
+    return encodings;
+  });
 
 export const search = define({
   name: "search",
@@ -1093,7 +1285,8 @@ export const search = define({
   unit: "ranked match",
   paging: "offset",
   coverage: "ranked",
-  note: "Ranked matches with stemming, best first, ties in commit order; never a complete relation. Messages are read at t, but the scoring statistics are not necessarily fixed by t, so stable ordering across pages is not guaranteed: if relative order changes between pages, offset pages can repeat or omit matches, and exhausted does not prove every match was returned. A new ledger's index can briefly find nothing. Joins and leaves are not searched.",
+  retains: true,
+  note: "Ranked matches with stemming, best first, ties in commit order; never a complete relation. The ranking is evaluated once, on a traversal's first page, and later pages continue it: each entry once, read at t. Fluree's scoring statistics are not fixed by t, so a new search at the same t can rank differently. selection.entries entries are retained from the ranking (at most 1,000); selection.truncated says whether lower-ranked matches were left out, and exhausted then means the end of the ranking, not of the matches. A traversal that needs more than one page is held by this bus until selection.expiresAt; after that, or after a restart, its cursor is refused and a new search must start. When the bus holds as many rankings as it can, a search that needs more than one page is refused rather than shortened. A new ledger's index can briefly find nothing. Joins and leaves are not searched.",
   Args: SearchArgs,
   Row: SearchRow,
   example: { text: "deploy rollback", limit: 10 },
@@ -1107,63 +1300,33 @@ export const search = define({
   start: () => ({ offset: 0 }),
   fetch: (args, at) =>
     Effect.gen(function* () {
-      const gateway = yield* QueryGateway;
       const size = args.limit ?? 50;
+      // Offsets count entries of the one ranking, so an entry is consumed whole.
       const offset = "offset" in at.position ? at.position.offset : 0;
-      const rows = yield* gateway
-        .jsonld(at.t, {
-          select: ["?t", "?id", "?json", "(as (max ?score) ?best)"],
-          ...valuesOf([
-            ["?q", [args.text]],
-            ["?p", args.participants ?? []],
-          ]),
-          where: [
-            ...typed("?m", ["message"]),
-            candidate("?m"),
-            [
-              "union",
-              { "@id": "?m", "bus:body": "?text" },
-              { "@id": "?m", "bus:subject": "?text" },
-            ],
-            ["bind", "?score", "(fulltext ?text ?q)"],
-            ["filter", "(> ?score 0)"],
-            // A positive match, not a correlated exists: Fluree then starts from the
-            // participants' messages instead of testing every scored row, whose cost grew with
-            // the square of the ledger. The grouping folds each membership row into its copy.
-            ...(args.participants === undefined ? [] : [participantMatch("?m")]),
-            storedJson("?m"),
-          ],
-          groupBy: ["?t", "?id", "?json"],
-          // Every stored copy of an entry scores the same, so ordering by key after the
-          // score keeps its rows adjacent.
-          orderBy: [["desc", "?best"], "?t", "?id"],
-          limit: size + 1,
-          offset,
-        })
-        .pipe(Effect.flatMap(decodeRows(SearchRows)));
-      const groups = groupCandidates(rows, size);
-      // Offsets count result rows (one per stored copy), so a position is just past the
-      // group's last row. A lone group that filled the page may continue past it: its copies
-      // are counted at the same t, so the next page starts after the whole entry and never
-      // decodes the rest of it as an entry of its own.
-      const lone = rows.length > size && groups.length === 1 ? groups[0] : undefined;
-      if (lone !== undefined) {
-        lone.last = Math.max(lone.last, (yield* storedCopies(at.t, lone.first[1])) - 1);
-      }
-      const items = groups.map((group): Item<SearchRow> => {
-        const [t, id, , score] = group.first;
-        const position = { offset: offset + group.last + 1 };
-        const message = decodeGroup(group);
+      const selection = at.retained ?? (yield* selectRanked(args, at.t));
+      const page = selection.entries.slice(offset, offset + size);
+      const encodings = yield* encodingsOf(at.t, page);
+      const items = page.map((entry, index): Item<SearchRow> => {
+        const position = { offset: offset + index + 1 };
+        const [only, ...others] = encodings[index] ?? [];
+        const message =
+          others.length === 0 && only !== undefined
+            ? decodeEntry(entry.id, only)
+            : Option.none<Message>();
         return Option.isSome(message)
           ? {
               kind: "row",
-              row: { ...entryRow(message.value, t), score },
+              row: { ...entryRow(message.value, entry.t), score: entry.score },
               at: position,
-              label: `${id} (t=${t})`,
+              label: `${entry.id} (t=${entry.t})`,
             }
-          : { kind: "damaged", t, at: position };
+          : { kind: "damaged", t: entry.t, at: position };
       });
-      return { items, more: rows.length > size };
+      return {
+        items,
+        more: offset + size < selection.entries.length,
+        selection: { entries: selection.entries, truncated: selection.truncated },
+      };
     }),
 });
 

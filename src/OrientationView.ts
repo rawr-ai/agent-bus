@@ -1,11 +1,11 @@
 import { Clock, Effect, Schema } from "effect";
 import {
-  byName,
   CATALOGUE_VERSION,
   MAX_ENVELOPE_BYTES,
+  orientationAssociations,
   orientationDirectories,
 } from "./catalogue.ts";
-import { InvalidQuery, LedgerError } from "./domain.ts";
+import { InvalidQuery, LedgerError, type QueryCapacity } from "./domain.ts";
 import {
   bulletinView,
   jsonBytes,
@@ -63,7 +63,7 @@ const unavailable = (
 
 const sectionError =
   (section: Section, message: string, recovery?: OrientationRecovery) =>
-  (error: LedgerError | InvalidQuery) =>
+  (error: LedgerError | InvalidQuery | QueryCapacity) =>
     unavailable(
       error instanceof InvalidQuery
         ? "INADMISSIBLE"
@@ -115,7 +115,6 @@ const readOrient = (input: OrientRequest, budget: number) =>
     const evaluatedAt = new Date(time).toISOString();
     const retry: OrientationRecovery = { tool: "bus_orient", input: { ...input, t } };
     const partial: Record<string, unknown> = {};
-    const candidateOperation = byName("orientation_directories");
     const outcome = yield* Effect.gen(function* () {
       const programme = bulletinView(
         yield* bulletinAt(gateway, t, { kind: "programme" }).pipe(
@@ -132,9 +131,6 @@ const readOrient = (input: OrientRequest, budget: number) =>
         partial.selection = { state: "UNRESOLVED", basis: "alias" };
         const message =
           "Directory discovery is unavailable. If you know a directory id, select it explicitly at this cut.";
-        if (candidateOperation === undefined) {
-          return yield* unavailable("FAULT", "candidates", message, retry);
-        }
         const recovery: OrientationRecovery = {
           tool: "bus_run_query",
           input: {
@@ -144,7 +140,7 @@ const readOrient = (input: OrientRequest, budget: number) =>
             ...(input.candidateCursor === undefined ? {} : { cursor: input.candidateCursor }),
           },
         };
-        candidatePage = yield* candidateOperation
+        candidatePage = yield* orientationDirectories
           .invoke(
             { cwd: input.cwd, limit: 20 },
             { t, cursor: input.candidateCursor },
@@ -282,7 +278,7 @@ const readOrient = (input: OrientRequest, budget: number) =>
           retry
         );
       }
-      if (candidatePage !== undefined && candidateOperation !== undefined) {
+      if (candidatePage !== undefined) {
         const pageBudget = Math.max(0, budget - jsonBytes(base) - 1_024);
         if (jsonBytes(candidatePage) > pageBudget) {
           const recovery: OrientationRecovery = {
@@ -294,7 +290,7 @@ const readOrient = (input: OrientRequest, budget: number) =>
               ...(input.candidateCursor === undefined ? {} : { cursor: input.candidateCursor }),
             },
           };
-          candidatePage = yield* candidateOperation
+          candidatePage = yield* orientationDirectories
             .invoke({ cwd: input.cwd, limit: 20 }, { t, cursor: input.candidateCursor }, pageBudget)
             .pipe(
               Effect.mapError(
@@ -310,15 +306,6 @@ const readOrient = (input: OrientRequest, budget: number) =>
       }
       let memberPage;
       if (selected !== undefined) {
-        const associations = byName("orientation_associations");
-        if (associations === undefined) {
-          return yield* unavailable(
-            "FAULT",
-            "associations",
-            "Association discovery is unavailable.",
-            retry
-          );
-        }
         const pageBudget = Math.max(
           0,
           budget - jsonBytes({ ...base, candidates: candidatePage }) - 1_024
@@ -333,7 +320,7 @@ const readOrient = (input: OrientRequest, budget: number) =>
           tool: "bus_run_query",
           input: { name: "orientation_associations", args, t },
         };
-        memberPage = yield* associations
+        memberPage = yield* orientationAssociations
           .invoke(args, { t }, pageBudget)
           .pipe(
             Effect.mapError(

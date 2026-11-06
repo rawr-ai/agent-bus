@@ -5,6 +5,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { createORPCClient } from "@orpc/client";
 import { RPCLink } from "@orpc/client/fetch";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
@@ -13,9 +16,10 @@ import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
+import { PROCESS_POLICY } from "../src/RankedSelections.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
-import { ObservationReader, readerLayer } from "../viewer/server/reader.ts";
+import { ObservationReader, ObservationUnavailable, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import { MAX_PAGES, MAX_THREAD_MESSAGES } from "../viewer/shared/public.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -41,6 +45,8 @@ const bus = ManagedRuntime.make(
   )
 );
 const reader = ManagedRuntime.make(readerLayer({ busPort }));
+// A direct MCP client, for calls the viewer does not make.
+const direct = new Client({ name: "viewer-reader-bus-test", version: "1" });
 const marker = "private-session-never-observed";
 
 let sent: { root: string; reply: string; other: string };
@@ -82,6 +88,7 @@ beforeAll(async () => {
   );
 });
 afterAll(async () => {
+  await direct.close();
   await reader.dispose();
   await bus.dispose();
   rmSync(dir, { recursive: true, force: true });
@@ -340,4 +347,103 @@ test("a tree the byte budget trims is followed page by page, within the page bou
   expect(cut.messages.map((message) => message.id)).toEqual(large.slice(0, MAX_PAGES * 3));
   expect(cut.exhausted).toBe(false);
   expect(cut.messages.some((message) => message.id === selected)).toBe(false);
+});
+
+/** `count` messages matching `word`, each about 20 KB, so a 64 KiB page holds three. */
+const writeMatches = async (word: string, count: number) => {
+  const ts = new Date().toISOString();
+  const messages = Array.from(
+    { length: count },
+    (_, index) =>
+      new Message({
+        id: `${word}-${String(index).padStart(3, "0")}`,
+        ts,
+        from: "claude/lead",
+        to: ["#search"],
+        kind: "message",
+        body: `${word} ${"x".repeat(20_000)}`,
+      })
+  );
+  await insertRaw(config, {
+    "@context": toNode(messages[0] as Message, "")["@context"],
+    "@graph": messages.map((m) => {
+      const { "@context": _, ...node } = toNode(m, encodeJson(m));
+      return node;
+    }),
+  });
+  return messages.map((m) => m.id);
+};
+
+const call = async (name: string, args: Record<string, unknown>) => {
+  if (direct.transport === undefined) {
+    await direct.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${busPort}/mcp`))
+    );
+  }
+  const result = (await direct.callTool({ name, arguments: args })) as CallToolResult;
+  if (result.isError) throw new Error(`${name} refused`);
+  return result.structuredContent as Record<string, unknown>;
+};
+
+/**
+ * Waits until a new commit's full-text index finds every match, through bus_history, whose
+ * ranking is its own call's and never held by the bus, so waiting leaves no ranking behind.
+ */
+const indexed = async (query: string, expected: number) => {
+  const found = () =>
+    call("bus_history", { query, limit: expected }).then(
+      (result) => (result.messages as ReadonlyArray<unknown>).length
+    );
+  for (let attempt = 0; attempt < 50 && (await found()) < expected; attempt++) {
+    await Bun.sleep(100);
+  }
+  expect(await found()).toBe(expected);
+};
+
+/** Rankings this file's reads have left held by the bus, for the capacity test's exact count. */
+let held = 0;
+
+test("a search over several calls returns every match once, as one ranked window", async () => {
+  // Seven matches of about 20 KB need three calls, each continuing the ranking the bus holds. The
+  // viewer shows matches in commit order, so their ranked order is checked against the stub in
+  // test/search-selection.test.ts; here, that every match arrives once.
+  const ids = await writeMatches("zebra", 7);
+  await indexed("zebra", ids.length);
+  const found = await read((r) => r.history({ limit: 200, query: "zebra" }));
+  held += 1;
+  expect(found.messages.map((message) => message.id).sort()).toEqual(ids);
+  expect(found.window).toBe("ranked");
+  expect(found.complete).toBe(false);
+});
+
+// Last in this file: it fills the bus's store of rankings for the rest of its lifetime.
+test("when the bus holds all the rankings it can, a search needing another call is unavailable, and one call still serves", async () => {
+  await writeMatches("yak", 7);
+  await indexed("yak", 7);
+  // A traversal held before the store fills keeps its ranking after it fills.
+  const first = await call("bus_run_query", { name: "search", args: { text: "yak", limit: 2 } });
+  held += 1;
+  // Each two-row read of seven matches leaves a ranking held, until the store holds all it can.
+  let served = 0;
+  let refusal: unknown;
+  while (refusal === undefined && served <= PROCESS_POLICY.records) {
+    refusal = await read((r) => r.history({ limit: 2, query: "yak" })).then(
+      () => {
+        served += 1;
+        return undefined;
+      },
+      (error: unknown) => error
+    );
+  }
+  expect(refusal).toBeInstanceOf(ObservationUnavailable);
+  expect(served).toBe(PROCESS_POLICY.records - held);
+  const second = await call("bus_run_query", {
+    name: "search",
+    args: { text: "yak", limit: 2 },
+    t: first.t,
+    cursor: first.next,
+  });
+  expect(second.rows).toHaveLength(2);
+  const single = await read((r) => r.history({ limit: 200, query: "broadcast" }));
+  expect(single.messages.map((message) => message.id)).toEqual([sent.other]);
 });

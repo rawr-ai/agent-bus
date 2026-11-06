@@ -148,6 +148,14 @@ export class InvalidQuery extends Schema.TaggedError<InvalidQuery>()("InvalidQue
   message: Schema.String,
 }) {}
 
+/**
+ * A ranked search could not hold its selection: the bus's retained selections are at capacity,
+ * or one selection exceeds its own bounds. Nothing was returned and no cursor was issued.
+ */
+export class QueryCapacity extends Schema.TaggedError<QueryCapacity>()("QueryCapacity", {
+  message: Schema.String,
+}) {}
+
 /** A join's topic list is malformed; no subscription or cursor was changed. */
 export class InvalidTopics extends Schema.TaggedError<InvalidTopics>()("InvalidTopics", {
   message: Schema.String,
