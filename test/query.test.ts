@@ -13,7 +13,7 @@ import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { CATALOGUE_VERSION, operationNames } from "../src/catalogue.ts";
+import { CATALOGUE_VERSION, operationNames, search } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -625,6 +625,161 @@ describe("entries", () => {
     expect(literal.rows).toEqual([]);
     const narrowed = await bus.run("search", { text: "deploy adapter", participants: ["codex/b"] });
     expect(narrowed.rows).toEqual([]);
+  });
+
+  test("participant-filtered search is the unfiltered ranking narrowed to its participants, each stored entry once, paged by stored-copy rows", async () => {
+    const config = await freshLedger("search-participants");
+    const bus = await startBus(flureeStore(config));
+    const [a, b, c] = ["claude/a", "codex/b", "claude/c"];
+    const clean = {
+      self: message({ from: a, to: [a], body: "kiwi self send" }),
+      both: message({ from: b, to: [a, b], body: "kiwi to both" }),
+      repeated: message({ from: c, to: [b, b], body: "kiwi repeated recipient" }),
+      topic: message({ from: c, to: ["#t"], body: "kiwi topic" }),
+      senderOnly: message({ from: a, to: [c], body: "kiwi sender only" }),
+      recipientOnly: message({ from: c, to: [b], body: "kiwi recipient only" }),
+      bodySubject: message({ from: b, to: [c], body: "kiwi kiwi kiwi body", subject: "kiwi" }),
+      subjectOnly: message({ from: b, to: [a], body: "plain words", subject: "kiwi" }),
+      unrelated: message({ from: c, to: ["claude/d"], body: "kiwi unrelated" }),
+    };
+    await bus.append(...Object.values(clean));
+    // Each membership row (a sends, a and b receive) and text row (body and subject) of one
+    // stored copy must fold into that copy, and its three copies into one damaged entry.
+    const multi = message({ from: a, to: [a, b], body: "kiwi copied", subject: "kiwi copied" });
+    await insertRaw(config, {
+      ...toNode(multi, encodeJson(multi)),
+      "bus:json": [0, 1, 2].map((k) =>
+        encodeJson(new Message({ ...multi, to: [...multi.to], body: `${multi.body} ${k}` }))
+      ),
+    });
+    const missing = message({ from: b, to: [a], body: "kiwi missing json" });
+    const { "bus:json": _, ...missingNode } = toNode(missing, "");
+    await insertRaw(config, missingNode);
+    const junk = message({ from: a, to: ["#t"], body: "kiwi junk json" });
+    await insertRaw(config, { ...toNode(junk, ""), "bus:json": "{not json" });
+    const late = {
+      inScope: message({ from: a, to: [b], body: "kiwi late" }),
+      unrelated: message({ from: c, to: ["claude/d"], body: "kiwi late unrelated" }),
+    };
+    await bus.append(...Object.values(late));
+
+    const entries = Object.keys(clean).length + Object.keys(late).length + 3;
+    let everything = await bus.run("search", { text: "kiwi", limit: 50 });
+    for (
+      let attempt = 0;
+      attempt < 50 && everything.rows.length + everything.damaged < entries;
+      attempt++
+    ) {
+      await Bun.sleep(100);
+      everything = await bus.run("search", { text: "kiwi", limit: 50 });
+    }
+    expect(everything.rows.length + everything.damaged).toBe(entries);
+    expect(everything).toMatchObject({ exhausted: true });
+    // Scores rest on corpus statistics, so the oracle is the complete unfiltered ranking at the
+    // same t, narrowed by each decoded row's own sender and recipients.
+    const pinned = { t: everything.t };
+    const narrowedTo = (participants: ReadonlyArray<string>) =>
+      (everything.rows as Array<Json>).filter(
+        (row) =>
+          participants.includes(row.from) ||
+          (row.to as Array<string>).some((to) => participants.includes(to))
+      );
+
+    const cases = [
+      {
+        participants: [a, b],
+        ids: [
+          clean.self,
+          clean.both,
+          clean.repeated,
+          clean.senderOnly,
+          clean.recipientOnly,
+          clean.bodySubject,
+          clean.subjectOnly,
+          late.inScope,
+        ],
+        damaged: 3,
+      },
+      {
+        participants: [a],
+        ids: [clean.self, clean.both, clean.senderOnly, clean.subjectOnly, late.inScope],
+        damaged: 3,
+      },
+      {
+        participants: [b],
+        ids: [
+          clean.both,
+          clean.repeated,
+          clean.recipientOnly,
+          clean.bodySubject,
+          clean.subjectOnly,
+          late.inScope,
+        ],
+        damaged: 2,
+      },
+      { participants: ["#t"], ids: [clean.topic], damaged: 1 },
+      { participants: ["claude/x"], ids: [], damaged: 0 },
+    ];
+    for (const expected of cases) {
+      const page = await bus.run(
+        "search",
+        { text: "kiwi", participants: expected.participants, limit: 50 },
+        pinned
+      );
+      expect(page.rows).toEqual(narrowedTo(expected.participants));
+      expect(ids(page.rows).sort()).toEqual(expected.ids.map((m) => m.id).sort());
+      expect(page).toMatchObject({ damaged: expected.damaged, exhausted: true, complete: false });
+    }
+
+    // Paged one or two at a time, the traversal is the same ranking, and the copied entry is
+    // consumed whole: three stored-copy rows, not one per membership or text row.
+    const offsetOf = (cursor: string) =>
+      JSON.parse(Buffer.from(cursor.slice(4), "base64url").toString()).p.offset as number;
+    for (const limit of [1, 2]) {
+      const pages = await bus.all("search", { text: "kiwi", participants: [a, b], limit }, pinned);
+      expect(rowsOf(pages)).toEqual(narrowedTo([a, b]));
+      expect(ids(rowsOf(pages))).not.toContain(multi.id);
+      expect(pages.map((page) => page.damaged).reduce((x: number, y: number) => x + y, 0)).toBe(3);
+      expect(pages.at(-1)).toMatchObject({ damagedTotal: 3, exhausted: true });
+      if (limit === 1) {
+        const steps = pages
+          .filter((page) => page.next !== undefined)
+          .map(
+            (page, k, paged) => offsetOf(page.next) - (k === 0 ? 0 : offsetOf(paged[k - 1]?.next))
+          );
+        expect(steps.filter((step) => step !== 1)).toEqual([3]);
+      }
+    }
+  });
+
+  test("search applies a participant filter as an outer union, not a correlated exists", async () => {
+    // A shape guard, not integration proof: a correlated exists after the scoring made Fluree
+    // test every scored row, and on a ledger of a few thousand messages it failed with HTTP 507.
+    const queries: Array<Json> = [];
+    const gateway = QueryGateway.of({
+      pin: Effect.succeed({ head: 1, incarnation: "stub" }),
+      jsonld: (_t, query) =>
+        Effect.sync(() => {
+          queries.push(query);
+          return [];
+        }),
+      sparql: () => Effect.die("unexpected query"),
+    });
+    await Effect.runPromise(
+      search
+        .fetch(
+          { text: "kiwi", participants: ["claude/a"], limit: 5 },
+          { t: 1, position: { offset: 0 } }
+        )
+        .pipe(Effect.provideService(QueryGateway, gateway))
+    );
+    const where = queries[0]?.where as Array<unknown>;
+    expect(where).toContainEqual([
+      "union",
+      { "@id": "?m", "bus:from": "?p" },
+      { "@id": "?m", "bus:to": "?p" },
+    ]);
+    expect(JSON.stringify(where)).not.toContain('"exists"');
   });
 });
 

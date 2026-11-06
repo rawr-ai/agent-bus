@@ -1124,7 +1124,10 @@ export const search = define({
             ],
             ["bind", "?score", "(fulltext ?text ?q)"],
             ["filter", "(> ?score 0)"],
-            ...(args.participants === undefined ? [] : [["exists", participantMatch("?m")]]),
+            // A positive match, not a correlated exists: Fluree then starts from the
+            // participants' messages instead of testing every scored row, whose cost grew with
+            // the square of the ledger. The grouping folds each membership row into its copy.
+            ...(args.participants === undefined ? [] : [participantMatch("?m")]),
             storedJson("?m"),
           ],
           groupBy: ["?t", "?id", "?json"],
