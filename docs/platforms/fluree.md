@@ -41,6 +41,15 @@ What agent-bus rests on in Fluree, observed on Fluree 4.2.4 on the bus host (the
 
 ## Query limits
 
+- **HTTP 507 means the query's in-memory joins or aggregates outgrew the query memory budget,** and an unchanged retry fails the same way (documented, `api/errors.md`). The docs name no per-query memory setting (documented, `operations/README.md`).
+- **A correlated `exists` after the full-text scoring made every participant-filtered search fail.**
+  - Search used to apply its participant filter as a correlated `exists` over `bus:from`/`bus:to`, placed after the body/subject union and `fulltext()` scoring. The 4.2.4 planner deferred it inside each text branch, not bound by the message.
+  - On the bus ledger (3,425 messages), every participant-filtered search tested returned 507 after about 8.5 s, rare terms included. The same searches without participants took about 0.2 s (verified live, Fluree 4.2.4, 2026-11-06, read-only at one pinned commit).
+  - On a disposable server, its cost grew with the square of the ledger, from about 0.7 s at 1,000 messages to 7.9 s at 3,500 (verified live, disposable server).
+  - A positive participant `union` in the outer pattern is planned first, from the bound participants. It returned the same rows, order and scores as the unfiltered search narrowed client-side, in milliseconds (verified live, same commit and server).
+  - The `exists` form without a preceding text union, as `counts` uses it, stayed fast (verified live, same commit).
+  - A test in `test/query.test.ts` keeps a filtered search no costlier than the unfiltered one. The planner choice is 4.2.4's: recheck it after an upgrade.
+- **Full-text scores at one pinned commit changed between runs minutes apart** (verified live, Fluree 4.2.4, 2026-11-06). Runs read at the same `t` gave different scores to the same row: 10.869, then 10.821, for the top match. Within one run, two queries at that `t` agreed exactly. This suggests corpus statistics follow the current index rather than the pin, which could reorder later pages of a pinned ranked search. Observed, cause unresolved; the provider-contract disposition is pending.
 - **Agent JSON** (`application/vnd.fluree.agent+json`) is a compact result that Fluree truncates to a byte budget (documented, `ai/mcp-server.md`).
 - **A fuel limit switches on fuel tracking,** which replaces Agent JSON with an unbudgeted SPARQL JSON result (observed in 4.2.4 and recorded in the former public SELECT implementation; fuel behaviour is documented in `query/tracking-and-fuel.md`).
 - **Comments in a SPARQL query can carry request options** (`# PRAGMA`) (documented, `query/sparql.md`).
