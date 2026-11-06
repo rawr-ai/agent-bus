@@ -15,7 +15,7 @@ import { Message, MessageJson } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
-import { ObservationReader, readerLayer } from "../viewer/server/reader.ts";
+import { ObservationReader, ObservationUnavailable, readerLayer } from "../viewer/server/reader.ts";
 import type { ViewerClient } from "../viewer/shared/client-types.ts";
 import { MAX_PAGES, MAX_THREAD_MESSAGES } from "../viewer/shared/public.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -340,4 +340,72 @@ test("a tree the byte budget trims is followed page by page, within the page bou
   expect(cut.messages.map((message) => message.id)).toEqual(large.slice(0, MAX_PAGES * 3));
   expect(cut.exhausted).toBe(false);
   expect(cut.messages.some((message) => message.id === selected)).toBe(false);
+});
+
+/** `count` messages matching `word`, each about 20 KB, so a 64 KiB page holds three. */
+const writeMatches = async (word: string, count: number) => {
+  const ts = new Date().toISOString();
+  const messages = Array.from(
+    { length: count },
+    (_, index) =>
+      new Message({
+        id: `${word}-${String(index).padStart(3, "0")}`,
+        ts,
+        from: "claude/lead",
+        to: ["#search"],
+        kind: "message",
+        body: `${word} ${"x".repeat(20_000)}`,
+      })
+  );
+  await insertRaw(config, {
+    "@context": toNode(messages[0] as Message, "")["@context"],
+    "@graph": messages.map((m) => {
+      const { "@context": _, ...node } = toNode(m, encodeJson(m));
+      return node;
+    }),
+  });
+  return messages.map((m) => m.id);
+};
+
+/** A text search, retried while a new commit's full-text index can still find nothing. */
+const searchFor = async (query: string, limit: number, expected: number) => {
+  let found = await read((r) => r.history({ limit, query }));
+  for (let attempt = 0; attempt < 50 && found.messages.length < expected; attempt++) {
+    await Bun.sleep(100);
+    found = await read((r) => r.history({ limit, query }));
+  }
+  return found;
+};
+
+test("a search over several pages continues the bus's one ranking call by call", async () => {
+  // Seven matches of about 20 KB need three calls; each continues the ranking held by the bus.
+  const ids = await writeMatches("zebra", 7);
+  const found = await searchFor("zebra", 200, ids.length);
+  expect(found.messages.map((message) => message.id).sort()).toEqual(ids);
+  expect(found.window).toBe("ranked");
+  expect(found.complete).toBe(false);
+});
+
+// Last in this file: it fills the bus's store of rankings for the rest of its lifetime.
+test("when the bus holds all the rankings it can, a search needing another call is unavailable, and one call still serves", async () => {
+  await writeMatches("yak", 7);
+  await searchFor("yak", 2, 2);
+  // Each two-row read of seven matches leaves a ranking held. Earlier reads in this file hold a
+  // few already (how many depends on index retries), so the refusal comes within 64 more.
+  let served = 0;
+  let refusal: unknown;
+  while (refusal === undefined && served <= 64) {
+    refusal = await read((r) => r.history({ limit: 2, query: "yak" })).then(
+      () => {
+        served += 1;
+        return undefined;
+      },
+      (error: unknown) => error
+    );
+  }
+  expect(refusal).toBeInstanceOf(ObservationUnavailable);
+  expect(served).toBeGreaterThan(55);
+  expect(served).toBeLessThan(64);
+  const single = await read((r) => r.history({ limit: 200, query: "broadcast" }));
+  expect(single.messages.map((message) => message.id)).toEqual([sent.other]);
 });

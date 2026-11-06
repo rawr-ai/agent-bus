@@ -1,10 +1,11 @@
 // Search's one ranking evaluation and its hydration on the real query engine: how Fluree groups
 // an entry's typed nodes, and whether each node's identity survives into a later call at t.
 import { expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { search } from "../src/catalogue.ts";
+import { history, search } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { QueryGateway } from "../src/Query.ts";
@@ -242,5 +243,47 @@ test("one grouped evaluation keeps every node of an entry, and hydration reads e
   }
   expect(paged.sort()).toEqual(valid.map((m) => m.id).sort());
   expect(page).toMatchObject({ damagedTotal: damaged.length, exhausted: true });
+
+  // Other operations keep their cursors: one built by hand in the format issued before kept
+  // rankings, with no revision or handle, continues history exactly as the issued one does.
+  // At the blank node's commit, the newest two entries (it and the non-canonical one) are valid.
+  const at = tOf.get(blank.id) as number;
+  const latest = await runtime.runPromise(
+    history.run({ direction: "backward", limit: 2 }, { t: at }, undefined)
+  );
+  expect(latest.rows.map((row) => row.id)).toEqual([blank.id, other.id]);
+  const last = latest.rows.at(-1);
+  const { limit: _limit, ...hashed } = latest.args as Json;
+  const sortedJson = (value: unknown): string =>
+    Array.isArray(value)
+      ? `[${value.map(sortedJson).join(",")}]`
+      : typeof value === "object" && value !== null
+        ? `{${Object.keys(value)
+            .sort()
+            .map((key) => `${JSON.stringify(key)}:${sortedJson((value as Json)[key])}`)
+            .join(",")}}`
+        : JSON.stringify(value);
+  const handBuilt = {
+    v: 1,
+    cv: 1,
+    op: "history",
+    h: createHash("sha256")
+      .update(sortedJson(hashed))
+      .digest()
+      .subarray(0, 16)
+      .toString("base64url"),
+    i: latest.ledger,
+    t: at,
+    n: 2,
+    p: { before: [last?.t, last?.id] },
+    u: 0,
+  };
+  const issued = JSON.parse(Buffer.from((latest.next as string).slice(4), "base64url").toString());
+  expect(issued).toEqual(handBuilt);
+  const continued = (cursor: string) =>
+    runtime.runPromise(history.run({ direction: "backward", limit: 2 }, { cursor }, undefined));
+  expect(
+    (await continued(`bq1.${Buffer.from(JSON.stringify(handBuilt)).toString("base64url")}`)).rows
+  ).toEqual((await continued(latest.next as string)).rows);
   await runtime.dispose();
 });
