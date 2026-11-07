@@ -262,6 +262,7 @@ const ANNOTATIONS = "Tool × annotation × approval";
 describe("the served instructions", () => {
   test("scope the join rule to a wake's read, leaving a deliberate rejoin open", () => {
     expect(instructions).toContain("reading needs no rejoin");
+    expect(instructions).toContain("an empty or refused read is not a reason to join");
     // An unconditional ban kept sessions from rejoining to change their topics or associations.
     expect(instructions).not.toMatch(/don't (call )?(bus_join|rejoin)|already joined/i);
   });

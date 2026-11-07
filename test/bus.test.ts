@@ -3950,7 +3950,7 @@ describe("claude wake hook", () => {
     );
   });
 
-  test("wake texts scope the join rule to their read and leave a deliberate rejoin open", () => {
+  test("wake texts route the read, keep its quiet and bounded-retry branches, and allow deliberate maintenance", () => {
     for (const { text, session, end } of [
       { text: formatWake("claude/a"), session: "$CLAUDE_CODE_SESSION_ID", end: "carry on" },
       { text: formatNudge("codex/a"), session: "$CODEX_THREAD_ID", end: "end the turn" },
@@ -3963,8 +3963,8 @@ describe("claude wake hook", () => {
       expect(text).toContain(
         "A deliberate bus_join to change the topics or associations of an address you hold is still fine."
       );
-      // An unconditional ban kept sessions from rejoining to change their topics or associations.
-      expect(text).not.toMatch(/don't (call )?(bus_join|rejoin)|already joined/i);
+      // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
+      expect(text).not.toMatch(/already joined|don't (call )?bus_join[.;]/i);
     }
   });
 
