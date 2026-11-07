@@ -1590,6 +1590,18 @@ describe("codex delivery", () => {
       })
     ));
 
+  test("a nudge in an earlier text, waiting across a deploy, still counts as ours", () =>
+    run(
+      Effect.gen(function* () {
+        const { waiting, put, restarted } = yield* setup;
+        // A nudge as an earlier release worded it: only its first sentence is shared.
+        const earlier = `[agent-bus] New messages for "codex/a". You are already joined; don't call bus_join.`;
+        put("t-1", earlier);
+        yield* restarted;
+        expect(waiting("t-1")).toEqual([earlier]);
+      })
+    ));
+
   test("a nudge belongs to its address's owner: leaving stops it, a takeover nudges the new one", () =>
     run(
       Effect.gen(function* () {
@@ -3931,6 +3943,19 @@ describe("claude wake hook", () => {
     expect(formatWake("claude/a")).toStartWith(
       '[agent-bus] New messages for "claude/a". Read them'
     );
+  });
+
+  test("wake texts scope the join rule to their read and leave a deliberate rejoin open", () => {
+    for (const [text, session] of [
+      [formatWake("claude/a"), "$CLAUDE_CODE_SESSION_ID"],
+      [formatNudge("codex/a"), "$CODEX_THREAD_ID"],
+    ] as const) {
+      expect(text).toContain(session);
+      expect(text).toContain("the read needs no bus_join");
+      expect(text).toContain("without replying or joining");
+      // An unconditional ban kept sessions from rejoining to change their topics or associations.
+      expect(text).not.toMatch(/don't (call )?(bus_join|rejoin)|already joined/i);
+    }
   });
 
   test("ends without a wake when superseded, owning nothing, or given no session", async () => {

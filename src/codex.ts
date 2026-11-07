@@ -365,9 +365,11 @@ const nudgeHead = (address: string) => `[agent-bus] New messages for ${JSON.stri
  * The turn input that tells a Codex thread it has mail. It carries no text
  * from other sessions (bodies, subjects or sender addresses): a queued item
  * runs as the owner's own input, so their text stays in `bus_read`'s result.
+ * Like the Claude wake, it rules out joining only to make an empty or refused
+ * read succeed; a deliberate rejoin to change topics or associations stays open.
  */
 export const formatNudge = (address: string) =>
-  `${nudgeHead(address)} You are already joined; don't call bus_join. Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
+  `${nudgeHead(address)} Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them; the read needs no bus_join. If it returns nothing, or says the address isn't joined or belongs to another session, end this turn without replying or joining. If it fails, retry once; if that fails too, say so and end the turn.`;
 
 /** An item waiting in a thread's queue: Codex's ids for it, which an edit keeps, and its text. */
 export interface Queued {

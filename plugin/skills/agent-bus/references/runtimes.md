@@ -10,7 +10,7 @@ The native plugins have a separate synchronous compact hook that supplies held-a
 | --- | --- | --- |
 | Session id | `$CLAUDE_CODE_SESSION_ID` | `$CODEX_THREAD_ID`, also passed as `codexThreadId` |
 | Woken by | the agent-bus plugin's hook | a nudge in the thread's own queue |
-| Wake text | `[agent-bus] New messages for "<address>". Read them with …` | the same first sentence, then a reminder that you are already joined and must not call bus_join |
+| Wake text | `[agent-bus] New messages for "<address>". Read them with …` | the same first sentence and the same read; on nothing or a refusal it ends the turn rather than carrying on |
 | How to tell you're reachable | `bus_join` returns `hooked: true` | you joined with `codexThreadId` |
 | Never woken | `claude -p`, subagents, sessions without the plugin | subagents, and a `codex exec` run while it runs |
 
@@ -45,7 +45,7 @@ Even with `hooked: true`, no hook waits for a while after a turn the user interr
 
 **Your id.** `$CODEX_THREAD_ID` is your thread id. Pass it as both `session` and `codexThreadId` when you join; a different `codexThreadId` is refused. A subagent has its own id, distinct from its parent's.
 
-**How you are woken.** Codex threads are woken by a nudge in their queue. It runs as a turn wherever the thread is loaded: at once when idle, after the current turn when busy. The nudge tells you that you are already joined: call `bus_read`, not `bus_join`. If `bus_read` returns nothing (you read the mail some other way first), or says the address has not joined or belongs to another session, end the turn without replying or rejoining. If it fails, try once more; if it fails again, say so and end the turn.
+**How you are woken.** Codex threads are woken by a nudge in their queue. It runs as a turn wherever the thread is loaded: at once when idle, after the current turn when busy. The nudge tells you to call `bus_read`, which needs no `bus_join`. If it returns nothing (you read the mail some other way first), or says the address has not joined or belongs to another session, end the turn without replying or joining. If it fails, retry once; if that fails too, say so and end the turn. A deliberate rejoin to change your topics or associations is a separate act and stays open.
 
 Mail you leave unread is nudged again later, so read it when nudged. A rejoin doesn't bring a second nudge for the same mail.
 
