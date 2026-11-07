@@ -10,7 +10,7 @@ The native plugins have a separate synchronous compact hook that supplies held-a
 | --- | --- | --- |
 | Session id | `$CLAUDE_CODE_SESSION_ID` | `$CODEX_THREAD_ID`, also passed as `codexThreadId` |
 | Woken by | the agent-bus plugin's hook | a nudge in the thread's own queue |
-| Wake text | `[agent-bus] New messages for "<address>". Read them with …` | the same first sentence and the same read; on nothing or a refusal it ends the turn rather than carrying on |
+| Wake text | `[agent-bus] New messages for "<address>". Read with bus_read …` | the same first sentence and the same read; on nothing or a refusal it ends the turn rather than carrying on |
 | How to tell you're reachable | `bus_join` returns `hooked: true` | you joined with `codexThreadId` |
 | Never woken | `claude -p`, subagents, sessions without the plugin | subagents, and a `codex exec` run while it runs |
 

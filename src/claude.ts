@@ -28,7 +28,7 @@ const HookInput = Schema.fromJsonString(
  * changes or the session compacts.
  */
 export const formatWake = (address: string) =>
-  `[agent-bus] New messages for ${JSON.stringify(address)}. Read them with the agent-bus bus_read tool, as that address with your $CLAUDE_CODE_SESSION_ID as session, and handle them. Don't use bus_join to make this read succeed: if it returns nothing, or says the address isn't joined or belongs to another session, carry on without replying. If it fails otherwise, retry once; if that fails too, say so and carry on. A deliberate bus_join to change the topics or associations of an address you hold is still fine.`;
+  `[agent-bus] New messages for ${JSON.stringify(address)}. Read with bus_read as this address, using session from $CLAUDE_CODE_SESSION_ID in your shell. Don't use bus_join to recover the read; deliberate updates to an address you hold may use it. No mail, not joined, or another owner: carry on quietly. Retry other failures once; if still failing, report and carry on.`;
 
 /**
  * Whether the hook's parent (Claude Code, or the shell it ran the hook in) is

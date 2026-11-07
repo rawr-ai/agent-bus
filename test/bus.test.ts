@@ -3946,23 +3946,24 @@ describe("claude wake hook", () => {
       ["bus_wake", { session: sid("claude/a") }],
     ]);
     expect(formatWake("claude/a")).toStartWith(
-      '[agent-bus] New messages for "claude/a". Read them'
+      '[agent-bus] New messages for "claude/a". Read with bus_read'
     );
   });
 
   test("wake texts route the read, keep its quiet and bounded-retry branches, and allow deliberate maintenance", () => {
     for (const { text, session, end } of [
       { text: formatWake("claude/a"), session: "$CLAUDE_CODE_SESSION_ID", end: "carry on" },
-      { text: formatNudge("codex/a"), session: "$CODEX_THREAD_ID", end: "end the turn" },
+      { text: formatNudge("codex/a"), session: "$CODEX_THREAD_ID", end: "end this turn" },
     ]) {
-      expect(text).toContain(`with your ${session} as session`);
-      expect(text).toContain("Don't use bus_join to make this read succeed");
-      expect(text).toContain("says the address isn't joined or belongs to another session");
-      // A retry that succeeds is not reported.
-      expect(text).toContain(`retry once; if that fails too, say so and ${end}.`);
       expect(text).toContain(
-        "A deliberate bus_join to change the topics or associations of an address you hold is still fine."
+        `Read with bus_read as this address, using session from ${session} in your shell.`
       );
+      expect(text).toContain(
+        "Don't use bus_join to recover the read; deliberate updates to an address you hold may use it."
+      );
+      expect(text).toContain(`No mail, not joined, or another owner: ${end} quietly.`);
+      // A retry that succeeds is not reported.
+      expect(text).toContain(`Retry other failures once; if still failing, report and ${end}.`);
       // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
       expect(text).not.toMatch(/already joined|don't (call )?bus_join[.;]/i);
     }
