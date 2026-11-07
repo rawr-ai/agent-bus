@@ -1590,14 +1590,19 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a nudge in an earlier text, waiting across a deploy, still counts as ours", () =>
+  test("a nudge in the earlier wording, waiting across a deploy, is ours to skip but never to remove", () =>
     run(
       Effect.gen(function* () {
-        const { waiting, put, restarted } = yield* setup;
-        // A nudge as an earlier release worded it: only its first sentence is shared.
-        const earlier = `[agent-bus] New messages for "codex/a". You are already joined; don't call bus_join.`;
+        const { bus, waiting, put, queueState, restarted, send } = yield* setup;
+        // The deployed text before the wake scoping, frozen: a queue can still hold it.
+        const earlier = `[agent-bus] New messages for "codex/a". You are already joined; don't call bus_join. Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
         put("t-1", earlier);
+        yield* send("two");
         yield* restarted;
+        expect(waiting("t-1")).toEqual([earlier]);
+        yield* bus.take("codex/a", "t-1");
+        yield* restarted;
+        expect(queueState.removed).toEqual([]);
         expect(waiting("t-1")).toEqual([earlier]);
       })
     ));
@@ -3946,13 +3951,18 @@ describe("claude wake hook", () => {
   });
 
   test("wake texts scope the join rule to their read and leave a deliberate rejoin open", () => {
-    for (const [text, session] of [
-      [formatWake("claude/a"), "$CLAUDE_CODE_SESSION_ID"],
-      [formatNudge("codex/a"), "$CODEX_THREAD_ID"],
-    ] as const) {
-      expect(text).toContain(session);
-      expect(text).toContain("the read needs no bus_join");
-      expect(text).toContain("without replying or joining");
+    for (const { text, session, end } of [
+      { text: formatWake("claude/a"), session: "$CLAUDE_CODE_SESSION_ID", end: "carry on" },
+      { text: formatNudge("codex/a"), session: "$CODEX_THREAD_ID", end: "end the turn" },
+    ]) {
+      expect(text).toContain(`with your ${session} as session`);
+      expect(text).toContain("Don't use bus_join to make this read succeed");
+      expect(text).toContain("says the address isn't joined or belongs to another session");
+      // A retry that succeeds is not reported.
+      expect(text).toContain(`retry once; if that fails too, say so and ${end}.`);
+      expect(text).toContain(
+        "A deliberate bus_join to change the topics or associations of an address you hold is still fine."
+      );
       // An unconditional ban kept sessions from rejoining to change their topics or associations.
       expect(text).not.toMatch(/don't (call )?(bus_join|rejoin)|already joined/i);
     }

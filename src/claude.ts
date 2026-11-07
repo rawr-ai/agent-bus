@@ -18,16 +18,17 @@ const HookInput = Schema.fromJsonString(
  * other sessions: the hook's output enters the session's context as Claude
  * Code's own, so senders' text stays in `bus_read`'s result. A woken session
  * may have lost its join from context (a compaction, a resume), so it is told
- * the read needs no join and not to join when the read comes back empty or
- * refused; after `/clear` a rejoin would be refused, the old id holding the
- * address. It forbids nothing else: a deliberate rejoin of an address the
- * session holds, to change its topics or associations, stays open. A wake may
+ * not to join to make the read succeed when it comes back empty or refused;
+ * after `/clear` a rejoin would be refused, the old id holding the address. It
+ * says outright that a deliberate rejoin of an address the session holds, to
+ * change its topics or associations, is still fine: a client keeps the MCP
+ * instructions it connected with, which may be older and broader. A wake may
  * land mid-turn, so it carries on rather than ending a turn, and says when its
  * read fails: the same unread mail doesn't wake it again until the unread span
  * changes or the session compacts.
  */
 export const formatWake = (address: string) =>
-  `[agent-bus] New messages for ${JSON.stringify(address)}. Read them with the agent-bus bus_read tool, as that address with your $CLAUDE_CODE_SESSION_ID as session, and handle them; the read needs no bus_join. If it returns nothing, or says the address isn't joined or belongs to another session, carry on without replying or joining. If it fails, retry once; if that fails too, say so and carry on.`;
+  `[agent-bus] New messages for ${JSON.stringify(address)}. Read them with the agent-bus bus_read tool, as that address with your $CLAUDE_CODE_SESSION_ID as session, and handle them. Don't use bus_join to make this read succeed: if it returns nothing, or says the address isn't joined or belongs to another session, carry on without replying. If it fails otherwise, retry once; if that fails too, say so and carry on. A deliberate bus_join to change the topics or associations of an address you hold is still fine.`;
 
 /**
  * Whether the hook's parent (Claude Code, or the shell it ran the hook in) is

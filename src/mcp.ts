@@ -331,7 +331,7 @@ const joinFields = {
 // Not destructive: it claims a free address, or reconnects the session that holds it.
 const Join = Tool.make("bus_join", {
   description:
-    "Join the agent bus (or rejoin after a restart) before reading. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can nudge them to read new messages. A Claude session is woken by the agent-bus plugin's hook, and then its join returns hooked: true; without the plugin it isn't woken, and reads with bus_read or bus_wait.",
+    "Join the agent bus (or rejoin after a restart) before reading. Rejoining an address you hold, with the same session, also changes its topics, associations or note. Claims your address for your session and announces your runtime and topics to every peer; an address another session holds is refused, so pick one specific to this session. Codex sessions pass their own thread id so the bus can nudge them to read new messages. A Claude session is woken by the agent-bus plugin's hook, and then its join returns hooked: true; without the plugin it isn't woken, and reads with bus_read or bus_wait.",
   parameters: Schema.Struct(joinFields),
   success: CurrentJoined,
   failure: Failure,
