@@ -1590,6 +1590,23 @@ describe("codex delivery", () => {
       })
     ));
 
+  test("a nudge in the earlier wording, waiting across a deploy, is ours to skip but never to remove", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, waiting, put, queueState, restarted, send } = yield* setup;
+        // The deployed text before the wake scoping, frozen: a queue can still hold it.
+        const earlier = `[agent-bus] New messages for "codex/a". You are already joined; don't call bus_join. Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
+        put("t-1", earlier);
+        yield* send("two");
+        yield* restarted;
+        expect(waiting("t-1")).toEqual([earlier]);
+        yield* bus.take("codex/a", "t-1");
+        yield* restarted;
+        expect(queueState.removed).toEqual([]);
+        expect(waiting("t-1")).toEqual([earlier]);
+      })
+    ));
+
   test("a nudge belongs to its address's owner: leaving stops it, a takeover nudges the new one", () =>
     run(
       Effect.gen(function* () {
@@ -3929,8 +3946,27 @@ describe("claude wake hook", () => {
       ["bus_wake", { session: sid("claude/a") }],
     ]);
     expect(formatWake("claude/a")).toStartWith(
-      '[agent-bus] New messages for "claude/a". Read them'
+      '[agent-bus] New messages for "claude/a". Read with bus_read'
     );
+  });
+
+  test("wake texts route the read, keep its quiet and bounded-retry branches, and allow deliberate maintenance", () => {
+    for (const { text, session, end } of [
+      { text: formatWake("claude/a"), session: "$CLAUDE_CODE_SESSION_ID", end: "carry on" },
+      { text: formatNudge("codex/a"), session: "$CODEX_THREAD_ID", end: "end this turn" },
+    ]) {
+      expect(text).toContain(
+        `Read with bus_read as this address, using session from ${session} in your shell.`
+      );
+      expect(text).toContain(
+        "Don't use bus_join to recover the read; deliberate updates to an address you hold may use it."
+      );
+      expect(text).toContain(`No mail, not joined, or another owner: ${end} quietly.`);
+      // A retry that succeeds is not reported.
+      expect(text).toContain(`Retry other failures once; if still failing, report and ${end}.`);
+      // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
+      expect(text).not.toMatch(/already joined|don't (call )?bus_join[.;]/i);
+    }
   });
 
   test("ends without a wake when superseded, owning nothing, or given no session", async () => {

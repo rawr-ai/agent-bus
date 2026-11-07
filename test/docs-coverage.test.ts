@@ -33,7 +33,7 @@ const read = (path: string) => readFileSync(join(root, path), "utf8");
 // --- The code ---------------------------------------------------------------------------
 
 /** The tools as the official SDK lists them from an in-process server. */
-const listTools = async () => {
+const served = async () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-docs-"));
   const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const port = Number(probe.url.port);
@@ -56,7 +56,7 @@ const listTools = async () => {
       new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`))
     );
     try {
-      return (await client.listTools()).tools;
+      return { tools: (await client.listTools()).tools, instructions: client.getInstructions() };
     } finally {
       await client.close();
     }
@@ -66,7 +66,7 @@ const listTools = async () => {
   }
 };
 
-const tools = await listTools();
+const { tools, instructions } = await served();
 const toolNamed = (name: string) => tools.find((tool) => tool.name === name);
 type Schema = {
   type?: string;
@@ -258,6 +258,15 @@ const tableUnder = (title: string) => {
   return table;
 };
 const ANNOTATIONS = "Tool × annotation × approval";
+
+describe("the served instructions", () => {
+  test("scope the join rule to a wake's read, leaving a deliberate rejoin open", () => {
+    expect(instructions).toContain("reading needs no rejoin");
+    expect(instructions).toContain("an empty or refused read is not a reason to join");
+    // An unconditional ban kept sessions from rejoining to change their topics or associations.
+    expect(instructions).not.toMatch(/don't (call )?(bus_join|rejoin)|already joined/i);
+  });
+});
 
 describe("interfaces.md covers the toolkit", () => {
   test("the tool table, the tool sections and the annotation table list the same tools", () => {

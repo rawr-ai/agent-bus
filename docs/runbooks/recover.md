@@ -244,7 +244,7 @@ The plugin's hook waits in `bus_wake` and exits 2 with a line when mail arrives.
    wait $hook; echo "hook exit $?"
    ```
 
-   Expect the line `[agent-bus] New messages for "rehearsal/hook". Read them with …` on stderr and exit 2. A hook for a session that owns no address returns at once with exit 0. *Rehearsed 2026-10-28.*
+   Expect the line `[agent-bus] New messages for "rehearsal/hook". Read with bus_read …` on stderr and exit 2. A hook for a session that owns no address returns at once with exit 0. *Rehearsed 2026-10-28.*
 
 5. Fix by cause.
    - **No plugin, or an old one:** install or update it ([install](install.md)): `claude plugin marketplace update agent-bus`, then `claude plugin update agent-bus@agent-bus`. Start the session again or run `/reload-plugins`.

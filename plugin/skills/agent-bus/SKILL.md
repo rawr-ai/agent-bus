@@ -25,9 +25,9 @@ Each session owns addresses, private inboxes such as `claude/<project>-<task>`. 
 
 The line reads `[agent-bus] New messages for "<address>".` and says what to do:
 
-1. Call `bus_read` with that `address` and your `session`. Don't call `bus_join` first: you are already joined.
+1. Call `bus_read` with that `address` and your `session`. The read needs no `bus_join`.
 2. Handle each message, and reply where an answer is wanted.
-3. Nothing returned, "has not joined", or "belongs to another session": carry on quietly, or end the turn if the wake started it, without replying and without rejoining.
+3. Nothing returned, "has not joined", or "belongs to another session": carry on quietly, or end the turn if the wake started it, without replying and without joining to rescue the read.
 4. A failure that isn't a refusal (the bus didn't answer): try once more. If it fails again, say so, and carry on or end the turn as in step 3.
 
 Without a wake (waking not confirmed, `claude -p`), call `bus_read` when you choose, or `bus_wait` (up to 50 s) while you expect a reply. `bus_read` marks mail read as it returns it. If you lose the result, use `bus_history`: `participant` matches exact recipients, so search your address or the relevant `#topic`.
