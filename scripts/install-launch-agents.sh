@@ -21,6 +21,13 @@
 # explicit Bun after restoring that source. The selected Bun must match its package pin.
 # Full installs may omit --bun to select the Bun currently on PATH.
 #
+# --release /abs/releases/<id> --expect <manifest sha256> --bun /abs/approved/bun binds the
+# managed command to a verified release instead of a source checkout
+# (docs/frames/release-packaging.md). The release must sit directly in AGENT_BUS_RELEASES
+# (default ~/.local/share/agent-bus/releases), match the anchored manifest digest and carry
+# the approved Bun. Like --runtime-only it touches only the launcher and the serve
+# LaunchAgent. Either mode adopts a launcher the other wrote.
+#
 # AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL (the label prefix) and
 # AGENT_BUS_LAUNCHER (the managed `agent-bus` executable) override the defaults, so a
 # disposable instance can run beside the real one. AGENT_BUS_REPO selects the source root.
@@ -28,12 +35,15 @@
 set -eu
 
 remote=""
+release=""
+expect=""
 runtime_only=false
 show_help=false
 bun_bin=""
 usage() {
   echo "usage: $0 [--remote SSH_HOST] [--bun /absolute/path/to/bun]"
   echo "       $0 --runtime-only --bun /absolute/path/to/bun"
+  echo "       $0 --release /absolute/releases/<id> --expect <manifest sha256> --bun /absolute/path/to/bun"
   echo "AGENT_BUS_REPO may select an absolute source root, including for explicit rollback."
 }
 fail() { echo "$*" >&2; exit 1; }
@@ -51,6 +61,18 @@ while [ "$#" -gt 0 ]; do
       fi
       shift 2
       ;;
+    --release|--expect)
+      [ "$#" -ge 2 ] && [ -n "$2" ] || fail "$1 requires a value"
+      case "$2" in --*) fail "$1 requires a value" ;; esac
+      if [ "$1" = --release ]; then
+        [ -z "$release" ] || fail "--release was supplied more than once"
+        case "$2" in /*) release=$2 ;; *) fail "--release must name an absolute directory" ;; esac
+      else
+        [ -z "$expect" ] || fail "--expect was supplied more than once"
+        expect=$2
+      fi
+      shift 2
+      ;;
     --runtime-only)
       [ "$runtime_only" = false ] || fail "--runtime-only was supplied more than once"
       runtime_only=true
@@ -65,7 +87,15 @@ if [ "$runtime_only" = true ]; then
   [ -z "$remote" ] || fail "--runtime-only cannot be combined with --remote"
   [ -n "$bun_bin" ] || fail "--runtime-only requires an explicit --bun path"
 fi
+[ -n "$expect" ] && [ -z "$release" ] && fail "--expect requires --release"
+if [ -n "$release" ]; then
+  [ "$runtime_only" = false ] || fail "--release cannot be combined with --runtime-only"
+  [ -z "$remote" ] || fail "--release cannot be combined with --remote"
+  [ -n "$bun_bin" ] || fail "--release requires the approved --bun path"
+  [ -n "$expect" ] || fail "--release requires --expect with the recorded manifest digest"
+fi
 
+script_dir=$(cd "$(dirname "$0")" && pwd -P)
 source_root="${AGENT_BUS_REPO:-$(cd "$(dirname "$0")/.." && pwd -P)}"
 case "$source_root" in /*) ;; *) fail "AGENT_BUS_REPO must name an absolute source root" ;; esac
 repo_dir=$(cd "$source_root" && pwd -P) || fail "source root does not exist: $source_root"
@@ -86,15 +116,19 @@ agents="$HOME/Library/LaunchAgents"
 domain="gui/$(id -u)"
 prefix="${AGENT_BUS_LABEL:-ai.rawr.agent-bus}"
 launcher="${AGENT_BUS_LAUNCHER:-$HOME/.local/bin/agent-bus}"
+releases="${AGENT_BUS_RELEASES:-$HOME/.local/share/agent-bus/releases}"
+case "$releases" in /*) ;; *) fail "AGENT_BUS_RELEASES must be an absolute path" ;; esac
+# Compare real paths: a release is recognised only directly inside this directory.
+if [ -d "$releases" ]; then releases=$(cd "$releases" && pwd -P); fi
 case "$launcher" in /*) ;; *) fail "AGENT_BUS_LAUNCHER must be an absolute path" ;; esac
 case "$prefix" in ""|*/*) fail "AGENT_BUS_LABEL must be a nonempty label without slashes" ;; esac
 
 # Validate source, runtime and ownership before creating any directories or temporary files.
 # Recognition is the exact generated shape, not merely the marker or an executable bit.
-validation=$("$bun_bin" --no-env-file - "$repo_dir/package.json" "$launcher" "$repo_dir/src/bin.ts" "$bun_bin" <<'JS'
+validation=$("$bun_bin" --no-env-file - "$repo_dir/package.json" "$launcher" "$repo_dir/src/bin.ts" "$bun_bin" "$releases" <<'JS'
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-const [manifestPath, launcher, entry, runtimePath] = process.argv.slice(2);
+import { dirname, normalize, resolve } from "node:path";
+const [manifestPath, launcher, entry, runtimePath, releases] = process.argv.slice(2);
 const fail = (message) => { console.error(message); process.exit(1); };
 const accept = () => { process.stdout.write(`agent-bus-runtime-binding-v1:${realpathSync(runtimePath)}`); process.exit(0); };
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -118,6 +152,21 @@ if (info.isFile()) {
     if (runtime.startsWith("/") && !runtime.includes("\n") && quote(runtime) === word)
       accept();
   }
+  // A release launcher (v2) is owned only in its exact generated shape (the anchored
+  // pattern fixes every byte), for a release directly inside the releases directory.
+  const v2 = "#!/bin/sh\n# agent-bus managed release launcher v2\nexec ";
+  if (content.startsWith(v2)) {
+    const match = /^'((?:[^']|'\\'')*)\/runtime\/bun' --no-env-file '((?:[^']|'\\'')*)\/app\/cli\.js' "\$@"\n$/.exec(
+      content.slice(v2.length)
+    );
+    const release = match?.[1]?.replaceAll("'\\''", "'");
+    if (
+      match !== null && release !== undefined && match[1] === match[2] &&
+      release.startsWith("/") && !release.includes("\n") && normalize(release) === release &&
+      dirname(release) === releases && !release.split("/").at(-1).startsWith(".")
+    )
+      accept();
+  }
 }
 fail(`Refusing foreign launcher at ${launcher}; move it aside explicitly before installing`);
 JS
@@ -129,6 +178,18 @@ case "$validation" in
 esac
 (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
   "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
+if [ -n "$release" ]; then
+  # The release must sit directly in the releases directory, by its real path.
+  release_parent=$(cd "$release/.." 2>/dev/null && pwd -P) || fail "release directory does not exist: $release"
+  [ "$release_parent" = "$releases" ] || fail "release is not directly inside $releases: $release"
+  case "$(basename "$release")" in .*) fail "release name must not start with a dot" ;; esac
+  [ -d "$release" ] && [ ! -L "$release" ] || fail "release is not a real directory: $release"
+  release="$release_parent/$(basename "$release")"
+  # Verification writes nothing, not even Bun's transpiler cache.
+  (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
+    "$bun_bin" --no-env-file "$script_dir/release.ts" verify "$release" --expect "$expect" --bun "$bun_bin" >/dev/null) \
+    || fail "Release did not verify against the expected manifest digest and approved Bun: $release"
+fi
 
 launcher_tmp=""
 agent_tmp=""
@@ -158,6 +219,7 @@ PLIST
   <key>WorkingDirectory</key><string>$(xml_escape "$bus_dir")</string>
   <key>EnvironmentVariables</key>
   <dict>
+    <key>HOME</key><string>$(xml_escape "$HOME")</string>
     <key>AGENT_BUS_DIR</key><string>$(xml_escape "$bus_dir")</string>
     <key>AGENT_BUS_PORT</key><string>$(xml_escape "$bus_port")</string>
   </dict>
@@ -198,16 +260,26 @@ write_agent() {
 install_runtime() {
   mkdir -p "$bus_dir" "$agents" "$(dirname "$launcher")"
   launcher_tmp=$(mktemp "$launcher.tmp.XXXXXX")
-  {
-    printf '#!/bin/sh\n# agent-bus managed runtime launcher v1\nexec '
-    shell_quote "$bun_bin"
-    printf ' --no-env-file '
-    shell_quote "$repo_dir/src/bin.ts"
-    printf ' "$@"\n'
-  } > "$launcher_tmp"
+  if [ -n "$release" ]; then
+    {
+      printf '#!/bin/sh\n# agent-bus managed release launcher v2\nexec '
+      shell_quote "$release/runtime/bun"
+      printf ' --no-env-file '
+      shell_quote "$release/app/cli.js"
+      printf ' "$@"\n'
+    } > "$launcher_tmp"
+  else
+    {
+      printf '#!/bin/sh\n# agent-bus managed runtime launcher v1\nexec '
+      shell_quote "$bun_bin"
+      printf ' --no-env-file '
+      shell_quote "$repo_dir/src/bin.ts"
+      printf ' "$@"\n'
+    } > "$launcher_tmp"
+  fi
   chmod 755 "$launcher_tmp"
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
-    "$launcher_tmp" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
+    "$launcher_tmp" --help >/dev/null) || fail "The new launcher cannot run --help"
   agent_tmp=$(mktemp "$agents/$prefix.plist.tmp.XXXXXX")
   render_agent "$prefix" "$bus_dir/agent-bus.log" "$launcher" serve > "$agent_tmp"
   chmod 644 "$agent_tmp"
@@ -257,7 +329,7 @@ wait_for() {
   done
 }
 
-if [ "$runtime_only" = true ]; then
+if [ "$runtime_only" = true ] || [ -n "$release" ]; then
   install_runtime
   wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
   exit 0

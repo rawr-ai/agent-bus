@@ -17,7 +17,7 @@ import { initializeInstallation, loadInstallation } from "./installation.ts";
 import * as Ledger from "./Ledger.ts";
 import * as Mcp from "./mcp.ts";
 import * as Serve from "./serve.ts";
-import { VERSION } from "./version.ts";
+import { BUILD } from "./version.ts";
 
 const busDir = process.env.AGENT_BUS_DIR ?? join(homedir(), ".agent-bus");
 const port = Number(process.env.AGENT_BUS_PORT ?? 8096);
@@ -127,7 +127,7 @@ const serve = Command.make(
     Layer.launch(
       Serve.layer({
         port,
-        version: VERSION,
+        version: BUILD,
         codex: input.codex,
       })
     ).pipe(Effect.provide(BusLayer))
@@ -367,8 +367,9 @@ const cli = Command.make("agent-bus").pipe(
   ])
 );
 
-Command.run(cli, { version: VERSION }).pipe(
-  // A refused or failed bus call or incomplete installation is an answer, not a crash:
+Command.run(cli, { version: BUILD }).pipe(
+  // A refused or failed bus call, a missing store or an incomplete installation is an
+  // answer, not a crash:
   // its message alone, and status 1.
   Effect.catchTags({ BusCallError: fail, NoStore: fail, InstallationError: fail }),
   Effect.provide(Layer.mergeAll(BunServices.layer, FetchHttpClient.layer)),

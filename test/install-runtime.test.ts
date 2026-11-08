@@ -13,6 +13,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { releaseLauncher, removeOwned } from "../scripts/release.ts";
+import { fakeRelease } from "./release-fixture.ts";
 
 const installer = resolve(import.meta.dir, "../scripts/install-launch-agents.sh");
 const manifest = await Bun.file(
@@ -142,9 +144,15 @@ async function fixture() {
     tools,
     env,
     plist: join(agents, `${label}.plist`),
+    releases: join(home, ".local/share/agent-bus/releases"),
+    /** Seals a stand-in release built on Bun A in the default releases directory. */
+    release: async (id: string, bun = bunA) => {
+      await mkdir(join(home, ".local/share/agent-bus/releases"), { recursive: true });
+      return fakeRelease(join(home, ".local/share/agent-bus/releases"), id, bun);
+    },
     install: (args = ["--runtime-only", "--bun", bunA], extra = {}) =>
       command(["/bin/sh", installer, ...args], { ...env, ...extra }, root),
-    dispose: () => rm(root, { recursive: true, force: true }),
+    dispose: async () => removeOwned(root),
   };
 }
 
@@ -284,7 +292,11 @@ test.skipIf(process.platform !== "darwin")(
       const plist = JSON.parse(result.stdout);
       expect(plist.ProgramArguments).toEqual([f.launcher, "serve"]);
       expect(plist.WorkingDirectory).toBe(f.bus);
-      expect(plist.EnvironmentVariables).toEqual({ AGENT_BUS_DIR: f.bus, AGENT_BUS_PORT: "47891" });
+      expect(plist.EnvironmentVariables).toEqual({
+        HOME: f.home,
+        AGENT_BUS_DIR: f.bus,
+        AGENT_BUS_PORT: "47891",
+      });
       expect(plist.StandardOutPath).toBe(join(f.bus, "agent-bus.log"));
       expect(plist.StandardErrorPath).toBe(join(f.bus, "agent-bus.log"));
       const served = await command(
@@ -520,3 +532,135 @@ test("failed launchd activation leaves a coherent binding that the same updater 
     await f.dispose();
   }
 });
+
+test("release mode binds the launcher to a verified release, and source rollback adopts it", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+    const plist = await readFile(f.plist, "utf8");
+    const a = await f.release("1.0.0-aaaaaaaaaaaa");
+    const b = await f.release("1.0.0-bbbbbbbbbbbb");
+    const stateBefore = await snapshot(f.bus);
+    for (const target of [a, b]) {
+      await writeFile(f.toolLog, "");
+      const result = await f.install([
+        "--release",
+        target.dir,
+        "--expect",
+        target.digest,
+        "--bun",
+        f.bunA,
+      ]);
+      expect(result).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(target.dir));
+      expect((await lstat(f.launcher)).mode & 0o777).toBe(0o755);
+      expect(await readFile(f.plist, "utf8")).toBe(plist);
+      expect(await readFile(f.toolLog, "utf8")).not.toMatch(/fluree|tunnel|scp|ssh/);
+      // The launcher and the real plugin hook run this release's code under env -i, without dotenv.
+      for (const [args, expectedArgs] of [
+        [[f.launcher, "serve"], ["serve"]],
+        [["/bin/sh", "-c", hookCommand], ["claude-wake"]],
+      ]) {
+        const ran = await command(args!, { HOME: f.home, PATH: "/usr/bin:/bin" }, f.bus, "{}\n");
+        expect(ran).toMatchObject({ exitCode: 0, stderr: "" });
+        expect(JSON.parse(ran.stdout)).toEqual({
+          runtime: "A",
+          args: expectedArgs,
+          dotenv: null,
+          release: target.dir.split("/").at(-1),
+        });
+      }
+    }
+    expect(await snapshot(f.bus)).toEqual(stateBefore);
+    // Rolling back to source uses the runtime-only path, which owns a release launcher.
+    expect(await f.install(["--runtime-only", "--bun", f.bunB])).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    const source = await command([f.launcher, "--help"], { HOME: f.home, PATH: "/bin" }, f.bus);
+    expect(JSON.parse(source.stdout)).toEqual({ runtime: "B", args: ["--help"], dotenv: null });
+    expect(await readFile(f.plist, "utf8")).toBe(plist);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("release mode refuses bad arguments, unverified or misplaced releases before any write", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+    const good = await f.release("1.0.0-cccccccccccc");
+    const wrongBun = await f.release("1.0.0-dddddddddddd", f.bunB);
+    const outside = fakeRelease(f.root, "1.0.0-eeeeeeeeeeee", f.bunA);
+    const releaseArgs = (dir: string, digest: string, bun = f.bunA) => [
+      "--release",
+      dir,
+      "--expect",
+      digest,
+      "--bun",
+      bun,
+    ];
+    const cases: Array<[string[], string]> = [
+      [releaseArgs(good.dir, "0".repeat(64)), "did not verify"],
+      [releaseArgs(wrongBun.dir, wrongBun.digest), "did not verify"],
+      [releaseArgs(outside.dir, outside.digest), "not directly inside"],
+      [releaseArgs(join(f.releases, "missing"), good.digest), "does not exist"],
+      [["--release", "relative", "--expect", good.digest, "--bun", f.bunA], "absolute directory"],
+      [["--release", good.dir, "--bun", f.bunA], "requires --expect"],
+      [["--release", good.dir, "--expect", good.digest], "requires the approved --bun"],
+      [["--expect", good.digest, "--runtime-only", "--bun", f.bunA], "--expect requires --release"],
+      [
+        [...releaseArgs(good.dir, good.digest), "--runtime-only"],
+        "cannot be combined with --runtime-only",
+      ],
+      [
+        [...releaseArgs(good.dir, good.digest), "--remote", "host"],
+        "cannot be combined with --remote",
+      ],
+      [[...releaseArgs(good.dir, good.digest), "--release", good.dir], "more than once"],
+    ];
+    for (const [args, reason] of cases) {
+      await writeFile(f.toolLog, "");
+      const before = await snapshot(f.root);
+      const result = await f.install(args);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain(reason);
+      expect(await snapshot(f.root)).toEqual(before);
+      expect(await readFile(f.toolLog, "utf8")).toBe("");
+    }
+  } finally {
+    await f.dispose();
+  }
+});
+
+for (const kind of ["marker-only", "appended", "outside-releases", "relative", "dot-release"]) {
+  test(`refuses a ${kind} release launcher before any write or service operation`, async () => {
+    const f = await fixture();
+    try {
+      const good = await f.release("1.0.0-ffffffffffff");
+      const genuine = releaseLauncher(good.dir);
+      const content = {
+        "marker-only": "#!/bin/sh\n# agent-bus managed release launcher v2\necho foreign\n",
+        appended: `${genuine}echo foreign\n`,
+        "outside-releases": releaseLauncher(join(f.root, "elsewhere/1.0.0-ffffffffffff")),
+        relative: releaseLauncher("releases/1.0.0-ffffffffffff"),
+        "dot-release": releaseLauncher(join(f.releases, ".tmp-1.0.0-ffffffffffff")),
+      }[kind]!;
+      await writeFile(f.launcher, content, { mode: 0o755 });
+      const before = await snapshot(f.root);
+      const result = await f.install([
+        "--release",
+        good.dir,
+        "--expect",
+        good.digest,
+        "--bun",
+        f.bunA,
+      ]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain("Refusing foreign launcher");
+      expect(await snapshot(f.root)).toEqual(before);
+    } finally {
+      await f.dispose();
+    }
+  });
+}
