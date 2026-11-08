@@ -33,6 +33,7 @@ import {
   symlinkSync,
   writeFileSync,
 } from "node:fs";
+import { builtinModules } from "node:module";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, posix } from "node:path";
 
@@ -360,6 +361,61 @@ export function removeOwned(path: string) {
   rmSync(path, { recursive: true, force: true });
 }
 
+/**
+ * Bundles one entry of a source tree for Bun, as a release ships it: no
+ * environment inlined, and with `id` the release identity the CLI reports.
+ */
+export function bundle(options: {
+  readonly src: string;
+  readonly entry: string;
+  readonly outfile: string;
+  readonly bun: string;
+  readonly env?: Record<string, string>;
+  readonly id?: string;
+}) {
+  must(
+    [
+      options.bun,
+      "build",
+      options.entry,
+      "--target=bun",
+      "--env=disable",
+      "--minify-syntax",
+      "--minify-whitespace",
+      ...(options.id === undefined
+        ? []
+        : [`--define=AGENT_BUS_RELEASE=${JSON.stringify(options.id)}`]),
+      `--outfile=${options.outfile}`,
+    ],
+    `bundling ${options.entry}`,
+    {
+      cwd: options.src,
+      env: options.env ?? {
+        ...cleanEnv(homedir()),
+        PATH: `${dirname(options.bun)}:/usr/bin:/bin:/usr/sbin:/sbin`,
+      },
+    }
+  );
+}
+
+const BUILTIN = new Set(builtinModules);
+
+/**
+ * Module specifiers a bundle still loads from outside itself, as Bun's own
+ * parser finds them. A release bundle may name only Bun and Node builtins;
+ * anything else would be resolved from wherever it happens to run.
+ */
+export function externalImports(code: string): ReadonlyArray<string> {
+  const body = code.startsWith("#!") ? code.slice(code.indexOf("\n") + 1) : code;
+  const found = new Set<string>();
+  for (const { path } of new Bun.Transpiler({ loader: "js" }).scanImports(body))
+    if (
+      !(path === "bun" || path.startsWith("bun:") || path.startsWith("node:") || BUILTIN.has(path))
+    )
+      found.add(path);
+  return [...found].sort();
+}
+
 export type Built = { readonly id: string; readonly dir: string; readonly manifestSha256: string };
 
 /**
@@ -424,36 +480,9 @@ export function build(options: {
     staged = stage;
     mkdirSync(join(stage, "app/dist"), { recursive: true });
     mkdirSync(join(stage, "runtime"));
-    must(
-      [
-        bun,
-        "build",
-        "src/bin.ts",
-        "--target=bun",
-        "--env=disable",
-        "--minify-syntax",
-        "--minify-whitespace",
-        `--define=AGENT_BUS_RELEASE=${JSON.stringify(id)}`,
-        `--outfile=${join(stage, "app/cli.js")}`,
-      ],
-      "the CLI bundle",
-      { cwd: src, env }
-    );
+    bundle({ src, entry: "src/bin.ts", outfile: join(stage, "app/cli.js"), bun, env, id });
     // The release's own activation tools: this script bundled, and the installer.
-    must(
-      [
-        bun,
-        "build",
-        "scripts/release.ts",
-        "--target=bun",
-        "--env=disable",
-        "--minify-syntax",
-        "--minify-whitespace",
-        `--outfile=${join(stage, "app/release.js")}`,
-      ],
-      "the release tool bundle",
-      { cwd: src, env }
-    );
+    bundle({ src, entry: "scripts/release.ts", outfile: join(stage, "app/release.js"), bun, env });
     writeFileSync(
       join(stage, "app/install-launch-agents.sh"),
       readFileSync(join(src, "scripts/install-launch-agents.sh"))

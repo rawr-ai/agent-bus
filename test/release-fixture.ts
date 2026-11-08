@@ -4,21 +4,32 @@
  * tool itself. Building the real CLI bundle is the job of `qualify:release`,
  * not of every test.
  */
-import { chmodSync, cpSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { fileSha256, seal } from "../scripts/release.ts";
+import { bundle, fileSha256, seal } from "../scripts/release.ts";
 
 const repo = resolve(import.meta.dir, "..");
 
 /** The release tool, bundled as a build bundles it, once per test process. */
-const bundled = await Bun.build({
-  entrypoints: [join(repo, "scripts/release.ts")],
-  target: "bun",
-  env: "disable",
-  minify: { syntax: true, whitespace: true },
+const scratch = mkdtempSync(join(tmpdir(), "agent-bus-release-tool-"));
+bundle({
+  src: repo,
+  entry: "scripts/release.ts",
+  outfile: join(scratch, "release.js"),
+  bun: process.execPath,
 });
-if (!bundled.success) throw new Error("bundling the release tool failed");
-const tool = new Uint8Array(await bundled.outputs[0]!.arrayBuffer());
+const tool = readFileSync(join(scratch, "release.js"));
+rmSync(scratch, { recursive: true });
 
 /** A Bun "executable" that runs the test's own Bun, optionally marked with an identity. */
 export function bunWrapper(path: string, identity?: string) {
