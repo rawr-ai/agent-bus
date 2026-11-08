@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileSha256, removeOwned, type Verdict, verify } from "../scripts/release.ts";
-import { bunWrapper, fakeRelease, mutate } from "./release-fixture.ts";
+import { bunWrapper, fakeRelease, mutate, reseal as resealRelease } from "./release-fixture.ts";
 
 const ID = "0.0.0-test";
 let root: string;
@@ -34,22 +34,7 @@ afterEach(() => removeOwned(root));
 const check = (path = dir, expect = digest, approved: string | undefined = bun) =>
   verify(path, { expect, bun: approved });
 
-/** Rewrites the manifest consistently (as a tamperer would) and returns its new digest. */
-function reseal(
-  edit: (manifest: { files: Array<Record<string, string>>; [key: string]: unknown }) => void
-) {
-  const path = join(dir, "manifest.json");
-  let text = "";
-  mutate(dir, 0o555, () =>
-    mutate(path, 0o444, () => {
-      const manifest = JSON.parse(readFileSync(path, "utf8"));
-      edit(manifest);
-      text = `${JSON.stringify(manifest, null, 2)}\n`;
-      writeFileSync(path, text);
-    })
-  );
-  return fileSha256(path);
-}
+const reseal = (edit: Parameters<typeof resealRelease>[1]) => resealRelease(dir, edit);
 
 const refused = (verdict: Verdict, reason: string) => {
   expect(verdict.ok).toBe(false);

@@ -6,8 +6,14 @@
  *
  *   release.ts build --bun /abs/bun --out /abs/releases [--commit REV]
  *   release.ts verify /abs/releases/<id> --expect <manifest sha256> [--bun /abs/approved-bun]
- *   release.ts plugin /abs/releases/<id> --expect <sha256> --marketplace /abs/dir [--bun ...]
- *   release.ts status [--launcher PATH] [--marketplace DIR] [--label LABEL]
+ *   release.ts plugin /abs/releases/<id> --expect <sha256> --marketplace /abs/dir
+ *   release.ts viewer /abs/releases/<id> --expect <sha256> [--plist PATH] [--viewer-label LABEL]
+ *   release.ts viewer-restore --from /abs/recorded.plist [--plist PATH] [--viewer-label LABEL]
+ *   release.ts status [--launcher PATH] [--marketplace DIR] [--label LABEL] [--viewer-label LABEL]
+ *     [--plist PATH]
+ *
+ * A built release carries this tool as app/release.js and the installer as
+ * app/install-launch-agents.sh, so activating it needs no source checkout.
  */
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
@@ -37,6 +43,8 @@ export const LAUNCHER_HEADER = "#!/bin/sh\n# agent-bus managed release launcher 
 export const REQUIRED = [
   "runtime/bun",
   "app/cli.js",
+  "app/release.js",
+  "app/install-launch-agents.sh",
   "app/dist/viewer/main.js",
   "app/dist/viewer/public/manifest.json",
   "plugin/.claude-plugin/plugin.json",
@@ -431,6 +439,25 @@ export function build(options: {
       "the CLI bundle",
       { cwd: src, env }
     );
+    // The release's own activation tools: this script bundled, and the installer.
+    must(
+      [
+        bun,
+        "build",
+        "scripts/release.ts",
+        "--target=bun",
+        "--env=disable",
+        "--minify-syntax",
+        "--minify-whitespace",
+        `--outfile=${join(stage, "app/release.js")}`,
+      ],
+      "the release tool bundle",
+      { cwd: src, env }
+    );
+    writeFileSync(
+      join(stage, "app/install-launch-agents.sh"),
+      readFileSync(join(src, "scripts/install-launch-agents.sh"))
+    );
     copyTree(join(src, "dist/viewer"), join(stage, "app/dist/viewer"));
     copyTree(join(src, "plugin"), join(stage, "plugin"));
     for (const client of [".claude-plugin", ".codex-plugin"]) {
@@ -505,6 +532,146 @@ export function selectPlugin(marketplace: string, release: string) {
 }
 
 // ---------------------------------------------------------------------------
+// viewer LaunchAgent
+
+/** Launchd, injectable so tests never touch the real GUI domain. */
+export type Launchd = (args: ReadonlyArray<string>) => { readonly status: number };
+const launchctl: Launchd = (args) => run(["/bin/launchctl", ...args]);
+const uid = () => process.getuid?.() ?? 0;
+
+const VIEWER_MAIN = "/dist/viewer/main.js";
+export const VIEWER_LABEL = "ai.rawr.agent-bus.viewer";
+
+/**
+ * The viewer job's binding, recognised only in the owned shape the viewer
+ * runbook writes: `/usr/bin/env -i NAME=value... <bun> --no-env-file
+ * <root>/dist/viewer/main.js`, run in `<root>`.
+ */
+export function parseViewerJob(
+  job: unknown,
+  label: string
+): { readonly env: ReadonlyArray<string>; readonly bun: string; readonly root: string } | null {
+  if (job === null || typeof job !== "object") return null;
+  const { Label, ProgramArguments: args, WorkingDirectory } = job as Record<string, unknown>;
+  if (Label !== label || !Array.isArray(args) || args.some((arg) => typeof arg !== "string"))
+    return null;
+  if (args[0] !== "/usr/bin/env" || args[1] !== "-i") return null;
+  let at = 2;
+  while (at < args.length && /^[A-Z_][A-Z0-9_]*=/.test(args[at])) at++;
+  if (args.length !== at + 3 || args[at + 1] !== "--no-env-file") return null;
+  const bun: string = args[at];
+  const main: string = args[at + 2];
+  if (!isAbsolute(bun) || !isAbsolute(main) || !main.endsWith(VIEWER_MAIN)) return null;
+  const root = main.slice(0, -VIEWER_MAIN.length);
+  if (WorkingDirectory !== root) return null;
+  return { env: args.slice(2, at), bun, root };
+}
+
+const readPlist = (path: string): unknown =>
+  JSON.parse(must(["/usr/bin/plutil", "-convert", "json", "-o", "-", path], "reading the plist"));
+
+/** Writes a plist beside its final path and renames it into place, private like the runbook's. */
+function writePlist(path: string, job: unknown) {
+  const staged = `${path}.tmp-${process.pid}`;
+  writeFileSync(staged, JSON.stringify(job), { mode: 0o600 });
+  try {
+    must(["/usr/bin/plutil", "-convert", "xml1", staged], "converting the plist");
+    must(["/usr/bin/plutil", "-lint", "-s", staged], "checking the plist");
+    renameSync(staged, path);
+  } finally {
+    rmSync(staged, { force: true });
+  }
+}
+
+/** Restarts a job only if it was loaded; an unloaded job stays unloaded. */
+function restartIfLoaded(launchd: Launchd, label: string, plist: string) {
+  const target = `gui/${uid()}/${label}`;
+  if (launchd(["print", target]).status !== 0) return false;
+  launchd(["bootout", target]);
+  // bootout returns before the job is gone; bootstrapping over it fails.
+  for (let attempt = 0; attempt < 50 && launchd(["print", target]).status === 0; attempt++)
+    Bun.sleepSync(200);
+  if (launchd(["bootstrap", `gui/${uid()}`, plist]).status !== 0)
+    throw new Error(`launchd did not start ${label}; it is stopped`);
+  return true;
+}
+
+const stamp = () =>
+  new Date()
+    .toISOString()
+    .replaceAll(/[-:]/g, "")
+    .replace(/\.\d+Z$/, "Z");
+
+/** The release a viewer root (`<releases>/<id>/app`) belongs to, or null for a source worktree. */
+const releaseOfRoot = (root: string) =>
+  basename(root) === "app" && basename(dirname(dirname(root))) === "releases"
+    ? basename(dirname(root))
+    : null;
+
+/**
+ * Moves an installed viewer job onto a verified release's Bun and viewer,
+ * keeping its label, environment assignments (ports) and every other setting.
+ * The previous plist is recorded first, for rollback. An absent viewer stays
+ * absent; a job not in the owned shape is refused unchanged.
+ */
+export function rebindViewer(options: {
+  readonly plist: string;
+  readonly label: string;
+  readonly release: string;
+  readonly bindings: string;
+  readonly launchd?: Launchd;
+}) {
+  if (!existsSync(options.plist)) return { viewer: "absent" as const };
+  const job = readPlist(options.plist) as Record<string, unknown>;
+  const bound = parseViewerJob(job, options.label);
+  if (bound === null) throw new Error("the viewer job is not in the owned shape; refusing");
+  const root = join(options.release, "app");
+  mkdirSync(options.bindings, { recursive: true });
+  const record = join(
+    options.bindings,
+    `viewer.${stamp()}.before-${basename(options.release)}.plist`
+  );
+  if (existsSync(record)) throw new Error("a binding record with this name exists; retry");
+  writeFileSync(record, readFileSync(options.plist), { mode: 0o600 });
+  writePlist(options.plist, {
+    ...job,
+    ProgramArguments: [
+      "/usr/bin/env",
+      "-i",
+      ...bound.env,
+      join(options.release, "runtime/bun"),
+      "--no-env-file",
+      `${root}${VIEWER_MAIN}`,
+    ],
+    WorkingDirectory: root,
+  });
+  const restarted = restartIfLoaded(options.launchd ?? launchctl, options.label, options.plist);
+  return {
+    viewer: "rebound" as const,
+    previousRelease: releaseOfRoot(bound.root),
+    restarted,
+    record: basename(record),
+  };
+}
+
+/** Puts back a recorded viewer plist (for example the source binding) and restarts a loaded job. */
+export function restoreViewer(options: {
+  readonly plist: string;
+  readonly label: string;
+  readonly from: string;
+  readonly launchd?: Launchd;
+}) {
+  const job = readPlist(options.from);
+  const bound = parseViewerJob(job, options.label);
+  if (bound === null) throw new Error("the recorded plist is not an owned viewer job; refusing");
+  if (existsSync(options.plist) && parseViewerJob(readPlist(options.plist), options.label) === null)
+    throw new Error("the installed viewer job is not in the owned shape; refusing");
+  writePlist(options.plist, job);
+  const restarted = restartIfLoaded(options.launchd ?? launchctl, options.label, options.plist);
+  return { viewer: "restored" as const, release: releaseOfRoot(bound.root), restarted };
+}
+
+// ---------------------------------------------------------------------------
 // status
 
 /** What a launcher binds: a source checkout (v1), a release (v2), or neither. */
@@ -551,10 +718,51 @@ export function parseReleaseLauncher(text: string): string | null {
     : null;
 }
 
+/** The running process of a loaded job, by its PID's own arguments. */
+function jobProcess(label: string): string | null {
+  const printed = run(["/bin/launchctl", "print", `gui/${uid()}/${label}`]);
+  const pid = /^\s*pid = (\d+)$/m.exec(printed.stdout)?.[1];
+  return pid === undefined ? null : run(["/bin/ps", "-o", "command=", "-p", pid]).stdout.trim();
+}
+
+/** Plugin versions each client has installed, read from their own records. */
+export function clientPlugins(options: {
+  readonly claudeHome: string;
+  readonly codexHome: string;
+}) {
+  let claude: string[] | null = null;
+  try {
+    const installed = JSON.parse(
+      readFileSync(join(options.claudeHome, "plugins/installed_plugins.json"), "utf8")
+    );
+    const entries = installed?.plugins?.["agent-bus@agent-bus"];
+    claude = Array.isArray(entries)
+      ? entries.map((entry: { version?: unknown }) => String(entry?.version))
+      : [];
+  } catch {
+    claude = null;
+  }
+  let codex: string[] | null = null;
+  try {
+    codex = readdirSync(join(options.codexHome, "plugins/cache/agent-bus/agent-bus")).sort();
+  } catch {
+    codex = null;
+  }
+  return { claude, codex };
+}
+
+/**
+ * The release each surface names, and whether they all agree. Configured
+ * agreement says nothing about what already running sessions loaded.
+ */
 export function status(options: {
   readonly launcher: string;
   readonly marketplace: string;
   readonly label: string;
+  readonly viewerLabel: string;
+  readonly viewerPlist: string;
+  readonly claudeHome: string;
+  readonly codexHome: string;
 }) {
   const launcher = readLauncher(options.launcher);
   let plugin: string | null = null;
@@ -563,26 +771,45 @@ export function status(options: {
   } catch {
     plugin = null;
   }
-  const domain = `gui/${process.getuid?.() ?? 0}/${options.label}`;
-  const printed = run(["/bin/launchctl", "print", domain]);
-  const pid = /^\s*pid = (\d+)$/m.exec(printed.stdout)?.[1];
-  const args =
-    pid === undefined ? null : run(["/bin/ps", "-o", "command=", "-p", pid]).stdout.trim();
-  const releaseOf = (path: string | null) => (path === null ? null : basename(dirname(path)));
   const launcherRelease = launcher.kind === "release" ? basename(launcher.release) : null;
-  const pluginRelease = plugin === null ? null : releaseOf(plugin);
+  const pluginRelease = plugin === null ? null : basename(dirname(plugin));
+  const serve = jobProcess(options.label);
   const serveRelease =
-    args === null ? null : (/\/releases\/([^/ ]+)\/app\/cli\.js serve$/.exec(args)?.[1] ?? null);
+    serve === null ? null : (/\/releases\/([^/ ]+)\/app\/cli\.js serve$/.exec(serve)?.[1] ?? null);
+  let viewer: "absent" | "foreign" | "source" | "release" = "absent";
+  let viewerRelease: string | null = null;
+  if (existsSync(options.viewerPlist)) {
+    const bound = parseViewerJob(readPlist(options.viewerPlist), options.viewerLabel);
+    viewerRelease = bound === null ? null : releaseOfRoot(bound.root);
+    viewer = bound === null ? "foreign" : viewerRelease === null ? "source" : "release";
+  }
+  const viewerProcess = viewer === "absent" ? null : jobProcess(options.viewerLabel);
+  const viewerRunningRelease =
+    viewerProcess === null
+      ? null
+      : (/\/releases\/([^/ ]+)\/app\/dist\/viewer\/main\.js$/.exec(viewerProcess)?.[1] ?? null);
+  const clients = clientPlugins(options);
+  const same = (value: string | null) => value === launcherRelease;
   return {
     launcher: launcher.kind,
     launcherRelease,
     pluginRelease,
-    serveRunning: pid !== undefined,
+    serveRunning: serve !== null,
     serveRelease,
+    viewer,
+    viewerRelease,
+    viewerRunning: viewerProcess !== null,
+    viewerRunningRelease,
+    claudePlugin: clients.claude,
+    codexPlugin: clients.codex,
     agree:
       launcherRelease !== null &&
-      launcherRelease === pluginRelease &&
-      (pid === undefined || serveRelease === launcherRelease),
+      same(pluginRelease) &&
+      (serve === null || same(serveRelease)) &&
+      (viewer === "absent" || same(viewerRelease)) &&
+      (viewerProcess === null || same(viewerRunningRelease)) &&
+      (clients.claude === null || clients.claude.every(same)) &&
+      (clients.codex === null || clients.codex.every(same)),
   };
 }
 
@@ -615,6 +842,9 @@ function main(argv: ReadonlyArray<string>): number {
     if (value === undefined) throw new Error(`${name} is required`);
     return value;
   };
+  const viewerLabel = () => named.get("--viewer-label") ?? VIEWER_LABEL;
+  const viewerPlist = () =>
+    named.get("--plist") ?? join(homedir(), "Library/LaunchAgents", `${viewerLabel()}.plist`);
   switch (command) {
     case "build": {
       const built = build({
@@ -659,6 +889,34 @@ function main(argv: ReadonlyArray<string>): number {
       );
       return 0;
     }
+    case "viewer": {
+      const dir = positional[0];
+      if (dir === undefined) throw new Error("viewer needs a release directory");
+      const verdict = verify(dir, { expect: required("--expect"), bun: named.get("--bun") });
+      if (!verdict.ok) {
+        console.log(JSON.stringify({ viewer: "unchanged", problems: verdict.problems }));
+        return 1;
+      }
+      console.log(
+        JSON.stringify(
+          rebindViewer({
+            plist: viewerPlist(),
+            label: viewerLabel(),
+            release: dir,
+            bindings: join(dirname(dirname(dir)), "bindings"),
+          })
+        )
+      );
+      return 0;
+    }
+    case "viewer-restore": {
+      console.log(
+        JSON.stringify(
+          restoreViewer({ plist: viewerPlist(), label: viewerLabel(), from: required("--from") })
+        )
+      );
+      return 0;
+    }
     case "status": {
       console.log(
         JSON.stringify(
@@ -666,13 +924,19 @@ function main(argv: ReadonlyArray<string>): number {
             launcher: named.get("--launcher") ?? join(homedir(), ".local/bin/agent-bus"),
             marketplace: named.get("--marketplace") ?? join(dataHome(), "marketplace"),
             label: named.get("--label") ?? "ai.rawr.agent-bus",
+            viewerLabel: viewerLabel(),
+            viewerPlist: viewerPlist(),
+            claudeHome: process.env.CLAUDE_CONFIG_DIR ?? join(homedir(), ".claude"),
+            codexHome: process.env.CODEX_HOME ?? join(homedir(), ".codex"),
           })
         )
       );
       return 0;
     }
     default:
-      console.error("usage: release.ts build|verify|plugin|status (see the header of this file)");
+      console.error(
+        "usage: release.ts build|verify|plugin|viewer|viewer-restore|status (see the header of this file)"
+      );
       return 2;
   }
 }

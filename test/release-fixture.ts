@@ -1,13 +1,24 @@
 /**
- * A small, real release for tests: the actual plugin tree, a stand-in CLI and a
- * Bun wrapper, sealed by the release tool itself. Building the real bundle is
- * the job of `qualify:release`, not of every test.
+ * A small, real release for tests: the actual plugin tree, the real release
+ * tool and installer, a stand-in CLI and a Bun wrapper, sealed by the release
+ * tool itself. Building the real CLI bundle is the job of `qualify:release`,
+ * not of every test.
  */
 import { chmodSync, cpSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
-import { seal } from "../scripts/release.ts";
+import { fileSha256, seal } from "../scripts/release.ts";
 
 const repo = resolve(import.meta.dir, "..");
+
+/** The release tool, bundled as a build bundles it, once per test process. */
+const bundled = await Bun.build({
+  entrypoints: [join(repo, "scripts/release.ts")],
+  target: "bun",
+  env: "disable",
+  minify: { syntax: true, whitespace: true },
+});
+if (!bundled.success) throw new Error("bundling the release tool failed");
+const tool = new Uint8Array(await bundled.outputs[0]!.arrayBuffer());
 
 /** A Bun "executable" that runs the test's own Bun, optionally marked with an identity. */
 export function bunWrapper(path: string, identity?: string) {
@@ -27,6 +38,11 @@ export function fakeRelease(releases: string, id: string, bun: string) {
   mkdirSync(join(stage, "app/dist/viewer/public"), { recursive: true });
   mkdirSync(join(stage, "runtime"));
   writeFileSync(join(stage, "app/cli.js"), cli(id));
+  writeFileSync(join(stage, "app/release.js"), tool);
+  writeFileSync(
+    join(stage, "app/install-launch-agents.sh"),
+    readFileSync(join(repo, "scripts/install-launch-agents.sh"))
+  );
   writeFileSync(join(stage, "app/dist/viewer/main.js"), "console.log('viewer');\n");
   writeFileSync(join(stage, "app/dist/viewer/public/manifest.json"), "[]\n");
   cpSync(join(repo, "plugin"), join(stage, "plugin"), { recursive: true });
@@ -57,4 +73,31 @@ export function mutate(path: string, mode: number, change: () => void) {
   } finally {
     chmodSync(path, mode);
   }
+}
+
+type ManifestEdit = (manifest: {
+  files: Array<Record<string, string>>;
+  [key: string]: unknown;
+}) => void;
+
+/** Rewrites a release's manifest consistently, as a tamperer would, and returns its new digest. */
+export function reseal(dir: string, edit: ManifestEdit) {
+  const path = join(dir, "manifest.json");
+  mutate(dir, 0o555, () =>
+    mutate(path, 0o444, () => {
+      const manifest = JSON.parse(readFileSync(path, "utf8"));
+      edit(manifest);
+      writeFileSync(path, `${JSON.stringify(manifest, null, 2)}\n`);
+    })
+  );
+  return fileSha256(path);
+}
+
+/** Replaces one sealed file's bytes and records its new hash, as a tamperer would. */
+export function replaceSealed(dir: string, path: string, content: string, mode = 0o444) {
+  const file = join(dir, path);
+  mutate(join(file, ".."), 0o555, () => mutate(file, mode, () => writeFileSync(file, content)));
+  return reseal(dir, (manifest) => {
+    for (const entry of manifest.files) if (entry.path === path) entry.sha256 = fileSha256(file);
+  });
 }

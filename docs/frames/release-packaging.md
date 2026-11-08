@@ -2,7 +2,9 @@
 
 This frame designs the source-independent release cohort accepted in [product continuation](product-continuation.md#release-independence-the-smallest-complete-story), before implementation and qualification. Current behaviour stays with the [deploy](../runbooks/deploy.md) and [install](../runbooks/install.md) runbooks; nothing here is shipped or activated.
 
-Status: **design proposed**, 2026-11-07, by the Claude bus co-lead for Codex director review. Production activation stays behind the existing deployment gate.
+Status: **design reviewed, implementation in qualification**, 2026-11-07. Codex's director, runtime and simplicity reviews are integrated in decisions 2, 11, 12, 14 and 16 and in decisions 19 to 21. Production activation stays behind the existing deployment gate.
+
+The checks here serve provenance and recovery: a release is the reviewed one, and a bad or partial one is refused before anything moves. They are not hardening against someone who can already write the user's files; signatures, extended attributes and adversarial filesystems are outside them.
 
 ## The binding today
 
@@ -17,7 +19,7 @@ One managed launcher, `~/.local/bin/agent-bus`, runs `<bun> --no-env-file <prima
    - it spawns only `git` and `codex`, never itself;
    - the viewer is already shipped as a bundle.
 
-   The release carries its own copy of the pinned Bun, hash-checked against the approved executable. A single compiled executable stays optional, as the accepted frame says.
+   The release carries its own copy of the pinned Bun. Its bytes are anchored by the manifest's recorded digest (decision 11), so a destination needs neither the builder's Bun nor a checkout. A single compiled executable stays optional, as the accepted frame says.
 
 3. **Layout.**
 
@@ -26,6 +28,8 @@ One managed launcher, `~/.local/bin/agent-bus`, runs `<bun> --no-env-file <prima
      manifest.json        identity, source commit and tree, lock hash, Bun version and hash, every file's sha256 and mode
      runtime/bun          the pinned Bun, copied
      app/cli.js           the bundled CLI, `serve` and hooks
+     app/release.js       the bundled release tool: verify, viewer, plugin and status
+     app/install-launch-agents.sh   the installer, whose --release mode needs no checkout
      app/dist/viewer/     viewer main.js, public/ and its manifest, the same relative layout the built viewer resolves
      plugin/              the plugin tree, with this release's version in both client manifests
    ```
@@ -44,25 +48,24 @@ One managed launcher, `~/.local/bin/agent-bus`, runs `<bun> --no-env-file <prima
 
 6. **Order activation so guidance never runs ahead of the server.**
    1. Verify the candidate release completely.
-   2. Write launcher v2, staged and checked with `--help` under `env -i`.
-   3. Restart `serve` with `kickstart`.
-   4. Run the health, query-tools and end-to-end checks.
+   2. Write launcher v2, staged and checked with `--help` under `env -i`, and restart `serve`.
+   3. Run the health, query-tools and end-to-end checks.
+   4. Move an installed viewer onto the release (decision 19).
    5. Flip the marketplace link and refresh both clients' plugins.
    6. Run a real Claude wake check.
 
-   Claude reads the installed skill straight from the marketplace path. Its skill text therefore changes at the flip, while hooks change only after the plugin update and a session restart. So the flip comes last, after the server that the new guidance describes is running.
+   Claude reports the marketplace path as the installed plugin's source. *Inferred, not yet qualified:* a newly started session may then load the skill text from that path rather than from its versioned cache, so guidance could change at the flip, while hooks change only after the plugin update and a session restart. The flip comes last either way, after the server that the new guidance describes is running. The real-client rehearsal settles which text a new session loads.
 
 7. **Rollback runs the same sequence for the previous release.** The first rollback boundary is the deployed-shape source binding, launcher v1 with the recorded primary and Bun. The installer keeps accepting v1 launchers, so source → release A → release B → A → source is one rehearsable path. Rollback is limited to commits that keep queries refused or validated ([query tools](../runbooks/deploy.md#query-tools)).
 
-8. **Reject a bad cohort before anything moves.** Verification recomputes every hash, requires the exact file set (nothing missing, nothing extra), and checks modes. It confirms that the copied Bun reports the pinned version and that the bundle reports the manifest's version under `env -i`. A tampered, incomplete or unverifiable release is refused with the launcher, LaunchAgent and marketplace link unchanged. The launcher swap and the marketplace flip can still diverge if a step fails between them. Recovery is to re-run the verified activation for one named release, or keep `serve` stopped behind its guard. The qualification injects that split.
+8. **Reject a bad cohort before anything moves.** Verification recomputes every hash, requires the exact file set (nothing missing, nothing extra), and checks modes. It confirms that the copied Bun reports the pinned version and that the bundle reports the manifest's version under `env -i`. A tampered, incomplete or unverifiable release is refused with the launcher, LaunchAgent, viewer job and marketplace link unchanged. The surfaces can still diverge if a step fails between them; decision 20 gives the recovery, and the qualification injects that split.
 
 9. **Keep the mechanism small and in the repository.**
-   - A build script produces a release only from a clean, committed tree, using a frozen install and the exact pinned Bun.
-   - A verify command checks any release directory.
-   - The existing installer gains a `--release <dir>` mode. It verifies first, writes launcher v2, and recognises v1 and v2 as owned.
-   - A small activate step performs the marketplace flip.
+   - `scripts/release.ts build` produces a release from one commit, using a frozen install and the exact pinned Bun.
+   - The release carries the same tool, bundled as `app/release.js`, for `verify`, `viewer`, `viewer-restore`, `plugin` and `status`, and the installer as `app/install-launch-agents.sh`. Activation therefore runs entirely from the release, with no checkout.
+   - The installer's `--release <dir> --expect <sha256>` mode branches before any source check. It anchors the manifest and Bun with `shasum` before running release code, runs the release's verifier, writes launcher v2 and recognises v1 and v2 launchers as owned.
 
-   Build, verify and activate print identities and boolean comparisons only, never file contents.
+   Every command prints identities and boolean comparisons only, never file contents.
 
 10. **Retain all legacy material until the first release has been activated and its rollback qualified.** This covers the earlier rollback cohorts, retained installers and runtimes in the data home. After that, superseded cohorts older than the rollback floor can be retired once their hashes are recorded. No cleanup is part of this work.
 
@@ -70,21 +73,34 @@ One managed launcher, `~/.local/bin/agent-bus`, runs `<bun> --no-env-file <prima
 
 The repository's testing-design steward reviewed this design before any code was written. These changes are adopted:
 
-11. **Anchor verification outside the release.** A manifest only vouches for itself: a consistent edit of a file and its hash would pass. The build prints the manifest's sha256. The activation decision records it, and `verify --expect <sha256>` (and the installer's `--release <dir> --expect <sha256>`) refuses any release whose manifest has a different digest. The copied Bun is also compared with the approved executable named in the decision.
+11. **Anchor verification outside the release.** A manifest only vouches for itself: a consistent edit of a file and its hash would pass. The build prints the manifest's sha256. The activation decision records it, and `verify --expect <sha256>` (and the installer's `--release <dir> --expect <sha256>`) refuses any release whose manifest has a different digest. The manifest records the copied Bun's hash, so the anchor covers its bytes too; the builder may also compare it with its approved executable (`--bun`), but no destination needs that executable.
 
-12. **Build from the commit, not the worktree.** `git status` cannot see a locally patched `node_modules`. The build therefore exports the commit with `git archive` into a fresh directory, runs a frozen install there with `--ignore-scripts` and the pinned Bun, and bundles from that directory. Two builds of one commit must produce identical hashes.
+12. **Build from the commit, not the worktree.** `git status` cannot see a locally patched `node_modules`. The build therefore exports the commit with `git archive` into a fresh directory, runs a frozen install there with `--ignore-scripts` and the pinned Bun, and bundles from that directory. Two builds of one commit producing identical hashes qualifies the toolchain and mechanism; it is rechecked when they or the inputs change, not for every release.
 
 13. **Embed the release identity.** `VERSION` is a constant, so two releases cannot be told apart. The bundle gets the release id and commit through `define`, and reports them in `--version` and in the MCP server information. A source run reports itself as source.
 
-14. **A read-only `release status`.** It prints identities and agreement booleans only: the release the launcher names, the marketplace link target, and the release in the running `serve`'s arguments. This is the oracle for split bindings and for coherent restoration.
+14. **A read-only `release status`, per surface.** It prints identities and agreement booleans only: the release the launcher names, the marketplace link target, the release in the running `serve`'s arguments, the viewer job's binding and its running process, and the plugin versions Claude and Codex have installed. This is the oracle for split bindings and for coherent restoration. Configured agreement does not show what an already running session loaded.
 
 15. **Releases are read-only on disk.** Files are 0444, or 0555 for executables, and directories 0555. Verify checks these modes and refuses anything that is not a regular file or directory, using `lstat`: symlinks, hard links with a link count above 1, FIFOs and a release directory that is itself a link. A build writes `releases/.tmp-<id>`, renames it into place, and never overwrites an existing id. Extended attributes are outside the hashes; that is a recorded limit.
 
-16. **Moving to an older release flips the guidance first.** Decision 6 sets the order for moving to a newer release. When moving to an older one, flip the marketplace and refresh first, then swap the launcher, so no guidance gets ahead of the server it describes. In both directions, activation refuses unless every hook subcommand in the target plugin exists in the target CLI.
+16. **Moving to an older release flips the guidance first, within the existing compatibility rules.** Decision 6 sets the order for moving to a newer release. When moving to an older one, flip the marketplace and refresh first, then swap the launcher, so no guidance gets ahead of the server it describes. Verification refuses a release unless every hook subcommand in its plugin exists in its CLI. That check cannot see three things, so a move from B to an older A also needs the reviewed release decision to show:
+    - **Waiting hooks:** a hook already waiting keeps running B's files, which stay in place, against A's server; the deployed overlap rule applies as for any rollback ([deploy](../runbooks/deploy.md#deploy-a-new-version)).
+    - **Cached guidance:** a session that loaded B's skill or tool list keeps it until it restarts, and its calls reach A. They must still be accepted or refused as A refuses unknown input; no session is restarted for this, and another owner's session never is.
+    - **Stored entries:** A must decode everything B can write. B's delta may not add a stored entry kind, field or mute scope that A cannot decode ([interfaces](../architecture/interfaces.md)), and A must keep queries refused or validated ([query tools](../runbooks/deploy.md#query-tools)).
 
-17. **Rolling back to source is a separate path.** It uses the new installer's `--runtime-only` mode, because older installers refuse a v2 launcher as foreign. The marketplace returns to the primary checkout through the existing native remove-and-add procedure, not by repointing the link at the checkout: that checkout's plugin has no version, so the Claude cache could not tell the two apart. The rehearsal qualifies this path separately. It is the one migration step in either direction between the source binding and the first release.
+17. **Rolling back to source is a separate path.** It uses the new installer's `--runtime-only` mode, because older installers refuse a v2 launcher as foreign. The marketplace returns to the primary checkout through the existing native remove-and-add procedure, not by repointing the link at the checkout: that checkout's plugin has no version, so the Claude cache could not tell the two apart. An installed viewer returns with `viewer-restore` from the plist recorded at the first activation. The rehearsal qualifies this path separately. It is the one migration step in either direction between the source binding and the first release.
 
 18. **The rehearsal cannot reach live services.** Every rehearsal step starts with a preflight that refuses default ports, labels, launcher paths and data directories. A disposable launchd job is given its isolated `HOME` explicitly, so Codex delivery cannot find the real control socket. Checks call the disposable launcher by explicit path, never through `PATH`.
+
+19. **The viewer moves with the release, where it is installed.** The viewer job keeps its label, environment (ports), logs and settings. Its runtime becomes the release's Bun and its entry the release's `app/dist/viewer/main.js`, run in `app/`. `release.js viewer` recognises the job only in the shape the [viewer runbook](../runbooks/viewer.md#run-as-a-user-launchagent) writes. It records the previous plist in the data home's `bindings/` before writing, and restarts the job only if it was loaded. An absent viewer stays absent. `viewer-restore --from <record>` puts back a recorded binding, the source one included, so source rollback restores the viewer too. The installer likewise records the launcher it replaces.
+
+20. **A split binding has a small, executed recovery.** `release status` names the surface that disagrees. Recovery uses only the steps above, for one named release:
+    - **Launcher swapped, checks failed:** run `--release` for the previous release, or the source rollback (decision 17). The plugin and viewer have not moved.
+    - **Viewer or plugin refresh failed partway:** re-run that step for the target release. If it still fails, return every surface that moved to the previous release in downgrade order (decision 16): plugin link and refresh first, then the viewer, then the launcher.
+    - **One client refreshed and the other did not:** the link already names the target, so re-run the failed client's refresh. A client cache that will not refresh is recorded and named in the decision; it does not block restoring the others.
+    - **No coherent state can be restored:** stop the owned jobs so launchd cannot restart them, and keep them stopped across login: `launchctl disable gui/$(id -u)/<label>`, then `launchctl bootout gui/$(id -u)/<label>`, for `serve` and an installed viewer. A disabled job does not load at the next login. `launchctl enable` then `launchctl bootstrap` undo it once a reviewed binding is restored. A guarded stop is a held failure, never a success.
+
+21. **Activation and rollback never restart another owner's session.** Running sessions adopt new hooks and guidance when they next start. Configured equality and refreshed caches do not prove that any running session adopted them.
 
 Two smaller findings are recorded rather than designed here:
 - **Untrusted project settings.** Hooks run in the session's project directory, where Bun reads `bunfig.toml`, even under `--no-env-file`. The current source launcher has the same exposure. A decoy measurement decides whether the launcher should change its working directory.
@@ -107,10 +123,12 @@ One disposable rehearsal must cover the sequence source → A → B → A → so
 - the production viewer rendering a known pinned row;
 - Codex native discovery of the release's plugin;
 - read/unread sentinels surviving rollback;
-- tamper, incomplete-cohort and split-binding rejection.
+- tamper, incomplete-cohort and split-binding rejection;
+- a disposable viewer job moved source → A → B → A → source, keeping its port and environment;
+- a split binding recovered by decision 20, and a guarded stop that launchd will not restart and that refuses a bootstrap until enabled.
 
 Real clients run in an isolated `HOME`. The plugins' unchanged hook text then resolves `$HOME/.local/bin/agent-bus` to the disposable launcher. Rewriting the hook path instead would test a stand-in plugin, not the shipped one. The Claude session is started with the disposable bus port and directory. Authentication uses a process-only credential passed in the environment and never written to a file. A real Codex delivery is exercised only with the isolated `HOME` from decision 18; otherwise it stays covered by the existing in-process tests and the bundle's import check.
 
 ## Not decided here
 
-This frame does not decide activation of any release on either machine, the viewer LaunchAgent's binding (it can point at a release's viewer later under its own procedure), remote access, or retirement of legacy material.
+This frame does not decide activation of any release on either machine, a viewer installer (the viewer job is still created by its runbook), remote access, or retirement of legacy material.
