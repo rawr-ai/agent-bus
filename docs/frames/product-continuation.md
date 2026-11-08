@@ -1,8 +1,8 @@
 # Frame: product continuation
 
-This draft selects the next engineering work after the [coordination turnaround](coordination-turnaround.md), without replacing its real-team outcome. Current behaviour remains with the architecture and runbook pages linked below; this frame does not describe shipped features.
+This frame selects the next engineering work after the [coordination turnaround](coordination-turnaround.md), without replacing its real-team outcome. Current behaviour remains with the architecture and runbook pages linked below; this frame does not describe shipped features.
 
-Status: **proposed, not accepted or implemented**, 2026-11-07. Audience: the director and leads deciding the next bounded work. Acceptance of this candidate would authorize the bounded packaging implementation and qualification described here, not production activation. The Claude bus co-lead owns packaging; the Codex director reviews and coordinates the integrated sequence. The director assigns owners for other lanes.
+Status: **owner-accepted for packaging implementation and qualification**, 2026-11-07; not implemented. Production activation remains a separate decision. Remote access remains a design candidate requiring its own access, disclosure and activation decisions. The Claude bus co-lead owns packaging; the Codex director reviews and coordinates the integrated sequence. The director assigns owners for other lanes.
 
 ## Continue engineering without declaring adoption
 
@@ -10,7 +10,7 @@ The intended end state is a bus that can be operated independently of a developm
 
 The unit of work here is a *bounded operational outcome*, not a collection of feature flags. Select in a source-independent release cohort, proactive Codex continuity, and private ChatGPT web access research. Foreground release independence because the current primary is live source for both `serve` and hooks, coupling routine development and operations ([deploy](../runbooks/deploy.md#before-you-start)). Keep real use and its observation separate from this engineering queue. Deliberately outside are a general distribution programme, container migration, an assumption that packaging is prerequisite to MCP, and a full repository refactor.
 
-The structural alternative is to stop engineering until a new adoption trial is available, making the trial rather than an operational capability the unit of priority. It protects against building unused features, but leaves the demonstrated source/deployment coupling in place. The proposed ordering starts design and qualification now while retaining the turnaround's real-use gate; it does not manufacture a trial or claim that the remaining human blockers are resolved. A simplicity review supported packaging first and bounded parallel discovery for the other two requests.
+The structural alternative is to stop engineering until a new adoption trial is available, making the trial rather than an operational capability the unit of priority. It protects against building unused features, but leaves the demonstrated source/deployment coupling in place. The accepted ordering starts packaging work while retaining the turnaround's real-use gate; it does not manufacture a trial or claim that the remaining human blockers are resolved. A simplicity review supported packaging first and bounded parallel discovery for the other two requests.
 
 ### Commitments and uncertainty
 
@@ -19,13 +19,13 @@ The structural alternative is to stop engineering until a new adoption trial is 
 3. Investigate the requested continuity and remote access on their actual clients and trust boundaries before choosing mechanisms. Neither is permission to invent another runtime or duplicate an existing owner.
 4. Acceptance of this packaging frame and production activation are separate decisions. Remote access requires its own exact access and disclosure decision, not bundled approval.
 
-The exact release layout, build method, access mechanism, and order of the bounded investigations are adjustable. Assumptions: a release can include the required assets and runtime without a source checkout; a genuine native client path can be established for each requested user outcome. Neither is established by this draft. The perspectives composed are the accepted turnaround's deployment follow-up, the current deploy procedure, the continuity investigation, and the independent simplicity review.
+The exact release layout, build method, access mechanism, and order of the bounded investigations are adjustable. Assumptions: a release can include the required assets and runtime without a source checkout; a genuine native client path can be established for each requested user outcome. Neither is established by this frame. The perspectives composed are the accepted turnaround's deployment follow-up, the current deploy procedure, the continuity investigation, and the independent simplicity review.
 
 ## Prioritized work ledger
 
 | Priority | Work and owner | Next concrete outcome | Status |
 | --- | --- | --- | --- |
-| 1 | Release independence; Claude bus co-lead, Codex director review | Design and qualify one versioned release directory containing the exact runtime or executable and the CLI, `serve`, hooks, plugin and viewer assets. | Proposed; acceptance would authorize implementation and qualification, not activation. |
+| 1 | Release independence; Claude bus co-lead, Codex director review | Design and qualify one versioned release directory containing the exact runtime or executable and the CLI, `serve`, hooks, plugin and viewer assets. | Owner-accepted for implementation and qualification; not implemented or activated. |
 | 2 | Private ChatGPT web MCP; director to assign access DRA | Qualify a separate read-only facade and the existing owned host/OAuth adapter against actual ChatGPT web before proposing activation. | Candidate researched; bounded discovery can proceed in parallel. |
 | Parallel | Proactive Codex continuity; existing handover owner with Codex lead | Determine whether a supported first-party/native Desktop path lets the agent request same-thread compaction and coordinate its next turn; qualify the handover only if that path exists. | Feasibility investigation; otherwise deferred on the upstream gate. |
 | Later | Thread mute; activity owner when a real consumer need warrants it | Decide thread identity and direct-versus-ambient behaviour, then specify compatibility, rollout and rollback before any command write. | Deferred, not an enum-only change. |
