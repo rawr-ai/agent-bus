@@ -66,6 +66,30 @@ One managed launcher, `~/.local/bin/agent-bus`, runs `<bun> --no-env-file <prima
 
 10. **Retain all legacy material until the first release has been activated and its rollback qualified.** This covers the earlier rollback cohorts, retained installers and runtimes in the data home. After that, superseded cohorts older than the rollback floor can be retired once their hashes are recorded. No cleanup is part of this work.
 
+## Adjustments after the testing-design review
+
+The repository's testing-design steward reviewed this design before any code was written. These changes are adopted:
+
+11. **Anchor verification outside the release.** A manifest only vouches for itself: a consistent edit of a file and its hash would pass. The build prints the manifest's sha256. The activation decision records it, and `verify --expect <sha256>` (and the installer's `--release <dir> --expect <sha256>`) refuses any release whose manifest has a different digest. The copied Bun is also compared with the approved executable named in the decision.
+
+12. **Build from the commit, not the worktree.** `git status` cannot see a locally patched `node_modules`. The build therefore exports the commit with `git archive` into a fresh directory, runs a frozen install there with `--ignore-scripts` and the pinned Bun, and bundles from that directory. Two builds of one commit must produce identical hashes.
+
+13. **Embed the release identity.** `VERSION` is a constant, so two releases cannot be told apart. The bundle gets the release id and commit through `define`, and reports them in `--version` and in the MCP server information. A source run reports itself as source.
+
+14. **A read-only `release status`.** It prints identities and agreement booleans only: the release the launcher names, the marketplace link target, and the release in the running `serve`'s arguments. This is the oracle for split bindings and for coherent restoration.
+
+15. **Releases are read-only on disk.** Files are 0444, or 0555 for executables, and directories 0555. Verify checks these modes and refuses anything that is not a regular file or directory, using `lstat`: symlinks, hard links with a link count above 1, FIFOs and a release directory that is itself a link. A build writes `releases/.tmp-<id>`, renames it into place, and never overwrites an existing id. Extended attributes are outside the hashes; that is a recorded limit.
+
+16. **Moving to an older release flips the guidance first.** Decision 6 sets the order for moving to a newer release. When moving to an older one, flip the marketplace and refresh first, then swap the launcher, so no guidance gets ahead of the server it describes. In both directions, activation refuses unless every hook subcommand in the target plugin exists in the target CLI.
+
+17. **Rolling back to source is a separate path.** It uses the new installer's `--runtime-only` mode, because older installers refuse a v2 launcher as foreign. The marketplace returns to the primary checkout through the existing native remove-and-add procedure, not by repointing the link at the checkout: that checkout's plugin has no version, so the Claude cache could not tell the two apart. The rehearsal qualifies this path separately. It is the one migration step in either direction between the source binding and the first release.
+
+18. **The rehearsal cannot reach live services.** Every rehearsal step starts with a preflight that refuses default ports, labels, launcher paths and data directories. A disposable launchd job is given its isolated `HOME` explicitly, so Codex delivery cannot find the real control socket. Checks call the disposable launcher by explicit path, never through `PATH`.
+
+Two smaller findings are recorded rather than designed here:
+- **Untrusted project settings.** Hooks run in the session's project directory, where Bun reads `bunfig.toml`, even under `--no-env-file`. The current source launcher has the same exposure. A decoy measurement decides whether the launcher should change its working directory.
+- **Concurrent activation.** Two operators activating at once is out of scope for the first release; activation is single-operator.
+
 ## Qualification
 
 Qualification follows the accepted frame's complete story. The repository's testing-design steward shapes the method before any test is written.
@@ -85,7 +109,7 @@ One disposable rehearsal must cover the sequence source → A → B → A → so
 - read/unread sentinels surviving rollback;
 - tamper, incomplete-cohort and split-binding rejection.
 
-One open problem is how the plugins' hooks resolve the launcher. They run `$HOME/.local/bin/agent-bus` by absolute path, so a real-hook trial needs either an isolated `HOME` with an authenticated client, or a hook path the disposable install controls. The steward review settles which, without touching the live launcher.
+Real clients run in an isolated `HOME`. The plugins' unchanged hook text then resolves `$HOME/.local/bin/agent-bus` to the disposable launcher. Rewriting the hook path instead would test a stand-in plugin, not the shipped one. The Claude session is started with the disposable bus port and directory. Authentication uses a process-only credential passed in the environment and never written to a file. A real Codex delivery is exercised only with the isolated `HOME` from decision 18; otherwise it stays covered by the existing in-process tests and the bundle's import check.
 
 ## Not decided here
 
