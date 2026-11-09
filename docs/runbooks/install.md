@@ -10,7 +10,7 @@ Earlier full-install rehearsal marks refer to the previous installer. The manage
 
 Install from the canonical checkout that `serve` will run, which stays clean and detached at its approved deployed commit ([deploy](deploy.md#before-you-start)). The installer binds a managed launcher to that checkout and an exact Bun executable; moving either requires a controlled rebinding.
 
-The installer also has a `--release` mode that binds the launcher to a sealed, versioned release instead of the checkout. It is qualified and rehearsed under disposable launchd jobs but not activated on either machine; until an activation decision names a release, install and deploy from the checkout as this page describes.
+The installer also has a `--release` mode that binds the launcher to a sealed, versioned release instead of the checkout. It needs this installation's `installation-id` already in place and creates none. It is qualified and rehearsed under disposable launchd jobs but not activated on either machine; until an activation decision names a release, install and deploy from the checkout as this page describes.
 
 What each machine needs:
 

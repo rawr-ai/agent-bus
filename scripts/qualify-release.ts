@@ -236,6 +236,30 @@ try {
   );
   check("launcherIgnoresCallerBunfig", !existsSync(preloadMark));
 
+  // A first install or upgrade initializes the identity a release's serve routes delivery by,
+  // from the release alone: created once, private, never printed, and kept by a rerun.
+  const state = join(root, "state");
+  const identity = join(state, "installation-id");
+  const initialize = () =>
+    spawnSync(launcher, ["initialize-installation"], {
+      cwd: decoy,
+      env: { ...empty, AGENT_BUS_DIR: state },
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+  const first = initialize();
+  const created = existsSync(identity) ? readFileSync(identity, "utf8") : "";
+  const rerun = initialize();
+  check(
+    "relocatedLauncherInitializesInstallation",
+    first.status === 0 &&
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$/.test(created) &&
+      (statSync(identity).mode & 0o777) === 0o600 &&
+      !`${first.stdout}${first.stderr}`.includes(created.trim()) &&
+      rerun.status === 0 &&
+      readFileSync(identity, "utf8") === created
+  );
+
   // 5. The relocated viewer, from its own app directory, serves every asset as shipped.
   const viewerPort = freePort();
   viewer = spawnSupervised(

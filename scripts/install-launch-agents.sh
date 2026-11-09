@@ -458,6 +458,16 @@ wait_for() {
   done
 }
 
+# A release's serve routes native delivery by this installation's identity and never creates
+# one. Activation does not create it either: a first upgrade initializes it deliberately, and
+# an established identity that is missing is restored, never replaced (docs/runbooks/deploy.md).
+if [ -n "$release" ]; then
+  identity="$bus_dir/installation-id"
+  [ -f "$identity" ] && [ ! -L "$identity" ] && [ "$(grep -c '' "$identity")" = 1 ] &&
+    grep -Eqx '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}' "$identity" ||
+    fail "No valid installation-id in $bus_dir. Initialize it before a first activation, or restore this installation's own; activation creates none."
+fi
+
 if [ "$runtime_only" = true ] || [ -n "$release" ]; then
   install_runtime
   wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"

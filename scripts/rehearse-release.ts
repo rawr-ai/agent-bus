@@ -348,10 +348,10 @@ const read = (who: typeof X) =>
 const same = (a: string[], b: string[]) =>
   JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
-/** Configuration, token and their modes, as one digest: the store binding. */
+/** Configuration, token, delivery identity and their modes, as one digest: the store binding. */
 const stateDigest = () =>
   sha256(
-    ["config.json", "fluree-token"]
+    ["config.json", "fluree-token", "installation-id"]
       .map((name) => {
         const path = join(busDir, name);
         return `${name}:${fileSha256(path)}:${(statSync(path).mode & 0o777).toString(8)}`;
@@ -502,6 +502,14 @@ try {
     JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
   );
   writeFileSync(join(busDir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
+  // The delivery identity, initialized once as the first upgrade to stable delivery does it,
+  // with the source's own command; no activation or rollback below may create or change it.
+  if (
+    run([bun, "--no-env-file", join(source, "src/bin.ts"), "initialize-installation"], {}, source)
+      .status !== 0 ||
+    !existsSync(join(busDir, "installation-id"))
+  )
+    throw new Error("could not initialize the installation identity");
   facts.stateDigest = stateDigest();
 
   // 0. Source, as deployed today: launcher v1 and serve, and the viewer from the checkout.
