@@ -5,6 +5,7 @@ import {
   chmodSync,
   cpSync,
   linkSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   realpathSync,
@@ -43,7 +44,7 @@ const refused = (verdict: Verdict, reason: string) => {
 
 test("an intact release verifies, here and after relocation, and reports only identities", () => {
   const verdict = check();
-  expect(verdict).toEqual({ ok: true, id: ID, manifestSha256: digest, problems: [] });
+  expect(verdict).toEqual({ ok: true, root: dir, id: ID, manifestSha256: digest, problems: [] });
   const elsewhere = join(root, "moved");
   // A relocation as an operator does it: modes preserved.
   expect(spawnSync("/bin/mkdir", ["-p", elsewhere]).status).toBe(0);
@@ -190,6 +191,25 @@ test("refuses a release whose directory name is not its id, or that is itself a 
   const link = join(root, "linked");
   symlinkSync(dir, link);
   refused(check(link), "release path is not a real directory");
+});
+
+test("a trailing separator neither follows a same-id link nor changes the root that is bound", () => {
+  // A link named like the release, elsewhere: with a trailing slash, lstat would follow it.
+  const elsewhere = join(root, "elsewhere");
+  mkdirSync(elsewhere);
+  symlinkSync(dir, join(elsewhere, ID));
+  for (const path of [join(elsewhere, ID), `${join(elsewhere, ID)}/`, `${join(elsewhere, ID)}//`])
+    refused(check(path), "release path is not a real directory");
+  // The release itself, however written, is checked and reported as one canonical root.
+  const aliasParent = join(root, "alias");
+  symlinkSync(root, aliasParent);
+  for (const path of [`${dir}/`, join(aliasParent, ID), `${join(aliasParent, ID)}/`]) {
+    const verdict = check(path);
+    expect(verdict.ok).toBe(true);
+    expect(verdict.root).toBe(dir);
+  }
+  for (const path of [`${dir}/.`, `${dir}/..`, "/"])
+    refused(check(path), "release path does not name a release directory");
 });
 
 test("refuses without a valid anchor or with a relative path, before reading anything", () => {

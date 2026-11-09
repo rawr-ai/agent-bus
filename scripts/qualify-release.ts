@@ -3,13 +3,18 @@
  * Never cached: it builds twice from the commit and runs the result.
  *
  * - Reproducible: two builds of one commit seal the same manifest digest.
- * - Lockfile, not worktree: a marker patched into this worktree's installed
- *   dependency reaches a worktree bundle (positive control) but not the release.
+ * - Lockfile, not worktree: a marker patched into the installed dependency of a
+ *   disposable clone reaches a bundle of that clone (positive control) but not the
+ *   release built from it. This checkout is only read: its installed dependency
+ *   and status are the same afterwards.
+ * - The runtime itself: the release's Bun is the builder's executable, byte for
+ *   byte, and a relocated copy reports its own path as its executable.
  * - Self-contained: no bundle loads a module from outside itself, and no file
  *   names the build root, this checkout or the home directory.
  * - Relocatable: a copy elsewhere, with the original gone, verifies against the
  *   original digest and reports its id under an empty environment from a decoy
- *   directory; the relocated viewer serves every asset byte for byte.
+ *   directory; the relocated viewer serves every asset byte for byte, and is gone
+ *   once stopped.
  * - Isolated from the caller: a bunfig.toml whose preload a bare release run
  *   would load (positive control) does not reach a run through the launcher.
  *
@@ -18,7 +23,6 @@
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
-  linkSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -30,7 +34,8 @@ import {
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
+import { spawnSupervised } from "../test/supervised.ts";
 import {
   build,
   bundle,
@@ -67,27 +72,30 @@ function filesUnder(root: string, at = ""): string[] {
   return found.sort();
 }
 
+/** Runs a command to completion, or throws naming what it was for. */
+function must(args: string[], what: string, cwd: string, env: Record<string, string>) {
+  const result = spawnSync(args[0]!, args.slice(1), { cwd, env, encoding: "utf8" });
+  if (result.status !== 0) throw new Error(`${what} failed`);
+  return result.stdout;
+}
+
 /**
- * Replaces one installed dependency file with a marked copy by rename, never in
- * place: the installed file may share its inode with Bun's cache. Returns the
- * restore step, which renames the untouched original back.
+ * Replaces one installed dependency file with a marked copy by rename, never in place:
+ * the installed file may share its inode or clone with Bun's cache.
  */
-function patchInstalled(path: string, marker: string) {
-  const before = fileSha256(path);
-  const aside = `${path}.qualify-original`;
+function markInstalled(path: string, marker: string) {
   const marked = `${path}.qualify-marked`;
-  if (existsSync(aside) || existsSync(marked)) throw new Error(`${path} has a leftover patch`);
   writeFileSync(
     marked,
     `${readFileSync(path, "utf8")}\n;globalThis.__agentBusQualify=${JSON.stringify(marker)};\n`
   );
-  linkSync(path, aside);
   renameSync(marked, path);
-  return () => {
-    renameSync(aside, path);
-    return fileSha256(path) === before;
-  };
 }
+
+const gitStatus = () =>
+  spawnSync("git", ["-C", repo, "status", "--porcelain", "--untracked-files=all"], {
+    encoding: "utf8",
+  }).stdout;
 
 const commit = spawnSync("git", ["-C", repo, "rev-parse", "HEAD"], {
   encoding: "utf8",
@@ -98,26 +106,47 @@ const dirty = spawnSync("git", ["-C", repo, "status", "--porcelain", "--untracke
 facts.commit = commit;
 facts.worktreeClean = dirty === "";
 
+// This checkout is only read; these are compared once the qualifier is done.
+const realInstalled = join(repo, "node_modules/sparqljs/sparql.js");
+const realBefore = {
+  sha256: fileSha256(realInstalled),
+  mtimeMs: statSync(realInstalled).mtimeMs,
+  status: gitStatus(),
+};
+
 const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-qualify-release-")));
-let viewer: ReturnType<typeof Bun.spawn> | null = null;
-let restore: (() => boolean) | null = null;
+let viewer: ReturnType<typeof spawnSupervised<"ignore", "ignore">> | null = null;
+let viewerBase: string | null = null;
 try {
-  // 1. Build A while this worktree's installed sparqljs carries a marker.
+  // 1. A disposable clone of the commit, with its own frozen install, whose installed
+  //    sparqljs carries a marker. Build A from that clone.
+  const clone = join(root, "clone");
+  const cloneEnv = { HOME: join(root, "clone-home"), PATH: `${dirname(bun)}:/usr/bin:/bin` };
+  mkdirSync(cloneEnv.HOME);
+  must(
+    ["git", "clone", "--quiet", "--local", "--no-checkout", repo, clone],
+    "cloning",
+    root,
+    cloneEnv
+  );
+  must(
+    ["git", "-C", clone, "checkout", "--quiet", "--detach", commit],
+    "checking out",
+    root,
+    cloneEnv
+  );
+  must(
+    [bun, "install", "--frozen-lockfile", "--ignore-scripts"],
+    "the clone's frozen install",
+    clone,
+    { ...cloneEnv, HOME: homedir() }
+  );
   const marker = `agent-bus-qualify-${crypto.randomUUID()}`;
-  const installed = join(repo, "node_modules/sparqljs/sparql.js");
-  restore = patchInstalled(installed, marker);
-  let restored = false;
-  let a: ReturnType<typeof build>;
-  try {
-    const probe = join(root, "worktree-bundle.js");
-    bundle({ src: repo, entry: "src/bin.ts", outfile: probe, bun });
-    check("patchedWorktreeBundleCarriesMarker", readFileSync(probe, "utf8").includes(marker));
-    a = build({ repo, commit, bun, out: join(root, "out-a") });
-  } finally {
-    restored = restore();
-    restore = null;
-  }
-  check("installedDependencyRestored", restored);
+  markInstalled(join(clone, "node_modules/sparqljs/sparql.js"), marker);
+  const probe = join(root, "clone-bundle.js");
+  bundle({ src: clone, entry: "src/bin.ts", outfile: probe, bun });
+  check("patchedCloneBundleCarriesMarker", readFileSync(probe, "utf8").includes(marker));
+  const a = build({ repo: clone, commit, bun, out: join(root, "out-a") });
   check(
     "releaseIgnoresWorktreeDependencies",
     !readFileSync(join(a.dir, "app/cli.js"), "utf8").includes(marker)
@@ -160,6 +189,7 @@ try {
   removeOwned(join(root, "out-b"));
   const rel = join(moved, a.id);
   check("relocatedVerifies", verify(rel, { expect: a.manifestSha256, bun }).ok);
+  check("releaseBunIsTheBuilderBun", fileSha256(join(rel, "runtime/bun")) === fileSha256(bun));
 
   // A decoy caller directory: a dotenv, and a bunfig that preloads a marker writer.
   const decoy = join(root, "decoy");
@@ -174,6 +204,15 @@ try {
     `require("node:fs").writeFileSync(${JSON.stringify(preloadMark)}, "1");\n`
   );
   const empty = { HOME: home, PATH: "/usr/bin:/bin" };
+  const ownPath = spawnSync(
+    join(rel, "runtime/bun"),
+    ["--no-env-file", "--config=/dev/null", "-e", "process.stdout.write(process.execPath)"],
+    { cwd: decoy, env: empty, encoding: "utf8", timeout: 20_000 }
+  );
+  check(
+    "relocatedRuntimeReportsItsOwnPath",
+    ownPath.status === 0 && ownPath.stdout === join(rel, "runtime/bun")
+  );
   const runIn = (args: string[]) =>
     spawnSync(args[0]!, args.slice(1), {
       cwd: decoy,
@@ -199,7 +238,7 @@ try {
 
   // 5. The relocated viewer, from its own app directory, serves every asset as shipped.
   const viewerPort = freePort();
-  viewer = Bun.spawn(
+  viewer = spawnSupervised(
     [join(rel, "runtime/bun"), "--no-env-file", join(rel, "app/dist/viewer/main.js")],
     {
       cwd: join(rel, "app"),
@@ -213,6 +252,7 @@ try {
     }
   );
   const base = `http://127.0.0.1:${viewerPort}`;
+  viewerBase = base;
   let up = false;
   for (let attempt = 0; attempt < 100 && !up; attempt++) {
     up = await fetch(`${base}/`).then(
@@ -251,13 +291,23 @@ try {
     message = message.replaceAll(path, name);
   facts.error = message;
 } finally {
-  if (restore !== null) check("installedDependencyRestored", restore());
   if (viewer !== null) {
     viewer.kill();
     await viewer.exited;
+    const answers = await fetch(`${viewerBase}/`).then(
+      () => true,
+      () => false
+    );
+    check("noViewerLeftAfterStop", !answers);
   }
   removeOwned(root);
 }
+check(
+  "thisCheckoutUntouched",
+  fileSha256(realInstalled) === realBefore.sha256 &&
+    statSync(realInstalled).mtimeMs === realBefore.mtimeMs &&
+    gitStatus() === realBefore.status
+);
 
 const ok = Object.values(checks).every(Boolean) && checks.completed !== false;
 console.log(JSON.stringify({ ok, ...facts, checks }, null, 2));

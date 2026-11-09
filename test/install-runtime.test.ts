@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { appendFileSync, existsSync } from "node:fs";
+import {
+  appendFileSync,
+  chmodSync,
+  cpSync,
+  existsSync,
+  renameSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
 import {
   lstat,
   mkdir,
@@ -15,7 +24,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { releaseLauncher, removeOwned } from "../scripts/release.ts";
-import { fakeRelease, mutate, replaceSealed } from "./release-fixture.ts";
+import { fakeRelease, mutate, replaceSealed, reseal } from "./release-fixture.ts";
 
 const installer = resolve(import.meta.dir, "../scripts/install-launch-agents.sh");
 const manifest = await Bun.file(
@@ -98,7 +107,7 @@ async function fixture() {
     await writeFile(join(agents, `${label}.${suffix}.plist`), `keep ${suffix}\n`);
   await executable(
     join(tools, "launchctl"),
-    `printf 'launchctl %s\\n' "$*" >> ${quote(toolLog)}\n[ "$1" != print ] || exit 1\n[ "$1" != bootstrap ] || [ "\${FAIL_BOOTSTRAP:-}" != 1 ]`
+    `printf 'launchctl %s\\n' "$*" >> ${quote(toolLog)}\n[ "$1" != print ] || exit 113\n[ "$1" != bootstrap ] || [ "\${FAIL_BOOTSTRAP:-}" != 1 ]`
   );
   await executable(
     join(tools, "curl"),
@@ -696,3 +705,280 @@ for (const kind of ["marker-only", "appended", "outside-releases", "relative", "
     }
   });
 }
+
+test("release mode hashes each file it runs with system tools before running any of them", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+    const ran = join(f.root, "release-code-ran");
+    const marking = `require("node:fs").writeFileSync(${JSON.stringify(ran)}, "1");\n`;
+    const preload = join(f.root, "marking-preload.js");
+    await writeFile(preload, marking);
+    const preloading = `preload = [${JSON.stringify(preload)}]\n`;
+    const changeInPlace = (dir: string, path: string, content: string) => {
+      const file = join(dir, path);
+      mutate(join(file, ".."), 0o555, () =>
+        mutate(file, 0o444, () => writeFileSync(file, content))
+      );
+    };
+    // Each is changed after sealing and offered under its recorded digest.
+    const verifier = await f.release("1.0.0-a1a1a1a1a1a1");
+    changeInPlace(verifier.dir, "app/release.js", `${marking}process.exit(0);\n`);
+    const config = await f.release("1.0.0-a2a2a2a2a2a2");
+    changeInPlace(config.dir, "app/bunfig.toml", preloading);
+    // The same bytes, but through a link to a file outside the release.
+    const linked = await f.release("1.0.0-a3a3a3a3a3a3");
+    const outsideCopy = join(f.root, "release-copy.js");
+    cpSync(join(linked.dir, "app/release.js"), outsideCopy);
+    mutate(join(linked.dir, "app"), 0o555, () => {
+      unlinkSync(join(linked.dir, "app/release.js"));
+      symlinkSync(outsideCopy, join(linked.dir, "app/release.js"));
+    });
+    // The whole app directory replaced by a link to an identical copy outside.
+    const linkedApp = await f.release("1.0.0-a4a4a4a4a4a4");
+    const appCopy = join(f.root, "app-copy");
+    cpSync(join(linkedApp.dir, "app"), appCopy, { recursive: true });
+    chmodSync(linkedApp.dir, 0o755);
+    chmodSync(join(linkedApp.dir, "app"), 0o755);
+    renameSync(join(linkedApp.dir, "app"), join(f.root, "app-moved"));
+    symlinkSync(appCopy, join(linkedApp.dir, "app"));
+    chmodSync(linkedApp.dir, 0o555);
+    // A manifest, sealed under its own digest, that no longer lists the Bun config.
+    const unlisted = await f.release("1.0.0-a5a5a5a5a5a5");
+    const unlistedDigest = reseal(unlisted.dir, (manifest) => {
+      manifest.files = manifest.files.filter((file) => file.path !== "app/bunfig.toml");
+    });
+    const cases: Array<[string, string, string]> = [
+      [verifier.dir, verifier.digest, "app/release.js differs from its manifest"],
+      [config.dir, config.digest, "app/bunfig.toml differs from its manifest"],
+      [linked.dir, linked.digest, "app/release.js is not a regular file"],
+      [linkedApp.dir, linkedApp.digest, "app is missing or a link"],
+      [unlisted.dir, unlistedDigest, "its manifest does not list app/bunfig.toml"],
+    ];
+    for (const [dir, digest, reason] of cases) {
+      await writeFile(f.toolLog, "");
+      const before = await snapshot(f.root);
+      const result = await f.install(["--release", dir, "--expect", digest]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain(reason);
+      expect(existsSync(ran)).toBe(false);
+      expect(await snapshot(f.root)).toEqual(before);
+      expect(await readFile(f.toolLog, "utf8")).toBe("");
+    }
+    // Positive controls: resealed and offered under the new digest, each change does run.
+    for (const [id, path, content] of [
+      ["1.0.0-a6a6a6a6a6a6", "app/release.js", `${marking}process.exit(0);\n`],
+      ["1.0.0-a7a7a7a7a7a7", "app/bunfig.toml", preloading],
+    ] as const) {
+      const control = await f.release(id);
+      const digest = replaceSealed(control.dir, path, content);
+      await f.install(["--release", control.dir, "--expect", digest]);
+      expect(existsSync(ran)).toBe(true);
+      unlinkSync(ran);
+    }
+  } finally {
+    await f.dispose();
+  }
+});
+
+test("release mode binds one spelling of the release and refuses the root, . and ..", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+    const good = await f.release("1.0.0-b1b1b1b1b1b1");
+    // A link in the releases directory named like a release: a trailing slash must not
+    // make the directory test follow it.
+    const alias = join(f.releases, "1.0.0-b2b2b2b2b2b2");
+    await symlink(good.dir, alias);
+    const cases: Array<[string, string]> = [
+      ["/", "absolute directory"],
+      ["//", "absolute directory"],
+      [`${good.dir}/.`, "not . or .."],
+      [`${good.dir}/..`, "not . or .."],
+      [`${f.releases}/../releases/${good.dir.split("/").at(-1)}`, "not . or .."],
+      [`${alias}/`, "not a real directory"],
+      [`${alias}//`, "not a real directory"],
+    ];
+    for (const [path, reason] of cases) {
+      await writeFile(f.toolLog, "");
+      const before = await snapshot(f.root);
+      const result = await f.install(["--release", path, "--expect", good.digest]);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr).toContain(reason);
+      expect(await snapshot(f.root)).toEqual(before);
+      expect(await readFile(f.toolLog, "utf8")).toBe("");
+    }
+    const bound = await f.install(["--release", `${good.dir}//`, "--expect", good.digest]);
+    expect(bound).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(good.dir));
+  } finally {
+    await f.dispose();
+  }
+});
+
+/** Writes a serve job as XML, from its JSON shape, the way launchd reads it. */
+async function writeJob(path: string, job: Record<string, unknown>) {
+  await writeFile(path, JSON.stringify(job));
+  const converted = await command(
+    ["/usr/bin/plutil", "-convert", "xml1", path],
+    { PATH: "/usr/bin:/bin" },
+    "/"
+  );
+  expect(converted.exitCode).toBe(0);
+}
+
+test.skipIf(process.platform !== "darwin")(
+  "activation keeps the owned serve job byte for byte and waits on its own port",
+  async () => {
+    const f = await fixture();
+    try {
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      const good = await f.release("1.0.0-c1c1c1c1c1c1");
+      // The owned job as another installer wrote it: no HOME, its own port and state.
+      const otherBus = join(f.home, "other state");
+      await mkdir(otherBus);
+      const unset = { AGENT_BUS_PORT: "", AGENT_BUS_DIR: "" };
+      for (const [env, port, overrides] of [
+        [{ AGENT_BUS_DIR: otherBus, AGENT_BUS_PORT: "47892" }, "47892", unset],
+        [
+          { AGENT_BUS_DIR: otherBus, AGENT_BUS_PORT: "47892" },
+          "47892",
+          { AGENT_BUS_PORT: "47892", AGENT_BUS_DIR: otherBus },
+        ],
+        // No port of its own: serve's default applies, and that is the one waited on.
+        [{ AGENT_BUS_DIR: otherBus }, "8096", unset],
+      ] as const) {
+        await writeJob(f.plist, {
+          Label: f.label,
+          ProgramArguments: [f.launcher, "serve"],
+          EnvironmentVariables: env,
+          KeepAlive: true,
+          RunAtLoad: true,
+        });
+        for (const args of [
+          ["--release", good.dir, "--expect", good.digest],
+          ["--runtime-only", "--bun", f.bunA],
+        ]) {
+          const kept = await snapshot(f.plist);
+          await writeFile(f.toolLog, "");
+          expect(await f.install(args, overrides)).toMatchObject({ exitCode: 0, stderr: "" });
+          expect(await snapshot(f.plist)).toEqual(kept);
+          const calls = await readFile(f.toolLog, "utf8");
+          expect(calls).toContain(`launchctl bootstrap gui/${process.getuid?.()} ${f.plist}\n`);
+          expect(calls).toContain(`curl -fsS http://127.0.0.1:${port}/health\n`);
+        }
+      }
+      expect(existsSync(join(otherBus, "agent-bus.log"))).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "activation refuses, unchanged, a serve job it does not own or an override it would not apply",
+  async () => {
+    const f = await fixture();
+    try {
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      const good = await f.release("1.0.0-c2c2c2c2c2c2");
+      const owned = {
+        Label: f.label,
+        ProgramArguments: [f.launcher, "serve"],
+        EnvironmentVariables: { AGENT_BUS_DIR: f.bus, AGENT_BUS_PORT: "47892" },
+      };
+      const cases: Array<[string, () => Promise<void>, Record<string, string>, string]> = [
+        [
+          "another port",
+          () => writeJob(f.plist, owned),
+          {},
+          "AGENT_BUS_PORT=47891 differs from its port 47892",
+        ],
+        [
+          "another state directory",
+          () => writeJob(f.plist, owned),
+          { AGENT_BUS_PORT: "", AGENT_BUS_DIR: join(f.home, "elsewhere") },
+          "AGENT_BUS_DIR differs from its state directory",
+        ],
+        [
+          "a Program override",
+          () => writeJob(f.plist, { ...owned, Program: "/bin/sh" }),
+          { AGENT_BUS_PORT: "" },
+          "not the owned job",
+        ],
+        [
+          "another label",
+          () => writeJob(f.plist, { ...owned, Label: "other" }),
+          { AGENT_BUS_PORT: "" },
+          "not the owned job",
+        ],
+        [
+          "extra arguments",
+          () => writeJob(f.plist, { ...owned, ProgramArguments: [f.launcher, "serve", "--x"] }),
+          { AGENT_BUS_PORT: "" },
+          "not the owned job",
+        ],
+        [
+          "another launcher",
+          () => writeJob(f.plist, { ...owned, ProgramArguments: [join(f.root, "other"), "serve"] }),
+          { AGENT_BUS_PORT: "" },
+          "not the owned job",
+        ],
+        [
+          "a link to an owned job",
+          async () => {
+            const target = join(f.root, "linked.plist");
+            await writeJob(target, owned);
+            await symlink(target, f.plist);
+          },
+          { AGENT_BUS_PORT: "" },
+          "not a regular file",
+        ],
+        [
+          "unreadable contents",
+          () => writeFile(f.plist, "not a plist\n"),
+          { AGENT_BUS_PORT: "" },
+          "not a readable plist",
+        ],
+      ];
+      for (const [, prepare, overrides, reason] of cases) {
+        await rm(f.plist, { force: true });
+        await prepare();
+        for (const args of [
+          ["--release", good.dir, "--expect", good.digest],
+          ["--runtime-only", "--bun", f.bunA],
+        ]) {
+          await writeFile(f.toolLog, "");
+          const before = await snapshot(f.root);
+          const result = await f.install(args, overrides);
+          expect(result.exitCode).not.toBe(0);
+          expect(result.stderr).toContain(reason);
+          expect(await snapshot(f.root)).toEqual(before);
+          expect(await readFile(f.toolLog, "utf8")).toBe("");
+        }
+      }
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test("an interrupted release activation leaves the job unchanged and the same command recovers", async () => {
+  const f = await fixture();
+  try {
+    expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+    const plist = await snapshot(f.plist);
+    const good = await f.release("1.0.0-c3c3c3c3c3c3");
+    const args = ["--release", good.dir, "--expect", good.digest];
+    const failed = await f.install(args, { FAIL_BOOTSTRAP: "1" });
+    expect(failed.exitCode).not.toBe(0);
+    expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(good.dir));
+    expect(await snapshot(f.plist)).toEqual(plist);
+    expect((await readdir(f.agents)).filter((name) => name.includes(".tmp."))).toEqual([]);
+    expect(await f.install(args)).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(good.dir));
+    expect(await snapshot(f.plist)).toEqual(plist);
+  } finally {
+    await f.dispose();
+  }
+});

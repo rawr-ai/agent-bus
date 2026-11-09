@@ -19,6 +19,7 @@ import { spawnSync } from "node:child_process";
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -32,7 +33,7 @@ import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { flureeServer, ledgerOn, stopFlureeServer } from "../test/fluree-server.ts";
-import { build, fileSha256, removeOwned, sha256 } from "./release.ts";
+import { build, fileSha256, releaseCommands, removeOwned, sha256 } from "./release.ts";
 
 const repo = resolve(import.meta.dir, "..");
 const bun = realpathSync(process.execPath);
@@ -70,6 +71,11 @@ const loadedPid = (label: string) => {
   if (printed.status !== 0) return null;
   return /^\s*pid = (\d+)$/m.exec(printed.stdout)?.[1] ?? "loaded";
 };
+/** The command line alone, to compare with the exact command a binding runs. */
+const commandOf = (pid: string | null) =>
+  pid === null || pid === "loaded"
+    ? null
+    : spawnSync("/bin/ps", ["-o", "command=", "-p", pid], { encoding: "utf8" }).stdout.trim();
 const processOf = (pid: string | null) =>
   pid === null || pid === "loaded"
     ? null
@@ -225,15 +231,29 @@ function installedClaudeHookWakes(who: { address: string; session: string }) {
     woke: ran.status === 2 && ran.stderr.includes(who.address),
   };
 }
+/**
+ * A release's installer is run only as known code: its manifest is the recorded one and
+ * the installer the regular file that manifest lists, checked here before it runs. Its
+ * own `--expect` stays whatever the step passes, so a refusal is still the installer's.
+ */
+function knownInstaller(target: Built) {
+  const manifest = join(target.dir, "manifest.json");
+  if (fileSha256(manifest) !== target.digest)
+    throw new Error(`${target.id}: its manifest is not the recorded one`);
+  const listed = (
+    JSON.parse(readFileSync(manifest, "utf8")).files as Array<{ path: string; sha256: string }>
+  ).find((file) => file.path === "app/install-launch-agents.sh");
+  const installer = join(target.dir, "app/install-launch-agents.sh");
+  if (
+    listed === undefined ||
+    !lstatSync(installer).isFile() ||
+    fileSha256(installer) !== listed.sha256
+  )
+    throw new Error(`${target.id}: its installer is not the one its manifest lists`);
+  return installer;
+}
 const installRelease = (target: Built, expect = target.digest) =>
-  run([
-    "/bin/sh",
-    join(target.dir, "app/install-launch-agents.sh"),
-    "--release",
-    target.dir,
-    "--expect",
-    expect,
-  ]);
+  run(["/bin/sh", knownInstaller(target), "--release", target.dir, "--expect", expect]);
 const selectPlugin = (target: Built) =>
   tool(target.dir, "plugin", target.dir, "--expect", target.digest, "--marketplace", marketplace);
 const moveViewer = (target: Built) =>
@@ -246,7 +266,9 @@ const moveViewer = (target: Built) =>
     "--plist",
     viewerPlist,
     "--viewer-label",
-    VIEWER
+    VIEWER,
+    "--bindings",
+    join(data, "bindings")
   );
 const status = (via: Built) =>
   JSON.parse(
@@ -262,7 +284,11 @@ const status = (via: Built) =>
       "--viewer-label",
       VIEWER,
       "--plist",
-      viewerPlist
+      viewerPlist,
+      "--bindings",
+      join(data, "bindings"),
+      // The clients this rehearsal drives; without them, status reports each unavailable.
+      ...(clients ? ["--claude", claudeBin!, "--codex", codexBin!] : [])
     ).stdout
   ) as Record<string, unknown>;
 
@@ -339,22 +365,20 @@ async function bound(step: string, expected: string, viaTool: Built) {
     `${step}: launcher reports ${expected === "source" ? "source" : "release"}`,
     expected === "source" ? version.endsWith("+source") : version === `agent-bus v${expected}`
   );
-  const serve = processOf(loadedPid(LABEL)) ?? "";
+  const exact = expected === "source" ? null : releaseCommands(join(releases, expected));
+  const serve = commandOf(loadedPid(LABEL)) ?? "";
   check(
     `${step}: running serve is the bound code`,
-    expected === "source"
-      ? serve.includes(`${source}/src/bin.ts serve`)
-      : serve.includes(`${releases}/${expected}/runtime/bun `) &&
-          serve.endsWith(`${releases}/${expected}/app/cli.js serve`)
+    exact === null ? serve.endsWith(`${source}/src/bin.ts serve`) : serve === exact.serve
   );
   check(`${step}: store binding unchanged`, stateDigest() === facts.stateDigest);
   check(`${step}: viewer serves`, await healthy(`http://127.0.0.1:${viewerPort}/`));
-  const viewerProcess = processOf(loadedPid(VIEWER)) ?? "";
+  const viewerProcess = commandOf(loadedPid(VIEWER)) ?? "";
   check(
     `${step}: running viewer is the bound code`,
-    expected === "source"
+    exact === null
       ? viewerProcess.endsWith(`${source}/dist/viewer/main.js`)
-      : viewerProcess.endsWith(`${releases}/${expected}/app/dist/viewer/main.js`)
+      : viewerProcess === exact.viewer
   );
   await mcp(async (client) => {
     const listing = await client.callTool({ name: "bus_queries", arguments: {} });
@@ -380,7 +404,8 @@ async function bound(step: string, expected: string, viaTool: Built) {
       report.agree === true &&
         report.launcherRelease === expected &&
         report.serveRelease === expected &&
-        report.viewerRunningRelease === expected
+        report.viewerRunningRelease === expected &&
+        report.viewerStartPending === false
     );
   return report;
 }
@@ -557,8 +582,10 @@ try {
       splitPlugin.pluginRelease === B.id &&
       splitPlugin.launcherRelease === A.id &&
       (!clients ||
-        (JSON.stringify(splitPlugin.claudePlugin) === JSON.stringify([B.id]) &&
-          JSON.stringify(splitPlugin.codexPlugin) === JSON.stringify([B.id])))
+        (JSON.stringify(splitPlugin.claudePlugin) ===
+          JSON.stringify({ state: "installed", versions: [B.id] }) &&
+          JSON.stringify(splitPlugin.codexPlugin) ===
+            JSON.stringify({ state: "installed", versions: [B.id] })))
   );
   check("split(ii): plugin A recovers", selectPlugin(A).status === 0);
   if (clients) check("split(ii): clients refreshed", refreshClients());
@@ -612,12 +639,14 @@ try {
         "--plist",
         viewerPlist,
         "--viewer-label",
-        VIEWER
+        VIEWER,
+        "--bindings",
+        join(data, "bindings")
       ).status === 0
   );
   check(
     "A→source: runtime-only rollback",
-    run(["/bin/sh", join(A.dir, "app/install-launch-agents.sh"), "--runtime-only", "--bun", bun], {
+    run(["/bin/sh", knownInstaller(A), "--runtime-only", "--bun", bun], {
       AGENT_BUS_REPO: source,
     }).status === 0
   );

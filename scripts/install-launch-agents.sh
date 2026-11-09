@@ -28,7 +28,11 @@
 # ~/.local/share/agent-bus/releases) and match the anchored manifest digest. Like
 # --runtime-only it touches only the launcher and the serve LaunchAgent, and it records the
 # previous launcher in the releases directory's sibling bindings/. Either mode adopts a
-# launcher the other wrote.
+# launcher the other wrote, and keeps an existing owned serve LaunchAgent unchanged (its port
+# and state directory included; a disagreeing AGENT_BUS_PORT or AGENT_BUS_DIR is refused).
+# Before running anything a release holds, it checks the files it runs with system tools
+# against the anchored manifest. Run this installer from known code: the reviewed checkout,
+# or a release copy checked the same way first (docs/frames/release-packaging.md).
 #
 # AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL (the label prefix) and
 # AGENT_BUS_LAUNCHER (the managed `agent-bus` executable) override the defaults, so a
@@ -68,7 +72,7 @@ while [ "$#" -gt 0 ]; do
       case "$2" in --*) fail "$1 requires a value" ;; esac
       if [ "$1" = --release ]; then
         [ -z "$release" ] || fail "--release was supplied more than once"
-        case "$2" in /*) release=$2 ;; *) fail "--release must name an absolute directory" ;; esac
+        case "$2" in /*[!/]*) release=$2 ;; *) fail "--release must name an absolute directory" ;; esac
       else
         [ -z "$expect" ] || fail "--expect was supplied more than once"
         expect=$2
@@ -90,6 +94,13 @@ if [ "$runtime_only" = true ]; then
   [ -n "$bun_bin" ] || fail "--runtime-only requires an explicit --bun path"
 fi
 [ -n "$expect" ] && [ -z "$release" ] && fail "--expect requires --release"
+# One spelling of the release for every check and the binding: no trailing separator, which
+# would make a test of the path follow a link standing in its place.
+while :; do case "$release" in */) release=${release%/} ;; *) break ;; esac; done
+case "/$release/" in
+  //) ;;
+  */./*|*/../*) fail "--release must name a release directory, not . or .." ;;
+esac
 if [ -n "$release" ]; then
   [ "$runtime_only" = false ] || fail "--release cannot be combined with --runtime-only"
   [ -z "$remote" ] || fail "--release cannot be combined with --remote"
@@ -136,12 +147,36 @@ if [ -n "$release" ]; then
   [ -d "$release" ] && [ ! -L "$release" ] || fail "release is not a real directory: $release"
   release="$release_parent/$(basename "$release")"
   # Anchor with system tools before running anything the release holds: its manifest must
-  # be the recorded one, and its Bun the one that manifest names.
+  # be the recorded one, and every file run here (its Bun, verifier and Bun config) a
+  # regular file, not a link, with the bytes that manifest lists.
+  for part in manifest.json app runtime; do
+    [ -e "$release/$part" ] && [ ! -L "$release/$part" ] || fail "Release did not verify: $part is missing or a link: $release"
+  done
+  [ -f "$release/manifest.json" ] && [ -d "$release/app" ] && [ -d "$release/runtime" ] \
+    || fail "Release did not verify: its manifest, app or runtime has the wrong type: $release"
   digest=$(/usr/bin/shasum -a 256 "$release/manifest.json" 2>/dev/null) || digest=""
   [ "${digest%% *}" = "$expect" ] || fail "Release did not verify against the expected manifest digest: $release"
   want=$(/usr/bin/plutil -extract bun.sha256 raw -o - "$release/manifest.json" 2>/dev/null) || want=""
   have=$(/usr/bin/shasum -a 256 "$release/runtime/bun" 2>/dev/null) || have=""
   [ -n "$want" ] && [ "${have%% *}" = "$want" ] || fail "Release did not verify: its Bun differs from its manifest: $release"
+  checked=""
+  i=0
+  while listed=$(/usr/bin/plutil -extract "files.$i.path" raw -o - "$release/manifest.json" 2>/dev/null); do
+    case "$listed" in
+      runtime/bun|app/release.js|app/bunfig.toml)
+        file="$release/$listed"
+        [ -f "$file" ] && [ ! -L "$file" ] || fail "Release did not verify: $listed is not a regular file: $release"
+        want=$(/usr/bin/plutil -extract "files.$i.sha256" raw -o - "$release/manifest.json" 2>/dev/null) || want=""
+        have=$(/usr/bin/shasum -a 256 "$file" 2>/dev/null) || have=""
+        [ -n "$want" ] && [ "${have%% *}" = "$want" ] || fail "Release did not verify: $listed differs from its manifest: $release"
+        checked="$checked $listed"
+        ;;
+    esac
+    i=$((i + 1))
+  done
+  for listed in runtime/bun app/release.js app/bunfig.toml; do
+    case "$checked " in *" $listed "*) ;; *) fail "Release did not verify: its manifest does not list $listed: $release" ;; esac
+  done
   bun_bin="$release/runtime/bun"
   # The release's own verifier checks every file; it writes nothing, not even Bun's cache.
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
@@ -223,6 +258,44 @@ esac
 if [ -z "$release" ]; then
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
     "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
+fi
+
+# Activation changes only what the launcher runs, so an existing serve job is kept as it is:
+# its own port and state directory are the ones waited on, and an override that disagrees is
+# refused rather than applied. Only the owned job, running exactly the launcher's serve, is
+# kept; anything else under the label is refused unchanged. A full install still writes it.
+keep_plist=false
+serve_plist="$agents/$prefix.plist"
+if { [ "$runtime_only" = true ] || [ -n "$release" ]; } && { [ -e "$serve_plist" ] || [ -L "$serve_plist" ]; }; then
+  refuse_plist() { fail "Refusing to change the serve LaunchAgent at $serve_plist: $1"; }
+  [ -f "$serve_plist" ] && [ ! -L "$serve_plist" ] || refuse_plist "it is not a regular file"
+  plist_json=$(/usr/bin/plutil -convert json -o - "$serve_plist" 2>/dev/null) || refuse_plist "it is not a readable plist"
+  # The plist reaches the check on stdin, never in an argument a process listing shows.
+  kept=$(printf '%s' "$plist_json" | (cd / && "$bun_bin" --no-env-file --config=/dev/null -e '
+const [label, launcher, home] = process.argv.slice(1);
+const job = JSON.parse(await Bun.stdin.text());
+const env = job.EnvironmentVariables ?? {};
+const port = env.AGENT_BUS_PORT ?? "8096";
+const dir = env.AGENT_BUS_DIR ?? `${env.HOME ?? home}/.agent-bus`;
+if (
+  job.Label !== label || job.Program !== undefined || typeof env !== "object" ||
+  JSON.stringify(job.ProgramArguments) !== JSON.stringify([launcher, "serve"]) ||
+  !/^[0-9]+$/.test(port) || !dir.startsWith("/") || dir.includes("\n")
+)
+  process.exit(1);
+process.stdout.write(`${port}\n${dir}`);
+' "$prefix" "$launcher" "$HOME")) || refuse_plist "it is not the owned job running $launcher serve"
+  kept_port=$(printf '%s\n' "$kept" | sed -n 1p)
+  kept_dir=$(printf '%s\n' "$kept" | sed -n 2p)
+  if [ -n "${AGENT_BUS_PORT:-}" ] && [ "$AGENT_BUS_PORT" != "$kept_port" ]; then
+    refuse_plist "AGENT_BUS_PORT=$AGENT_BUS_PORT differs from its port $kept_port"
+  fi
+  if [ -n "${AGENT_BUS_DIR:-}" ] && [ "$AGENT_BUS_DIR" != "$kept_dir" ]; then
+    refuse_plist "AGENT_BUS_DIR differs from its state directory $kept_dir"
+  fi
+  bus_port=$kept_port
+  bus_dir=$kept_dir
+  keep_plist=true
 fi
 
 launcher_tmp=""
@@ -316,9 +389,11 @@ install_runtime() {
   chmod 755 "$launcher_tmp"
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
     "$launcher_tmp" --help >/dev/null) || fail "The new launcher cannot run --help"
-  agent_tmp=$(mktemp "$agents/$prefix.plist.tmp.XXXXXX")
-  render_agent "$prefix" "$bus_dir/agent-bus.log" "$launcher" serve > "$agent_tmp"
-  chmod 644 "$agent_tmp"
+  if [ "$keep_plist" = false ]; then
+    agent_tmp=$(mktemp "$agents/$prefix.plist.tmp.XXXXXX")
+    render_agent "$prefix" "$bus_dir/agent-bus.log" "$launcher" serve > "$agent_tmp"
+    chmod 644 "$agent_tmp"
+  fi
   if [ -n "$release" ] && { [ -e "$launcher" ] || [ -L "$launcher" ]; }; then
     # Keep the binding this activation replaces, for rollback (a source one especially).
     bindings="$(dirname "$releases")/bindings"
@@ -327,8 +402,10 @@ install_runtime() {
   fi
   mv -f "$launcher_tmp" "$launcher"
   launcher_tmp=""
-  mv -f "$agent_tmp" "$agents/$prefix.plist"
-  agent_tmp=""
+  if [ "$keep_plist" = false ]; then
+    mv -f "$agent_tmp" "$agents/$prefix.plist"
+    agent_tmp=""
+  fi
   load_agent "$prefix" "$bus_dir/agent-bus.log"
 }
 

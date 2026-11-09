@@ -14,7 +14,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Launchd,
+  parsePrinted,
   parseViewerJob,
+  pendingStart,
   rebindViewer,
   removeOwned,
   restoreViewer,
@@ -57,17 +59,61 @@ function writeJob(path: string, job: unknown) {
 const readJob = (path: string) =>
   JSON.parse(spawnSync("/usr/bin/plutil", ["-convert", "json", "-o", "-", path]).stdout.toString());
 
-/** A launchd stand-in: records calls and tracks whether the one job is loaded. */
-function fakeLaunchd(loaded: boolean, bootstrapFails = false) {
+/** `launchctl print` for a loaded job, in launchd's own layout. */
+const printed = (job: Record<string, unknown>, path: string) => {
+  const args = job.ProgramArguments as string[];
+  return [
+    `gui/501/${LABEL} = {`,
+    `\tpath = ${path}`,
+    "\tstate = running",
+    `\tprogram = ${(job.Program as string | undefined) ?? args[0]}`,
+    "\targuments = {",
+    ...args.map((arg) => `\t\t${arg}`),
+    "\t}",
+    `\tworking directory = ${job.WorkingDirectory}`,
+    "\tpid = 4242",
+    "}",
+    "",
+  ].join("\n");
+};
+
+/**
+ * A launchd stand-in: records calls and tracks the one job. A loaded job is what
+ * the plist held when it was loaded; `print` answers 113 when nothing is loaded.
+ */
+function fakeLaunchd(
+  loaded: boolean,
+  options: {
+    readonly bootstrapFails?: number;
+    readonly printFails?: (nth: number) => boolean;
+    readonly loadedJob?: Record<string, unknown>;
+    readonly loadedFrom?: string;
+  } = {}
+) {
   const calls: string[] = [];
-  const state = { loaded };
+  const state = {
+    loaded,
+    job: (options.loadedJob ?? null) as Record<string, unknown> | null,
+    failures: options.bootstrapFails ?? 0,
+    prints: 0,
+  };
   const launchd: Launchd = (args) => {
     calls.push(args[0]!);
-    if (args[0] === "print") return { status: state.loaded ? 0 : 113 };
+    if (args[0] === "print") {
+      state.prints++;
+      if (options.printFails?.(state.prints)) return { status: 5 };
+      if (!state.loaded) return { status: 113 };
+      state.job ??= readJob(plist);
+      return { status: 0, stdout: printed(state.job!, options.loadedFrom ?? plist) };
+    }
     if (args[0] === "bootout") state.loaded = false;
     if (args[0] === "bootstrap") {
-      if (bootstrapFails) return { status: 5 };
+      if (state.failures > 0) {
+        state.failures--;
+        return { status: 5 };
+      }
       state.loaded = true;
+      state.job = readJob(plist);
     }
     return { status: 0 };
   };
@@ -109,7 +155,7 @@ test("an absent viewer stays absent and nothing is written", () => {
   expect(result).toEqual({ viewer: "absent" });
   expect(existsSync(plist)).toBe(false);
   expect(existsSync(bindings)).toBe(false);
-  expect(calls).toEqual([]);
+  expect(calls).toEqual(["print"]);
 });
 
 test("source -> A -> B -> source moves the running viewer, keeping ports, settings and a record", () => {
@@ -150,7 +196,7 @@ test("source -> A -> B -> source moves the running viewer, keeping ports, settin
   expect(calls).toEqual(["print", "bootout", "print", "bootstrap"]);
 
   calls.length = 0;
-  const back = restoreViewer({ plist, label: LABEL, from: sourceRecord, launchd });
+  const back = restoreViewer({ plist, label: LABEL, from: sourceRecord, bindings, launchd });
   expect(back).toEqual({ viewer: "restored", release: null, restarted: true });
   expect(readJob(plist)).toEqual(source);
   expect(calls).toEqual(["print", "bootout", "print", "bootstrap"]);
@@ -175,7 +221,7 @@ test("an installed but unloaded viewer is rebound without being started", () => 
 
 test("a failed start is reported, not hidden", () => {
   writeJob(plist, source);
-  const { launchd } = fakeLaunchd(true, true);
+  const { launchd } = fakeLaunchd(true, { bootstrapFails: Number.POSITIVE_INFINITY });
   expect(() =>
     rebindViewer({ plist, label: LABEL, release: release("1.0.0-aaaaaaaaaaaa"), bindings, launchd })
   ).toThrow("it is stopped");
@@ -200,6 +246,7 @@ const foreign: Array<[string, (job: Record<string, unknown>) => Record<string, u
     },
   ],
   ["another working directory", (job) => ({ ...job, WorkingDirectory: "/tmp" })],
+  ["a Program override", (job) => ({ ...job, Program: "/bin/sh" })],
   [
     "a different entry",
     (job) => {
@@ -237,9 +284,149 @@ test("restore refuses a record that is not an owned viewer job", () => {
   const record = join(root, "record.plist");
   writeJob(record, { ...source, Label: "someone.else" });
   const { launchd, calls } = fakeLaunchd(true);
-  expect(() => restoreViewer({ plist, label: LABEL, from: record, launchd })).toThrow(
+  expect(() => restoreViewer({ plist, label: LABEL, from: record, bindings, launchd })).toThrow(
     "not an owned viewer job"
   );
   expect(readFileSync(plist)).toEqual(before);
   expect(calls).toEqual([]);
+});
+
+// ---------------------------------------------------------------------------
+// Launchd's answers: a failed start, inspection errors, and whose job is loaded.
+
+const toA = (launchd: Launchd) =>
+  rebindViewer({ plist, label: LABEL, release: release("1.0.0-aaaaaaaaaaaa"), bindings, launchd });
+const marker = () => pendingStart(bindings, LABEL);
+
+test("the print parser reads launchd's layout", () => {
+  expect(parsePrinted(printed(source, plist))).toEqual({
+    kind: "loaded",
+    path: plist,
+    program: "/usr/bin/env",
+    args: source.ProgramArguments as string[],
+    workingDirectory: source.WorkingDirectory as string,
+    pid: "4242",
+  });
+});
+
+test("a start that failed is finished by rerunning the step", () => {
+  writeJob(plist, source);
+  const fake = fakeLaunchd(true, { bootstrapFails: 1 });
+  expect(() => toA(fake.launchd)).toThrow("it is stopped");
+  expect(fake.state.loaded).toBe(false);
+  expect(existsSync(marker())).toBe(true);
+  fake.calls.length = 0;
+  // Launchd now reports the job absent: without the record it would stay stopped.
+  expect(toA(fake.launchd)).toMatchObject({ viewer: "rebound", restarted: true });
+  expect(fake.calls).toEqual(["print", "bootstrap"]);
+  expect(fake.state.loaded).toBe(true);
+  expect(existsSync(marker())).toBe(false);
+});
+
+test("a start that failed is finished by viewer-restore, back on the recorded binding", () => {
+  writeJob(plist, source);
+  const fake = fakeLaunchd(true, { bootstrapFails: 1 });
+  expect(() => toA(fake.launchd)).toThrow("it is stopped");
+  const [record] = readdirSync(bindings).filter((name) => name.endsWith(".plist"));
+  const back = restoreViewer({
+    plist,
+    label: LABEL,
+    from: join(bindings, record!),
+    bindings,
+    launchd: fake.launchd,
+  });
+  expect(back).toEqual({ viewer: "restored", release: null, restarted: true });
+  expect(fake.state.loaded).toBe(true);
+  expect(fake.state.job).toEqual(source);
+  expect(existsSync(marker())).toBe(false);
+});
+
+test("a start that keeps failing keeps its record", () => {
+  writeJob(plist, source);
+  const fake = fakeLaunchd(true, { bootstrapFails: 2 });
+  expect(() => toA(fake.launchd)).toThrow("it is stopped");
+  expect(() => toA(fake.launchd)).toThrow("it is stopped");
+  expect(existsSync(marker())).toBe(true);
+});
+
+test("a record left by an earlier step does not stop a loaded job from restarting normally", () => {
+  writeJob(plist, source);
+  mkdirSync(bindings, { recursive: true });
+  writeFileSync(marker(), `${LABEL}\n`);
+  const fake = fakeLaunchd(true);
+  expect(toA(fake.launchd)).toMatchObject({ restarted: true });
+  expect(fake.calls).toEqual(["print", "bootout", "print", "bootstrap"]);
+  expect(existsSync(marker())).toBe(false);
+});
+
+test("an inspection error is not absence: nothing is written or stopped", () => {
+  writeJob(plist, source);
+  const before = readFileSync(plist);
+  const fake = fakeLaunchd(true, { printFails: (nth) => nth === 1 });
+  expect(() => toA(fake.launchd)).toThrow("could not be asked");
+  expect(readFileSync(plist)).toEqual(before);
+  expect(existsSync(bindings)).toBe(false);
+  expect(fake.calls).toEqual(["print"]);
+  expect(fake.state.loaded).toBe(true);
+});
+
+test("an inspection error while stopping keeps the start record for the retry", () => {
+  writeJob(plist, source);
+  const fake = fakeLaunchd(true, { printFails: (nth) => nth === 2 });
+  expect(() => toA(fake.launchd)).toThrow("could not be asked");
+  expect(existsSync(marker())).toBe(true);
+  expect(toA(fake.launchd)).toMatchObject({ restarted: true });
+  expect(fake.state.loaded).toBe(true);
+  expect(existsSync(marker())).toBe(false);
+});
+
+test("an interrupted step's previous binding, still loaded, is recognised and replaced", () => {
+  // The plist already names A, but launchd still runs the source job it loaded.
+  writeJob(plist, bound("1.0.0-aaaaaaaaaaaa"));
+  const fake = fakeLaunchd(true, { loadedJob: source });
+  expect(toA(fake.launchd)).toMatchObject({ restarted: true });
+  expect(fake.state.job).toEqual(bound("1.0.0-aaaaaaaaaaaa"));
+});
+
+const notOwned: Array<[string, () => Parameters<typeof fakeLaunchd>[1]]> = [
+  ["from another plist", () => ({ loadedFrom: "/Library/LaunchAgents/someone.plist" })],
+  [
+    "with other ports",
+    () => ({
+      loadedJob: {
+        ...source,
+        ProgramArguments: (source.ProgramArguments as string[]).map((arg) =>
+          arg === "AGENT_BUS_VIEWER_PORT=4999" ? "AGENT_BUS_VIEWER_PORT=5999" : arg
+        ),
+      },
+    }),
+  ],
+  ["with a program override", () => ({ loadedJob: { ...source, Program: "/bin/sh" } })],
+  [
+    "in another shape",
+    () => ({ loadedJob: { ...source, ProgramArguments: ["/bin/sh", "-c", "anything"] } }),
+  ],
+];
+
+for (const [name, options] of notOwned)
+  test(`a loaded job ${name} is not stopped or rebound`, () => {
+    writeJob(plist, source);
+    const before = readFileSync(plist);
+    const fake = fakeLaunchd(true, options());
+    expect(() => toA(fake.launchd)).toThrow("is not the owned viewer");
+    expect(readFileSync(plist)).toEqual(before);
+    expect(existsSync(bindings)).toBe(false);
+    expect(fake.calls).toEqual(["print"]);
+  });
+
+test("a job loaded without its plist is refused, by rebind and by restore", () => {
+  const fake = fakeLaunchd(true, { loadedJob: source });
+  expect(() => toA(fake.launchd)).toThrow("without its plist");
+  const record = join(root, "record.plist");
+  writeJob(record, source);
+  expect(() =>
+    restoreViewer({ plist, label: LABEL, from: record, bindings, launchd: fake.launchd })
+  ).toThrow("without its plist");
+  expect(existsSync(plist)).toBe(false);
+  expect(fake.calls).not.toContain("bootout");
 });
