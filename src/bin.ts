@@ -9,10 +9,11 @@ import * as Bus from "./Bus.ts";
 import * as Cursors from "./Cursors.ts";
 import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
-import { defaultCodex, localHost } from "./codex.ts";
+import { defaultCodex } from "./codex.ts";
 import { compactRecovery, readCompactInput } from "./compact.ts";
 import { Association, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
+import { initializeInstallation, loadInstallation } from "./installation.ts";
 import * as Ledger from "./Ledger.ts";
 import * as Mcp from "./mcp.ts";
 import * as Serve from "./serve.ts";
@@ -67,8 +68,9 @@ const BusLayer = Layer.unwrap(
         message: `${join(busDir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`,
       });
     }
+    const installation = yield* loadInstallation(busDir);
     const token = yield* loadToken;
-    return Bus.layer.pipe(
+    return Bus.layer(installation).pipe(
       Layer.provideMerge(cursorsFor(config.fluree.ledger)),
       Layer.provideMerge(Fluree.layerFluree({ ...config.fluree, token }))
     );
@@ -120,10 +122,6 @@ const serve = Command.make(
       ),
       Flag.withDefault(defaultCodex)
     ),
-    host: Flag.String("host").pipe(
-      Flag.withDescription("Wake the Codex peers that joined from this machine"),
-      Flag.withDefault(localHost)
-    ),
   },
   (input) =>
     Layer.launch(
@@ -131,12 +129,19 @@ const serve = Command.make(
         port,
         version: VERSION,
         codex: input.codex,
-        host: input.host,
       })
     ).pipe(Effect.provide(BusLayer))
 ).pipe(
   Command.withDescription(
-    `Run this machine's bus: MCP over HTTP at ${endpoint}, and delivery to this machine's Codex peers (run one per machine)`
+    `Run this machine's bus: MCP over HTTP at ${endpoint}, and native delivery to this installation's Codex and Claude peers (run one per machine)`
+  )
+);
+
+const initialize = Command.make("initialize-installation", {}, () =>
+  initializeInstallation(busDir)
+).pipe(
+  Command.withDescription(
+    "Create this bus installation's native delivery identity once; do not replace an existing identity"
   )
 );
 
@@ -352,6 +357,7 @@ const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
   Command.withSubcommands([
     serve,
+    initialize,
     joinCommand,
     orientCommand,
     publish,
@@ -362,9 +368,9 @@ const cli = Command.make("agent-bus").pipe(
 );
 
 Command.run(cli, { version: VERSION }).pipe(
-  // A refused or failed bus call, or a missing store, is an answer, not a crash:
+  // A refused or failed bus call or incomplete installation is an answer, not a crash:
   // its message alone, and status 1.
-  Effect.catchTags({ BusCallError: fail, NoStore: fail }),
+  Effect.catchTags({ BusCallError: fail, NoStore: fail, InstallationError: fail }),
   Effect.provide(Layer.mergeAll(BunServices.layer, FetchHttpClient.layer)),
   Effect.provide(Layer.succeed(Logger.LogToStderr)(true)),
   BunRuntime.runMain

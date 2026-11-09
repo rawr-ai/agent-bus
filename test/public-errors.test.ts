@@ -44,7 +44,7 @@ probe.stop(true);
 const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer.pipe(
+      Bus.layer("test-installation").pipe(
         Layer.provideMerge(ledgerLayer),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)

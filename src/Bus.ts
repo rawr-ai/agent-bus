@@ -36,7 +36,6 @@ import {
   MAX_ASSOCIATION_BYTES,
   Message,
   type MuteScope,
-  machine,
   NotJoined,
   NotOwner,
   needsScan,
@@ -185,10 +184,15 @@ export const cover = (
 export interface Woken {
   /** The session's addresses with eligible unread mail, including unchanged mail when fresh. */
   readonly addresses: ReadonlyArray<string>;
-  /** Whether the session owns any address. */
+  /** Whether the session has an address eligible for this installation's Claude wake. */
   readonly owns: boolean;
   /** A newer wait from the same session ended this one. */
   readonly superseded: boolean;
+}
+
+interface DeliveryOptions<E> {
+  readonly accepts?: (subscriber: Subscriber) => boolean;
+  readonly idle?: (subscriber: Subscriber) => Effect.Effect<void, E>;
 }
 
 export class Bus extends Context.Service<
@@ -235,23 +239,25 @@ export class Bus extends Context.Service<
       action: (owner: Subscriber) => Effect.Effect<A, E>
     ) => Effect.Effect<A, E | LedgerError | NotJoined | NotOwner>;
     readonly peers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
+    readonly localPeers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
     /**
      * Hands an address's unread messages to `nudge`, and marks none of them
      * read: only the owner's read does. With nothing for the subscriber, it
      * passes over what isn't its mail, as the owner's read would. Joins,
      * leaves, reads and nudges for one address run one at a time, so a nudge
-     * acts on the subscriber's current state. Returns what `nudge` returns, or
+     * acts on the subscriber's current state. Nonlocal joins and joins `accepts`
+     * rejects do not access a cursor or invoke a callback. Returns what `nudge` returns, or
      * undefined when it had nothing to act on, in which case `idle`, if given,
      * runs for the subscriber, still under the lock. Unread mail the wake law
      * suppresses (inactivity, mutes) is handed over only alongside mail that
      * wakes; with none that wakes, it returns undefined without `idle`, and
-     * nothing is passed over. This is the Codex deliverer's path; sessions
+     * nothing is passed over. This is the native deliverers' path; sessions
      * read through `take` and `wait`, unfiltered.
      */
     readonly deliver: <A, E, E2 = never>(
       address: string,
       nudge: (pending: Pending) => Effect.Effect<A, E>,
-      idle?: (subscriber: Subscriber) => Effect.Effect<void, E2>
+      options?: DeliveryOptions<E2>
     ) => Effect.Effect<A | undefined, LedgerError | NotJoined | E | E2>;
     /** Returns the owner's unread messages and marks them read. */
     readonly take: (
@@ -308,12 +314,15 @@ const git = (cwd: string, args: ReadonlyArray<string>) =>
  * its repo and branch. They are optional metadata for queries: a branch can't
  * be recovered once its worktree or branch is gone.
  */
-export const originFor = Effect.fn("Bus.originFor")(function* (cwd: string | undefined) {
-  if (cwd === undefined) return new Origin({ host: hostname() });
+export const originFor = Effect.fn("Bus.originFor")(function* (
+  cwd: string | undefined,
+  hostOf = hostname
+) {
+  if (cwd === undefined) return new Origin({ host: hostOf() });
   const repo = yield* git(cwd, ["rev-parse", "--show-toplevel"]);
   const branch = repo === undefined ? undefined : yield* git(cwd, ["branch", "--show-current"]);
   return new Origin({
-    host: hostname(),
+    host: hostOf(),
     cwd,
     ...(repo === undefined ? {} : { repo }),
     ...(branch === undefined ? {} : { branch }),
@@ -432,8 +441,7 @@ type Concerns = Map<
   ReadonlyArray<{ readonly id: string; readonly topic: string }> | undefined
 >;
 
-export const layer = Layer.effect(
-  Bus,
+const make = (installation: string, hostOf: () => string) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger;
     const cursors = yield* Cursors;
@@ -447,6 +455,9 @@ export const layer = Layer.effect(
     const peers = Effect.map(latest, (all) =>
       Array.from(all.values()).filter((peer) => peer.presence.status === "joined")
     ).pipe(Effect.withSpan("Bus.peers"));
+
+    const local = (peer: Subscriber) => peer.presence.installation === installation;
+    const localPeers = Effect.map(peers, (all) => all.filter(local));
 
     const peer = (address: string) =>
       Effect.map(peers, (all) => all.find((subscriber) => subscriber.address === address));
@@ -545,7 +556,7 @@ export const layer = Layer.effect(
           to: ["*"],
           kind: "presence",
           body: `${address} ${presence.status}`,
-          origin: yield* originFor(cwd),
+          origin: yield* originFor(cwd, hostOf),
           presence,
         });
       });
@@ -643,6 +654,7 @@ export const layer = Layer.effect(
           topics: [...topics],
           associations,
           session,
+          installation,
           ...optional("takeover", takeover),
           ...optional("rejoinOf", renews ? (last.presence.rejoinOf ?? last.joinId) : undefined),
           ...optional("codexThreadId", input.codexThreadId),
@@ -884,7 +896,7 @@ export const layer = Layer.effect(
           body: input.body,
           ...optional("subject", input.subject),
           ...optional("replyTo", input.replyTo),
-          origin: yield* originFor(sender.cwd),
+          origin: yield* originFor(sender.cwd, hostOf),
         });
         if (input.pierce === undefined) {
           yield* ledger.append(draft);
@@ -1076,12 +1088,14 @@ export const layer = Layer.effect(
     const deliver = <A, E, E2 = never>(
       address: string,
       nudge: (pending: Pending) => Effect.Effect<A, E>,
-      idle?: (subscriber: Subscriber) => Effect.Effect<void, E2>
+      { accepts, idle }: DeliveryOptions<E2> = {}
     ) =>
       Effect.gen(function* () {
-        // A peer that left since the deliverer listed peers has nothing to nudge.
+        // The join may have changed since discovery. Check before even an empty scan can ack.
         const subscriber = yield* peer(address);
-        if (subscriber === undefined) return undefined;
+        if (subscriber === undefined || !local(subscriber) || accepts?.(subscriber) === false) {
+          return undefined;
+        }
         const { entries, from, next } = yield* pending(address, Effect.succeed(subscriber));
         if (entries.length > 0) {
           const eligible = yield* eligibleOf(subscriber, entries, next);
@@ -1169,13 +1183,9 @@ export const layer = Layer.effect(
       fresh: boolean
     ) =>
       Effect.gen(function* () {
-        const here = machine(hostname());
         const eligible = (peer: Subscriber) =>
-          peer.presence.runtime === "claude" &&
-          peer.presence.session === session &&
-          peer.host !== undefined &&
-          machine(peer.host) === here;
-        const owned = (yield* peers).filter(eligible);
+          peer.presence.runtime === "claude" && peer.presence.session === session;
+        const owned = (yield* localPeers).filter(eligible);
         const found: Array<Moved> = [];
         for (const peer of owned) {
           yield* touch(peer.address);
@@ -1183,23 +1193,26 @@ export const layer = Layer.effect(
             counted.add(peer.address);
             seenOf(peer.address).waits += 1;
           }
-          const unread = yield* deliver(peer.address, (found) => {
-            const { subscriber } = found;
-            if (!eligible(subscriber)) return Effect.succeed(undefined);
-            // The mark as it was under the lock: if it has moved by the commit (another
-            // owner's wake, after a takeover), this reading is stale and is dropped.
-            const previous = woken.get(subscriber.address);
-            const { news, coverage } = cover(
-              previous?.joinId === subscriber.joinId ? previous.coverage : undefined,
-              found
-            );
-            return Effect.succeed({
-              address: subscriber.address,
-              previous,
-              mark: { joinId: subscriber.joinId, coverage },
-              news,
-            });
-          }).pipe(
+          const unread = yield* deliver(
+            peer.address,
+            (found) => {
+              const { subscriber } = found;
+              // The mark as it was under the lock: if it has moved by the commit (another
+              // owner's wake, after a takeover), this reading is stale and is dropped.
+              const previous = woken.get(subscriber.address);
+              const { news, coverage } = cover(
+                previous?.joinId === subscriber.joinId ? previous.coverage : undefined,
+                found
+              );
+              return Effect.succeed({
+                address: subscriber.address,
+                previous,
+                mark: { joinId: subscriber.joinId, coverage },
+                news,
+              });
+            },
+            { accepts: eligible }
+          ).pipe(
             // A join from this machine without a cursor (a replaced ledger, say), or a failing read,
             // leaves this address for a later pass rather than holding up the others.
             Effect.catchTags({
@@ -1269,10 +1282,13 @@ export const layer = Layer.effect(
       activity,
       withOwner,
       peers,
+      localPeers,
       deliver,
       take,
       wait,
       wake,
     });
-  })
-);
+  });
+
+export const layer = (installation: string, hostOf = hostname) =>
+  Layer.effect(Bus, make(installation, hostOf));

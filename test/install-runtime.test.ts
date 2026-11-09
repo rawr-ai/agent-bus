@@ -331,6 +331,61 @@ test("managed update is idempotent and explicit upgrade then rollback reproduces
   }
 });
 
+test("full install initializes identity before first config, including after an interrupted attempt", async () => {
+  const f = await fixture();
+  try {
+    const config = join(f.bus, "config.json");
+    const identity = join(f.bus, "installation-id");
+    await rm(config);
+    // Stub only the CLI command; installation.test.ts exercises its actual file behavior.
+    await writeFile(
+      f.entry,
+      `import { writeFile } from "node:fs/promises";
+if (process.argv[2] === "initialize-installation") {
+  const file = process.env.AGENT_BUS_DIR + "/installation-id";
+  try { await writeFile(file, crypto.randomUUID(), { flag: "wx" }); }
+  catch (error) { if (error.code !== "EEXIST") throw error; }
+  if (process.env.FAIL_INITIALIZE === "1") process.exit(42);
+}
+`
+    );
+
+    expect(await f.install(["--bun", f.bunA], { FAIL_INITIALIZE: "1" })).toMatchObject({
+      exitCode: 42,
+    });
+    expect(await Bun.file(config).exists()).toBe(false);
+    expect(await Bun.file(f.plist).exists()).toBe(false);
+    const first = await readFile(identity, "utf8");
+
+    expect(await f.install(["--bun", f.bunA])).toMatchObject({ exitCode: 0, stderr: "" });
+    expect(await Bun.file(config).exists()).toBe(true);
+    expect(await readFile(identity, "utf8")).toBe(first);
+
+    await rm(identity);
+    expect(await f.install(["--bun", f.bunA], { FAIL_INITIALIZE: "1" })).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    expect(await f.install(undefined, { FAIL_INITIALIZE: "1" })).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    expect(await Bun.file(identity).exists()).toBe(false);
+
+    await rm(config);
+    await mkdir(join(f.bus, "fluree-cursors"));
+    await writeFile(f.toolLog, "");
+    const partial = await f.install(["--bun", f.bunA]);
+    expect(partial.exitCode).toBe(1);
+    expect(partial.stderr).toContain("Retained cursors but no config.json or installation-id.");
+    expect(await readFile(f.toolLog, "utf8")).toBe("");
+    expect(await Bun.file(config).exists()).toBe(false);
+    expect(await Bun.file(identity).exists()).toBe(false);
+  } finally {
+    await f.dispose();
+  }
+});
+
 test("full install adopts a managed launcher and uses the same binding, with optional PATH selection", async () => {
   const f = await fixture();
   try {

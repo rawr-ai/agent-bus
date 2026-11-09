@@ -44,7 +44,7 @@ type Outcome<A> =
 const machine = async (config: Config, url: string) => {
   const cursorDir = join(mkdtempSync(join(tmpdir(), "agent-bus-lifecycle-")), "cursors");
   const runtime = ManagedRuntime.make(
-    Bus.layer.pipe(
+    Bus.layer("test-installation").pipe(
       Layer.provideMerge(layerFluree({ ...config, url }).pipe(Layer.provide(platform))),
       Layer.provideMerge(Cursors.layerFiles(cursorDir)),
       Layer.provide(platform)

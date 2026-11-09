@@ -53,9 +53,8 @@ export const layer = (options: {
   readonly version: string;
   /** The Codex CLI whose app-server queues nudges. */
   readonly codex: string;
-  readonly host: string;
 }) =>
   Layer.mergeAll(
     layerHttp(options),
-    Layer.effectDiscard(Effect.forkScoped(runDeliverer(options.codex, options.host)))
+    Layer.effectDiscard(Effect.forkScoped(runDeliverer(options.codex)))
   );

@@ -509,7 +509,7 @@ const testRealPresenceDamage = async (damage: "missing-json" | "missing-id") => 
     const store = layerFluree(config).pipe(Layer.provide(platform));
     const layer = Serve.layerHttp({ port, version: "test" }).pipe(
       Layer.provideMerge(
-        Bus.layer.pipe(
+        Bus.layer("test-installation").pipe(
           Layer.provideMerge(store),
           Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
           Layer.provide(platform)

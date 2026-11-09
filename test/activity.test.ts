@@ -600,7 +600,7 @@ describe("reachable inactivity: Codex delivery", () => {
       topics: ["t"],
     });
     yield* joinAs(sender);
-    const deliver = deliverOnce(codex.openQueue, codex.daemon, hostname(), holds);
+    const deliver = deliverOnce(codex.openQueue, codex.daemon, holds);
     return { ...codex, holds, deliver };
   });
   /** As `run`, with the ledger file at hand for writing damage into it. */

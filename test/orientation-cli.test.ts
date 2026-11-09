@@ -72,7 +72,7 @@ test("a failed post-join orientation reports the committed join and retries read
   const port = Number(probe.url.port);
   probe.stop(true);
   const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
-  const bus = Bus.layer.pipe(
+  const bus = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
     Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
@@ -287,7 +287,7 @@ test("association CLI preserves a real owner refusal without changing presence o
   const port = Number(probe.url.port);
   probe.stop(true);
   const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
-  const bus = Bus.layer.pipe(
+  const bus = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
     Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)

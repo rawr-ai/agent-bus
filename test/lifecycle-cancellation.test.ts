@@ -87,7 +87,10 @@ const fixture = (mode: "holdRestore" | "holdAdmit", gates: Gates, prior?: number
     ),
     Layer.provide(base)
   );
-  const layer = Bus.layer.pipe(Layer.provideMerge(seams), Layer.provideMerge(base));
+  const layer = Bus.layer("test-installation").pipe(
+    Layer.provideMerge(seams),
+    Layer.provideMerge(base)
+  );
   const file = join(cursorDir, `${encodeURIComponent(address)}.json`);
   return { layer, file, cursorDir };
 };

@@ -40,11 +40,18 @@ tail -n 20 ~/.agent-bus/agent-bus.log
 | --- | --- |
 | `last exit code = 1` and `Failed to start server. Is port 8096 in use?` | [The port is held](#the-port-is-held) |
 | `last exit code = 1` and `has no Fluree ledger`, or `SchemaError` | [The config file is bad](#the-config-file-is-bad) |
+| `last exit code = 1` and `Missing installation-id` or `Cannot read a valid installation-id` | [The installation identity is missing or invalid](#the-installation-identity-is-missing-or-invalid) |
 | `last exit code = 1` and `Transport error (GET …/exists/…)` | [Fluree is down or unreachable](#fluree-is-down-or-unreachable) |
 | `last exit code = 1` and `Fluree 401` | [Fluree won't start, or the token isn't enforced](#fluree-wont-start-or-the-token-isnt-enforced) (a missing token) |
 | `last exit code = 78: EX_CONFIG`, a `program` that doesn't exist, and nothing in the log | [bun is missing from the plist](#bun-is-missing-from-the-plist) |
 
-While the cause stands, the job stays in `state = spawn scheduled` and launchd tries again every 10 s. Each of these five states was produced on a disposable instance: *Rehearsed 2026-10-28.*
+While the cause stands, the job stays in `state = spawn scheduled` and launchd tries again every 10 s. The five failures other than installation identity were produced under launchd on a disposable instance: *Rehearsed 2026-10-28.*
+
+### The installation identity is missing or invalid
+
+Use the [one-time upgrade](deploy.md#switch-to-stable-native-delivery) only if this `serve` has never had an identity. Otherwise, check access to `installation-id` in this machine's bus state directory. Restore a lost or damaged file from this installation's own backup; do not copy another machine's file. Then [check that `serve` restarted](deploy.md#check-that-serve-restarted). Expect startup without an identity error and the same addresses still eligible for wake. *Unverified as an installed recovery procedure; startup refusal is tested on a disposable state directory.*
+
+Only if the identity is irretrievably lost: stop `serve`, retain any damaged file outside the active path, then run the initialization step with this installation's state directory. Follow the same-owner renewal and native wake checks in the upgrade procedure. Do not replace the cursor files. *Unverified as an installed recovery procedure.*
 
 ### The port is held
 
@@ -269,7 +276,7 @@ The plugin's hook waits in `bus_wake` and exits 2 with a line when mail arrives.
 
    | You see | Means | Do |
    | --- | --- | --- |
-   | Nothing for the address, though mail arrived | It isn't a delivery target: not joined as `codex` with its own `codexThreadId`, or joined from another machine | Rejoin ([launch agents](launch-agents.md#start-a-codex-thread-the-bus-can-wake)). `agent-bus peers` shows the runtime and machine |
+   | Nothing for the address, though mail arrived | It may lack its own `codexThreadId` or be joined from another installation. An old hostname-only join cannot wake after the upgrade | Check the [native join](launch-agents.md#start-a-codex-thread-the-bus-can-wake) and the [one-time upgrade](deploy.md#switch-to-stable-native-delivery). `agent-bus peers` shows the runtime and descriptive host, not the installation match |
    | `Waking …: another Codex process holds its thread` | An app-server holds the thread and should run the nudge on its own poll (within about 10 s when idle, after the current turn when busy) | Wait, then step 3 |
    | `Not borrowing …: <reason>` | The thread can't be borrowed, so its nudge waits until the thread is next loaded | The [reasons](#why-a-thread-isnt-borrowed) |
    | `Could not wake …: <method>: <reason>. Next attempt in …` | A Codex step failed | The [failures](#why-a-wake-fails) |

@@ -263,6 +263,12 @@ if [ "$runtime_only" = true ]; then
   exit 0
 fi
 
+# Missing config is not a fresh install when this directory already held a cursor.
+if [ ! -f "$bus_dir/config.json" ] && [ ! -e "$bus_dir/installation-id" ] &&
+  [ -e "$bus_dir/fluree-cursors" ]; then
+  fail "Retained cursors but no config.json or installation-id. Restore this installation's state before reinstalling."
+fi
+
 mkdir -p "$bus_dir" "$agents"
 
 if [ -z "$remote" ]; then
@@ -323,6 +329,7 @@ wait_for "$url" "$log"
 require_auth
 
 if [ ! -f "$bus_dir/config.json" ]; then
+  AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation
   printf '{ "fluree": { "url": "%s", "ledger": "%s" } }\n' "$url" "$ledger" > "$bus_dir/config.json"
   echo "bus store: $ledger at $url"
 fi

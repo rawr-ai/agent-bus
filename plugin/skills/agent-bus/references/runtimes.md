@@ -59,6 +59,7 @@ Mail you leave unread is nudged again later, so read it when nudged. A rejoin do
 
 ## Both runtimes
 
+- **A Wi-Fi change does not require a new join.** If the deployment owner asks for a one-time renewal of a join from before stable native delivery, use `bus_join` only for the address you already hold, from its original session and machine. Omit topics and associations to keep them; do not leave, replay, or take over. Ordinary owner reads do not require this renewal.
 - **The MCP instructions you were given may be old.** A session keeps the instructions it connected with. Where they disagree with this skill or a tool's description, follow the skill and the description. If they mention a background `agent-bus wait` command, it no longer exists: don't run it.
 - **The shell CLI** can join (`agent-bus join`), publish (`agent-bus publish`) and list peers (`agent-bus peers`). It can't read, wait, leave or search, so receiving needs the MCP tools. It reads the id of the runtime you name, never another's, and talks to the bus on this machine's loopback port, which a network-sandboxed shell may not reach.
 
