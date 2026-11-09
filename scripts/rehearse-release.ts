@@ -578,16 +578,22 @@ try {
   check("split(ii): plugin at B", selectPlugin(B).status === 0);
   if (clients) check("split(ii): clients refreshed onto B", refreshClients());
   const splitPlugin = status(A);
+  // A's own tool reports here, and an older tool's report may lack fields a newer one adds:
+  // the client must be installed only at B and not reported disabled.
+  const onlyAtB = (reported: unknown) => {
+    const client = reported as { state?: unknown; versions?: unknown; enabled?: unknown };
+    return (
+      client?.state === "installed" &&
+      JSON.stringify(client.versions) === JSON.stringify([B.id]) &&
+      client.enabled !== false
+    );
+  };
   check(
     "split(ii): status names the plugin",
     splitPlugin.agree === false &&
       splitPlugin.pluginRelease === B.id &&
       splitPlugin.launcherRelease === A.id &&
-      (!clients ||
-        (JSON.stringify(splitPlugin.claudePlugin) ===
-          JSON.stringify({ state: "installed", versions: [B.id], enabled: true }) &&
-          JSON.stringify(splitPlugin.codexPlugin) ===
-            JSON.stringify({ state: "installed", versions: [B.id], enabled: true })))
+      (!clients || (onlyAtB(splitPlugin.claudePlugin) && onlyAtB(splitPlugin.codexPlugin)))
   );
   check("split(ii): plugin A recovers", selectPlugin(A).status === 0);
   if (clients) check("split(ii): clients refreshed", refreshClients());
