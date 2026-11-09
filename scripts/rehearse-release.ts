@@ -102,6 +102,8 @@ const env = {
   AGENT_BUS_LABEL: LABEL,
   AGENT_BUS_LAUNCHER: launcher,
   AGENT_BUS_RELEASES: releases,
+  CLAUDE_CONFIG_DIR: join(home, ".claude"),
+  CODEX_HOME: join(home, ".codex"),
 };
 
 /** The live surfaces the rehearsal must never name or change. */
@@ -118,6 +120,9 @@ const liveFiles = [
   join(realHome, ".local/bin/agent-bus"),
   join(realHome, "Library/LaunchAgents/ai.rawr.agent-bus.plist"),
   join(realHome, "Library/LaunchAgents/ai.rawr.agent-bus.viewer.plist"),
+  join(realHome, ".claude/plugins/installed_plugins.json"),
+  join(realHome, ".claude/plugins/known_marketplaces.json"),
+  join(realHome, ".codex/config.toml"),
 ];
 const liveDigest = () =>
   liveFiles.map((path) => (existsSync(path) ? fileSha256(path) : "absent")).join(",");
@@ -156,6 +161,70 @@ const tool = (release: string, ...args: string[]) =>
   ]);
 
 type Built = { id: string; dir: string; digest: string };
+
+/**
+ * The real Claude and Codex plugin commands, in this home's own client
+ * directories (decision 6, step 5). Skipped, and reported, when either client
+ * is not installed. No step here needs a signed-in client.
+ */
+const claudeBin = Bun.which("claude");
+const codexBin =
+  Bun.which("codex") ??
+  ["/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"].find(
+    (path) => existsSync(path)
+  ) ??
+  null;
+const clients = claudeBin !== null && codexBin !== null;
+const claude = (...args: string[]) => run([claudeBin!, "plugin", ...args]).status === 0;
+const codex = (...args: string[]) => run([codexBin!, "plugin", ...args, "--json"]).status === 0;
+/** Adds the marketplace at `from` to both clients and installs the plugin. */
+const addClients = (from: string) =>
+  claude("marketplace", "add", from) &&
+  claude("install", "agent-bus@agent-bus") &&
+  codex("marketplace", "add", from) &&
+  codex("add", "agent-bus@agent-bus");
+/** Refreshes both clients after the marketplace link moved. */
+const refreshClients = () =>
+  claude("marketplace", "update", "agent-bus") &&
+  claude("update", "agent-bus@agent-bus") &&
+  codex("add", "agent-bus@agent-bus");
+const removeClients = () =>
+  claude("uninstall", "agent-bus@agent-bus") &&
+  claude("marketplace", "remove", "agent-bus") &&
+  codex("remove", "agent-bus@agent-bus") &&
+  codex("marketplace", "remove", "agent-bus");
+
+/**
+ * Runs the Stop hook exactly as the Claude plugin installed in this home holds
+ * it, for an address with unread mail: it must exit 2 and name the address.
+ */
+function installedClaudeHookWakes(who: { address: string; session: string }) {
+  const installed = JSON.parse(
+    readFileSync(join(home, ".claude/plugins/installed_plugins.json"), "utf8")
+  ).plugins["agent-bus@agent-bus"][0];
+  const manifest = JSON.parse(
+    readFileSync(join(installed.installPath, ".claude-plugin/plugin.json"), "utf8")
+  );
+  const command: string = manifest.hooks.Stop[0].hooks[0].command;
+  // A session's hooks inherit its environment. This one names the rehearsal bus: with
+  // no port, the CLI's default is the production serve, which must never be reached.
+  const ran = spawnSync("/bin/sh", ["-c", command], {
+    cwd: root,
+    env: {
+      HOME: home,
+      PATH: "/usr/bin:/bin",
+      AGENT_BUS_DIR: busDir,
+      AGENT_BUS_PORT: String(busPort),
+    },
+    input: JSON.stringify({ session_id: who.session, hook_event_name: "Stop" }),
+    encoding: "utf8",
+    timeout: 20_000,
+  });
+  return {
+    version: String(installed.version),
+    woke: ran.status === 2 && ran.stderr.includes(who.address),
+  };
+}
 const installRelease = (target: Built, expect = target.digest) =>
   run([
     "/bin/sh",
@@ -365,9 +434,12 @@ try {
   for (const label of [LABEL, VIEWER])
     if (loadedPid(label) !== null)
       throw new Error(`${label} is already loaded; finish or boot out the previous rehearsal`);
+  facts.clients = clients ? "claude and codex" : "skipped: a client is not installed";
   facts.commitA = commitA;
   facts.commitB = commitB;
   preflight("setup");
+  // Each client keeps its state under this home; Codex refuses a CODEX_HOME that does not exist.
+  for (const dir of [env.CLAUDE_CONFIG_DIR, env.CODEX_HOME]) mkdirSync(dir, { recursive: true });
 
   // The source binding: a checkout of B with a frozen install and a built viewer.
   mkdirSync(source);
@@ -454,6 +526,7 @@ try {
   check("A: installed", installRelease(A).status === 0);
   check("A: viewer moved", moveViewer(A).status === 0);
   check("A: plugin selected", selectPlugin(A).status === 0);
+  if (clients) check("A: both clients install the release plugin", addClients(marketplace));
   await bound("A", A.id, A);
   const m1 = publish(Y, X, "m1");
   const m2 = publish(X, Y, "m2");
@@ -476,14 +549,19 @@ try {
   // 4. Split binding (ii): marketplace at B, the rest at A, recovered by re-running the step.
   preflight("split marketplace");
   check("split(ii): plugin at B", selectPlugin(B).status === 0);
+  if (clients) check("split(ii): clients refreshed onto B", refreshClients());
   const splitPlugin = status(A);
   check(
     "split(ii): status names the plugin",
     splitPlugin.agree === false &&
       splitPlugin.pluginRelease === B.id &&
-      splitPlugin.launcherRelease === A.id
+      splitPlugin.launcherRelease === A.id &&
+      (!clients ||
+        (JSON.stringify(splitPlugin.claudePlugin) === JSON.stringify([B.id]) &&
+          JSON.stringify(splitPlugin.codexPlugin) === JSON.stringify([B.id])))
   );
   check("split(ii): plugin A recovers", selectPlugin(A).status === 0);
+  if (clients) check("split(ii): clients refreshed", refreshClients());
   await bound("split(ii) recovered", A.id, A);
 
   // 5. A → B.
@@ -491,14 +569,20 @@ try {
   check("B: installed", installRelease(B).status === 0);
   check("B: viewer moved", moveViewer(B).status === 0);
   check("B: plugin selected", selectPlugin(B).status === 0);
+  if (clients) check("B: clients refreshed", refreshClients());
   await bound("B", B.id, B);
   const m3 = publish(X, Y, "m3");
+  if (clients) {
+    const hook = installedClaudeHookWakes(Y);
+    check("B: installed Claude hook is B's and wakes Y", hook.version === B.id && hook.woke);
+  }
   const m4 = publish(Y, X, "m4");
   check("B: X reads only m4", same(await read(X), [m4]));
 
   // 6. B → A, downgrade order (decisions 16 and 20): plugin, viewer, launcher.
   preflight("B to A");
   check("B→A: plugin selected", selectPlugin(A).status === 0);
+  if (clients) check("B→A: clients refreshed", refreshClients());
   check("B→A: viewer moved", moveViewer(A).status === 0);
   check("B→A: installed", installRelease(A).status === 0);
   await bound("B→A", A.id, A);
@@ -508,10 +592,12 @@ try {
   const m6 = publish(Y, X, "m6");
   check("B→A: X reads m6", same(await read(X), [m6]));
 
-  // 7. A → source (decision 17): viewer restored from its first record, then the
-  // runtime-only rollback with A's installer. The marketplace returns through the
-  // clients' own remove-and-add, which the real-client rehearsal covers.
+  // 7. A → source (decision 17), guidance first: the clients' marketplace returns to the
+  // checkout by remove-and-add, the viewer is restored from its first record, then
+  // the runtime-only rollback with A's installer.
   preflight("A to source");
+  if (clients)
+    check("A→source: clients back on the checkout", removeClients() && addClients(source));
   const records = readdirSync(join(data, "bindings"))
     .filter((name) => name.startsWith("viewer."))
     .sort();
@@ -540,6 +626,14 @@ try {
     "A→source: status reads source",
     atSource.launcher === "source" && atSource.viewer === "source"
   );
+  if (clients) {
+    const hook = installedClaudeHookWakes(Y);
+    check(
+      "A→source: installed Claude hook is the checkout's and wakes Y",
+      hook.version !== A.id && hook.version !== B.id && hook.woke
+    );
+    facts.sourcePluginVersion = hook.version;
+  }
   check("A→source: X gets no redelivery", same(await read(X), []));
   check("A→source: Y gets exactly m5", same(await read(Y), [m5]));
 

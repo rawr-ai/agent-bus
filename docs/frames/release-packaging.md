@@ -136,9 +136,10 @@ One disposable rehearsal must cover the sequence source → A → B → A → so
 - each split binding injected and recovered by decision 20;
 - the downgrade order on B → A;
 - the source rollback with `viewer-restore` and the release's installer;
-- a guarded stop whose bootstrap launchd refuses until enabled.
+- a guarded stop whose bootstrap launchd refuses until enabled;
+- when both clients are installed, their real plugin commands in client directories under that home: the first activation adds the marketplace, every flip refreshes both clients, `release status` reports both client versions in the split binding, and the source rollback removes and re-adds the checkout's marketplace. The Stop hook text that Claude installed, run with the rehearsal bus's port and directory as a session's environment would give it, wakes an address with mail under B and again after the rollback. None of this needs a signed-in client; the rehearsal reports when a client is missing.
 
-In each bound state it checks health, the launcher's `--version`, the running `serve` and viewer arguments, an unchanged store binding, a pinned query, the `SERVICE` refusal and `release status`, and the mail sentinels as exact sets. It then removes the jobs and the home, and confirms that the live launcher and LaunchAgents are unchanged. The client plugin steps (marketplace refresh and the source marketplace's remove-and-add) belong to the real-client rehearsal.
+In each bound state it checks health, the launcher's `--version`, the running `serve` and viewer arguments, an unchanged store binding, a pinned query, the `SERVICE` refusal and `release status`, and the mail sentinels as exact sets. It then removes the jobs and the home, and confirms that the live launcher and LaunchAgents are unchanged. What still needs a signed-in session belongs to the real-client rehearsal: a live session woken by its hook, which skill text a new session loads after the flip (decision 5), and Codex thread discovery.
 
 Real clients run in an isolated `HOME`. The plugins' unchanged hook text then resolves `$HOME/.local/bin/agent-bus` to the disposable launcher. Rewriting the hook path instead would test a stand-in plugin, not the shipped one. The Claude session is started with the disposable bus port and directory. Authentication uses a process-only credential passed in the environment and never written to a file. A real Codex delivery is exercised only with the isolated `HOME` from decision 18; otherwise it stays covered by the existing in-process tests and the bundle's import check.
 
