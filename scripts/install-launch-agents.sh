@@ -189,10 +189,12 @@ fi
 # An explicit empty config: Bun would otherwise apply a bunfig.toml (and its preload) from here.
 if [ -n "$release" ]; then mode=release pins="$release/manifest.json" entry=""
 else mode=source pins="$repo_dir/package.json" entry="$repo_dir/src/bin.ts"; fi
-validation=$("$bun_bin" --no-env-file --config=/dev/null - "$mode" "$pins" "$launcher" "$entry" "$bun_bin" "$releases" <<'JS'
+# The script is given with -e, never as stdin after "-": Bun reads the next argument as a
+# possible subcommand, so an argument such as "a" would run `bun add`.
+validation_js=$(cat <<'JS'
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, normalize, resolve } from "node:path";
-const [mode, manifestPath, launcher, entry, runtimePath, releases] = process.argv.slice(2);
+const [mode, manifestPath, launcher, entry, runtimePath, releases] = process.argv.slice(1);
 const fail = (message) => { console.error(message); process.exit(1); };
 const accept = () => { process.stdout.write(`agent-bus-runtime-binding-v1:${realpathSync(runtimePath)}`); process.exit(0); };
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -249,7 +251,10 @@ if (info.isFile()) {
 }
 fail(`Refusing foreign launcher at ${launcher}; move it aside explicitly before installing`);
 JS
-) || fail "Selected Bun could not validate the source and launcher"
+)
+validation=$("$bun_bin" --no-env-file --config=/dev/null -e "$validation_js" \
+  "$mode" "$pins" "$launcher" "$entry" "$bun_bin" "$releases") \
+  || fail "Selected Bun could not validate the source and launcher"
 case "$validation" in
   # Resolve a selected symlink once, rather than borrowing a mutable global Bun shim.
   agent-bus-runtime-binding-v1:/*) bun_bin=${validation#agent-bus-runtime-binding-v1:} ;;
