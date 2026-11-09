@@ -369,7 +369,9 @@ test("full install initializes identity before first config, including after an 
   try {
     const config = join(f.bus, "config.json");
     const identity = join(f.bus, "installation-id");
+    // A first install: the fixture's established identity is not there yet.
     await rm(config);
+    await rm(identity);
     // Stub only the CLI command; installation.test.ts exercises its actual file behavior.
     await writeFile(
       f.entry,
@@ -855,9 +857,27 @@ test.skipIf(process.platform !== "darwin")(
       // The owned job as another installer wrote it: no HOME, its own port and state.
       const otherBus = join(f.home, "other state");
       await mkdir(otherBus);
-      // The kept job's own state directory is the one whose identity a release needs.
-      await writeFile(join(otherBus, "installation-id"), `${IDENTITY}\n`, { mode: 0o600 });
       const unset = { AGENT_BUS_PORT: "", AGENT_BUS_DIR: "" };
+      // The kept job's own state directory is the one whose identity a release needs: a valid
+      // one in the installer's directory or in HOME's default does not stand in for it.
+      const homeDefault = join(f.home, ".agent-bus");
+      await mkdir(homeDefault);
+      await writeFile(join(homeDefault, "installation-id"), `${IDENTITY}\n`, { mode: 0o600 });
+      await writeJob(f.plist, {
+        Label: f.label,
+        ProgramArguments: [f.launcher, "serve"],
+        EnvironmentVariables: { AGENT_BUS_DIR: otherBus, AGENT_BUS_PORT: "47892" },
+        KeepAlive: true,
+        RunAtLoad: true,
+      });
+      await writeFile(f.toolLog, "");
+      const unidentified = await snapshot(f.root);
+      const refused = await f.install(["--release", good.dir, "--expect", good.digest], unset);
+      expect(refused.exitCode).toBe(1);
+      expect(refused.stderr).toContain(`No valid installation-id in ${otherBus}`);
+      expect(await snapshot(f.root)).toEqual(unidentified);
+      expect(await readFile(f.toolLog, "utf8")).toBe("");
+      await writeFile(join(otherBus, "installation-id"), `${IDENTITY}\n`, { mode: 0o600 });
       for (const [env, port, overrides] of [
         [{ AGENT_BUS_DIR: otherBus, AGENT_BUS_PORT: "47892" }, "47892", unset],
         [
@@ -1022,6 +1042,12 @@ test("release activation needs this installation's identity and creates none", a
         },
       ],
       ["a directory", () => mkdir(identity)],
+      ["uppercase", () => writeFile(identity, `${IDENTITY.toUpperCase()}\n`)],
+      ["not version 4", () => writeFile(identity, `${IDENTITY.replace("-4c7b-", "-3c7b-")}\n`)],
+      ["split across lines", () => writeFile(identity, IDENTITY.replace("-1a2b", "-\n1a2b"))],
+      ["with a NUL after it", () => writeFile(identity, `${IDENTITY}\0junk\n`)],
+      // Stricter than serve, whose trim passes a byte-order mark: restore the file as written.
+      ["with a byte-order mark", () => writeFile(identity, `\uFEFF${IDENTITY}\n`)],
     ];
     for (const [kind, arrange] of refusals) {
       await rm(identity, { recursive: true, force: true });
@@ -1034,12 +1060,34 @@ test("release activation needs this installation's identity and creates none", a
       expect(await snapshot(f.root)).toEqual(before);
       expect(await readFile(f.toolLog, "utf8")).toBe("");
     }
-    // The control: the same activation with an established identity binds, and keeps it.
-    await rm(identity, { recursive: true, force: true });
-    await writeFile(identity, `${IDENTITY}\n`, { mode: 0o600 });
-    expect(await activate()).toMatchObject({ exitCode: 0, stderr: "" });
-    expect(await readFile(identity, "utf8")).toBe(`${IDENTITY}\n`);
+    // The control: an established identity binds, as written or with the whitespace serve
+    // trims, and activation leaves the file exactly as it was.
+    for (const written of [
+      `${IDENTITY}\n`,
+      IDENTITY,
+      `${IDENTITY}\r\n`,
+      `  ${IDENTITY} \n\n`,
+      `\n${IDENTITY}\n`,
+    ]) {
+      await rm(identity, { recursive: true, force: true });
+      await writeFile(identity, written, { mode: 0o600 });
+      const entry = async () => {
+        const { ino, mtimeNs, mode } = await lstat(identity, { bigint: true });
+        return { ino, mtimeNs, mode, bytes: await readFile(identity, "utf8") };
+      };
+      const before = await entry();
+      const result = await activate();
+      expect({ written, exitCode: result.exitCode, stderr: result.stderr }).toEqual({
+        written,
+        exitCode: 0,
+        stderr: "",
+      });
+      // Not rewritten or replaced, even with the same bytes.
+      expect(await entry()).toEqual(before);
+      expect(before.bytes).toBe(written);
+    }
   } finally {
     await f.dispose();
   }
-});
+  // Fifteen activations, each a full install-runtime run.
+}, 30_000);

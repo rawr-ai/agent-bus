@@ -11,8 +11,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -32,6 +34,8 @@ let decoy: string;
 let poisonMark: string;
 type Server = { port: number; dir: string; process: Supervised; client: Client };
 const servers: Partial<Record<"source" | "bundle", Server>> = {};
+/** What each build's initialize-installation printed, both streams together. */
+const initialized: Partial<Record<"source" | "bundle", string>> = {};
 
 const freePort = () => {
   const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
@@ -85,12 +89,12 @@ async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledger
   const server = { port, dir } as Server;
   // Each installation's delivery identity, initialized by that build's own command, as a
   // first install does; serve refuses to start without it.
-  const initialized = Bun.spawnSync(
+  const init = Bun.spawnSync(
     [process.execPath, "--no-env-file", entryOf(kind), "initialize-installation"],
     { cwd: decoy, env: cleanEnv(server), stdout: "pipe", stderr: "pipe" }
   );
-  if (initialized.exitCode !== 0 || initialized.stdout.length !== 0)
-    throw new Error(`${kind} could not initialize its installation`);
+  if (init.exitCode !== 0) throw new Error(`${kind} could not initialize its installation`);
+  initialized[kind] = `${init.stdout}${init.stderr}`;
   // A Codex that always fails, so no real Codex delivery is attempted.
   server.process = spawnSupervised(
     [process.execPath, "--no-env-file", entryOf(kind), "serve", "--codex", "/usr/bin/false"],
@@ -157,13 +161,49 @@ afterAll(async () => {
 });
 
 test("each serve runs on its own installation identity, initialized by its own build", () => {
-  const identity = (kind: "source" | "bundle") =>
-    readFileSync(join(servers[kind]!.dir, "installation-id"), "utf8");
   const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$/;
-  expect(identity("source")).toMatch(uuid);
-  expect(identity("bundle")).toMatch(uuid);
-  expect(identity("source")).not.toBe(identity("bundle"));
+  const ids = (["source", "bundle"] as const).map((kind) => {
+    const file = join(servers[kind]!.dir, "installation-id");
+    const id = readFileSync(file, "utf8");
+    expect({ kind, id }).toEqual({ kind, id: expect.stringMatching(uuid) });
+    expect({ kind, mode: statSync(file).mode & 0o777 }).toEqual({ kind, mode: 0o600 });
+    // Initialization prints nothing, so the identity never reaches a log.
+    expect({ kind, printed: initialized[kind] }).toEqual({ kind, printed: "" });
+    return id;
+  });
+  expect(ids[0]).not.toBe(ids[1]);
 });
+
+test("each build's serve refuses a store without an identity and creates none", async () => {
+  for (const kind of ["source", "bundle"] as const) {
+    // A configured store whose identity was never initialized: serve's own loader, bundled
+    // or not, must refuse rather than seed one.
+    const dir = join(root, `unidentified-${kind}`);
+    mkdirSync(dir);
+    for (const name of ["config.json", "fluree-token"])
+      cpSync(join(servers[kind]!.dir, name), join(dir, name));
+    const before = readdirSync(dir).sort();
+    const port = freePort();
+    const child = Bun.spawn(
+      [process.execPath, "--no-env-file", entryOf(kind), "serve", "--codex", "/usr/bin/false"],
+      {
+        cwd: decoy,
+        env: { ...cleanEnv(servers[kind]!), AGENT_BUS_DIR: dir, AGENT_BUS_PORT: String(port) },
+        stdout: "pipe",
+        stderr: "pipe",
+        timeout: 20_000,
+      }
+    );
+    const [code, stdout, stderr] = await Promise.all([
+      child.exited,
+      new Response(child.stdout).text(),
+      new Response(child.stderr).text(),
+    ]);
+    expect({ kind, code, stdout }).toEqual({ kind, code: 1, stdout: "" });
+    expect(stderr).toContain("Missing installation-id");
+    expect({ kind, files: readdirSync(dir).sort() }).toEqual({ kind, files: before });
+  }
+}, 30_000);
 
 test("the bundle reports its release and the source reports itself as source", async () => {
   expect((await run("bundle", ["--version"])).stdout).toBe(`agent-bus v${ID}`);

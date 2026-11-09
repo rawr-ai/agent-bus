@@ -25,7 +25,6 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
-  statSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -348,13 +347,20 @@ const read = (who: typeof X) =>
 const same = (a: string[], b: string[]) =>
   JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
 
-/** Configuration, token, delivery identity and their modes, as one digest: the store binding. */
+/**
+ * Configuration, token and delivery identity as one digest: the store binding. Each file's own
+ * entry (not a link's target), its inode, modification time and mode are in it with its bytes,
+ * so a file replaced or rewritten with the same contents also counts as a change.
+ */
 const stateDigest = () =>
   sha256(
     ["config.json", "fluree-token", "installation-id"]
       .map((name) => {
         const path = join(busDir, name);
-        return `${name}:${fileSha256(path)}:${(statSync(path).mode & 0o777).toString(8)}`;
+        const entry = lstatSync(path, { bigint: true });
+        const kind = entry.isFile() ? "file" : entry.isSymbolicLink() ? "link" : "other";
+        const mode = (entry.mode & 0o777n).toString(8);
+        return `${name}:${kind}:${entry.ino}:${entry.mtimeNs}:${mode}:${fileSha256(path)}`;
       })
       .join("\n")
   );
