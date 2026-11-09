@@ -130,6 +130,16 @@ One disposable rehearsal must cover the sequence source → A → B → A → so
 - a disposable viewer job moved source → A → B → A → source, keeping its port and environment;
 - a split binding recovered by decision 20, and a guarded stop that launchd will not restart and that refuses a bootstrap until enabled.
 
+`bun run rehearse:release` runs this rehearsal under real launchd for two commits (default `HEAD~1` and `HEAD`). It uses the fixed disposable labels `test.agent-bus-rehearsal` and `.viewer`, so launchd's per-label override record never accumulates, and free ports. One temporary home holds the launcher, data home, plists and marketplace, and a preflight refuses default or production labels, ports and paths before every step. Its checks:
+- the source binding, from an exported checkout with a frozen install, its own installer and a viewer job in the runbook's shape;
+- an unanchored and a content-tampered release refused with every surface and the running jobs unchanged;
+- each split binding injected and recovered by decision 20;
+- the downgrade order on B → A;
+- the source rollback with `viewer-restore` and the release's installer;
+- a guarded stop whose bootstrap launchd refuses until enabled.
+
+In each bound state it checks health, the launcher's `--version`, the running `serve` and viewer arguments, an unchanged store binding, a pinned query, the `SERVICE` refusal and `release status`, and the mail sentinels as exact sets. It then removes the jobs and the home, and confirms that the live launcher and LaunchAgents are unchanged. The client plugin steps (marketplace refresh and the source marketplace's remove-and-add) belong to the real-client rehearsal.
+
 Real clients run in an isolated `HOME`. The plugins' unchanged hook text then resolves `$HOME/.local/bin/agent-bus` to the disposable launcher. Rewriting the hook path instead would test a stand-in plugin, not the shipped one. The Claude session is started with the disposable bus port and directory. Authentication uses a process-only credential passed in the environment and never written to a file. A real Codex delivery is exercised only with the isolated `HOME` from decision 18; otherwise it stays covered by the existing in-process tests and the bundle's import check.
 
 ## Not decided here
