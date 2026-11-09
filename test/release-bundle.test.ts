@@ -83,18 +83,17 @@ async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledger
   writeFileSync(join(dir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
   const port = freePort();
   const server = { port, dir } as Server;
-  // A host no peer joined from, so no Codex delivery is attempted.
+  // Each installation's delivery identity, initialized by that build's own command, as a
+  // first install does; serve refuses to start without it.
+  const initialized = Bun.spawnSync(
+    [process.execPath, "--no-env-file", entryOf(kind), "initialize-installation"],
+    { cwd: decoy, env: cleanEnv(server), stdout: "pipe", stderr: "pipe" }
+  );
+  if (initialized.exitCode !== 0 || initialized.stdout.length !== 0)
+    throw new Error(`${kind} could not initialize its installation`);
+  // A Codex that always fails, so no real Codex delivery is attempted.
   server.process = spawnSupervised(
-    [
-      process.execPath,
-      "--no-env-file",
-      entryOf(kind),
-      "serve",
-      "--host",
-      "release-bundle.invalid",
-      "--codex",
-      "/usr/bin/false",
-    ],
+    [process.execPath, "--no-env-file", entryOf(kind), "serve", "--codex", "/usr/bin/false"],
     { cwd: decoy, env: cleanEnv(server), stdout: "ignore", stderr: "ignore" }
   );
   servers[kind] = server;
@@ -155,6 +154,15 @@ afterAll(async () => {
     await server?.process.exited;
   }
   removeOwned(root);
+});
+
+test("each serve runs on its own installation identity, initialized by its own build", () => {
+  const identity = (kind: "source" | "bundle") =>
+    readFileSync(join(servers[kind]!.dir, "installation-id"), "utf8");
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\n$/;
+  expect(identity("source")).toMatch(uuid);
+  expect(identity("bundle")).toMatch(uuid);
+  expect(identity("source")).not.toBe(identity("bundle"));
 });
 
 test("the bundle reports its release and the source reports itself as source", async () => {
