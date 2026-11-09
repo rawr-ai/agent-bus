@@ -11,7 +11,9 @@
  *   release.ts viewer-restore --from /abs/recorded.plist [--plist PATH] [--viewer-label LABEL]
  *     [--bindings DIR]
  *   release.ts status [--launcher PATH] [--marketplace DIR] [--label LABEL] [--viewer-label LABEL]
- *     [--plist PATH] [--bindings DIR] [--claude /abs/claude] [--codex /abs/codex]
+ *     [--plist PATH] [--bindings DIR] [--claude /abs/claude|none] [--codex /abs/codex|none]
+ *     A client found neither by its flag nor on PATH is reported unknown and does not
+ *     agree; `none` excludes it on purpose.
  *
  * A built release carries this tool as app/release.js and the installer as
  * app/install-launch-agents.sh, so activating it needs no source checkout.
@@ -964,18 +966,25 @@ export const releaseCommands = (release: string) => ({
 
 /**
  * One client's agent-bus plugin, from the client's own `plugin list --json`:
- * installed with its versions, absent, unavailable (no client executable here),
- * or unknown (the client could not answer).
+ * installed with its versions and whether every installed entry is enabled,
+ * absent, excluded (left out of this report on purpose), or unknown (no client
+ * could be asked, or it could not answer). A client that cannot be inspected is
+ * never taken to be absent.
  */
 export type ClientPlugin =
-  | { readonly state: "installed"; readonly versions: ReadonlyArray<string> }
-  | { readonly state: "absent" | "unavailable" | "unknown" };
+  | {
+      readonly state: "installed";
+      readonly versions: ReadonlyArray<string>;
+      readonly enabled: boolean;
+    }
+  | { readonly state: "absent" | "excluded" | "unknown" };
 
+/** A client's listing, or null for a client excluded from the report. */
 export type ClientList = (client: "claude" | "codex") => { status: number; stdout: string } | null;
 
 export function clientPlugin(list: ClientList, client: "claude" | "codex"): ClientPlugin {
   const listed = list(client);
-  if (listed === null) return { state: "unavailable" };
+  if (listed === null) return { state: "excluded" };
   if (listed.status !== 0) return { state: "unknown" };
   let parsed: unknown;
   try {
@@ -995,16 +1004,37 @@ export function clientPlugin(list: ClientList, client: "claude" | "codex"): Clie
         : null;
   if (entries === null) return { state: "unknown" };
   if (entries.length === 0) return { state: "absent" };
-  if (entries.some((entry) => typeof entry?.version !== "string")) return { state: "unknown" };
-  return { state: "installed", versions: entries.map((entry) => entry.version as string).sort() };
+  if (
+    entries.some(
+      (entry) => typeof entry?.version !== "string" || typeof entry?.enabled !== "boolean"
+    )
+  )
+    return { state: "unknown" };
+  return {
+    state: "installed",
+    versions: entries.map((entry) => entry.version as string).sort(),
+    enabled: entries.every((entry) => entry.enabled === true),
+  };
 }
+
+/**
+ * A client's executable for status: a path, null when the client is excluded on purpose,
+ * or undefined when none was named and none was found, which reports it unknown.
+ */
+export type ClientBin = string | null | undefined;
+
+/** The executable `--claude` or `--codex` names: a path, `none` to exclude, or PATH's. */
+export const clientBin = (named: string | undefined, onPath: string | null): ClientBin =>
+  named === "none" ? null : (named ?? onPath ?? undefined);
 
 /** Runs a client's own plugin listing, in the client homes this process names. */
 export const nativeClientList =
-  (bins: { claude: string | null; codex: string | null }): ClientList =>
+  (bins: { claude: ClientBin; codex: ClientBin }): ClientList =>
   (client) => {
     const bin = bins[client];
     if (bin === null) return null;
+    // Nothing could be asked: unknown, never absent.
+    if (bin === undefined || !existsSync(bin)) return { status: 127, stdout: "" };
     const env: Record<string, string> = {
       HOME: process.env.HOME ?? homedir(),
       PATH: process.env.PATH ?? "/usr/bin:/bin:/usr/sbin:/sbin",
@@ -1065,8 +1095,10 @@ export function status(options: {
   const claude = clientPlugin(options.clients, "claude");
   const codex = clientPlugin(options.clients, "codex");
   const clientAgrees = (client: ClientPlugin) =>
-    client.state === "unavailable" ||
-    (client.state === "installed" && client.versions.every((version) => version === id));
+    client.state === "excluded" ||
+    (client.state === "installed" &&
+      client.enabled &&
+      client.versions.every((version) => version === id));
   const releaseIn = (command: string, pattern: RegExp) => pattern.exec(command)?.[1] ?? null;
   return {
     launcher: launcher.kind,
@@ -1227,8 +1259,8 @@ function main(argv: ReadonlyArray<string>): number {
             viewerPlist: viewerPlist(),
             bindings: bindings(),
             clients: nativeClientList({
-              claude: named.get("--claude") ?? Bun.which("claude"),
-              codex: named.get("--codex") ?? Bun.which("codex"),
+              claude: clientBin(named.get("--claude"), Bun.which("claude")),
+              codex: clientBin(named.get("--codex"), Bun.which("codex")),
             }),
           })
         )

@@ -170,7 +170,14 @@ async function snapshot(root: string): Promise<unknown[]> {
   const entries: unknown[] = [];
   async function visit(path: string) {
     const stat = await lstat(path);
-    const kind = stat.isDirectory() ? "dir" : stat.isSymbolicLink() ? "link" : "file";
+    // Only a regular file is read: reading a FIFO would wait for a writer.
+    const kind = stat.isDirectory()
+      ? "dir"
+      : stat.isSymbolicLink()
+        ? "link"
+        : stat.isFile()
+          ? "file"
+          : "other";
     entries.push([
       path.slice(root.length),
       kind,
@@ -743,6 +750,12 @@ test("release mode hashes each file it runs with system tools before running any
     renameSync(join(linkedApp.dir, "app"), join(f.root, "app-moved"));
     symlinkSync(appCopy, join(linkedApp.dir, "app"));
     chmodSync(linkedApp.dir, 0o555);
+    // A FIFO in the Bun's place: a hash would wait on it forever, so its type is checked first.
+    const fifo = await f.release("1.0.0-a8a8a8a8a8a8");
+    mutate(join(fifo.dir, "runtime"), 0o555, () => {
+      unlinkSync(join(fifo.dir, "runtime/bun"));
+      expect(Bun.spawnSync(["/usr/bin/mkfifo", join(fifo.dir, "runtime/bun")]).exitCode).toBe(0);
+    });
     // A manifest, sealed under its own digest, that no longer lists the Bun config.
     const unlisted = await f.release("1.0.0-a5a5a5a5a5a5");
     const unlistedDigest = reseal(unlisted.dir, (manifest) => {
@@ -754,6 +767,7 @@ test("release mode hashes each file it runs with system tools before running any
       [linked.dir, linked.digest, "app/release.js is not a regular file"],
       [linkedApp.dir, linkedApp.digest, "app is missing or a link"],
       [unlisted.dir, unlistedDigest, "its manifest does not list app/bunfig.toml"],
+      [fifo.dir, fifo.digest, "runtime/bun is not a regular file"],
     ];
     for (const [dir, digest, reason] of cases) {
       await writeFile(f.toolLog, "");

@@ -11,7 +11,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type ClientList,
+  clientBin,
+  clientPlugin,
   type Launchd,
+  nativeClientList,
   pendingStart,
   releaseLauncher,
   removeOwned,
@@ -34,17 +37,23 @@ type World = {
   codex: { status: number; stdout: string } | null;
 };
 
-const claudeList = (...versions: string[]) => ({
+const claudeList = (...versions: string[]) =>
+  claudeEntries(versions.map((version) => ({ version })));
+const claudeEntries = (entries: Array<Record<string, unknown>>) => ({
   status: 0,
-  stdout: JSON.stringify(versions.map((version) => ({ id: "agent-bus@agent-bus", version }))),
+  stdout: JSON.stringify(
+    entries.map((entry) => ({ id: "agent-bus@agent-bus", enabled: true, ...entry }))
+  ),
 });
-const codexList = (...versions: string[]) => ({
+const codexList = (...versions: string[]) => codexEntries(versions.map((version) => ({ version })));
+const codexEntries = (entries: Array<Record<string, unknown>>) => ({
   status: 0,
   stdout: JSON.stringify({
-    installed: versions.map((version) => ({
+    installed: entries.map((entry) => ({
       pluginId: "agent-bus@agent-bus",
-      version,
       installed: true,
+      enabled: true,
+      ...entry,
     })),
     available: [],
   }),
@@ -120,8 +129,8 @@ test("every surface exactly on the launcher's release agrees", () => {
     viewerJob: "running",
     viewerRunningRelease: ID,
     viewerStartPending: false,
-    claudePlugin: { state: "installed", versions: [ID] },
-    codexPlugin: { state: "installed", versions: [ID] },
+    claudePlugin: { state: "installed", versions: [ID], enabled: true },
+    codexPlugin: { state: "installed", versions: [ID], enabled: true },
     agree: true,
   });
 });
@@ -163,6 +172,22 @@ const disagreements: Array<[string, () => void]> = [
     () => (world.codex = codexList("1.0.0-bbbbbbbbbbbb", ID)),
   ],
   ["a client that cannot answer", () => (world.codex = { status: 1, stdout: "" })],
+  [
+    "Claude holding the plugin disabled",
+    () => (world.claude = claudeEntries([{ version: ID, enabled: false }])),
+  ],
+  [
+    "Codex holding the plugin disabled",
+    () => (world.codex = codexEntries([{ version: ID, enabled: false }])),
+  ],
+  [
+    "Claude enabled in one scope and disabled in another",
+    () => (world.claude = claudeEntries([{ version: ID }, { version: ID, enabled: false }])),
+  ],
+  [
+    "a client listing without an enabled state",
+    () => (world.claude = claudeEntries([{ version: ID, enabled: undefined }])),
+  ],
   ["a client that answers nonsense", () => (world.claude = { status: 0, stdout: "{}" })],
   [
     "an unfinished viewer start",
@@ -187,11 +212,25 @@ test("unknown is reported as unknown, never as absent or empty", () => {
   expect(result.codexPlugin).toEqual({ state: "unknown" });
 });
 
-test("a client not installed on this machine is reported and does not block agreement", () => {
+test("a client excluded on purpose is reported and does not block agreement", () => {
   world.codex = null;
   const result = report();
-  expect(result.codexPlugin).toEqual({ state: "unavailable" });
+  expect(result.codexPlugin).toEqual({ state: "excluded" });
   expect(result.agree).toBe(true);
+});
+
+test("a client that cannot be found is unknown, never absent or excluded", () => {
+  // Neither named nor on PATH, or named at a path that does not exist.
+  for (const bin of [clientBin(undefined, null), join(root, "missing-claude")]) {
+    const list = nativeClientList({ claude: bin, codex: null });
+    expect(clientPlugin(list, "claude")).toEqual({ state: "unknown" });
+  }
+  expect(clientBin("none", "/usr/bin/claude")).toBeNull();
+  expect(clientBin(undefined, "/usr/bin/claude")).toBe("/usr/bin/claude");
+  expect(clientBin("/opt/claude", null)).toBe("/opt/claude");
+  // An unknown client in the report does not agree.
+  world.codex = { status: 127, stdout: "" };
+  expect(report()).toMatchObject({ codexPlugin: { state: "unknown" }, agree: false });
 });
 
 test("an absent viewer agrees only while nothing runs under its label", () => {

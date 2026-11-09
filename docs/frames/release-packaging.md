@@ -91,7 +91,9 @@ The repository's testing-design steward reviewed this design before any code was
     - `serve` is running exactly R's command: its Bun, `--no-env-file`, its `--config` and its `cli.js serve`;
     - the viewer is either absent with nothing loaded under its label, or bound to R and running exactly R's viewer command;
     - no viewer start is pending;
-    - each client is either not installed on this machine, which is reported as unavailable, or holds the plugin only at R's id.
+    - each client either is excluded on purpose (`--claude none`, `--codex none`), or holds the plugin only at R's id and enabled.
+
+    A client whose executable is neither named nor found on `PATH` cannot be asked, so it is `unknown`, never taken to be absent.
 
     A state launchd or a client cannot report is `unknown`, never absent or empty, and does not agree. Configured agreement does not show what an already running session loaded.
 

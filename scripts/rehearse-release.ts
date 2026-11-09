@@ -287,8 +287,10 @@ const status = (via: Built) =>
       viewerPlist,
       "--bindings",
       join(data, "bindings"),
-      // The clients this rehearsal drives; without them, status reports each unavailable.
-      ...(clients ? ["--claude", claudeBin!, "--codex", codexBin!] : [])
+      // The clients this rehearsal drives, or both excluded on purpose without them.
+      ...(clients
+        ? ["--claude", claudeBin!, "--codex", codexBin!]
+        : ["--claude", "none", "--codex", "none"])
     ).stdout
   ) as Record<string, unknown>;
 
@@ -583,9 +585,9 @@ try {
       splitPlugin.launcherRelease === A.id &&
       (!clients ||
         (JSON.stringify(splitPlugin.claudePlugin) ===
-          JSON.stringify({ state: "installed", versions: [B.id] }) &&
+          JSON.stringify({ state: "installed", versions: [B.id], enabled: true }) &&
           JSON.stringify(splitPlugin.codexPlugin) ===
-            JSON.stringify({ state: "installed", versions: [B.id] })))
+            JSON.stringify({ state: "installed", versions: [B.id], enabled: true })))
   );
   check("split(ii): plugin A recovers", selectPlugin(A).status === 0);
   if (clients) check("split(ii): clients refreshed", refreshClients());

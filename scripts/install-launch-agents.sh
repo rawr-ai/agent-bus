@@ -154,6 +154,11 @@ if [ -n "$release" ]; then
   done
   [ -f "$release/manifest.json" ] && [ -d "$release/app" ] && [ -d "$release/runtime" ] \
     || fail "Release did not verify: its manifest, app or runtime has the wrong type: $release"
+  # Types before any hash: shasum would wait forever on a FIFO.
+  for listed in runtime/bun app/release.js app/bunfig.toml; do
+    [ -f "$release/$listed" ] && [ ! -L "$release/$listed" ] \
+      || fail "Release did not verify: $listed is not a regular file: $release"
+  done
   digest=$(/usr/bin/shasum -a 256 "$release/manifest.json" 2>/dev/null) || digest=""
   [ "${digest%% *}" = "$expect" ] || fail "Release did not verify against the expected manifest digest: $release"
   want=$(/usr/bin/plutil -extract bun.sha256 raw -o - "$release/manifest.json" 2>/dev/null) || want=""
