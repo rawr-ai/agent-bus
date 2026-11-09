@@ -184,21 +184,42 @@ test("each build's serve refuses a store without an identity and creates none", 
       cpSync(join(servers[kind]!.dir, name), join(dir, name));
     const before = readdirSync(dir).sort();
     const port = freePort();
-    const child = Bun.spawn(
+    // Supervised, so a regression that serves instead of refusing cannot outlive this run,
+    // even if the test process is killed; a bounded wait then stops it and awaits its exit.
+    const child = spawnSupervised(
       [process.execPath, "--no-env-file", entryOf(kind), "serve", "--codex", "/usr/bin/false"],
       {
         cwd: decoy,
         env: { ...cleanEnv(servers[kind]!), AGENT_BUS_DIR: dir, AGENT_BUS_PORT: String(port) },
         stdout: "pipe",
         stderr: "pipe",
-        timeout: 20_000,
       }
     );
-    const [code, stdout, stderr] = await Promise.all([
-      child.exited,
-      new Response(child.stdout).text(),
-      new Response(child.stderr).text(),
-    ]);
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let outcome: [number, string, string] | "still running";
+    try {
+      outcome = await Promise.race([
+        Promise.all([
+          child.exited,
+          new Response(child.stdout).text(),
+          new Response(child.stderr).text(),
+        ]),
+        new Promise<"still running">((settle) => {
+          timer = setTimeout(() => settle("still running"), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      if (child.exitCode === null && child.signalCode === null) {
+        child.kill();
+        await child.exited;
+      }
+    }
+    if (outcome === "still running")
+      throw new Error(
+        `${kind} serve neither exited nor closed its output within 10 s (exit ${child.exitCode ?? "none"})`
+      );
+    const [code, stdout, stderr] = outcome;
     expect({ kind, code, stdout }).toEqual({ kind, code: 1, stdout: "" });
     expect(stderr).toContain("Missing installation-id");
     expect({ kind, files: readdirSync(dir).sort() }).toEqual({ kind, files: before });
