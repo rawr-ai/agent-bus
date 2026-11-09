@@ -1,8 +1,8 @@
-import { homedir, hostname } from "node:os";
+import { homedir } from "node:os";
 import { join } from "node:path";
 import { Clock, Duration, Effect, Option, Schema, type Scope, Stream } from "effect";
 import { Bus, type Coverage, cover, type Pending } from "./Bus.ts";
-import { machine, type Subscriber } from "./domain.ts";
+import type { Subscriber } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { readEligibility, type Stored } from "./rollout.ts";
 import {
@@ -491,21 +491,12 @@ export const appServerQueue = (codex: string, timeout: Duration.Duration = QUEUE
     })
   );
 
-export const localHost = hostname();
-
 /**
- * The Codex peers one machine's deliverer wakes: those with a thread id that
- * joined from that machine, whose queues are in that machine's `~/.codex`.
- * One deliverer per machine keeps one cursor writer per address.
+ * Codex peers with a thread to wake. The Bus supplies only this installation's
+ * joins, whose queues are in the local `~/.codex`.
  */
-export const deliveryTargets = (peers: ReadonlyArray<Subscriber>, host: string) =>
-  peers.filter(
-    (peer) =>
-      peer.presence.runtime === "codex" &&
-      peer.presence.codexThreadId !== undefined &&
-      peer.host !== undefined &&
-      machine(peer.host) === machine(host)
-  );
+const hasCodexThread = (peer: Subscriber) =>
+  peer.presence.runtime === "codex" && peer.presence.codexThreadId !== undefined;
 
 const reconcileDelay = (reconciles: number) =>
   RECONCILE[Math.min(reconciles, RECONCILE.length - 1)] ?? Duration.minutes(60);
@@ -598,13 +589,12 @@ const noDirectInput = (error: CodexError) =>
 export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
   openQueue: Effect.Effect<Queue, CodexError, Scope.Scope>,
   daemon: Daemon,
-  host: string,
   holds: Holds
 ) {
   const bus = yield* Bus;
   const now = yield* Clock.currentTimeMillis;
   let stalled: CodexError | undefined;
-  const targets = deliveryTargets(yield* bus.peers, host);
+  const targets = (yield* bus.localPeers).filter(hasCodexThread);
   // An ordinary rejoin keeps what was learned, but a subagent refusal and failures belong to the join.
   for (const peer of targets) {
     const hold = holds.get(peer.address);
@@ -662,9 +652,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         const { subscriber } = found;
         attempted = subscriber;
         const threadId = subscriber.presence.codexThreadId;
-        if (threadId === undefined || deliveryTargets([subscriber], host).length === 0) {
-          return undefined;
-        }
+        if (threadId === undefined) return undefined;
         if ((joined()?.until ?? 0) > now) return undefined;
         const covered = current()?.covered;
         const { news, coverage } = cover(covered?.coverage, found);
@@ -718,7 +706,10 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         );
       });
     const waking = Effect.gen(function* () {
-      const posted = yield* bus.deliver(peer.address, post, retract);
+      const posted = yield* bus.deliver(peer.address, post, {
+        accepts: hasCodexThread,
+        idle: retract,
+      });
       if (posted === undefined) return undefined;
       const eligibility = yield* readEligibility(posted.threadId, posted.stored);
       if (!eligibility.eligible) return { ...posted, eligibility, borrowed: undefined };
@@ -806,12 +797,12 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
 });
 
 /** Long-running deliverer: wakes now, then whenever the ledger changes, and on its 15 s tick. */
-export const runDeliverer = (codex: string, host: string) =>
+export const runDeliverer = (codex: string) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger;
     const holds: Holds = new Map();
     const daemon = daemonBorrower({ socket: defaultSocket, start: startDaemon(codex) });
-    const attempt = deliverOnce(appServerQueue(codex), daemon, host, holds).pipe(
+    const attempt = deliverOnce(appServerQueue(codex), daemon, holds).pipe(
       Effect.catchCause((cause) => Effect.logWarning("Delivery cycle failed", cause))
     );
     yield* attempt;

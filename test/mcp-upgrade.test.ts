@@ -25,7 +25,7 @@ const url = new URL(`http://127.0.0.1:${port}/mcp`);
 const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer.pipe(
+      Bus.layer("test-installation").pipe(
         Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))

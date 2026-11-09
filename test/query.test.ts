@@ -57,7 +57,7 @@ const startBus = async (store: Store, options: { readonly testClock?: boolean } 
   const port = freePort();
   const layer = Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer.pipe(
+      Bus.layer("test-installation").pipe(
         Layer.provideMerge(store),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)

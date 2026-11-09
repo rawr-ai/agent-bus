@@ -32,7 +32,7 @@ test("association address admission counts UTF-8 bytes without changing unassoci
         }),
     })
   );
-  const layer = Bus.layer.pipe(
+  const layer = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
     Layer.provideMerge(cursors),
     Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))

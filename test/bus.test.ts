@@ -27,7 +27,6 @@ import {
   type Daemon,
   daemonBorrower,
   deliverOnce,
-  deliveryTargets,
   formatNudge,
   type Holds,
   type Queue,
@@ -56,7 +55,7 @@ const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 
 const busOn = (ledger: Layer.Layer<Ledger.Ledger | QueryGateway, unknown, never>, dir: string) =>
-  Bus.layer.pipe(
+  Bus.layer("test-installation").pipe(
     Layer.provideMerge(ledger),
     Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors")))
   );
@@ -423,6 +422,7 @@ for (const backend of backends) {
             presence: new Presence({
               runtime: joining.runtime,
               session: joining.session,
+              installation: "test-installation",
               status: "joined",
               topics: ["#reviews", "reviews", "##legacy"],
             }),
@@ -831,62 +831,6 @@ describe("codex delivery routing", () => {
     );
     expect(joined).toEqual({ address: "codex/a", cursor: 3 });
   });
-
-  test("each machine's deliverer wakes only the Codex peers that joined from it", () =>
-    Effect.runPromise(
-      Effect.provide(
-        Effect.gen(function* () {
-          const bus = yield* Bus.Bus;
-          const ledger = yield* Ledger.Ledger;
-          yield* bus.join({
-            address: "codex/here",
-            runtime: "codex",
-            session: sid("codex/here"),
-            cwd: process.cwd(),
-            codexThreadId: sid("codex/here"),
-          });
-          yield* bus.join({
-            address: "codex/no-thread",
-            runtime: "codex",
-            session: sid("codex/no-thread"),
-            cwd: process.cwd(),
-          });
-          yield* bus.join({
-            address: "claude/here",
-            runtime: "claude",
-            session: sid("claude/here"),
-            cwd: process.cwd(),
-          });
-          yield* ledger.append(
-            new Message({
-              id: Bun.randomUUIDv7(),
-              ts: new Date().toISOString(),
-              from: "codex/there",
-              to: ["*"],
-              kind: "presence",
-              body: "codex/there joined",
-              origin: new Origin({ host: "Other-Machine.local" }),
-              presence: new Presence({
-                runtime: "codex",
-                status: "joined",
-                topics: [],
-                session: "t-there",
-                codexThreadId: "t-there",
-              }),
-            })
-          );
-          const peers = yield* bus.peers;
-          const local = hostname().split(".")[0]?.toUpperCase() ?? "";
-          expect(deliveryTargets(peers, `${local}.lan`).map((p) => p.address)).toEqual([
-            "codex/here",
-          ]);
-          expect(deliveryTargets(peers, "other-machine").map((p) => p.address)).toEqual([
-            "codex/there",
-          ]);
-        }),
-        jsonl().layer
-      )
-    ));
 });
 
 /** A settings snapshot record, as Codex writes one at each thread start and resume. */
@@ -1061,7 +1005,7 @@ describe("codex delivery", () => {
     const queued = fakeQueue();
     const { daemon, daemonState } = fakeDaemon();
     const holds: Holds = new Map();
-    const deliverer = (state: Holds) => deliverOnce(queued.openQueue, daemon, hostname(), state);
+    const deliverer = (state: Holds) => deliverOnce(queued.openQueue, daemon, state);
     const join = bus.join({
       address: "codex/a",
       runtime: "codex",
@@ -3599,11 +3543,12 @@ describe("claude wake", () => {
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
         const ledger = yield* Ledger.Ledger;
+        const cursors = yield* Cursors.Cursors;
         yield* joinBoth(bus);
         // The same session holding an address joined on another machine, and a Codex one.
-        for (const [address, runtime, host] of [
-          ["claude/far", "claude", "elsewhere.local"],
-          ["codex/same-id", "codex", hostname()],
+        for (const [address, runtime, installation] of [
+          ["claude/far", "claude", "foreign-installation"],
+          ["codex/same-id", "codex", "test-installation"],
         ] as const) {
           yield* ledger.append(
             new Message({
@@ -3613,10 +3558,17 @@ describe("claude wake", () => {
               to: ["*"],
               kind: "presence",
               body: `${address} joined`,
-              origin: new Origin({ host }),
-              presence: new Presence({ runtime, status: "joined", topics: [], session: a }),
+              origin: new Origin({ host: hostname() }),
+              presence: new Presence({
+                runtime,
+                status: "joined",
+                topics: [],
+                session: a,
+                installation,
+              }),
             })
           );
+          yield* cursors.set(address, yield* ledger.end);
         }
         yield* send(bus, "far", "claude/far");
         yield* send(bus, "codex", "codex/same-id");

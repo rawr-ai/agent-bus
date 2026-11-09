@@ -332,7 +332,7 @@ describe("presence guard (jsonl): two Bus layers on one file", () => {
       )
     ).pipe(Layer.provideMerge(layerJsonl(file).pipe(Layer.provide(platform))));
     const runtime = ManagedRuntime.make(
-      Bus.layer.pipe(
+      Bus.layer("test-installation").pipe(
         Layer.provideMerge(ledger),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)

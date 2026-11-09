@@ -37,7 +37,7 @@ flowchart TB
   serveB --- stateB
 ```
 
-A message sent on one machine is one ledger commit. Fluree's event stream, through the tunnel for the other machine, tells every `serve` that something changed, and each `serve` wakes its own machine's recipients: only the peers whose join came from that machine (the presence entry's `origin.host`).
+A message sent on one machine is one ledger commit. Fluree's event stream, through the tunnel for the other machine, tells every `serve` that something changed. Each `serve` selects its own joins for wake as described in [delivery](delivery.md#rules).
 
 ### Inside one machine
 
@@ -88,6 +88,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | --- | --- | --- | --- |
 | The ledger | Bus host: `~/.agent-bus/fluree/storage`, with the Fluree project in `~/.agent-bus/fluree/.fluree` | The Fluree server, for every machine's `serve` | Every message and presence entry, append-only, in ledger `agent-bus:main`. [Messaging](messaging.md) gives its model |
 | Cursors | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>/` | That machine's `serve` | One per address joined from that machine: the last commit `t` read. A replaced ledger has a new first commit, so its subscribers start over |
+| Native delivery identity | Each machine: `~/.agent-bus/installation-id` | That machine's `serve` | Random identity initialized once and retained across restarts. Keep it with that installation's state and do not copy it to another installation |
 | `config.json` | Each machine: `~/.agent-bus/config.json` | The installer, only when absent | The Fluree URL and ledger. `serve` won't start without it |
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |
 | `fluree-key.json` | Bus host: `~/.agent-bus/fluree-key.json`, mode 0600 | The installer | The key the Fluree server trusts tokens from |
@@ -104,7 +105,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 2. **One ledger, on one Fluree transaction server on the bus host.** Every machine's `serve` writes to it over HTTP. Other machines run no Fluree.
 3. **Servers listen on loopback only.** Fluree is on `127.0.0.1:8095` and `serve` on `127.0.0.1:8096`. Nothing listens on a network address.
 4. **Another machine reaches Fluree only through an SSH tunnel,** on the same local port, so its `config.json` names the same URL as the bus host's.
-5. **A `serve` wakes only the peers that joined from its own machine.** Each machine's Codex queues and Claude sessions are its own; no wake crosses machines.
+5. **Native queues and hooks stay local to their installation.** The wake-selection rule is in [delivery](delivery.md#rules).
 6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail; a held search ranking holds entry ids, scores and node names, and every page reads its messages from the ledger.
 7. **`serve` and the hook use the same managed launcher** and canonical checkout. Source and runtime changes are controlled together at deploy ([deploy](../runbooks/deploy.md)). Already-running hooks retain their loaded code and runtime until they rearm.
 8. **Each ledger instance has its own cursor directory.** The path names the ledger and its first commit ([messaging rule 11](messaging.md#rules) says what follows).
@@ -137,6 +138,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 ## History
 
 The frames that made these choices are indexed in [frames](../frames/README.md):
+- [Stable native delivery](../frames/stable-native-delivery.md): explicit initialization and retained local installation identity.
 - [simplification-pass](../frames/simplification-pass.md): Fluree as the only production store, JSONL as test support.
 - [one-codex-route](../frames/one-codex-route.md): one `serve` per machine, and `serve` no longer connecting to the daemon to deliver.
 - [claude-wake](../frames/claude-wake.md) and [finish-swap](../frames/finish-swap.md): the hook, the launcher link and the one-file plugin.

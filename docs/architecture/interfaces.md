@@ -208,7 +208,7 @@ Returns `messages` as `bus_read` does, as soon as there are any, or an empty lis
 | `session` | string | yes (optional in the schema) | — | The Claude Code session id the hook was given |
 | `fresh` | boolean | no | false | Only for a `SessionStart` compact hook: allow unchanged unread mail to ring again; retain on empty/error retries, then exit after the first nonempty response |
 
-Waits up to 50 seconds, then returns `addresses` (the session's addresses with eligible unread mail; empty on timeout), `owns` (whether the session holds any address this machine wakes) and `superseded` (whether a newer call from the same session ended this one). By default, a previously woken unread span is suppressed; `fresh: true` bypasses that comparison, not ownership or waiter arbitration. Repeated fresh calls can each ring: the one-response bound belongs to the hook invocation, not to an idempotent API or a durable compaction event. It returns no message bodies and acknowledges no mail; like delivery, it can pass the cursor over entries that aren't the address's mail. Sessions don't call it. How the hook uses it is in [delivery](delivery.md).
+Waits up to 50 seconds, then returns `addresses` (the session's addresses with eligible unread mail; empty on timeout), `owns` (whether the session holds any Claude address joined from this installation) and `superseded` (whether a newer call from the same session ended this one). By default, a previously woken unread span is suppressed; `fresh: true` bypasses that comparison, not ownership, installation eligibility or waiter arbitration. Repeated fresh calls can each ring: the one-response bound belongs to the hook invocation, not to an idempotent API or a durable compaction event. It returns no message bodies and acknowledges no mail; like delivery, it can pass the cursor over entries that aren't the address's mail. Sessions don't call it. How the hook uses it is in [delivery](delivery.md).
 
 #### `bus_owned_addresses`
 
@@ -378,7 +378,8 @@ The installer accepts `--bun /absolute/path` to select a runtime, checks it agai
 
 | Subcommand | Purpose | Calls |
 | --- | --- | --- |
-| `serve` | Run this machine's bus: MCP at `/mcp` and delivery to this machine's Codex peers. One per machine | none: it is the server |
+| `serve` | Run this machine's bus: MCP at `/mcp` and native delivery to this installation's Codex and Claude peers. One per machine | none: it is the server |
+| `initialize-installation` | Create this installation's native delivery identity once without printing or replacing it | none: it writes local state only |
 | `join` | Join as an address from the current directory; prints the effective topic list when returned by the server | `bus_join`, or `bus_takeover` with `--takeover` |
 | `orient` | Read orientation without joining or advancing a cursor | `bus_orient` |
 | `publish` | Send a message; prints the new id | `bus_publish` |
@@ -391,7 +392,6 @@ The installer accepts `--bun /absolute/path` to select a runtime, checks it agai
 | Subcommand | Flag | Required | Default | Meaning |
 | --- | --- | --- | --- | --- |
 | `serve` | `--codex` | no | The Codex CLI bundled in the ChatGPT desktop app (`defaultCodex` in `src/codex.ts`) | The Codex CLI whose app-server queues nudges. A machine without the desktop app passes its own |
-| `serve` | `--host` | no | This machine's hostname | Wake the Codex peers that joined from this machine |
 | `join` | `--address` | yes | — | Your bus address |
 | `join` | `--runtime` | yes | — | `claude`, `codex`, `human` or `other` |
 | `join` | `--session` | no | By runtime, see below | Your session id |
@@ -443,7 +443,7 @@ The CLI presents the session id of the runtime in question and never another run
 
 | Name | Default | Read by | Meaning |
 | --- | --- | --- | --- |
-| `AGENT_BUS_DIR` | `~/.agent-bus` | every `agent-bus` command; the installer | The bus's state directory: `config.json`, `fluree-token`, `fluree-cursors/`, and the installer's key, Fluree project and logs ([topology](topology.md#where-state-lives)) |
+| `AGENT_BUS_DIR` | `~/.agent-bus` | every `agent-bus` command; the installer | The bus's state directory: `config.json`, `installation-id`, `fluree-token`, `fluree-cursors/`, and the installer's key, Fluree project and logs ([topology](topology.md#where-state-lives)) |
 | `AGENT_BUS_PORT` | `8096` | `serve` (where it listens); the CLI and the hook (where they connect); the installer (health waits, LaunchAgent environment) | The loopback port of `/mcp` and `/health`. The hook inherits Claude Code's environment, so it needs the same value as `serve`, or neither set |
 | `AGENT_BUS_FLUREE_PORT` | `8095` | the installer only | The port of the bus's own Fluree server. It reaches `serve` only through the `url` the installer writes into `config.json` on a first install |
 | `AGENT_BUS_SESSION` | none | the CLI | The session id for runtimes `human` and `other` |
@@ -458,6 +458,7 @@ Files in the state directory that the code reads:
 | File | Read by | Meaning |
 | --- | --- | --- |
 | `config.json` | `serve` | `{ "fluree": { "url": "...", "ledger": "..." } }`. `serve` refuses to start without the `fluree` entry. The installer writes `http://127.0.0.1:8095` and `agent-bus:main` only if the file is absent |
+| `installation-id` | `serve`, `initialize-installation` | Local native delivery identity. `serve` refuses missing or invalid state; it never creates or replaces it. See [deployment](../runbooks/deploy.md#switch-to-stable-native-delivery) and [recovery](../runbooks/recover.md#the-installation-identity-is-missing-or-invalid) |
 | `fluree-token` | `serve` | The bearer token for the bus's Fluree server, trimmed. Absent means no `Authorization` header is sent. Never logged |
 | `fluree-cursors/<ledger>/<instance>/` | `serve` | One cursor file per address. The `<ledger>` segment is the URI-encoded ledger id, and `<instance>` names the ledger's incarnation ([messaging](messaging.md#rules)) |
 

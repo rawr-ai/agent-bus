@@ -140,7 +140,7 @@ const waitForIndex = async () => {
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 const busLayer = (store: Fluree.FlureeConfig = config) =>
-  Bus.layer.pipe(
+  Bus.layer("qualification-installation").pipe(
     Layer.provideMerge(Fluree.layerFluree(store)),
     Layer.provide(Cursors.layerFiles(join(dir, "cursors", encodeURIComponent(store.ledger)))),
     Layer.provide(platform)

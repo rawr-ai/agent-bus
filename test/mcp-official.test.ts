@@ -36,7 +36,7 @@ const url = new URL(`http://127.0.0.1:${port}/mcp`);
 const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer.pipe(
+      Bus.layer("test-installation").pipe(
         Layer.provideMerge(store),
         Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
@@ -98,6 +98,7 @@ const privatePresence = new Presence({
   status: "joined",
   topics: [],
   session: privateMarker,
+  installation: privateMarker,
   codexThreadId: privateMarker,
   rejoinOf: "synthetic-private-run",
 });
@@ -382,7 +383,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     for (const name of ["bus_read", "bus_wait", "bus_history", "bus_peers"]) {
       const schema = JSON.stringify(tools.find((tool) => tool.name === name)?.outputSchema);
       if (structured) {
-        for (const field of ["presence", "session", "codexThreadId", "rejoinOf"]) {
+        for (const field of ["presence", "session", "installation", "codexThreadId", "rejoinOf"]) {
           expect(schema).not.toContain(`"${field}":`);
         }
       }

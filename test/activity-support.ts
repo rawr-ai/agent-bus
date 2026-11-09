@@ -58,7 +58,7 @@ export interface Serve {
 }
 
 export const busOn = (store: Store, cursorsDir: string) =>
-  Bus.layer.pipe(
+  Bus.layer("test-installation").pipe(
     Layer.provideMerge(store),
     Layer.provideMerge(Cursors.layerFiles(join(cursorsDir, "cursors"))),
     Layer.provide(platform)

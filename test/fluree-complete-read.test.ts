@@ -26,7 +26,13 @@ const presence = (id: string, session: string) =>
     to: ["*"],
     kind: "presence",
     body: "joined",
-    presence: { runtime: "codex", status: "joined", topics: [], session },
+    presence: {
+      runtime: "codex",
+      status: "joined",
+      topics: [],
+      session,
+      installation: "test-installation",
+    },
   });
 const malformed = '{"secret":"DO-NOT-LEAK"';
 const invalid = JSON.stringify({ id: "DO-NOT-LEAK", kind: "message" });
@@ -117,7 +123,10 @@ const fixture = () => {
       clear: () => Effect.void,
     })
   );
-  const bus = Bus.layer.pipe(Layer.provideMerge(ledger), Layer.provideMerge(cursors));
+  const bus = Bus.layer("test-installation").pipe(
+    Layer.provideMerge(ledger),
+    Layer.provideMerge(cursors)
+  );
   return {
     ledger,
     bus,
@@ -224,10 +233,12 @@ describe("complete Fluree reads", () => {
                   Effect.sync(() => {
                     nudges += 1;
                   }),
-                () =>
-                  Effect.sync(() => {
-                    idles += 1;
-                  })
+                {
+                  idle: () =>
+                    Effect.sync(() => {
+                      idles += 1;
+                    }),
+                }
               )
             ),
             501
@@ -256,10 +267,12 @@ describe("complete Fluree reads", () => {
                   Effect.sync(() => {
                     nudges += 1;
                   }),
-                () =>
-                  Effect.sync(() => {
-                    idles += 1;
-                  })
+                {
+                  idle: () =>
+                    Effect.sync(() => {
+                      idles += 1;
+                    }),
+                }
               )
             ),
             2
@@ -272,10 +285,12 @@ describe("complete Fluree reads", () => {
                   Effect.sync(() => {
                     nudges += 1;
                   }),
-                () =>
-                  Effect.sync(() => {
-                    idles += 1;
-                  })
+                {
+                  idle: () =>
+                    Effect.sync(() => {
+                      idles += 1;
+                    }),
+                }
               )
             ),
             2

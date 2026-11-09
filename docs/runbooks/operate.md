@@ -313,12 +313,13 @@ A bus of your own lets you call tools, join addresses and break things without t
    fluree_pid=$!
    dir=$(mktemp -d)
    echo '{ "fluree": { "url": "http://127.0.0.1:18095", "ledger": "check:main" } }' > "$dir/config.json"
+   AGENT_BUS_DIR="$dir" bun src/bin.ts initialize-installation
    AGENT_BUS_DIR=$dir AGENT_BUS_PORT=8196 bun src/bin.ts serve &
    serve_pid=$!
    curl -fsS http://127.0.0.1:8196/health
    ```
 
-   Expect `ok`. *Rehearsed 2026-10-28.*
+   Expect `ok`. *Rehearsed 2026-10-28* without the initialization step; the revised startup is covered by disposable qualification for the stable-delivery upgrade.
 
 2. List the tools and call one with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector). Its CLI mode prints each result as JSON.
 

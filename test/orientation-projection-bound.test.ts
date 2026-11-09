@@ -22,7 +22,7 @@ test("publication refuses an oversized projection even when its stored record fi
       clear: () => Effect.void,
     })
   );
-  const layer = Bus.layer.pipe(
+  const layer = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
     Layer.provideMerge(cursors),
     Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))

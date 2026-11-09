@@ -86,6 +86,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    | The signing key | `~/.agent-bus/fluree-key.json`, mode 0600 | The key the Fluree server trusts tokens from |
    | The token | `~/.agent-bus/fluree-token`, mode 0600 | The bearer token for Fluree's data and admin APIs. It has no subject and lasts 520 weeks ([connections](../architecture/connections.md#limits)) |
    | `config.json` | `~/.agent-bus/config.json` | `{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`, written only if absent. `serve` won't start without it |
+   | Native delivery identity | `~/.agent-bus/installation-id`, mode 0600 | Initialized before the first config is written. Keep it with this installation; never copy it to another machine |
    | The Fluree project and storage | `~/.agent-bus/fluree/` | The ledger lives here |
    | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; `serve` runs the managed launcher with `serve`, so a `.env` file in the state directory is not loaded |
 
@@ -135,7 +136,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
 
 ### Rerun the installer
 
-A full rerun keeps the key, token, `config.json` and messages, but rewrites both plists and restarts both servers. Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
+A full rerun keeps the key, token, `config.json`, `installation-id` and messages, but rewrites both plists and restarts both servers. A rerun with existing config does not initialize a missing identity: use the [first upgrade procedure](deploy.md#switch-to-stable-native-delivery) or [recover an established identity](recover.md#the-installation-identity-is-missing-or-invalid). Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
 
 ```sh
 bun run install:launch-agents
@@ -305,6 +306,7 @@ The other machine's non-interactive SSH `PATH` may lack `bun`, so a command run 
 | `fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun`, exit status 1 | `fluree` isn't on `PATH` (bus host). Check with `command -v fluree`, fix the `PATH`, rerun. *Rehearsed 2026-10-28* |
 | `Refusing foreign launcher …` | A foreign file, symlink or modified wrapper occupies the launcher path. Establish ownership before moving it aside; the installer will not overwrite it. Fixture-tested; live *Unverified*. |
 | `Selected runtime cannot run …` | The selected executable or source cannot run under a minimal environment. Check the exact pin and frozen dependency install before retrying. *Unverified* live. |
+| `Retained cursors but no config.json or installation-id` | This is not a fresh install. Restore the configuration and identity for this installation, rather than letting the installer guess. Fixture-tested; live *Unverified*. |
 | A runtime-only update fails after replacing a file | Launcher and plist replacement are atomic individually, not together. Inspect both and the job; rerun the qualified installer or follow [deploy rollback](deploy.md). *Unverified* on launchd. |
 | `The Fluree server at … does not enforce the bus token` | Another server holds the Fluree port. Find it with `lsof -nP -iTCP:8095 -sTCP:LISTEN`, stop it by its pid, rerun. *Rehearsed 2026-10-28* |
 | `Nothing answers at … ; see <log>` | A server didn't come up within 20 s. Read the log it names ([operate](operate.md)) |

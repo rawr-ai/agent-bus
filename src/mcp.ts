@@ -221,7 +221,7 @@ export const Woken = Schema.Struct({
       "Your addresses with eligible unread mail; fresh includes previously woken mail. Empty on timeout.",
   }),
   owns: Schema.Boolean.annotate({
-    description: "Whether your session holds any address this machine wakes.",
+    description: "Whether your session holds any Claude address joined from this installation.",
   }),
   superseded: Schema.Boolean.annotate({
     description: "Whether a newer call from your session ended this one.",
@@ -483,7 +483,7 @@ const Wait = Tool.make("bus_wait", {
 
 // Not read-only: it moves the mark of what the session was woken for.
 const Wake = Tool.make("bus_wake", {
-  description: `For agent-bus's Claude Code hook, which wakes the session; sessions don't call this. Waits up to ${MAX_WAIT_SECONDS} seconds until an address your session owns has mail it hasn't been woken for, and returns those addresses. A compact hook uses fresh to ring unchanged unread mail again and exits after its first nonempty response. Returns no message bodies and acknowledges no mail; a newer call from the same session ends this one.`,
+  description: `For agent-bus's Claude Code hook, which wakes the session; sessions don't call this. Waits up to ${MAX_WAIT_SECONDS} seconds for previously unwoken mail to an address the session joined as Claude from this bus installation, and returns those addresses. A compact hook uses fresh to ring unchanged unread mail again and exits after its first nonempty response. Returns no message bodies and acknowledges no mail; a newer call from the same session ends this one.`,
   parameters: Schema.Struct({
     session: Session,
     fresh: Schema.optionalKey(

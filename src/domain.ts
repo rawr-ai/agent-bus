@@ -59,6 +59,8 @@ export class Presence extends Schema.Class<Presence>("Presence")({
   status: Schema.Literals(["joined", "left"]),
   topics: Schema.Array(Schema.String),
   session: Schema.optionalKey(Schema.String),
+  /** The installation eligible to wake this join; absent in hostname-routed records. */
+  installation: Schema.optionalKey(Schema.String),
   /** The join this one took over from a different session. */
   takeover: Schema.optionalKey(Schema.String),
   /**
@@ -206,9 +208,6 @@ export const isFor = (message: Message, subscriber: Subscriber): boolean =>
 /** The ambient routes by which a message reaches a subscriber: `*` and its matching #topics. */
 export const ambientRoutes = (message: Message, subscriber: Subscriber): Array<string> =>
   message.to.filter((recipient) => recipient === "*" || subscribes(subscriber, recipient));
-
-/** Host names compare without case or domain, which macOS varies (`.local`, `.lan`). */
-export const machine = (host: string) => (host.split(".")[0] ?? host).toLowerCase();
 
 /**
  * Each address's latest presence, joined or left, folded from presence

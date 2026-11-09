@@ -40,7 +40,7 @@ The activation decision must name the exact merged source commit and tree, each 
 
    Expected: the locked install completes without changing the lockfile. The development-only Effect vendor preparation is not needed by the running server. A frozen-lockfile mismatch is a failure, not permission to update the lock. *Rehearsed 2026-11-02* for both selected and previous cohorts on the disposable installation.
 
-6. **Apply the reviewed service change.** If only source changed and the existing launcher and service configuration remain correct, restart just `serve` with `launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus`. If the runtime binding changes, use the retained, qualified upgraded installer, not the old whole installer:
+6. **Apply the reviewed service change.** On the first upgrade from hostname routing, use [the cohort procedure](#switch-to-stable-native-delivery) instead of restarting the machines separately. Otherwise, if only source changed and the existing launcher and service configuration remain correct, restart just `serve` with `launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus`. If the runtime binding changes, use the retained, qualified upgraded installer, not the old whole installer:
 
    ```sh
    AGENT_BUS_REPO="$primary" "$retained_installer" --runtime-only --bun "$approved_bun"
@@ -183,6 +183,27 @@ Expected: `PASS` and exit status 0, in a few seconds. Afterwards `agent-bus peer
 *Observed live 2026-11-01:* this canonical end-to-end command returned `PASS` on both installed endpoints after their activation and restart at `0202499`. It exercises the stand-in hook described above, not a real Claude session.
 
 That a hook already waiting before the restart calls `serve` again by itself (it retries every five seconds) was seen once, with an earlier form of this check: `hooked` was true 6 s after the restart. *Unverified* in a real Claude session: from a joined session, call `bus_join` again with its own address and session after the restart, and expect `hooked: true` within about ten seconds.
+
+## Switch to stable native delivery
+
+Only for the first upgrade from hostname-based wake routing. Do not repeat it on a network change or ordinary restart. Record the state directory, approved source and exact Bun on each machine. Remove any manually supplied `serve --host` argument before starting the new server; the managed LaunchAgent never used it. Arrange a one-time ordinary renewal with the owners of live native addresses. Do not rely on bus wakes to reach those owners during this transition.
+
+1. After the approved source and locked dependencies are in place, initialize each machine's state using its own approved Bun and source. Do not copy the ID between machines. For the default state directory:
+
+   ```sh
+   AGENT_BUS_DIR="$HOME/.agent-bus" "$approved_bun" --no-env-file "$primary/src/bin.ts" initialize-installation
+   test -f "$HOME/.agent-bus/installation-id"
+   ```
+
+   Expect both commands to succeed without printing the ID. Rerunning the first does not replace it. For a nondefault setup, use the state directory recorded for that `serve`. *Rehearsed 2026-11-08* with a disposable state directory; production activation is unverified.
+
+2. [Stop](operate.md#stop-and-start-serve-fluree-or-the-tunnel) every old `serve` before starting the upgraded cohort; keep Fluree and the tunnel running. Start and verify the approved `serve` on each machine. Do not rely on native delivery during a mixed rollout: old servers still match descriptive hostnames, and new servers cannot wake hostname-only joins. *Unverified on the installed cohort.*
+
+3. Have each live native owner call `bus_join` once from its original session and machine, using its existing address and normal session and working directory fields (including its own `codexThreadId` for Codex). Omit topics and associations to keep them; resupply a note if it should be kept. Do not leave, replay, or take over. With its local cursor intact, the session keeps its unread position and run. An owner can still read before renewal. Prompt a dormant owner in its native client only when it needs native wake again, rather than acting on its behalf. *Rehearsed 2026-11-08* with disposable owners; installed native renewals are unverified.
+
+4. Confirm a fresh direct test message wakes a real Codex thread and a real Claude session, and that each owner reads the intended message. A health check, stand-in hook, or queued nudge alone does not qualify a native turn. *Unverified on the installed cohort.*
+
+For rollback, keep `installation-id` in place. The previous server can read retained messages but returns to hostname-based wake routing; repeat the old-version wake checks, and have an affected owner renew from its original session if needed. Never reset a cursor to repair wake routing. If the local identity is missing or damaged, follow [recovery](recover.md#the-installation-identity-is-missing-or-invalid).
 
 ## Inactivity and mutes: every `serve` first
 

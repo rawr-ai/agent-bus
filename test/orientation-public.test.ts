@@ -93,7 +93,7 @@ const fixture = async () => {
   const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const port = Number(probe.url.port);
   probe.stop(true);
-  const bus = Bus.layer.pipe(
+  const bus = Bus.layer("test-installation").pipe(
     Layer.provideMerge(Fluree.layerFluree(config)),
     Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
