@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { appendFileSync } from "node:fs";
+import { appendFileSync, existsSync } from "node:fs";
 import {
   lstat,
   mkdir,
@@ -542,6 +542,17 @@ test("release mode binds the launcher to a verified release without a checkout, 
     const plist = await readFile(f.plist, "utf8");
     const a = await f.release("1.0.0-aaaaaaaaaaaa");
     const b = await f.release("1.0.0-bbbbbbbbbbbb");
+    // A bunfig.toml where the installer, launcher and hook run: its preload must never load.
+    const preloaded = join(f.root, "bunfig-preloaded");
+    await writeFile(
+      join(f.root, "preload.js"),
+      `require("node:fs").writeFileSync(${JSON.stringify(preloaded)}, "1");\n`
+    );
+    for (const dir of [f.root, f.bus])
+      await writeFile(
+        join(dir, "bunfig.toml"),
+        `preload = [${JSON.stringify(join(f.root, "preload.js"))}]\n`
+      );
     const stateBefore = await snapshot(f.bus);
     // No source root anywhere: the release's own installer, with no AGENT_BUS_REPO.
     const { AGENT_BUS_REPO: _, ...withoutSource } = f.env;
@@ -580,6 +591,7 @@ test("release mode binds the launcher to a verified release without a checkout, 
       }
     }
     expect(await snapshot(f.bus)).toEqual(stateBefore);
+    expect(existsSync(preloaded)).toBe(false);
     // Each activation kept the binding it replaced: first the source launcher, then A's.
     const bindings = join(f.home, ".local/share/agent-bus/bindings");
     const records = (await readdir(bindings)).sort();

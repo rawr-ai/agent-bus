@@ -54,6 +54,7 @@ export function fakeRelease(releases: string, id: string, bun: string) {
     join(stage, "app/install-launch-agents.sh"),
     readFileSync(join(repo, "scripts/install-launch-agents.sh"))
   );
+  writeFileSync(join(stage, "app/bunfig.toml"), "");
   writeFileSync(join(stage, "app/dist/viewer/main.js"), "console.log('viewer');\n");
   writeFileSync(join(stage, "app/dist/viewer/public/manifest.json"), "[]\n");
   cpSync(join(repo, "plugin"), join(stage, "plugin"), { recursive: true });

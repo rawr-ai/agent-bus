@@ -145,15 +145,16 @@ if [ -n "$release" ]; then
   bun_bin="$release/runtime/bun"
   # The release's own verifier checks every file; it writes nothing, not even Bun's cache.
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
-    "$bun_bin" --no-env-file "$release/app/release.js" verify "$release" --expect "$expect" >/dev/null) \
+    "$bun_bin" --no-env-file --config="$release/app/bunfig.toml" "$release/app/release.js" verify "$release" --expect "$expect" >/dev/null) \
     || fail "Release did not verify against the expected manifest digest: $release"
 fi
 
 # Validate source, runtime and ownership before creating any directories or temporary files.
 # Recognition is the exact generated shape, not merely the marker or an executable bit.
+# An explicit empty config: Bun would otherwise apply a bunfig.toml (and its preload) from here.
 if [ -n "$release" ]; then mode=release pins="$release/manifest.json" entry=""
 else mode=source pins="$repo_dir/package.json" entry="$repo_dir/src/bin.ts"; fi
-validation=$("$bun_bin" --no-env-file - "$mode" "$pins" "$launcher" "$entry" "$bun_bin" "$releases" <<'JS'
+validation=$("$bun_bin" --no-env-file --config=/dev/null - "$mode" "$pins" "$launcher" "$entry" "$bun_bin" "$releases" <<'JS'
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, normalize, resolve } from "node:path";
 const [mode, manifestPath, launcher, entry, runtimePath, releases] = process.argv.slice(2);
@@ -199,12 +200,12 @@ if (info.isFile()) {
   // pattern fixes every byte), for a release directly inside the releases directory.
   const v2 = "#!/bin/sh\n# agent-bus managed release launcher v2\nexec ";
   if (content.startsWith(v2)) {
-    const match = /^'((?:[^']|'\\'')*)\/runtime\/bun' --no-env-file '((?:[^']|'\\'')*)\/app\/cli\.js' "\$@"\n$/.exec(
+    const match = /^'((?:[^']|'\\'')*)\/runtime\/bun' --no-env-file --config='((?:[^']|'\\'')*)\/app\/bunfig\.toml' '((?:[^']|'\\'')*)\/app\/cli\.js' "\$@"\n$/.exec(
       content.slice(v2.length)
     );
     const release = match?.[1]?.replaceAll("'\\''", "'");
     if (
-      match !== null && release !== undefined && match[1] === match[2] &&
+      match !== null && release !== undefined && match[1] === match[2] && match[1] === match[3] &&
       release.startsWith("/") && !release.includes("\n") && normalize(release) === release &&
       dirname(release) === releases && !release.split("/").at(-1).startsWith(".")
     )
@@ -297,7 +298,9 @@ install_runtime() {
     {
       printf '#!/bin/sh\n# agent-bus managed release launcher v2\nexec '
       shell_quote "$release/runtime/bun"
-      printf ' --no-env-file '
+      printf ' --no-env-file --config='
+      shell_quote "$release/app/bunfig.toml"
+      printf ' '
       shell_quote "$release/app/cli.js"
       printf ' "$@"\n'
     } > "$launcher_tmp"

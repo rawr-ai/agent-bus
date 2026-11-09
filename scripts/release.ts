@@ -38,6 +38,14 @@ import { homedir, tmpdir } from "node:os";
 import { basename, dirname, isAbsolute, join, normalize, posix } from "node:path";
 
 export const SCHEMA = "agent-bus-release-v1";
+/**
+ * Every run of release code names this sealed, empty Bun config. Without an
+ * explicit one, Bun reads bunfig.toml from the caller's directory, and its
+ * `preload` would run that directory's code inside the release.
+ */
+export const RELEASE_BUNFIG = "app/bunfig.toml";
+const BUNFIG_TEXT =
+  "# Empty on purpose: release runs name this file so that no caller's bunfig.toml applies.\n";
 export const LAUNCHER_HEADER = "#!/bin/sh\n# agent-bus managed release launcher v2\nexec ";
 
 /** The files every release must hold, beyond what its manifest lists. */
@@ -46,6 +54,7 @@ export const REQUIRED = [
   "app/cli.js",
   "app/release.js",
   "app/install-launch-agents.sh",
+  "app/bunfig.toml",
   "app/dist/viewer/main.js",
   "app/dist/viewer/public/manifest.json",
   "plugin/.claude-plugin/plugin.json",
@@ -259,14 +268,15 @@ export function verify(
   const bunVersion = run([bun, "--version"]);
   if (bunVersion.status !== 0 || bunVersion.stdout.trim() !== manifest.bun.version)
     problems.push("runtime/bun does not report the manifest's Bun version");
-  const cliVersion = run([bun, "--no-env-file", cli, "--version"]);
+  const config = `--config=${join(dir, RELEASE_BUNFIG)}`;
+  const cliVersion = run([bun, "--no-env-file", config, cli, "--version"]);
   if (cliVersion.status !== 0 || cliVersion.stdout.trim() !== `agent-bus v${id}`)
     problems.push("app/cli.js does not report this release");
   for (const client of [".claude-plugin", ".codex-plugin"]) {
     const plugin = JSON.parse(readFileSync(join(dir, "plugin", client, "plugin.json"), "utf8"));
     if (plugin.version !== id) problems.push(`plugin ${client} version is not the release id`);
     for (const sub of hookSubcommands(plugin))
-      if (run([bun, "--no-env-file", cli, sub, "--help"]).status !== 0)
+      if (run([bun, "--no-env-file", config, cli, sub, "--help"]).status !== 0)
         problems.push(`hook subcommand missing from this release's CLI: ${sub}`);
   }
   return done(id, digest);
@@ -487,6 +497,7 @@ export function build(options: {
       join(stage, "app/install-launch-agents.sh"),
       readFileSync(join(src, "scripts/install-launch-agents.sh"))
     );
+    writeFileSync(join(stage, RELEASE_BUNFIG), BUNFIG_TEXT);
     copyTree(join(src, "dist/viewer"), join(stage, "app/dist/viewer"));
     copyTree(join(src, "plugin"), join(stage, "plugin"));
     for (const client of [".claude-plugin", ".codex-plugin"]) {
@@ -732,15 +743,15 @@ const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
 
 /** The exact v2 launcher text for a release directory. */
 export const releaseLauncher = (release: string) =>
-  `${LAUNCHER_HEADER}${quote(join(release, "runtime/bun"))} --no-env-file ${quote(join(release, "app/cli.js"))} "$@"\n`;
+  `${LAUNCHER_HEADER}${quote(join(release, "runtime/bun"))} --no-env-file --config=${quote(join(release, RELEASE_BUNFIG))} ${quote(join(release, "app/cli.js"))} "$@"\n`;
 
 export function parseReleaseLauncher(text: string): string | null {
   if (!text.startsWith(LAUNCHER_HEADER)) return null;
   const match =
-    /^'((?:[^']|'\\'')*)\/runtime\/bun' --no-env-file '((?:[^']|'\\'')*)\/app\/cli\.js' "\$@"\n$/.exec(
+    /^'((?:[^']|'\\'')*)\/runtime\/bun' --no-env-file --config='((?:[^']|'\\'')*)\/app\/bunfig\.toml' '((?:[^']|'\\'')*)\/app\/cli\.js' "\$@"\n$/.exec(
       text.slice(LAUNCHER_HEADER.length)
     );
-  if (match === null || match[1] !== match[2]) return null;
+  if (match === null || match[1] !== match[2] || match[1] !== match[3]) return null;
   const release = match[1]!.replaceAll("'\\''", "'");
   return isAbsolute(release) && normalize(release) === release && releaseLauncher(release) === text
     ? release
