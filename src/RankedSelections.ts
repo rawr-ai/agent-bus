@@ -120,6 +120,7 @@ export const checkBounds = (policy: Policy, entries: ReadonlyArray<Selected>) =>
   ) {
     return Effect.fail(
       new QueryCapacity({
+        selectionTooLarge: true,
         message: `This search's ranking is larger than one search may hold (${policy.entries} entries, ${policy.subjects} subjects, ${policy.bytes} bytes); narrow the search.`,
       })
     );

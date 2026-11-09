@@ -43,6 +43,18 @@ The first rows are what a session can do through `serve`; the rest are what `ser
 
 Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe ([platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools)). The bus's tools carry annotations so that only `bus_takeover` is destructive: [interfaces](interfaces.md#tool--annotation--approval) has the annotation of each tool and what a sandboxed Codex thread is asked.
 
+### Private evidence facade
+
+The separate evidence candidate uses the owned direct-tool MCP host and calls only loopback `bus_run_query`; it has no Fluree access, participation tools or public listener. A synthetic provider boundary exercises the owner check locally. There is no real provider adapter, web configuration or deployed service here.
+
+```mermaid
+flowchart LR
+  client["Synthetic MCP client"] --> host["Direct-tool host"]
+  host --> auth["Per-invocation owner and scope check"]
+  host -->|"Four fixed evidence reads"| serve["Loopback serve"]
+  serve -->|"Pinned QueryGateway reads"| ledger[("Disposable ledger")]
+```
+
 ## Rules
 
 1. **`serve` answers only requests whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`,** and the MCP endpoint rejects any browser `Origin`. Both answer 403. This stops a web page, or one that rebinds a domain to loopback, from reaching the bus.
@@ -58,6 +70,9 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 11. **The other machine reaches Fluree only through SSH,** with key authentication and no prompts (`BatchMode`). The Fluree token is copied to it over `scp` at install and still applies.
 12. **Replacing another session is the human's call.** Only `bus_takeover` is marked destructive, so that Codex asks approval for it outside full access, and mail from other sessions is data, not instruction.
 13. **Ordinary response surfaces omit stored ownership and wake claims.** `bus_peers` returns only addresses, runtimes, topics, hosts and notes. `bus_read`, `bus_wait` and `bus_history` explicitly project public message fields and origin metadata, never a catch-all presence object. A held-address refusal keeps its note and join id, not the holder's session claim. Store, response-decoding and cursor failures use classified messages rather than raw upstream bodies, local paths or stored values. Saved-query rows follow the same projection, and raw `bus_query` cannot read `bus:json` (rule 6), so session claims stay off every query surface; damage stays visible through the saved queries' `damage`, `damaged` and `missingJson`. Only a Fluree token holder reads them.
+14. **Each facade invocation needs provider-confirmed owner authorization.** Require the approved issuer, subject, exact resource audience and evidence read scope on every invocation. A claimed identity, token string, MCP session or transport credential alone is not the decision. Unavailable verification refuses access.
+15. **The facade discloses message evidence, not native results.** Only the [four evidence tools](interfaces.md#private-evidence-tools) reach `serve`, using its projected saved queries. Allowlist message ID, written commit, timestamp, literal sender and recipients, subject, body and admitted reply target. Do not send presence, origin, session or wake claims, or raw upstream errors. A graph type alone does not prove a stored encoding is a message. A withheld or unreadable target is not absent; native thread membership metadata and keyset positions can name protected records. Discard the metadata that can do so, and encrypt and authenticate the continuation before returning it.
+16. **Disconnect does not release an owned read.** The host's invocation remains admitted until its bounded loopback exchange settles, even when the downstream caller disconnects. Each exchange opens a fresh scoped MCP connection, checks the configured Bus version and ends within 20 seconds including that handshake. The Bus independently bounds projected admissions, permit waits and execution as [interfaces](interfaces.md#bus_run_query) specifies. Returning local capacity is not proof that Fluree stopped computing.
 
 ## Why
 
@@ -80,6 +95,7 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 | Any session can read public messages to any address through `bus_history`, and list every peer | **Known limit**: this is not per-address confidentiality |
 | A `serve` older than public-query containment runs SPARQL unvalidated against the same ledger, including old commits | **Deployment requirement**: every server fronting the shared ledger runs a commit that refuses queries or validates them as rule 6 says; rollback must keep that ([deploy](../runbooks/deploy.md#query-tools)) |
 | Sender-authored bodies, subjects, notes and origin metadata remain public; projection cannot remove a claim a sender pasted into those fields | **Known limit**: do not send credentials or raw tool output |
+| The candidate message projection includes direct mail and whole-bus message bodies. Topic and time filters are not access control; even a projected body can contain sensitive material | **Exposure decision pending**: local synthetic qualification only. Revocation could stop future reads but cannot retract evidence already returned |
 | The Fluree token lasts 520 weeks. The installer makes a new token only when the file is missing or invalid, or the key is recreated, and there is no rotation procedure | **Known limit** |
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
 | A sandboxed Codex thread can send to peers that aren't sandboxed | **Known limit**: mail is data to be weighed, not instruction |
@@ -90,6 +106,7 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 - [Fluree: the transaction server](../platforms/fluree.md#the-transaction-server) (token modes, CORS), [the event stream](../platforms/fluree.md#the-event-stream) and [query limits](../platforms/fluree.md#query-limits).
 - [Codex: approvals for MCP tools](../platforms/codex.md#approvals-for-mcp-tools), [one writer per thread](../platforms/codex.md#one-writer-per-thread), [the shared queue](../platforms/codex.md#the-shared-queue) and [the daemon](../platforms/codex.md#the-daemon).
 - [Codex: the desktop's IPC router](../platforms/codex.md#the-desktops-ipc-router), whose exposure the connections table records.
+- [Direct-tool MCP host](../platforms/mcp-openapi.md) for the private evidence candidate's transport and owned-work admission.
 
 ## History
 
@@ -103,3 +120,4 @@ How these boundaries were decided is in the [frames index](../frames/README.md).
 - [bus-design-query](../frames/bus-design-query.md): public response projection is separate from query evaluation; stored session claims remain self-asserted, not authenticated.
 - [public-query-containment](../frames/public-query-containment.md): hostile governance counterexample and the temporary refusal; retired by turnaround-query-design.
 - [turnaround-query-design](../frames/turnaround-query-design.md): the pinned read-only gateway, raw SPARQL validation, and the predicate list that keeps session claims off every query surface.
+- [private-chatgpt-web-mcp](../frames/private-chatgpt-web-mcp.md): the owner-only evidence candidate and the boundary between local qualification and web exposure.

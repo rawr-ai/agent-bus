@@ -199,6 +199,7 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 | `DEFAULT_HISTORY_LIMIT` | 50 | `src/mcp.ts` | `bus_history`'s default number of messages |
 | `IDLE_TIMEOUT_SECONDS` | 65 s | `src/serve.ts` | The HTTP server's explicit `idleTimeout`, `MAX_WAIT_SECONDS` + 15, so a long `bus_wake` or `bus_wait` isn't closed while idle connections remain bounded |
 | `CALL_TIMEOUT_SECONDS` | 30 s | `src/client.ts` | The deadline of one CLI call to `serve` |
+| `SAVED_QUERY_DEADLINE_SECONDS` | 15 s | `src/mcp.ts` | [Saved-query deadline](interfaces.md#bus_run_query), including permit wait |
 | `COMPACT_DEADLINE` | 4 s | `src/compact.ts` | Whole synchronous recovery, including stdin, connection, discovery and the call |
 | `COMPACT_OUTPUT_BYTES` | 2 KiB | `src/compact.ts` | Complete fixed compact context including its newline; overflow emits nothing |
 | `WAKE_CALL_TIMEOUT_SECONDS` | 55 s | `src/claude.ts` | The hook's deadline for one `bus_wake` call: `MAX_WAIT_SECONDS` + 5 |

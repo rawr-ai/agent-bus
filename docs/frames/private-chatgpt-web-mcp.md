@@ -2,7 +2,7 @@
 
 This frame takes up the [private web candidate](product-continuation.md#private-chatgpt-web-access-candidate) without changing the Bus participation model or the packaging work. Current local read and trust rules remain in [interfaces](../architecture/interfaces.md#bus_run_query) and [connections](../architecture/connections.md#rules).
 
-Status: **proposed**, 2026-11-08. For the owner to decide whether this private read is worth qualifying, and for the director to assign an access owner. No implementation, network or account changes, disclosure, or activation are authorized by this frame.
+Status: **accepted for implementation and disposable local qualification**, 2026-11-09 (proposed 2026-11-08). Acceptance does not authorize OAuth or tunnel setup, a ChatGPT connection, account or grant changes, live-data disclosure, or activation. Those remain separate owner decisions below.
 
 ## The job is evidence, not participation
 
@@ -64,10 +64,16 @@ Stop rather than weaken the boundary if actual ChatGPT web cannot return and cit
 
 This bounded recommendation composes the product-continuation candidate and owned-host precedent with MCP review of the tool contract and actual-client proof, and simplicity review of the data path and scope. It assumes the owner wants evidence rather than participation, and that the existing saved queries can support the workflow without a second data path. The actual web and local-capacity proofs decide whether those assumptions hold.
 
+## Local qualification, 2026-11-09
+
+On a disposable Fluree 4.2.4 Bus, Bun 1.4.4 and the owned direct host artifact, the official MCP client saw just the four closed evidence tools. A node typed as a message in the graph but encoded as presence was withheld; neither it nor its references escaped through thread results or a continuation. History and thread continued at the same cut after an append. Missing, unreadable, withheld, oversized and stale-ledger outcomes remained distinguishable. The reader refused an unavailable or mismatched Bus and recovered when the expected version returned. A Bus restart expired a search ranking without moving the history snapshot, and a facade restart invalidated old ciphertext. The synthetic issuer, owner, audience and scope refusals are not OAuth evidence.
+
+An escaped sample was 23,369 logical JSON bytes and 58,385 HTTP response-body bytes with both carriers; no ChatGPT limit was measured. The real host refused five reconnect attempts while one disconnected invocation still owned its loopback exchange. Separately, a real HTTP fixture held all four shared Bus permits, then held three others while a queued evidence read reached its whole-operation deadline. The local sentinel obtained the released permit without a fixture response, and unread mail and its wake mark were unchanged. Neither check proves that Fluree stops computing. The [disposable qualification runbook](../runbooks/qualify-private-evidence.md) reproduces these checks.
+
 ## Moved into current docs
 
-- [ ] Contract: accepted web tools and any saved-query deadline or budget change in interfaces and tool descriptions.
-- [ ] Rules: implemented trust, projection and query protection in the owning architecture pages.
-- [ ] Agent guidance: verified reading and citation guidance, if applicable.
-- [ ] Platform claims: observed client and host behavior, with versions and limits.
-- [ ] Procedure: rehearsed private setup, activation, revocation and recovery.
+- [x] Contract: candidate evidence tools and saved-query deadline and budget in interfaces and tool descriptions.
+- [x] Rules: implemented trust, projection and query protection in connections and interfaces.
+- [x] Agent guidance: pinned native reading and citation guidance in the query reference. Web guidance awaits the web trial.
+- [x] Platform claims: local client and host behavior in the platforms register. Actual ChatGPT remains unverified.
+- [x] Procedure: rehearsed disposable local qualification. Private web setup, activation and revocation remain out of scope.

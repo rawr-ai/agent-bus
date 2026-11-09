@@ -775,11 +775,13 @@ export const layerFluree = (config: FlureeConfig) =>
       const gateway = QueryGateway.of({
         // The incarnation first: a head read after it belongs to that incarnation or a later
         // one, and a later one is caught by the incarnation check that follows every read.
-        pin: Effect.gen(function* () {
-          const id = yield* incarnation;
-          const head = yield* end;
-          return { head, incarnation: id };
-        }).pipe(Effect.withSpan("QueryGateway.pin")),
+        pin: bounded(
+          Effect.gen(function* () {
+            const id = yield* guardedIncarnation;
+            const head = yield* guardedHead;
+            return { head, incarnation: id };
+          })
+        ).pipe(Effect.withSpan("QueryGateway.pin")),
         jsonld: (t, body) =>
           sendBounded(
             HttpClientRequest.post(pinned(t)).pipe(

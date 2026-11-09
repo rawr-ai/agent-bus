@@ -24,6 +24,8 @@ export const DEFAULT_HISTORY_LIMIT = 50;
 export const IDLE_TIMEOUT_SECONDS = MAX_WAIT_SECONDS + 15;
 /** The deadline of one CLI call to `serve`. */
 export const CALL_TIMEOUT_SECONDS = 30;
+/** One saved-query call, including its wait for the query permit and both ledger pins. */
+export const SAVED_QUERY_DEADLINE_SECONDS = 15;
 /** Whole synchronous compact recovery, including stdin, connection and tool discovery. */
 export const COMPACT_DEADLINE = Duration.seconds(4);
 /** Complete compact context including its trailing newline; overflow emits nothing. */

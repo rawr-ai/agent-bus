@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Schema, Semaphore } from "effect";
+import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus, ORIENTATION_JOIN_TOO_LARGE } from "./Bus.ts";
 import {
@@ -26,6 +26,7 @@ import {
   PresenceConflict,
   QueryCapacity,
   Runtime,
+  SavedQueryRefusal,
   validSession,
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
@@ -47,7 +48,7 @@ import {
   make as selectionStore,
 } from "./RankedSelections.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
-import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
+import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS, SAVED_QUERY_DEADLINE_SECONDS } from "./timing.ts";
 
 export { OrientationResult } from "./orientation-model.ts";
 
@@ -608,12 +609,17 @@ const Query = Tool.make("bus_query", {
 }).annotateMerge(Lookup);
 
 const RunQuery = Tool.make("bus_run_query", {
-  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search continues the ranking of its first page while the bus holds it: see its note and selection). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Results are at most ${MAX_ENVELOPE_BYTES} bytes; whole rows are kept.`,
+  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search continues the ranking of its first page while the bus holds it: see its note and selection). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Whole rows fit in at most ${MAX_ENVELOPE_BYTES} UTF-8 JSON bytes by default, or in maxPageBytes when supplied. The call has ${SAVED_QUERY_DEADLINE_SECONDS} seconds, including waiting for a query permit.`,
   parameters: Schema.Struct({
     name: Schema.Literals(operationNames).annotate({ description: "The saved query to run." }),
     args: Schema.optionalKey(
       Schema.Record(Schema.String, Schema.Unknown).annotate({
         description: "Its arguments, as bus_queries describes them; unknown keys are refused.",
+      })
+    ),
+    ledger: Schema.optionalKey(
+      Schema.String.annotate({
+        description: "Refuse unless this is still the ledger incarnation being read.",
       })
     ),
     t: Schema.optionalKey(
@@ -627,9 +633,22 @@ const RunQuery = Tool.make("bus_run_query", {
         description: "A previous result's next, to continue that traversal.",
       })
     ),
+    maxPageBytes: Schema.optionalKey(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+        .check(Schema.isLessThanOrEqualTo(MAX_ENVELOPE_BYTES))
+        .annotate({
+          description: "Optional smaller logical JSON page ceiling, not a transport byte limit.",
+        })
+    ),
+    projection: Schema.optionalKey(
+      Schema.Literal("message-evidence").annotate({
+        description:
+          "For history, search, thread and messages only: omit non-message rows and protected metadata before sizing the page. Returns machine-readable refusals.",
+      })
+    ),
   }),
   success: QueryEnvelope,
-  failure: Failure,
+  failure: Schema.Union([Failure, SavedQueryRefusal]),
 }).annotateMerge(Lookup);
 
 const Queries = Tool.make("bus_queries", {
@@ -796,6 +815,9 @@ const BusHandlers = BusToolkit.toLayer(
     );
     // One pool for every query operation, presets included.
     const pool = yield* Semaphore.make(QUERY_PERMITS);
+    // An interrupted facade exchange cannot prove the Bus stopped. Bound its running or
+    // queued work here too, without changing the shared pool's ordinary wait order.
+    const evidenceReservation = yield* Semaphore.make(1);
     // The rankings that searches page across calls, shared by every session this server serves.
     const selections = yield* selectionStore(PROCESS_POLICY);
     const queries = <A, E>(effect: Effect.Effect<A, E, QueryGateway | RankedSelections>) =>
@@ -877,15 +899,75 @@ const BusHandlers = BusToolkit.toLayer(
       bus_peers: () => queries(peersPreset),
       bus_history: (params) => queries(historyPreset(params)),
       bus_query: ({ query, t }) => queries(runSparql(query, t)),
-      bus_run_query: ({ name, args, t, cursor }) =>
-        queries(
+      bus_run_query: ({ name, args, ledger, t, cursor, maxPageBytes, projection }) => {
+        const query = queries(
           Effect.suspend(() => {
             const operation = byName(name);
-            return operation === undefined
-              ? Effect.fail(new InvalidQuery({ message: `No saved query is named ${name}.` }))
-              : operation.invoke(args ?? {}, { t, cursor }, MAX_ENVELOPE_BYTES);
+            if (operation === undefined) {
+              return Effect.fail(new InvalidQuery({ message: `No saved query is named ${name}.` }));
+            }
+            if (
+              projection !== undefined &&
+              name !== "history" &&
+              name !== "search" &&
+              name !== "thread" &&
+              name !== "messages"
+            ) {
+              return Effect.fail(
+                new InvalidQuery({ message: "This operation has no message evidence projection." })
+              );
+            }
+            return operation.invoke(
+              args ?? {},
+              { ledger, t, cursor, projection },
+              maxPageBytes ?? MAX_ENVELOPE_BYTES
+            );
           })
-        ),
+        );
+        const admitted =
+          projection === undefined
+            ? query
+            : evidenceReservation
+                .withPermitsIfAvailable(1)(query)
+                .pipe(
+                  Effect.flatMap(
+                    Option.match({
+                      onNone: () =>
+                        Effect.fail(
+                          new QueryCapacity({ message: "An evidence read is already admitted." })
+                        ),
+                      onSome: Effect.succeed,
+                    })
+                  )
+                );
+        return admitted.pipe(
+          Effect.mapError((error) =>
+            projection === undefined
+              ? error
+              : new SavedQueryRefusal({
+                  code:
+                    error._tag === "InvalidQuery"
+                      ? (error.code ?? "INVALID_REQUEST")
+                      : error._tag === "QueryCapacity"
+                        ? error.selectionTooLarge
+                          ? "SEARCH_TOO_BROAD"
+                          : "CAPACITY"
+                        : "UNAVAILABLE",
+                })
+          ),
+          Effect.timeoutOrElse({
+            duration: `${SAVED_QUERY_DEADLINE_SECONDS} seconds`,
+            orElse: () =>
+              Effect.fail(
+                projection !== undefined
+                  ? new SavedQueryRefusal({ code: "DEADLINE" })
+                  : new LedgerError({
+                      message: `The saved query did not finish within ${SAVED_QUERY_DEADLINE_SECONDS} seconds.`,
+                    })
+              ),
+          })
+        );
+      },
       bus_queries: () =>
         queries(
           Effect.map(

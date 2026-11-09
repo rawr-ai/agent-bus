@@ -370,9 +370,17 @@ export type Position =
   | { readonly offset: number };
 
 type Item<Row> =
-  | { readonly kind: "row"; readonly row: Row; readonly at: Position; readonly label: string }
+  | {
+      readonly kind: "row";
+      readonly row: Row;
+      readonly at: Position;
+      readonly label: string;
+      readonly omittedReplyTarget?: true;
+      readonly missingReplyTarget?: string;
+    }
   | { readonly kind: "damaged"; readonly t?: number; readonly at: Position }
   | { readonly kind: "absent"; readonly id: string; readonly at: Position }
+  | { readonly kind: "withheld"; readonly at: Position }
   | { readonly kind: "passed"; readonly at: Position };
 
 interface Fetched<Row> {
@@ -387,7 +395,13 @@ interface Fetched<Row> {
   readonly extra?: Partial<
     Pick<
       typeof QueryEnvelope.Type,
-      "root" | "members" | "missingReplyTargets" | "total" | "totals" | "missingJson"
+      | "root"
+      | "members"
+      | "missingReplyTargets"
+      | "rootOmitted"
+      | "total"
+      | "totals"
+      | "missingJson"
     >
   >;
 }
@@ -395,6 +409,7 @@ interface Fetched<Row> {
 interface At {
   readonly t: number;
   readonly position: Position;
+  readonly projection?: "message-evidence" | undefined;
   /** For a retaining operation's later pages: the selection its cursor names. */
   readonly retained?: Retained;
 }
@@ -437,8 +452,10 @@ export type Envelope<Row> = Omit<typeof QueryEnvelope.Type, "rows"> & {
 };
 
 export interface RunInput {
+  readonly ledger?: string | undefined;
   readonly t?: number | undefined;
   readonly cursor?: string | undefined;
+  readonly projection?: "message-evidence" | undefined;
 }
 
 // ---- Cursors ----------------------------------------------------------------------------------
@@ -458,6 +475,8 @@ const cursorFields = {
   n: Int.check(Schema.isGreaterThanOrEqualTo(1)),
   p: PositionSchema,
   u: Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  o: Schema.optionalKey(Int.check(Schema.isGreaterThanOrEqualTo(0))),
+  q: Schema.optionalKey(Int.check(Schema.isGreaterThanOrEqualTo(0))),
 };
 /** A retaining operation's cursor: its own revision and the handle of the selection it pages. */
 const SelectionCursor = Schema.Struct({
@@ -526,6 +545,12 @@ const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8
 /** Pins the snapshot: an explicit t, the cursor's, or head, all checked against the pin. */
 const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
   Effect.gen(function* () {
+    if (input.ledger !== undefined && input.ledger !== pin.incarnation) {
+      return yield* new InvalidQuery({
+        message: "The requested ledger is not the current incarnation.",
+        code: "STALE_LEDGER",
+      });
+    }
     if (
       input.t !== undefined &&
       (!Number.isInteger(input.t) || input.t < 1 || input.t > pin.head)
@@ -534,9 +559,10 @@ const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
     }
     if (cursor === undefined) return input.t ?? pin.head;
     if (cursor.i !== pin.incarnation) {
-      return yield* invalid(
-        "The ledger was replaced since this cursor was issued; start the traversal again."
-      );
+      return yield* new InvalidQuery({
+        message: "The ledger was replaced since this cursor was issued; start the traversal again.",
+        code: "STALE_LEDGER",
+      });
     }
     if (cursor.t > pin.head) {
       return yield* invalid(`The cursor's t=${cursor.t} is ahead of the ledger (t=${pin.head}).`);
@@ -566,7 +592,9 @@ const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never },
   Effect.gen(function* () {
     const gateway = yield* QueryGateway;
     const normalized: Readonly<Record<string, unknown>> = { ...(args as object) };
-    const hash = argsHash(normalized);
+    const hash = argsHash(
+      input.projection === undefined ? normalized : { ...normalized, $projection: input.projection }
+    );
     const size = spec.pageSize(args);
     const cursor = input.cursor === undefined ? undefined : yield* decodeCursor(input.cursor);
     if (cursor !== undefined) {
@@ -615,9 +643,10 @@ const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never },
         record.hash !== hash ||
         record.size !== size
       ) {
-        return yield* invalid(
-          `This ${spec.name}'s ranking is no longer held: it expired, the bus restarted, or the cursor is from another server. Start a new ${spec.name}, passing t=${t} to keep the snapshot; its ranking is evaluated again, so its order can differ.`
-        );
+        return yield* new InvalidQuery({
+          message: `This ${spec.name}'s ranking is no longer held: it expired, the bus restarted, or the cursor is from another server. Start a new ${spec.name}, passing t=${t} to keep the snapshot; its ranking is evaluated again, so its order can differ.`,
+          code: "RANKING_UNAVAILABLE",
+        });
       }
       retained = record;
     }
@@ -636,10 +665,18 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
     const fetched = yield* spec.fetch(args, {
       t,
       position,
+      projection: input.projection,
       ...(retained === undefined ? {} : { retained }),
     });
+    const evidence = input.projection === "message-evidence";
     const after = yield* gateway.pin;
     if (after.incarnation !== pin.incarnation) {
+      if (input.ledger !== undefined) {
+        return yield* new InvalidQuery({
+          message: "The requested ledger is not the current incarnation.",
+          code: "STALE_LEDGER",
+        });
+      }
       return yield* new LedgerError({
         message: "The ledger was replaced while the query ran; run it again.",
       });
@@ -664,8 +701,15 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
       const damagedAt: Array<number> = [...outside];
       let damaged = outside.length;
       const notFound: Array<string> = [];
+      let omitted = 0;
+      let omittedReplyTargets = 0;
+      const missingTargets = new Set<string>();
       for (const item of items) {
-        if (item.kind === "row") rows.push(item.row);
+        if (item.kind === "row") {
+          rows.push(item.row);
+          if (item.omittedReplyTarget) omittedReplyTargets += 1;
+          if (item.missingReplyTarget !== undefined) missingTargets.add(item.missingReplyTarget);
+        } else if (item.kind === "withheld") omitted += 1;
         else if (item.kind === "damaged") {
           damaged += 1;
           if (item.t !== undefined) damagedAt.push(item.t);
@@ -674,6 +718,8 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
       const more = fetched.more || kept < fetched.items.length;
       const last = items.at(-1);
       const damagedTotal = previous + damaged;
+      const omittedTotal = (cursor?.o ?? 0) + omitted;
+      const omittedReferencesTotal = (cursor?.q ?? 0) + omittedReplyTargets;
       const exhausted = !more;
       const shown = held ?? (more ? standIn : undefined);
       return {
@@ -683,14 +729,21 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
         t,
         ...(after.head > t ? { currentHeadT: after.head } : {}),
         unit: spec.unit,
-        args: normalized,
+        // This projection serves a separate closed facade; the original arguments remain
+        // cursor-bound but are not evidence and should not compete with whole message bodies.
+        args: evidence ? {} : normalized,
         rows,
         damage: spec.coverage === "predicates" ? "not-checked" : "checked",
         damaged,
         ...(damagedAt.length === 0 ? {} : { damagedAt: damagedAt.slice(0, MAX_DAMAGED_AT) }),
         damagedTotal,
         exhausted,
-        complete: exhausted && damagedTotal === 0 && spec.coverage === "entries",
+        complete:
+          exhausted &&
+          damagedTotal === 0 &&
+          spec.coverage === "entries" &&
+          (!evidence ||
+            (omittedTotal === 0 && omittedReferencesTotal === 0 && !fetched.extra?.rootOmitted)),
         ...(more && last !== undefined
           ? {
               next: encodeCursor({
@@ -703,6 +756,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
                 n: size,
                 p: last.at,
                 u: damagedTotal,
+                ...(evidence ? { o: omittedTotal, q: omittedReferencesTotal } : {}),
                 ...(spec.retains === true && shown !== undefined
                   ? { r: SEARCH_REVISION, s: shown.handle }
                   : {}),
@@ -720,9 +774,19 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
                   : {}),
               },
             }),
-        note: spec.note,
+        note: evidence ? "Projected message evidence at this snapshot." : spec.note,
         ...(spec.name === "messages" ? { notFound } : {}),
         ...fetched.extra,
+        ...(evidence
+          ? {
+              omitted,
+              omittedTotal,
+              omittedReplyTargets,
+              ...(missingTargets.size === 0
+                ? {}
+                : { missingReplyTargets: [...missingTargets].sort() }),
+            }
+          : {}),
       };
     };
     /**
@@ -763,6 +827,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
     // starts right after that row.
     let consumed = largestFitting(all - 1, (k) => bytes(envelope(k)) <= budget);
     while (
+      !evidence &&
       consumed > 0 &&
       fetched.items[consumed - 1]?.kind !== "row" &&
       (spec.name !== "orientation_directories" || fetched.items[consumed - 1]?.kind !== "passed")
@@ -780,11 +845,13 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
           `An association unit exceeds the ${budget}-byte result limit at t=${t}; retry at the same cut without consuming this cursor.`
         );
       }
-      return yield* invalid(
-        first?.kind === "row"
-          ? `The entry ${first.label} alone exceeds the ${budget}-byte result limit; read it with bus_query, selecting fewer fields.`
-          : `The result exceeds the ${budget}-byte limit; narrow the query.`
-      );
+      return yield* new InvalidQuery({
+        ...(evidence ? { code: "EVIDENCE_TOO_LARGE" } : {}),
+        message:
+          first?.kind === "row"
+            ? `The entry ${first.label} alone exceeds the ${budget}-byte result limit; read it with bus_query, selecting fewer fields.`
+            : `The result exceeds the ${budget}-byte limit; narrow the query.`,
+      });
     }
     return yield* serve(consumed);
   });
@@ -851,8 +918,8 @@ const decodeEntry = (id: string, json: string | null) => {
 const dateTime = (value: string) => ({ "@value": value, "@type": "xsd:dateTime" });
 
 /**
- * Ids are looked up by their subject IRI, which keeps the index lookup and the
- * commit t of bus:id. A token that cannot be part of an entry IRI names no entry.
+ * The ordinary catalogue's historical ID alphabet. The evidence projection must
+ * not infer absence from this shortcut: imported IRIs can contain other characters.
  */
 const isEntryId = (id: string) => /^[A-Za-z0-9._~:@-]+$/.test(id);
 const entryIri = (id: string) => ({ "@type": "@id", "@value": `${MESSAGE_IRI}${id}` });
@@ -917,6 +984,9 @@ const windowValues = (window: {
 const CandidateRows = Schema.Array(
   Schema.Tuple([Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
 );
+const LocatedCandidateRows = Schema.Array(
+  Schema.Tuple([Schema.String, Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
+);
 
 /** Keyset filters on (?t, ?id) against a bound key (?bt, ?bid). */
 const AFTER_KEY = "(or (> ?t ?bt) (and (= ?t ?bt) (> ?id ?bid)))";
@@ -961,6 +1031,109 @@ const TotalRows = Schema.Array(Schema.Tuple([Schema.Number]));
 /** A grouped candidate's entry, or nothing when it is damaged or stored more than once. */
 const decodeGroup = <R extends Candidate>(group: Group<R>) =>
   group.copies > 1 ? Option.none<Message>() : decodeEntry(group.first[1], group.first[2]);
+
+const entriesById = (wanted: ReadonlyArray<string>, at: At) =>
+  Effect.gen(function* () {
+    const evidence = at.projection === "message-evidence";
+    const lookup = [...new Set(evidence ? wanted : wanted.filter(isEntryId))];
+    const gateway = yield* QueryGateway;
+    const found = new Map<string, Group<Candidate>>();
+    if (lookup.length === 0) return found;
+    const where = {
+      values: [["?m"], lookup.map((id) => [entryIri(id)])],
+      where: [candidate("?m"), storedJson("?m")],
+    };
+    let rows: ReadonlyArray<Candidate>;
+    if (evidence) {
+      // Only a lookup of the actual requested subject proves absence. A contradictory
+      // bus:id at that subject is damaged, not a row for a different requested ID.
+      const located = yield* gateway
+        .jsonld(at.t, { selectDistinct: ["?m", "?t", "?id", "?json"], ...where })
+        .pipe(Effect.flatMap(decodeRows(LocatedCandidateRows)));
+      const expected = new Map(lookup.map((id) => [messageIri(id), id]));
+      const checked: Candidate[] = [];
+      for (const [subject, t, id, json] of located) {
+        const asked = expected.get(subject);
+        if (asked === undefined) return yield* invalidResponse();
+        checked.push([t, asked, id === asked ? json : null]);
+      }
+      rows = checked;
+    } else {
+      rows = yield* gateway
+        .jsonld(at.t, { selectDistinct: ["?t", "?id", "?json"], ...where })
+        .pipe(Effect.flatMap(decodeRows(CandidateRows)));
+    }
+    for (const [index, row] of rows.entries()) {
+      const group = found.get(row[1]);
+      if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
+      else group.copies += 1;
+    }
+    return found;
+  });
+
+const entryKind = (group: Group<Candidate> | undefined) =>
+  group === undefined
+    ? "absent"
+    : Option.match(decodeGroup(group), { onNone: () => "damaged" as const, onSome: (m) => m.kind });
+
+const evidenceRow = (row: EntryRow, replyTo: string | undefined): EntryRow => ({
+  t: row.t,
+  id: row.id,
+  ts: row.ts,
+  from: row.from,
+  to: row.to,
+  kind: "message",
+  body: row.body,
+  ...(row.subject === undefined ? {} : { subject: row.subject }),
+  ...(replyTo === undefined ? {} : { replyTo }),
+});
+
+/** Redact before whole-row sizing. A target must be an admitted message or genuinely absent. */
+const asEvidence = <Row extends EntryRow>(
+  fetched: Fetched<Row>,
+  at: At,
+  rowOf: (entry: EntryRow, original: Row) => Row
+) =>
+  Effect.gen(function* () {
+    if (at.projection !== "message-evidence") return fetched;
+    const root = fetched.extra?.root;
+    const targets = yield* entriesById(
+      [
+        ...(root === undefined ? [] : [root]),
+        ...fetched.items.flatMap((item) =>
+          item.kind === "row" && item.row.kind === "message" && item.row.replyTo !== undefined
+            ? [item.row.replyTo]
+            : []
+        ),
+      ],
+      at
+    );
+    const targetKinds = new Map([...targets].map(([id, group]) => [id, entryKind(group)]));
+    const items = fetched.items.map((item): Item<Row> => {
+      if (item.kind !== "row") return item;
+      if (item.row.kind !== "message") return { kind: "withheld", at: item.at };
+      const target = item.row.replyTo;
+      const kind = target === undefined ? undefined : (targetKinds.get(target) ?? "absent");
+      const omitted = kind === "presence" || kind === "damaged";
+      return {
+        ...item,
+        row: rowOf(evidenceRow(item.row, omitted ? undefined : target), item.row),
+        ...(omitted ? { omittedReplyTarget: true } : {}),
+        ...(target !== undefined && kind === "absent" ? { missingReplyTarget: target } : {}),
+      };
+    });
+    // Native member counts and missing targets can describe withheld rows, not just this page.
+    const extra =
+      root === undefined
+        ? {}
+        : targetKinds.get(root) === "message"
+          ? { root }
+          : { rootOmitted: true };
+    return { ...fetched, items, extra };
+  });
+
+const entryEvidence = (fetched: Fetched<EntryRow>, at: At) =>
+  asEvidence(fetched, at, (entry) => entry);
 
 /** Keyset items from (t, id, json) rows fetched with limit size + 1, damaged ones in place. */
 const entryItems = (
@@ -1014,6 +1187,9 @@ export const history = define({
     args.direction === "backward" ? { before: [t + 1, ""] } : { after: [0, ""] },
   fetch: (args, at) =>
     Effect.gen(function* () {
+      if (at.projection === "message-evidence" && args.kinds?.some((kind) => kind !== "message")) {
+        return yield* invalid("Message evidence cannot include presence in history.");
+      }
       const gateway = yield* QueryGateway;
       const size = args.limit ?? 50;
       const backward = "before" in at.position;
@@ -1044,7 +1220,7 @@ export const history = define({
           limit: size + 1,
         })
         .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      return entryItems(rows, size, backward ? "before" : "after");
+      return yield* entryEvidence(entryItems(rows, size, backward ? "before" : "after"), at);
     }),
 });
 
@@ -1063,27 +1239,9 @@ export const messages = define({
   start: () => ({ offset: 0 }),
   fetch: (args, at) =>
     Effect.gen(function* () {
-      const gateway = yield* QueryGateway;
       const offset = "offset" in at.position ? at.position.offset : 0;
       const wanted = args.ids.slice(offset);
-      const lookup = wanted.filter(isEntryId);
-      const rows =
-        lookup.length === 0
-          ? []
-          : yield* gateway
-              .jsonld(at.t, {
-                selectDistinct: ["?t", "?id", "?json"],
-                values: [["?m"], lookup.map((id) => [entryIri(id)])],
-                where: [candidate("?m"), storedJson("?m")],
-              })
-              .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      // An id with more than one stored row (several bus:json values) is damaged, not a pick.
-      const found = new Map<string, Group<(typeof rows)[number]>>();
-      for (const [index, row] of rows.entries()) {
-        const group = found.get(row[1]);
-        if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
-        else group.copies += 1;
-      }
+      const found = yield* entriesById(wanted, at);
       const items = wanted.map((id, index): Item<EntryRow> => {
         const position = { offset: offset + index + 1 };
         const group = found.get(id);
@@ -1099,7 +1257,7 @@ export const messages = define({
             }
           : { kind: "damaged", t: row[0], at: position };
       });
-      return { items, more: false };
+      return yield* entryEvidence({ items, more: false }, at);
     }),
 });
 
@@ -1127,20 +1285,36 @@ export const thread = define({
     Effect.gen(function* () {
       const gateway = yield* QueryGateway;
       const size = args.limit ?? 100;
-      if (!isEntryId(args.id)) {
+      if (at.projection === undefined && !isEntryId(args.id)) {
         return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
       }
       const focusIri = entryIri(args.id);
       const focus = { values: [["?f"], [[focusIri]]] };
-      const resolved = yield* gateway
-        .jsonld(at.t, {
-          select: ["?t"],
-          ...focus,
-          where: [{ "@id": "?f", "bus:id": { "@value": "?fid", "@t": "?t" } }],
-        })
-        .pipe(Effect.flatMap(decodeRows(ResolvedRows)));
-      if (resolved.length === 0) {
-        return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
+      if (at.projection === "message-evidence") {
+        const found = yield* entriesById([args.id], at);
+        const kind = entryKind(found.get(args.id));
+        if (kind !== "message") {
+          return yield* new InvalidQuery({
+            message: "The thread focus is not available as message evidence.",
+            code:
+              kind === "presence"
+                ? "WITHHELD"
+                : kind === "damaged"
+                  ? "EVIDENCE_DAMAGED"
+                  : "NOT_FOUND",
+          });
+        }
+      } else {
+        const resolved = yield* gateway
+          .jsonld(at.t, {
+            select: ["?t"],
+            ...focus,
+            where: [{ "@id": "?f", "bus:id": { "@value": "?fid", "@t": "?t" } }],
+          })
+          .pipe(Effect.flatMap(decodeRows(ResolvedRows)));
+        if (resolved.length === 0) {
+          return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
+        }
       }
       const tree = [
         { "@id": "?f", up: "?top" },
@@ -1185,14 +1359,17 @@ export const thread = define({
           limit: size + 1,
         })
         .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      return {
-        ...entryItems(rows, size, "after"),
-        extra: {
-          ...optionalKey("root", root),
-          members: memberIris.size,
-          missingReplyTargets: [...missing].sort(),
+      return yield* entryEvidence(
+        {
+          ...entryItems(rows, size, "after"),
+          extra: {
+            ...optionalKey("root", root),
+            members: memberIris.size,
+            missingReplyTargets: [...missing].sort(),
+          },
         },
-      };
+        at
+      );
     }),
 });
 
@@ -1322,11 +1499,15 @@ export const search = define({
             }
           : { kind: "damaged", t: entry.t, at: position };
       });
-      return {
-        items,
-        more: offset + size < selection.entries.length,
-        selection: { entries: selection.entries, truncated: selection.truncated },
-      };
+      return yield* asEvidence(
+        {
+          items,
+          more: offset + size < selection.entries.length,
+          selection: { entries: selection.entries, truncated: selection.truncated },
+        },
+        at,
+        (entry, original) => ({ ...entry, score: original.score })
+      );
     }),
 });
 

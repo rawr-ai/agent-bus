@@ -233,7 +233,7 @@ test("a ranking over its bounds is refused before any result", async () => {
   const refused = await runtime.runPromise(
     Effect.flip(search.run({ text: "kiwi", limit: 50 }, {}, undefined))
   );
-  expect(refused._tag).toBe("QueryCapacity");
+  expect(refused).toMatchObject({ _tag: "QueryCapacity", selectionTooLarge: true });
   expect(ledger.hydrated).toEqual([]);
   await runtime.dispose();
 });
@@ -316,6 +316,7 @@ test("the process store holds a viewer's abandoned traversals with room to spare
       `Retry after ${new Date(start + PROCESS_POLICY.ttlMillis).toISOString()}, or narrow the search.`
     ),
   });
+  expect(refused.selectionTooLarge).toBeUndefined();
   // One byte over a selection's own bound is refused whatever room there is.
   await runtime.runPromise(TestClock.adjust("10 minutes"));
   expect(Exit.isFailure(await admit(largest(1)))).toBe(true);

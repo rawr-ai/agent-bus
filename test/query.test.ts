@@ -19,6 +19,7 @@ import { CATALOGUE_VERSION, operationNames, search } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
+import { busReader, type Query } from "../src/private-web/reader.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Selections from "../src/RankedSelections.ts";
 import * as Serve from "../src/serve.ts";
@@ -118,6 +119,7 @@ const startBus = async (store: Store, options: { readonly testClock?: boolean } 
     return pages;
   };
   return {
+    port,
     runtime,
     tools,
     client,
@@ -1041,6 +1043,110 @@ describe("aggregates and peers", () => {
 });
 
 describe("snapshots and cursors", () => {
+  test("private evidence budgets only projected rows and refuses an oversized middle row without consuming it", async () => {
+    const config = await freshLedger("evidence-pages");
+    const bus = await startBus(flureeStore(config));
+    const reader = await busReader({
+      busPort: bus.port,
+      expectedBusVersion: "test",
+      pageBytes: 32_768,
+    });
+    disposers.push(reader.dispose);
+    const page = async (request: Query) => {
+      const result = await reader.read(request);
+      if ("refusal" in result) throw new Error(result.refusal);
+      return result.page;
+    };
+    const hidden = "withheld/entry-canary";
+    const protectedEntry = new Message({
+      ...presence("protected-sender", "joined"),
+      id: hidden,
+      body: "withheld-body-canary",
+    });
+    await insertRaw(config, {
+      ...toNode(protectedEntry, encodeJson(protectedEntry)),
+      "@type": "bus:Message",
+    });
+    const replies = message({ from: "reply-sender", to: ["*"], body: "reply", replyTo: hidden });
+    const narrow = message({ from: "budget-match", to: ["*"], body: "x".repeat(27_000) });
+    const huge = message({ from: "claude/a", to: ["*"], body: "€".repeat(13_000) });
+    await bus.append(replies, narrow, huge);
+    const { ledger, headT: t } = await bus.ok("bus_queries");
+    const snapshot = { ledger, t };
+
+    const first = await page({ name: "history", args: { limit: 1 }, snapshot });
+    expect(first).toMatchObject({ rows: [], omitted: 1, omittedTotal: 1, complete: false });
+    expect(first.next).toBeDefined();
+    const next = await page({ name: "history", args: { limit: 1 }, cursor: first.next });
+    expect(next).toMatchObject({
+      snapshot,
+      rows: [{ id: replies.id, body: "reply" }],
+      omitted: 0,
+      omittedTotal: 1,
+      omittedReplyTargets: 1,
+    });
+    expect(next.rows[0]?.replyTo).toBeUndefined();
+    expect(next.missingReplyTargets).toBeUndefined();
+    expect(JSON.stringify([first, next])).not.toMatch(
+      /withheld-body-canary|withheld\/entry-canary|fixture-host/
+    );
+
+    const lookup = await page({
+      name: "messages",
+      args: { ids: [hidden, "absent/id"] },
+      snapshot,
+    });
+    expect(lookup).toMatchObject({
+      rows: [],
+      omitted: 1,
+      notFound: ["absent/id"],
+      complete: false,
+    });
+    expect(await reader.read({ name: "thread", args: { id: hidden }, snapshot })).toEqual({
+      refusal: "WITHHELD",
+    });
+
+    const narrowPage = await page({
+      name: "history",
+      args: { participants: ["budget-match"] },
+      snapshot,
+    });
+    const widePage = await page({
+      name: "history",
+      args: {
+        participants: [
+          "budget-match",
+          ...Array.from({ length: 49 }, (_, i) => `miss-${i}-${"x".repeat(128)}`),
+        ],
+      },
+      snapshot,
+    });
+    expect(widePage).toEqual(narrowPage);
+    expect(widePage).toMatchObject({
+      complete: true,
+      exhausted: true,
+      rows: [{ body: narrow.body }],
+    });
+    expect(widePage.rows[0]?.writtenT).toBeLessThan(snapshot.t);
+    expect(Object.keys(widePage.rows[0] ?? {}).sort()).toEqual([
+      "body",
+      "from",
+      "id",
+      "to",
+      "ts",
+      "writtenT",
+    ]);
+
+    const args = { ids: [narrow.id, huge.id, replies.id] };
+    const beforeLarge = await page({ name: "messages", args, snapshot });
+    expect(ids(beforeLarge.rows)).toEqual([narrow.id]);
+    expect(beforeLarge.next).toBeDefined();
+    const continuation = { name: "messages", args, snapshot, cursor: beforeLarge.next } as const;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await reader.read(continuation)).toEqual({ refusal: "EVIDENCE_TOO_LARGE" });
+    }
+  });
+
   test("appends between pages and during input resolution leave the snapshot unchanged", async () => {
     const config = await freshLedger("snapshot");
     const late = message({ from: "claude/a", to: ["*"], body: "written mid-resolution" });
@@ -1741,6 +1847,94 @@ describe("transport bounds", () => {
     await Promise.all(requests.map((request) => request.finalised));
     // Every permit came back: four new queries are held at once.
     await poolHolds(4);
+  });
+
+  test("evidence admission bounds waiters, and the saved-query deadline includes the permit wait", async () => {
+    const { bus, edge, history, raw, failure, poolHolds } = await throughBoundary(
+      "evidence-deadline",
+      {
+        testClock: true,
+      }
+    );
+    const project = () =>
+      bus.call("bus_run_query", {
+        name: "history",
+        projection: "message-evidence",
+      });
+    const pinned = [
+      edge.nextPin(stallBeforeHeaders),
+      edge.nextPin(stallMidBody),
+      edge.nextPin(stallBeforeHeaders),
+      edge.nextPin(stallMidBody),
+    ];
+    const native = pinned.map(history);
+    const heldPins = await Promise.all(pinned);
+    const queuedQuery = edge.next(stallMidBody);
+    const projected = [project(), project()];
+    const refused = await Promise.race(projected);
+    expect(refused.isError).toBe(true);
+    expect(JSON.parse(bus.text(refused))).toEqual({ _tag: "SavedQueryRefusal", code: "CAPACITY" });
+    expect(heldPins.every((pin) => !pin.isFinalised())).toBe(true);
+
+    // All four pins reached their own request deadline before the queued evidence read runs.
+    await bus.adjust("10 seconds");
+    for (const call of native) expect(await failure(call)).toBe("Fluree request timed out.");
+    await Promise.all(heldPins.map((pin) => pin.finalised));
+    const heldEvidence = await queuedQuery;
+    const heldOthers = Array.from({ length: 3 }, () => edge.next(stallBeforeHeaders));
+    const others = heldOthers.map(history);
+    const blockers = await Promise.all(heldOthers);
+    const passes = edge.passed();
+    const sentinel = raw();
+    await bus.adjust("4999 millis");
+    expect(edge.passed()).toBe(passes);
+    expect(heldEvidence.isFinalised()).toBe(false);
+
+    // No provider response was released. With three other permits held, the sentinel can
+    // complete only if the evidence call releases its own permit at the outer deadline.
+    await bus.adjust("1 millis");
+    const codes = await Promise.all(
+      projected.map(async (call) => JSON.parse(await failure(call)).code)
+    );
+    expect(codes.sort()).toEqual(["CAPACITY", "DEADLINE"]);
+    await heldEvidence.finalised;
+    expect((await sentinel).isError).toBe(false);
+    expect(blockers.every((request) => !request.isFinalised())).toBe(true);
+    expect((await project()).isError).toBe(false);
+
+    await bus.adjust("5 seconds");
+    for (const call of others) expect(await failure(call)).toBe(DEADLINE);
+    await poolHolds(4);
+  });
+
+  test("evidence reads neither consume unread mail nor change its wake mark", async () => {
+    const { bus } = await throughBoundary("evidence-unread");
+    const recipient = { address: "evidence-reader", session: "evidence-reader-session" };
+    const sender = { address: "evidence-writer", session: "evidence-writer-session" };
+    for (const owner of [recipient, sender]) {
+      await bus.ok("bus_join", { ...owner, runtime: "claude", cwd: "/tmp" });
+    }
+    const body = "Synthetic evidence and unread mail.";
+    const id = "evidence-unread-fixture";
+    await bus.append(message({ id, body, from: sender.address, to: [recipient.address] }));
+    const snapshot = () =>
+      bus.runtime.runPromise(Effect.flatMap(QueryGateway, (gateway) => gateway.pin));
+    const cursor = () =>
+      bus.runtime.runPromise(
+        Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(recipient.address))
+      );
+    const wake = () =>
+      bus.runtime.runPromise(Effect.flatMap(Bus.Bus, (owner) => owner.wake(recipient.session, 1)));
+    expect((await wake()).addresses).toEqual([recipient.address]);
+    const before = await cursor();
+    const pin = await snapshot();
+    const options = { ledger: pin.incarnation, t: pin.head, projection: "message-evidence" };
+    expect((await bus.run("messages", { ids: [id] }, options)).rows).toMatchObject([{ id, body }]);
+    expect((await bus.run("thread", { id }, options)).rows).toMatchObject([{ id, body }]);
+    expect(await snapshot()).toEqual(pin);
+    expect(await cursor()).toEqual(before);
+    expect((await wake()).addresses).toEqual([]);
+    expect((await bus.ok("bus_read", recipient)).messages).toMatchObject([{ id, body }]);
   });
 
   test("an MCP cancel ends its query and frees its permit at once; a lost connection's query ends by the deadline", async () => {

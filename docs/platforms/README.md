@@ -5,6 +5,7 @@ This folder holds the behaviour of Bun, Codex, Claude Code and Fluree that agent
 - [Codex](codex.md): app-servers, the writer lock, unloading and the gap after it, the queue, desktop features and the desktop's IPC router, the wake link, what a resume restores, hooks, ids, the daemon, `codex exec`, what a plugin can carry and how skills load;
 - [Claude Code](claude-code.md): how the desktop app runs it, hooks, session ids, plugin monitors, the inbox socket, channels and plugins;
 - [Fluree](fluree.md): the transaction server, its event stream and tokens, full-text search and query limits.
+- [Owned direct-tool MCP host](mcp-openapi.md): direct schemas, complete result carriers and HTTP admission for the private evidence fixture.
 
 ## Installed versions
 
@@ -38,6 +39,7 @@ Each finding below was observed on the versions named. The last column says what
 
 | Finding | Observed on | Basis | Described in | Recheck when |
 | --- | --- | --- | --- | --- |
+| Direct tools preserve closed schemas and both complete result carriers; the work permit holds across downstream disconnect | Owned `mcp-openapi` 1.0.0 artifact, Bun 1.4.4, MCP SDK 1.32.2 | Verified in development, 2026-11-09, synthetic loopback | [Direct host](mcp-openapi.md#direct-host-and-http-admission) | Host artifact, runtime, transport, result encoding or owned-work budget changes |
 | TOML multiline literal opening newline is trimmed; generated adapter parity must account for it | Bun 1.4.4+38afee6c8 compared with 1.3.14 | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or the native adapter renderer changes |
 | An absolute `bun run` can execute a script's bare `bun` from `PATH` instead of the parent executable | Bun 1.4.4+38afee6c8 with 1.3.14 on `PATH` | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or script runtime selection changes |
 | `--no-env-file` still permits cwd `bunfig.toml` preloads; an explicit sealed `--config` replaces that lookup | Bun 1.4.4+38afee6c8 | Verified in release packaging qualification with a decoy working directory | [Bun](bun.md#runtime-and-toml) | Bun, release launcher/verifier or installer validation invocation changes |
