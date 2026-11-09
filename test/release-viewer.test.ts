@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, test } from "bun:test";
+import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { spawnSync } from "node:child_process";
 import {
   existsSync,
@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   type Launchd,
+  main,
   parsePrinted,
   parseViewerJob,
   pendingStart,
@@ -21,6 +22,7 @@ import {
   removeOwned,
   restoreViewer,
 } from "../scripts/release.ts";
+import { bunWrapper, fakeRelease } from "./release-fixture.ts";
 
 const LABEL = "test.agent-bus.viewer";
 let root: string;
@@ -429,4 +431,88 @@ test("a job loaded without its plist is refused, by rebind and by restore", () =
   ).toThrow("without its plist");
   expect(existsSync(plist)).toBe(false);
   expect(fake.calls).not.toContain("bootout");
+});
+
+// ---------------------------------------------------------------------------
+// The command line, whole: a custom releases root keeps its records and any
+// unfinished start in its own bindings directory, and every step finds them there.
+
+/** A sealed release under `<root>/custom/releases`, and that root's bindings directory. */
+function customRelease() {
+  const releasesRoot = join(root, "custom/releases");
+  mkdirSync(releasesRoot, { recursive: true });
+  const made = fakeRelease(releasesRoot, "1.0.0-cccccccccccc", bunWrapper(join(root, "bun")));
+  return { ...made, bindings: join(root, "custom/bindings") };
+}
+
+function cli(launchd: Launchd, ...args: string[]) {
+  const printed = spyOn(console, "log").mockImplementation(() => {});
+  try {
+    const code = main([...args, "--plist", plist, "--viewer-label", LABEL], { launchd });
+    return { code, output: JSON.parse(String(printed.mock.calls.at(-1)?.[0])) };
+  } finally {
+    printed.mockRestore();
+  }
+}
+
+test("a failed start under a custom releases root is finished by viewer-restore from its record", () => {
+  const custom = customRelease();
+  writeJob(plist, source);
+  const fake = fakeLaunchd(true, { bootstrapFails: 1 });
+  expect(() => cli(fake.launchd, "viewer", custom.dir, "--expect", custom.digest)).toThrow(
+    "it is stopped"
+  );
+  expect(fake.state.loaded).toBe(false);
+  expect(existsSync(pendingStart(custom.bindings, LABEL))).toBe(true);
+  expect(existsSync(bindings)).toBe(false);
+  const [name] = readdirSync(custom.bindings).filter((entry) => entry.endsWith(".plist"));
+  const record = join(custom.bindings, name!);
+
+  // A --bindings naming another directory is refused before anything changes.
+  const before = readFileSync(plist);
+  expect(() =>
+    cli(fake.launchd, "viewer-restore", "--from", record, "--bindings", bindings)
+  ).toThrow("refusing");
+  expect(readFileSync(plist)).toEqual(before);
+  expect(fake.state.loaded).toBe(false);
+
+  // As documented, with no --bindings: the unfinished start is found beside the record.
+  expect(cli(fake.launchd, "viewer-restore", "--from", record)).toEqual({
+    code: 0,
+    output: { viewer: "restored", release: null, restarted: true },
+  });
+  expect(fake.state.loaded).toBe(true);
+  expect(fake.state.job).toEqual(source);
+  expect(existsSync(pendingStart(custom.bindings, LABEL))).toBe(false);
+});
+
+test("the command line refuses a bindings directory or record the release did not use", () => {
+  const custom = customRelease();
+  writeJob(plist, source);
+  const fake = fakeLaunchd(true);
+  const before = readFileSync(plist);
+  expect(() =>
+    cli(fake.launchd, "viewer", custom.dir, "--expect", custom.digest, "--bindings", bindings)
+  ).toThrow("refusing");
+  expect(readFileSync(plist)).toEqual(before);
+  expect(fake.calls).toEqual([]);
+
+  // The same directory spelled another way is that directory.
+  const spelled = join(root, "custom/releases/../bindings");
+  expect(
+    cli(fake.launchd, "viewer", custom.dir, "--expect", custom.digest, "--bindings", spelled).code
+  ).toBe(0);
+
+  // While a release runs, a copy of the record kept elsewhere would miss that release's
+  // unfinished start, so it is refused.
+  const [name] = readdirSync(custom.bindings).filter((entry) => entry.endsWith(".plist"));
+  const copy = join(root, "kept.plist");
+  writeFileSync(copy, readFileSync(join(custom.bindings, name!)));
+  const bound = readFileSync(plist);
+  fake.calls.length = 0;
+  expect(() => cli(fake.launchd, "viewer-restore", "--from", copy)).toThrow(
+    "the bindings directory of the installed release"
+  );
+  expect(readFileSync(plist)).toEqual(bound);
+  expect(fake.calls).toEqual(["print"]);
 });

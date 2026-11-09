@@ -8,10 +8,15 @@
  *   release.ts verify /abs/releases/<id> --expect <manifest sha256> [--bun /abs/approved-bun]
  *   release.ts plugin /abs/releases/<id> --expect <sha256> --marketplace /abs/dir
  *   release.ts viewer /abs/releases/<id> --expect <sha256> [--plist PATH] [--viewer-label LABEL]
- *   release.ts viewer-restore --from /abs/recorded.plist [--plist PATH] [--viewer-label LABEL]
- *     [--bindings DIR]
+ *   release.ts viewer-restore --from /abs/bindings/<record>.plist [--plist PATH]
+ *     [--viewer-label LABEL]
+ *     The viewer steps keep their records and any unfinished start in one directory:
+ *     `bindings/` beside the release's `releases/`, and for a restore the record's own
+ *     directory. `--bindings DIR` is accepted only when it names that same directory.
  *   release.ts status [--launcher PATH] [--marketplace DIR] [--label LABEL] [--viewer-label LABEL]
  *     [--plist PATH] [--bindings DIR] [--claude /abs/claude|none] [--codex /abs/codex|none]
+ *     An unfinished viewer start counts wherever a step could have left it: beside the
+ *     launcher's or the viewer's release, or in --bindings (default ~/.local/share/agent-bus/bindings).
  *     A client found neither by its flag nor on PATH is reported unknown and does not
  *     agree; `none` excludes it on purpose.
  *
@@ -38,7 +43,7 @@ import {
 } from "node:fs";
 import { builtinModules } from "node:module";
 import { homedir, tmpdir } from "node:os";
-import { basename, dirname, isAbsolute, join, normalize, posix } from "node:path";
+import { basename, dirname, isAbsolute, join, normalize, posix, resolve } from "node:path";
 
 export const SCHEMA = "agent-bus-release-v1";
 /**
@@ -749,6 +754,31 @@ export const pendingStart = (bindings: string, label: string) =>
   join(bindings, `${label}.start-pending`);
 
 /**
+ * The one bindings directory of a releases root: `<parent>/bindings` beside
+ * `<parent>/releases`. A viewer step records the previous binding and its
+ * unfinished start there, so every later step finds them from the release alone.
+ */
+export const bindingsOf = (release: string) => join(dirname(dirname(release)), "bindings");
+
+/** A path as the filesystem names it: real where it exists, resolved beneath that. */
+function realPath(path: string): string {
+  const absolute = resolve(path);
+  try {
+    return realpathSync(absolute);
+  } catch {
+    const parent = dirname(absolute);
+    return parent === absolute ? absolute : join(realPath(parent), basename(absolute));
+  }
+}
+
+/** A `--bindings` the caller named must be the directory the rule chose; nothing else is honoured. */
+function requireBindings(chosen: string, named: string | undefined, why: string) {
+  if (named !== undefined && realPath(named) !== realPath(chosen))
+    throw new Error(`--bindings ${named} is not ${chosen}, ${why}; refusing`);
+  return chosen;
+}
+
+/**
  * Restarts the job if it was loaded, or if an earlier step stopped it and did not
  * start it again. A job that was not running stays stopped.
  */
@@ -805,10 +835,16 @@ export function rebindViewer(options: {
   readonly plist: string;
   readonly label: string;
   readonly release: string;
-  readonly bindings: string;
-  readonly launchd?: Launchd;
+  /** Checked only: the bindings directory is always the release's own. */
+  readonly bindings?: string | undefined;
+  readonly launchd?: Launchd | undefined;
 }) {
   const launchd = options.launchd ?? launchctl;
+  const bindings = requireBindings(
+    bindingsOf(options.release),
+    options.bindings,
+    "the bindings directory beside this release"
+  );
   if (!existsSync(options.plist)) {
     if (inspectJob(launchd, options.label).kind === "loaded")
       throw new Error(`a job is loaded as ${options.label} without its plist; refusing`);
@@ -820,7 +856,7 @@ export function rebindViewer(options: {
   const loaded = inspectJob(launchd, options.label);
   requireOwnedLoaded(loaded, options.label, options.plist, bound);
   const root = join(options.release, "app");
-  mkdirSync(options.bindings, { recursive: true });
+  mkdirSync(bindings, { recursive: true });
   // Created exclusively: a rerun within the same second gets the next name (sorting after
   // the first, which viewer-restore takes), and nothing is overwritten.
   const previous = readFileSync(options.plist);
@@ -828,8 +864,8 @@ export function rebindViewer(options: {
   for (let n = 0; record === ""; n++) {
     const name = `viewer.${stamp()}${n === 0 ? "" : `_${String(n).padStart(2, "0")}`}.before-${basename(options.release)}.plist`;
     try {
-      writeFileSync(join(options.bindings, name), previous, { mode: 0o600, flag: "wx" });
-      record = join(options.bindings, name);
+      writeFileSync(join(bindings, name), previous, { mode: 0o600, flag: "wx" });
+      record = join(bindings, name);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST" || n > 100) throw error;
     }
@@ -846,7 +882,7 @@ export function rebindViewer(options: {
     ],
     WorkingDirectory: root,
   });
-  const restarted = restartViewer(launchd, options.label, options.plist, options.bindings, loaded);
+  const restarted = restartViewer(launchd, options.label, options.plist, bindings, loaded);
   return {
     viewer: "rebound" as const,
     previousRelease: releaseOfRoot(bound.root),
@@ -857,14 +893,19 @@ export function rebindViewer(options: {
 
 /**
  * Puts back a recorded viewer plist (for example the source binding) and restarts
- * the job if it was loaded or an earlier step left its start unfinished.
+ * the job if it was loaded or an earlier step left its start unfinished. The
+ * record's own directory is the bindings directory: the unfinished start is
+ * looked for, and recorded, beside it. While the installed job runs a release,
+ * the record must come from that release's bindings directory, where the step
+ * that bound it left any unfinished start.
  */
 export function restoreViewer(options: {
   readonly plist: string;
   readonly label: string;
   readonly from: string;
-  readonly bindings: string;
-  readonly launchd?: Launchd;
+  /** Checked only: the bindings directory is the record's own. */
+  readonly bindings?: string | undefined;
+  readonly launchd?: Launchd | undefined;
 }) {
   const launchd = options.launchd ?? launchctl;
   const job = readPlist(options.from);
@@ -879,8 +920,20 @@ export function restoreViewer(options: {
   if (loaded.kind === "loaded" && installed === null)
     throw new Error(`a job is loaded as ${options.label} without its plist; refusing`);
   if (installed !== null) requireOwnedLoaded(loaded, options.label, options.plist, installed);
+  const bindings = requireBindings(
+    dirname(realPath(options.from)),
+    options.bindings,
+    "the directory holding the record"
+  );
+  if (installed !== null && releaseOfRoot(installed.root) !== null) {
+    const expected = bindingsOf(dirname(installed.root));
+    if (realPath(expected) !== bindings)
+      throw new Error(
+        `the record is not in ${expected}, the bindings directory of the installed release; restore from a record there`
+      );
+  }
   writePlist(options.plist, job);
-  const restarted = restartViewer(launchd, options.label, options.plist, options.bindings, loaded);
+  const restarted = restartViewer(launchd, options.label, options.plist, bindings, loaded);
   return { viewer: "restored" as const, release: releaseOfRoot(bound.root), restarted };
 }
 
@@ -1057,9 +1110,10 @@ export function status(options: {
   readonly label: string;
   readonly viewerLabel: string;
   readonly viewerPlist: string;
-  readonly bindings: string;
+  /** Looked in as well as the bindings directories of the launcher's and the viewer's releases. */
+  readonly bindings?: string | undefined;
   readonly clients: ClientList;
-  readonly launchd?: Launchd;
+  readonly launchd?: Launchd | undefined;
   readonly processOf?: (pid: string) => string | null;
 }) {
   const launchd = options.launchd ?? launchctl;
@@ -1091,7 +1145,17 @@ export function status(options: {
     }
   }
   const viewerJob = jobState(launchd, options.viewerLabel, processOf);
-  const viewerStartPending = existsSync(pendingStart(options.bindings, options.viewerLabel));
+  // A step leaves an unfinished start beside the release it bound, or beside the record it
+  // restored from; for a release that is the same directory. Any of them counts.
+  const viewerRelease =
+    viewerBinding !== null && releaseOfRoot(viewerBinding.root) !== null
+      ? dirname(viewerBinding.root)
+      : null;
+  const viewerStartPending = [
+    release === null ? null : bindingsOf(release),
+    viewerRelease === null ? null : bindingsOf(viewerRelease),
+    options.bindings ?? null,
+  ].some((dir) => dir !== null && existsSync(pendingStart(dir, options.viewerLabel)));
   const claude = clientPlugin(options.clients, "claude");
   const codex = clientPlugin(options.clients, "codex");
   const clientAgrees = (client: ClientPlugin) =>
@@ -1159,7 +1223,11 @@ function flags(argv: ReadonlyArray<string>) {
 
 const dataHome = () => join(homedir(), ".local/share/agent-bus");
 
-function main(argv: ReadonlyArray<string>): number {
+/** The command line, with launchd injectable so its recovery paths can be tested whole. */
+export function main(
+  argv: ReadonlyArray<string>,
+  deps: { readonly launchd?: Launchd } = {}
+): number {
   const [command, ...rest] = argv;
   const { positional, named } = flags(rest);
   const required = (name: string) => {
@@ -1229,7 +1297,8 @@ function main(argv: ReadonlyArray<string>): number {
             plist: viewerPlist(),
             label: viewerLabel(),
             release: verdict.root!,
-            bindings: join(dirname(dirname(verdict.root!)), "bindings"),
+            bindings: named.get("--bindings"),
+            launchd: deps.launchd,
           })
         )
       );
@@ -1242,7 +1311,8 @@ function main(argv: ReadonlyArray<string>): number {
             plist: viewerPlist(),
             label: viewerLabel(),
             from: required("--from"),
-            bindings: bindings(),
+            bindings: named.get("--bindings"),
+            launchd: deps.launchd,
           })
         )
       );
@@ -1258,6 +1328,7 @@ function main(argv: ReadonlyArray<string>): number {
             viewerLabel: viewerLabel(),
             viewerPlist: viewerPlist(),
             bindings: bindings(),
+            launchd: deps.launchd,
             clients: nativeClientList({
               claude: clientBin(named.get("--claude"), Bun.which("claude")),
               codex: clientBin(named.get("--codex"), Bun.which("codex")),

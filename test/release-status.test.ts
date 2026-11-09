@@ -10,6 +10,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  bindingsOf,
   type ClientList,
   clientBin,
   clientPlugin,
@@ -239,4 +240,28 @@ test("an absent viewer agrees only while nothing runs under its label", () => {
   expect(report()).toMatchObject({ viewer: "absent", viewerJob: "absent", agree: true });
   world.viewer = "running";
   expect(report().agree).toBe(false);
+});
+
+test("an unfinished viewer start is found beside the release without naming a directory", () => {
+  expect(bindingsOf(R)).toBe(paths().bindings);
+  mkdirSync(paths().bindings, { recursive: true });
+  writeFileSync(pendingStart(paths().bindings, VIEWER), `${VIEWER}\n`);
+  const unnamed = () =>
+    status({
+      ...paths(),
+      bindings: join(root, "elsewhere"),
+      label: SERVE,
+      viewerLabel: VIEWER,
+      clients,
+      launchd,
+      processOf,
+    });
+  expect(unnamed()).toMatchObject({ viewerStartPending: true, agree: false });
+  // Beside the viewer's release when the launcher names none.
+  rmSync(pendingStart(paths().bindings, VIEWER));
+  writeFileSync(paths().launcher, '#!/bin/sh\nexec /somewhere/else "$@"\n');
+  writeViewerJob(other(R));
+  mkdirSync(bindingsOf(other(R)), { recursive: true });
+  writeFileSync(pendingStart(bindingsOf(other(R)), VIEWER), `${VIEWER}\n`);
+  expect(unnamed().viewerStartPending).toBe(true);
 });
