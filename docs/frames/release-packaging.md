@@ -36,7 +36,7 @@ One managed launcher, `~/.local/bin/agent-bus`, runs `<bun> --no-env-file <prima
 
    Store, configuration and credentials (`~/.agent-bus`) are never in a release and never touched by activation.
 
-4. **The launcher names an exact release, not a moving pointer.** Launcher v2 is `exec '<release>/runtime/bun' --no-env-file '<release>/app/cli.js' "$@"`. Activation then changes exactly one file, the launcher, by atomic rename. The `serve` LaunchAgent's arguments stay the same, so the plist is not rewritten. A hook already waiting keeps the old release's files, which remain in place, and the next hook runs the new one. A `current` symlink would add a second binding with its own race and no benefit.
+4. **The launcher names an exact release, not a moving pointer.** Launcher v2 is `exec '<release>/runtime/bun' --no-env-file --config='<release>/app/bunfig.toml' '<release>/app/cli.js' "$@"` (decision 22 gives the reason for `--config`). Activation then changes exactly one file, the launcher, by atomic rename. The `serve` LaunchAgent's arguments stay the same, so the plist is not rewritten. A hook already waiting keeps the old release's files, which remain in place, and the next hook runs the new one. A `current` symlink would add a second binding with its own race and no benefit.
 
 5. **Plugins come from one stable marketplace.** `<data>/marketplace/` is a real directory holding a fixed `.claude-plugin/marketplace.json`, plus a `plugin` symlink to `../releases/<id>/plugin`. It has to be a real directory because Codex resolves the marketplace root's real path when it is added. A symlink at the top level is therefore invisible to it, which was checked in isolated client homes.
 
@@ -102,8 +102,9 @@ The repository's testing-design steward reviewed this design before any code was
 
 21. **Activation and rollback never restart another owner's session.** Running sessions adopt new hooks and guidance when they next start. Configured equality and refreshed caches do not prove that any running session adopted them.
 
-Two smaller findings are recorded rather than designed here:
-- **Untrusted project settings.** Hooks run in the session's project directory, where Bun reads `bunfig.toml`, even under `--no-env-file`. The current source launcher has the same exposure. A decoy measurement decides whether the launcher should change its working directory.
+22. **No caller's Bun settings reach release code.** Hooks run in the session's project directory. Bun reads `bunfig.toml` from the working directory even under `--no-env-file`, for a file or for stdin, and its `preload` runs that directory's code in the process. The decoy measurement confirmed this for a bare release run; a `bunfig.toml` in the home directory was not loaded. The launcher keeps the caller's working directory, which commands such as `join` rely on. Instead, every release carries a sealed, empty `app/bunfig.toml`, and the launcher and the verifier name it with `--config`, which replaces the working-directory lookup. The installer's inline validation names `/dev/null` for the same reason. The viewer job runs in `app/`, so its lookup finds the sealed file. The source launcher (v1) keeps this exposure; it is the development binding and is not changed here.
+
+One smaller finding is recorded rather than designed here:
 - **Concurrent activation.** Two operators activating at once is out of scope for the first release; activation is single-operator.
 
 ## Qualification
@@ -112,9 +113,11 @@ Qualification follows the accepted frame's complete story. The repository's test
 
 The release must run from a relocated, unpacked copy, with:
 - the staging path absent;
-- an unrelated working directory;
+- an unrelated working directory, holding a `.env` and a `bunfig.toml` whose preload a bare run would load;
 - a clean `HOME` and `PATH`;
 - no install, build or download step.
+
+`bun run qualify:release` checks this for the current commit and is never cached. It builds the commit twice and requires one manifest digest. A marker patched into the worktree's installed dependency must reach a worktree bundle but not the release. It scans every bundle for external imports and every file for the build, checkout and home paths. Then it relocates a copy, verifies it against the original digest, runs the generated launcher from the decoy directory, and requires the relocated viewer to serve every asset byte for byte. The bundle tests run a bundled `serve` beside a source `serve` on one throwaway ledger, and require the same MCP surface and refusals, with the bundled CLI and hooks used end to end.
 
 One disposable rehearsal must cover the sequence source → A → B → A → source. It runs against an authenticated, throwaway Fluree and a native `serve` under disposable labels, ports and data directory. It records store, configuration and credential sameness as booleans only. It must also show:
 - an independent MCP client answering a pinned query and refusing `SERVICE`;
