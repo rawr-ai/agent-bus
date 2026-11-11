@@ -197,6 +197,7 @@ describe("native steward translation", () => {
       "agent-bus-fluree-query-steward",
       "agent-bus-mcp-steward",
       "agent-bus-orpc-steward",
+      "agent-bus-release-operations-steward",
       "agent-bus-simplicity-steward",
       "agent-bus-sparql-steward",
       "agent-bus-state-machine-steward",

@@ -2,6 +2,8 @@
 
 Use this to put a reviewed packaged release or source version into service, verify its bindings and roll back. Restarting alone is in [operate](operate.md); the first source install is in [install](install.md).
 
+For end-to-end release ownership, commission the native `agent-bus-release-operations-steward` as described in [stewards](stewards.md#commission-release-operations). It covers readiness, integration and distribution as well as this runbook's activation, verification and recovery, through post-release communication and retirement.
+
 ## Before you start
 
 The primary checkout stays clean and detached at its approved retained commit, never used for development. It supplies live code only in a source installation; a packaged installation runs immutable release files and retains the checkout for source rollback. Git/Graphite synchronization activates neither. Coordinate with the deployment owner before changing any installed binding, primary or shared branch metadata. Activation is single-operator.
@@ -82,7 +84,7 @@ The binding mechanism, source/release transitions and complete rollback have bee
 
 ### Release rollback and partial failure
 
-Verify the previous release against its retained external digest before using it. Review overlap compatibility: waiting hooks and loaded guidance from the newer release must work with or be refused safely by the older server, which must decode newer stored entries and retain public-query guarding. On downgrade, move guidance first: select the previous marketplace link and refresh clients, restore/rebind an existing viewer, then bind the launcher to the previous release with the same installer command. Repeat step 5 and all applicable checks. Keep newer release files while an old process still uses them. The source → release A → B → A → source mechanism is rehearsed; live rollback remains *Unverified*.
+Verify the previous release against its retained external digest before using it. Review overlap compatibility: waiting hooks and loaded guidance from the newer release must work with or be refused safely by the older server, which must decode newer stored entries and retain public-query guarding. Include any [connected hosted peer](#when-a-hosted-peer-is-connected) in the rollback record, holding its attributed host stopped before a downgrade when the previous Bus cannot satisfy its contract. On downgrade, move guidance first: select the previous marketplace link and refresh clients, restore/rebind an existing viewer, then bind the launcher to the previous release with the same installer command. Repeat step 5 and all applicable checks. Keep newer release files while an old process still uses them. The source → release A → B → A → source mechanism is rehearsed; live rollback remains *Unverified*.
 
 To return to source, first migrate the clients back to the recorded primary marketplace using [install's remove-and-add procedure](install.md#select-the-plugin-marketplace), not a release marketplace link pointed at an unversioned source plugin. Restore the viewer with the trusted release tool's `viewer-restore --from "$record"`, using its recorded source plist. Restore the approved clean, detached source and frozen dependencies with its exact Bun as in [the source lane](#deploy-a-new-version), then use the retained upgraded installer:
 
@@ -134,6 +136,31 @@ This is the supported **source-binding lane**, including source rollback. For an
 7. **Verify the activated pair on each machine.** Confirm exact source commit and tree, installed dependency and Bun identities, launcher contents, LaunchAgent arguments, and the running process entrypoint and start time. Run the restart, query tools and end-to-end checks, then verify a real Claude wake through an owned participant. Do not restart another owner's session to force its hook to rearm. Refresh the plugin only if its source changed. Record every result and its basis; a stand-in hook or a health response alone is insufficient. *Observed live 2026-11-02:* identities, query checks and controlled delivery passed on both; real wakes passed with independent observation on one and a correlated participant receipt on the other.
 
 8. **On failure, restore the complete approved previous state.** Only use a previous source that keeps queries refused or validated, and public response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, query tools, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Rehearsed 2026-11-02*, with the containment check in place of the query tools check: complete source/dependency/runtime rollback under launchd at the same disposable canonical path, with a waiting candidate hook waking against the old server. A live-primary rollback remains *Unverified*.
+
+## When a hosted peer is connected
+
+For an existing approved hosted connection, include the private host in the release and rollback record. Its [separate version binding](../architecture/interfaces.md#release-tools) is not covered by release `status`. A routine rebind inside the existing exposure and identity scope follows that commission; a change to exposure, subject, grant, resource or permissions needs its own decision. The following sequence is *Unverified as an operator procedure*; the binding behavior was checked in [service configuration](../../src/private-web/service.ts) and [per-exchange admission](../../src/private-web/peer.ts), not exercised live by this documentation change.
+
+1. **Record the owned host and its previous binding.** Identify its actual process/service, bundle and runtime, private configuration, selected Bus port/version, connector and tunnel ownership. Set `private_config` to the actual absolute configuration path in that owned service's arguments. Preserve the previous configuration in a protected private backup, along with OAuth, grant, session-key and token-storage state. From a trusted development worktree with frozen dependencies and the pinned Bun first on `PATH`, inspect only the selected non-secret binding:
+
+   ```sh
+   bun --no-env-file -e '
+   import { decodeServiceConfig, readPrivateJson } from "./src/private-web/service.ts";
+   try {
+     const c = decodeServiceConfig(readPrivateJson(process.argv[1]));
+     console.log(JSON.stringify({ binding: c.binding, source: c.sources[c.binding] }));
+   } catch {
+     console.error("Private binding inspection failed.");
+     process.exitCode = 1;
+   }
+   ' "$private_config"
+   ```
+
+   Expected: the selected loopback source agrees with the recorded installation. Keep complete configuration and secrets out of output and public records. Establish the installation's actual restart command and previous bundle before changing anything; there is no generic managed private-host label in the public installer.
+
+2. **Coordinate the Bus transition and private rebind.** Review host compatibility with both the selected and rollback Bus, including the [peer's read byte-admission check](../../src/private-web/peer.ts). Follow the source or package lane above and verify that the target advertises the exact MCP version in the authorized release record. Then update the selected source's `expectedBusVersion` to that recorded identity, preserving unrelated configuration and all identity material. Use the installation's protected structured-config procedure with atomic same-directory replacement, leaving a regular file owned by the current OS user at mode `0600`; retain its protected previous backup. Restart only the attributed private host through its recorded service command. A transition window can refuse hosted exchanges until both identities agree; arrange it with participants rather than claiming uninterrupted service. Keep an existing tunnel unchanged unless the release specifically owns a required change. Expected: the verified Bus target, configuration and restarted private host agree in that order; core release agreement alone does not prove this.
+
+3. **Check the actual hosted consumer and retain complete rollback.** Use an owned native participant and the intended hosted conversation for a fresh correlated exchange, checking that the hosted side reads the native participant's reply from its own inbox. Label what was observed separately from health, identity and fixture results; shared-history visibility and interactive participation do not establish automatic wake, token-refresh behavior or large-result handling. Clean up temporary participants. If the transition fails, restore the compatible Bus cohort, prior selected-source configuration and any changed private bundle through the recorded commands, preserving OAuth and session state, then repeat the actual-client check. When the previous Bus cannot satisfy the retained host's contract, hold the attributed hosted front stopped before downgrading and report it as unavailable rather than claiming a compatible restoration. Expected: the recorded target or restored coherent state is demonstrated; otherwise report the held state and missing evidence. [Fixture qualification](qualify-private-peer.md) does not substitute for this client proof.
 
 ## Query tools
 
@@ -322,7 +349,7 @@ Also refresh the Codex plugin on every machine and Codex home with participants,
 
 ## Recover a diverged primary checkout
 
-Stop if the primary is dirty, attached, divergent or its deployed identity is uncertain. Preserve unfamiliar work without overwriting it and consult the deployment owner. A merge-base or reflog can help investigate, but neither proves the reviewed release decision. Do not select current `main` or an arbitrary older commit as a recovery target. Only after identifying the exact reviewed source and runtime and ensuring public-query containment, use the complete rollback in [Deploy a new version](#deploy-a-new-version). *Unverified* for the revised procedure.
+Stop if the primary is dirty, attached, divergent or its deployed identity is uncertain. Preserve unfamiliar work without overwriting it and contact its actual owner when ownership or intent is unclear. A merge-base or reflog can help investigate, but neither proves the reviewed release decision. Do not select current `main` or an arbitrary older commit as a recovery target. Only after identifying the exact reviewed source and runtime and ensuring public-query containment, use the complete rollback in [Deploy a new version](#deploy-a-new-version). *Unverified* for the revised procedure.
 
 ## If it fails
 
@@ -331,5 +358,6 @@ Stop if the primary is dirty, attached, divergent or its deployed identity is un
 | Dirty, attached or divergent primary, or unexpected source identity | Stop and [recover the checkout](#recover-a-diverged-primary-checkout); preserve the work. |
 | Foreign or modified launcher refused | Stop before replacing it. Establish ownership and resolve it explicitly; do not bypass the installer check. |
 | Release verification fails, `agree` is false/unknown, or a viewer start is pending | Do not advance guidance or delete markers. Follow [release rollback and partial failure](#release-rollback-and-partial-failure); status exit 0 is not agreement. |
+| Native release checks pass but a connected hosted peer refuses calls | Check the selected private source's exact version and attributed host binding; follow [the hosted transition](#when-a-hosted-peer-is-connected). Preserve identity material and resolve the affected operation rather than widening access. |
 | Launcher or plist rename or launchd bootstrap fails | The two file replacements are atomic individually, not together. Inspect both files and the job, then rerun the qualified narrow installer for the intended source and runtime or complete the approved rollback; do not assume either pair is active. *Unverified* on launchd. |
 | Health, process identity, query tools or delivery fails | Keep the affected `serve` stopped if query guarding is uncertain; otherwise use the complete approved rollback above. Consult [operate](operate.md) and [recover](recover.md) for diagnosis. |
