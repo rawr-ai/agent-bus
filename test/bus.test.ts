@@ -50,6 +50,7 @@ import { MAX_PAGES } from "../src/timing.ts";
 import { type FlureeServer, flureeServer, ledgerOn } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import { legacyTopicServer } from "./legacy-topic-server.ts";
+import { spawnSupervised } from "./supervised.ts";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -2889,30 +2890,54 @@ describe("one session per address", () => {
     ]);
   });
 
-  const cliIn = (dir: string, args: ReadonlyArray<string>) =>
-    Bun.spawnSync([process.execPath, join(import.meta.dir, "../src/bin.ts"), ...args], {
-      stdin: "ignore",
-      env: { ...process.env, AGENT_BUS_PORT: "9", AGENT_BUS_DIR: dir },
-      timeout: 10_000,
-    });
-  const outcome = (run: ReturnType<typeof cliIn>) => [
-    run.exitCode,
-    run.stdout.toString(),
-    run.stderr.toString(),
-  ];
-
-  test("serve won't start without a Fluree ledger in config.json", () => {
-    const missing = tempDir();
-    const empty = tempDir();
-    writeFileSync(join(empty, "config.json"), "{}");
-    for (const dir of [missing, empty]) {
-      expect(outcome(cliIn(dir, ["serve"]))).toEqual([
-        1,
-        "",
-        `${join(dir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }\n`,
+  const serve = async (dir: string) => {
+    const supervisor = spawnSupervised(
+      [process.execPath, join(import.meta.dir, "../src/bin.ts"), "serve"],
+      {
+        env: { ...process.env, AGENT_BUS_PORT: "9", AGENT_BUS_DIR: dir },
+        stderr: "pipe",
+      }
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      const output = Promise.all([
+        supervisor.exited,
+        new Response(supervisor.stdout).text(),
+        new Response(supervisor.stderr).text(),
       ]);
+      return await Promise.race([
+        output,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("serve did not exit within 10000ms")), 10_000);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      if (supervisor.exitCode === null && supervisor.signalCode === null)
+        supervisor.kill("SIGTERM");
+      await supervisor.exited;
     }
-  });
+  };
+
+  test("serve won't start without a Fluree ledger in config.json", async () => {
+    const dirs: string[] = [];
+    try {
+      const missing = tempDir();
+      dirs.push(missing);
+      const empty = tempDir();
+      dirs.push(empty);
+      writeFileSync(join(empty, "config.json"), "{}");
+      for (const dir of dirs) {
+        expect(await serve(dir)).toEqual([
+          1,
+          "",
+          `${join(dir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }\n`,
+        ]);
+      }
+    } finally {
+      for (const dir of dirs) rmSync(dir, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   test("the owner reconnects and rejoins with its mail; a left address is free, without it", () =>
     run(

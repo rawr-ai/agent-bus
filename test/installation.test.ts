@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { BunFileSystem } from "@effect/platform-bun";
 import { Effect, type FileSystem } from "effect";
 import { initializeInstallation, loadInstallation } from "../src/installation.ts";
+import { spawnSupervised } from "./supervised.ts";
 
 const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
   Effect.runPromise(Effect.provide(effect, BunFileSystem.layer));
@@ -19,6 +20,32 @@ const cli = (dir: string, ...args: string[]) => {
     stdout: result.stdout.toString(),
     stderr: result.stderr.toString(),
   };
+};
+
+const serve = async (dir: string) => {
+  const supervisor = spawnSupervised(
+    [process.execPath, "--no-env-file", join(import.meta.dir, "../src/bin.ts"), "serve"],
+    { env: { ...process.env, AGENT_BUS_DIR: dir, AGENT_BUS_PORT: "9" }, stderr: "pipe" }
+  );
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const output = Promise.all([
+      supervisor.exited,
+      new Response(supervisor.stdout).text(),
+      new Response(supervisor.stderr).text(),
+    ]);
+    const [code, stdout, stderr] = await Promise.race([
+      output,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("serve did not exit within 5000ms")), 5_000);
+      }),
+    ]);
+    return { code, stdout, stderr };
+  } finally {
+    clearTimeout(timer);
+    if (supervisor.exitCode === null && supervisor.signalCode === null) supervisor.kill("SIGTERM");
+    await supervisor.exited;
+  }
 };
 
 test("explicit initialization is idempotent, race safe and distinct by state directory", async () => {
@@ -48,7 +75,7 @@ test("serve never creates a missing identity, and neither command overwrites inv
       JSON.stringify({ fluree: { url: "http://127.0.0.1:9", ledger: "fixture:main" } })
     );
     await mkdir(join(dir, "fluree-cursors"));
-    const missing = cli(dir, "serve");
+    const missing = await serve(dir);
     expect(missing).toMatchObject({ code: 1, stdout: "" });
     expect(missing.stderr).toContain("Missing installation-id.");
     expect(await Bun.file(identity).exists()).toBe(false);
@@ -56,7 +83,7 @@ test("serve never creates a missing identity, and neither command overwrites inv
     const malformed = "do-not-print-this-stored-value\n";
     await writeFile(identity, malformed);
     for (const command of ["serve", "initialize-installation"]) {
-      const result = cli(dir, command);
+      const result = command === "serve" ? await serve(dir) : cli(dir, command);
       expect(result).toMatchObject({ code: 1, stdout: "" });
       expect(result.stderr).toContain("Cannot read a valid installation-id.");
       expect(result.stderr).not.toContain(malformed.trim());
@@ -65,4 +92,4 @@ test("serve never creates a missing identity, and neither command overwrites inv
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
-});
+}, 30_000);
