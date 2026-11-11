@@ -9,6 +9,7 @@ The contract of every way into the bus: the MCP tools and their parameters, anno
 | Way in | What it is | Who uses it |
 | --- | --- | --- |
 | MCP over Streamable HTTP | The tools below, at `http://127.0.0.1:<port>/mcp` on loopback, served by `serve` | Claude and Codex sessions |
+| Private hosted peer | A separate authenticated bridge forwards the participation and lookup tools except `bus_wake` to loopback `serve` | Authorized interactive ChatGPT conversations; [connections](connections.md#private-hosted-peer) |
 | `agent-bus` CLI | `join`, `publish` and `peers` from a shell, each an MCP client of the local `serve`; and `serve` itself | People, scripts and shell-only agents |
 | Plugin hook | `agent-bus claude-wake`, a CLI command that calls `bus_wake` and wakes a Claude session | Claude Code, through the agent-bus plugin |
 | Compact hook | `agent-bus compact-context --runtime`, with claude or codex, a synchronous ownership observation and guidance route | Native sessions through their plugin compact hook |
@@ -57,6 +58,8 @@ Unavailable, timeout, cancellation and internal failure have safe public outcome
 ### MCP tools
 
 Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas, where every parameter and every result field has a description; the tool descriptions and these descriptions own each call's contract, and this page is the reference that lists them in one place. "Required" is what the bus needs, which differs from the schema in one case: `session` is optional in every schema that has it, so that a call without it gets the bus's refusal, which says what to pass, instead of a schema error. `test/docs-coverage.test.ts` checks every table below against the registered tools: the parameters, their types, bounds and requirement, and the result fields.
+
+The hosted peer projects these contracts rather than exposing native ownership inputs: it binds `session` to the verified principal and conversation, sets runtime `other` and uses the bridge's actual working directory on joins and takeovers. It accepts only `chatgpt/` addresses for those operations. `bus_orient` still accepts an optional `cwd` filter; the bridge directory is not the conversation's project directory. The peer does not expose `bus_wake` or provide automatic wake or compact recovery. Its bounded consuming read and failure semantics are in [connections](connections.md#rules).
 
 | Tool | Purpose |
 | --- | --- |
@@ -192,7 +195,7 @@ Returns `status`, `cut`, `currentHeadT`, `evaluatedAt` and `catalogueVersion` wh
 
 Returns `messages`, possibly empty. Each message has `id`, `ts`, `from`, `to`, `kind`, `body` and, when set, `subject`, `replyTo` and `origin` (`host`, and when known `cwd`, `repo` and `branch`: where it was written). These are explicit public fields, not the stored entry: nested `presence`, session claims, wake state and extra internal objects are omitted, including on legacy ordinary messages. Presence entries are not delivered as mail. It marks what it returns read before the response is sent. MCP text and structured content carry the same projected object.
 
-With either limit, the result is the oldest whole messages that satisfy the limits, ending only at a complete commit group. Remaining messages stay unread. If the oldest unread commit cannot fit, the call is refused before moving the cursor. The hosted candidate supplies a 4 MiB carrier limit; it is not a promise that a successfully admitted response reaches the caller.
+With either limit, the result is the oldest whole messages that satisfy the limits, ending only at a complete commit group. Remaining messages stay unread. If the oldest unread commit cannot fit, the call is refused before moving the cursor. The hosted peer supplies a 4 MiB carrier limit; it is not a promise that a successfully admitted response reaches the caller.
 
 #### `bus_wait`
 

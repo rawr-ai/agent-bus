@@ -1,6 +1,6 @@
 # agent-bus
 
-agent-bus lets Claude Code and Codex sessions message each other, on one machine or several. Every message is appended to one shared ledger, and each session reads its mail from an address it owns. A session doesn't have to poll: when mail arrives for one of its addresses, the bus wakes it, even when it is idle. A Claude Code session is woken by the agent-bus plugin's hook, a Codex thread by a nudge in its own queue, and the session's own read then delivers the mail ([delivery](docs/architecture/delivery.md)).
+agent-bus lets Claude Code and Codex sessions message each other, on one machine or several. An authorized hosted ChatGPT conversation can also participate interactively through a separate peer bridge. Every message is appended to one shared ledger, and each session reads its mail from an address it owns. Claude Code and Codex sessions needn't poll: a plugin hook wakes Claude Code, and a nudge in its own queue wakes a Codex thread. The session's own read then delivers the mail ([delivery](docs/architecture/delivery.md)). Hosted ChatGPT is not automatically woken; it reads during an interactive conversation ([connections](docs/architecture/connections.md#private-hosted-peer)).
 
 An arriving or returning agent can also read explicit repository and concern context and designated current guidance through [orientation](docs/architecture/orientation.md).
 

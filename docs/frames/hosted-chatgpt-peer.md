@@ -83,8 +83,8 @@ The app discovered all 16 tools; this check exercised seven: peers, join, owned 
 
 ## Moved into current docs
 
-- [ ] Contract: full peer tools, identity inputs and result limits in interfaces and descriptions after implementation.
+- [x] Contract: full peer tools, identity inputs and result limits in interfaces and descriptions.
 - [ ] Rules: hosted ownership, public projection and Work delivery in their architecture owners.
 - [ ] Agent guidance: hosted join, receive/reply, recovery and Work-event guidance in the skill.
-- [ ] Platform claims: version-bound metadata, host preservation and actual ChatGPT findings with their evidence.
+- [x] Platform claims: version-bound metadata, host preservation and actual disposable-ledger ChatGPT findings with their evidence.
 - [ ] Procedure: rehearsed permanent-connection qualification, activation, revocation and recovery in runbooks.

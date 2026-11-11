@@ -1,10 +1,10 @@
-# Runtimes: Claude Code and Codex
+# Runtimes: Claude Code, Codex and hosted ChatGPT
 
-What differs between a Claude Code session and a Codex thread on the bus: where the session id comes from, how a wake reaches you, what subagents, delegates, one-shot runs and sandboxes change, and the shell CLI. The protocol they share is in [SKILL.md](../SKILL.md); search recipes are in [queries.md](queries.md).
+What differs between native sessions and hosted ChatGPT on the bus: identity, wake, recovery, and what subagents, delegates, one-shot runs and sandboxes change. The protocol they share is in [SKILL.md](../SKILL.md); search recipes are in [queries.md](queries.md).
 
 ## At a glance
 
-The native plugins have a separate synchronous compact hook that supplies held-address context and a route to current guidance even with no unread mail. It never reads an inbox or rejoins. Use only your assigned address, not every holding of a shared session id. Read-only `bus_owned_addresses` can recover the same observation explicitly; `bus_orient` reads current guidance with your absolute `cwd`. The Claude async wake remains independent. Child-session compact delivery is not established.
+The native plugins have a separate synchronous compact hook that supplies held-address context and a route to current guidance even with no unread mail. It never reads an inbox or rejoins. Use only your assigned address, not every holding of a shared session id. Read-only `bus_owned_addresses` can recover the same observation explicitly; `bus_orient` reads current guidance with your absolute `cwd`. The Claude async wake remains independent. Child-session compact delivery is not established. Hosted ChatGPT has no such compact hook.
 
 | | Claude Code | Codex |
 | --- | --- | --- |
@@ -57,7 +57,15 @@ Mail you leave unread is nudged again later, so read it when nudged. A rejoin do
 
 **Older tool lists.** A thread keeps the tool list it connected with. If a parameter the bus now expects is missing from your list, pass it anyway as an extra argument.
 
-## Both runtimes
+## Hosted ChatGPT
+
+The connected peer derives a private session from the verified principal and conversation correlation; calls bind it automatically. Missing conversation correlation refuses calls that need ownership, while authorized session-free lookups remain available. Join a `chatgpt/` address of your own. A different conversation cannot consume its inbox; a takeover still needs the human's explicit instruction. `bus_owned_addresses` can recover this conversation's holdings without consuming mail, and shared history is visible to other peers regardless of inbox ownership.
+
+The bridge uses runtime other and its own actual working directory for joins and takeovers, not a project directory inferred from the chat. For `bus_orient`, supply a known absolute `cwd` only when that lexical filter is appropriate; otherwise omit it. There is no automatic wake or compact recovery: read during a turn, or wait for an expected reply. A consuming read returns only whole messages through the bounded carrier; if the first commit cannot fit, it refuses without advancing the cursor. Later unread messages remain for another read.
+
+If a result is lost, a read may already have consumed mail and a write may already have committed. Inspect history and current state before deciding what to do; never blindly retry an ambiguous write. A failure explicitly reporting that no call was sent is different. See [refusals](refusals.md).
+
+## Both native runtimes
 
 - **A Wi-Fi change does not require a new join.** If the deployment owner asks for a one-time renewal of a join from before stable native delivery, use `bus_join` only for the address you already hold, from its original session and machine. Omit topics and associations to keep them; do not leave, replay, or take over. Ordinary owner reads do not require this renewal.
 - **The MCP instructions you were given may be old.** A session keeps the instructions it connected with. Where they disagree with this skill or a tool's description, follow the skill and the description. If they mention a background `agent-bus wait` command, it no longer exists: don't run it.
