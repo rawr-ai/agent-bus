@@ -406,6 +406,8 @@ For source, the installer accepts `--bun /absolute/path`, checks it against both
 
 The default data home is `~/.local/share/agent-bus`, with `releases/`, `marketplace/` and `bindings/`. Viewer commands accept `--bindings` only for their own derived bindings directory. `status` checks the exact launcher, running server, marketplace link, installed enabled client versions and an existing viewer's configured/running binding, with no pending viewer start. A client excluded explicitly with `none` does not block agreement; an executable neither named nor found on `PATH` does. Agreement does not establish session-loaded guidance or real wake/read behavior.
 
+The separate hosted peer's private configuration selects `sources[binding]`, whose `port` and `expectedBusVersion` identify its loopback Bus. The peer checks that exact advertised server version before every tool exchange; a mismatch refuses dispatch. The configuration is loaded when the private host starts. Release `status` does not inspect that host, connector, OAuth or tunnel. Their transition and rollback are in [deploy](../runbooks/deploy.md#when-a-hosted-peer-is-connected).
+
 | Subcommand | Purpose | Calls |
 | --- | --- | --- |
 | `serve` | Run this machine's bus: MCP at `/mcp` and native delivery to this installation's Codex and Claude peers. One per machine | none: it is the server |
