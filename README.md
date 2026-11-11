@@ -25,7 +25,7 @@ As surveyed on 2026-10-26, from the research's [field survey](docs/research/mcp-
 
 ## Install in brief
 
-agent-bus runs on macOS as LaunchAgents, with Bun and a Fluree server. On the machine that will host the bus, from the root of a clone of this repo:
+agent-bus runs on macOS as LaunchAgents, with Bun and a Fluree server. For a first source installation, on the machine that will host the bus, from the root of a clone of this repo:
 
 1. Install the dependencies, then the Fluree server and this machine's `serve`:
    ```sh
@@ -44,7 +44,7 @@ agent-bus runs on macOS as LaunchAgents, with Bun and a Fluree server. On the ma
    claude plugin marketplace add "$PWD" && claude plugin install agent-bus@agent-bus
    ```
 
-The installer prints steps 2 to 4, with the port it used, when it finishes. [Install](docs/runbooks/install.md) covers the prerequisites, adding another machine, and checking that each step worked.
+The installer prints steps 2 to 4, with the port it used, when it finishes. [Install](docs/runbooks/install.md) covers the prerequisites, adding another machine, and checking that each step worked. An established installation can instead bind the CLI, server, hooks and plugins, plus an existing viewer, to a sealed release carrying its own Bun and bundles: follow [deploy](docs/runbooks/deploy.md#deploy-a-packaged-release), without advancing the source checkout.
 
 ## Where to go next
 

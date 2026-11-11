@@ -8,9 +8,9 @@ Earlier full-install rehearsal marks refer to the previous installer. The manage
 
 ## Before you start
 
-Install from the canonical checkout that `serve` will run, which stays clean and detached at its approved deployed commit ([deploy](deploy.md#before-you-start)). The installer binds a managed launcher to that checkout and an exact Bun executable; moving either requires a controlled rebinding.
+The full first-install and add-machine procedures below are the supported **source bootstrap**: install from the approved canonical checkout that `serve` will run, kept clean and detached ([deploy](deploy.md#before-you-start)). This binds the managed launcher to that checkout and an exact Bun executable; moving either requires controlled rebinding.
 
-The installer also has a `--release` mode that binds the launcher to a sealed, versioned release instead of the checkout. It needs this installation's `installation-id` already in place and creates none. It is qualified and rehearsed under disposable launchd jobs but not activated on either machine; until an activation decision names a release, install and deploy from the checkout as this page describes.
+An established installation can instead use [packaged deployment](deploy.md#deploy-a-packaged-release), now activated on the paired installations: its launcher binds a sealed release's own Bun, CLI/server and hooks, not the checkout. It needs this installation's existing valid `installation-id` and creates none. It does not provision Fluree or a tunnel. Keep the source bootstrap and rollback material; a release is not a replacement for first provisioning. Qualification and live-client limits are recorded separately in the deploy procedure.
 
 What each machine needs:
 
@@ -164,13 +164,42 @@ codex mcp get agent-bus
 
 Expected: `Status: ✔ Connected` and the URL for Claude Code; `enabled: true` and the URL for Codex. A session picks the server up when it next starts. The `get` commands: *Checked read-only 2026-10-28*. *Observed live 2026-11-05:* the Claude `add` above registered the endpoint; the subsequent `get` reported `Status: ✔ Connected`, and the next client connection exposed the bus tools. The Codex `add` has not been run; its syntax is from `codex mcp add --help`: *Unverified*
 
-## Install the Claude plugin
+## Select the plugin marketplace
 
-Claude sessions are woken by the agent-bus plugin, which this repo serves as a local marketplace. Install it once per machine, after the installer, from the checkout `serve` runs:
+MCP registration supplies tools, not the skill or hooks. Choose the marketplace for the installed binding before installing either native plugin. For a source bootstrap, from the approved checkout:
 
 ```sh
-claude plugin marketplace add "$PWD"
-claude plugin install agent-bus@agent-bus
+MARKETPLACE_ROOT="$PWD"
+BUS_PLUGIN_ROOT="$PWD/plugin"
+```
+
+For a release, after deploy has verified the new server and selected its plugin link:
+
+```sh
+MARKETPLACE_ROOT="$HOME/.local/share/agent-bus/marketplace"
+BUS_PLUGIN_ROOT="$MARKETPLACE_ROOT/plugin"
+```
+
+The release marketplace root must be a real directory, not a symlink; only its `plugin` link moves. Inspect each client's marketplace list first. If `agent-bus` already names this root, leave it registered and use the steady-state update below. If it names a foreign or uncertain source, stop. *Unverified as this exact shell procedure; source and release registration/refresh mechanisms have been exercised in the disposable client rehearsal and paired activation.*
+
+For the **first owned source → release migration**, or its source rollback, preserve the existing client configuration and ownership record, then remove only this plugin/marketplace before adding the selected root using the client-specific sections below:
+
+```sh
+claude plugin uninstall agent-bus@agent-bus --scope user --keep-data
+claude plugin marketplace remove agent-bus
+"$CODEX_BIN" plugin remove agent-bus@agent-bus --json
+"$CODEX_BIN" plugin marketplace remove agent-bus --json
+```
+
+Set `CODEX_BIN` to the native executable checked in [the Codex section](#install-the-codex-skill-plugin) first; use the intended client homes consistently. Expected: only the owned `agent-bus` registration is removed, Claude persistent plugin data is retained, then both clients install from `MARKETPLACE_ROOT`. Do not run removal for a first install or routine release update. On source rollback select the recorded primary root itself; do not point the release link at the unversioned source plugin. *Unverified as this exact manual migration; native command flags checked read-only 2026-11-11. The rehearsal exercised native remove-and-add in disposable client homes.*
+
+## Install the Claude plugin
+
+Claude sessions are woken by the agent-bus plugin. Install it once per machine, after the server, from [the selected marketplace](#select-the-plugin-marketplace). Skip `marketplace add` when that exact root is already registered:
+
+```sh
+claude plugin marketplace add "$MARKETPLACE_ROOT"
+claude plugin install agent-bus@agent-bus --scope user
 ```
 
 Check:
@@ -180,7 +209,7 @@ claude plugin marketplace list
 claude plugin list
 ```
 
-Expected: a marketplace `agent-bus` whose source is the checkout, and `agent-bus@agent-bus` with `Status: ✔ enabled`. Sessions get the plugin when they next start, or with `/reload-plugins` (that it loads the hook into a running session wasn't probed: [platforms: Claude Code](../platforms/claude-code.md#plugins)). The list commands: *Checked read-only 2026-10-28*. `marketplace add` and `install` change the owner's Claude configuration, so they were not run; their syntax is from `claude plugin --help`: *Unverified*
+Expected: marketplace `agent-bus` names the selected root and `agent-bus@agent-bus` is enabled; for a release, its version equals the selected release id. Sessions get the plugin when they next start, or with `/reload-plugins` (loaded-session behavior is bounded by [platforms: Claude Code](../platforms/claude-code.md#plugins)). The original source list commands were *Checked read-only 2026-10-28*; release configured agreement was *Checked read-only 2026-11-11*. This does not establish fresh skill loading or wake in every client.
 
 Check that the installed copy holds the skill as well as the manifest, in the newest cache directory (read-only):
 
@@ -193,8 +222,8 @@ ls "$newest/.claude-plugin/plugin.json" "$newest/skills/agent-bus/SKILL.md" "$ne
 Expected: the manifest and `SKILL.md` listed, then `queries.md` and `runtimes.md`; the directory is the one named by the `Version` that `claude plugin list` shows. Don't pick the newest directory by time: an update writes an `.orphaned_at` marker into the old one, which makes it the newest. A plugin installed before the skill shipped has only the manifest, and `ls` says `No such file or directory` for the skill until the plugin is updated. *Rehearsed 2026-10-28* on a copy of `plugin/` laid out as the cache; the live cache was made before the skill shipped and correctly lacked it (*Checked read-only 2026-10-28*).
 
 What to know about it:
-- **The plugin is a hooks manifest and the agent skill:** `plugin/.claude-plugin/plugin.json` (three async wake arming events and synchronous compact recovery) and `plugin/skills/agent-bus/` (`SKILL.md` and `references/`, with `queries.md` and `runtimes.md`). Claude Code copies all of it into its cache ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Both wake and compact commands run the checkout, but the skill is read from the cache, so a change to the skill needs a plugin update.
-- **Its hooks run the checkout,** through the managed launcher: `claude-wake` for mail and `compact-context --runtime claude` for ownership context. A deploy therefore reaches the hook at once, with no plugin update ([delivery](../architecture/delivery.md#claude-code-sessions)).
+- **The plugin is hook manifests and the agent skill:** `plugin/.claude-plugin/plugin.json` (three async wake arming events and synchronous compact recovery) and `plugin/skills/agent-bus/`. Claude Code maintains a cache copy; local-marketplace skill loading can also name its source ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Refresh a changed skill through the native client rather than assuming cache or loaded-session adoption.
+- **Its hooks run the managed launcher:** `claude-wake` for mail and `compact-context --runtime claude` for ownership context. The launcher selects source or a release; a newly started hook uses that binding, while an already-waiting hook keeps its loaded code until it rearms ([delivery](../architecture/delivery.md#claude-code-sessions)).
 - **Both commands use the managed launcher's exact Bun**, not the `PATH` inherited from Claude Code.
 - **It needs the same `AGENT_BUS_PORT` as `serve`,** or neither set.
 - **Deploy `serve` before the plugin,** so the hook finds `bus_wake` ([deploy](deploy.md#when-the-plugin-changed)).
@@ -205,18 +234,18 @@ The package now includes native compact-only ownership recovery for Claude and C
 
 After owner-controlled activation, start an owned native session with its normal settings and installed plugins. In Codex use `/hooks` to review and trust the exact new compact hook; installation alone is not trust. Join an assigned disposable address and drain its own inbox, then use one manual `/compact` and a neutral continuation. Inspect that session's native record for the compact boundary and complete shipped hook context with its own address and cwd: Codex marks it as `hooks.additional_context` with hook provenance; Claude records `hook_success` for `SessionStart:compact`. Verify that the session uses current guidance through `bus_orient` with absolute cwd without rejoining or reading another inbox. Remembered identity or a successful lookup alone does not prove hook delivery. Keep Claude's existing async wake hooks in the composition; test a subsequent independently sent message without a check-mail prompt when qualifying the wake. Leave the assigned address and close only that owned session. Do not exclude user settings, use strict MCP isolation, or bypass hook trust. Preserve the prior source/dependency/plugin cohort and exact trust-change provenance for rollback. Expected: complete native hook context and assigned-address continuity, with the separately tested Claude wake. *Rehearsed 2026-11-05* in owned root-session CLI trials with normal settings; automatic compaction, children and multiple holdings were not qualified. The [Codex](../platforms/codex.md#hooks) and [Claude Code](../platforms/claude-code.md#hooks) pages record the exact limits.
 
-Only a change under `plugin/` or `.claude-plugin/` needs this:
+For source, a change under `plugin/` or `.claude-plugin/` needs this; for a release, refresh after every selected link change, even when the skill text is unchanged:
 
 ```sh
 claude plugin marketplace update agent-bus
 claude plugin update agent-bus@agent-bus
 ```
 
-Then repeat the cache check above: the new directory must hold `skills/agent-bus/SKILL.md` and `references/`. Sessions get the change when they next start, or with `/reload-plugins`: `claude plugin update --help` says a restart is required to apply it. *Unverified*: it would change the owner's installed plugin.
+Then repeat the cache check above and compare the complete copy with `BUS_PLUGIN_ROOT`; the directory must hold `skills/agent-bus/SKILL.md` and `references/`. Sessions get the change when they next start, or with `/reload-plugins`: `claude plugin update --help` says a restart is required to apply it. *Unverified as this revised operator sequence; paired release inventory agreement does not prove a running session refreshed.*
 
 ## Install the Codex skill plugin
 
-MCP registration supplies tools, not the agent skill. Install the complete plugin for each Codex home on each machine that runs bus participants, from that machine's deployed primary checkout. Use the native executable for the client being configured; the desktop bundle's path is shown below. Check its help before proceeding rather than assuming the shell's `codex` is the same executable ([platforms: Codex](../platforms/codex.md#the-bundled-cli-and-private-app-servers)).
+Install the complete plugin for each Codex home on each machine that runs bus participants, from [the selected marketplace](#select-the-plugin-marketplace). Use the native executable for the client being configured; the desktop bundle's path is shown below. Check its help before proceeding rather than assuming the shell's `codex` is the same executable ([platforms: Codex](../platforms/codex.md#the-bundled-cli-and-private-app-servers)).
 
 ```sh
 CODEX_BIN=/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex
@@ -224,17 +253,17 @@ CODEX_BIN=/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Co
 "$CODEX_BIN" plugin marketplace list --json
 ```
 
-Expected: native plugin commands and the configured marketplaces. If `agent-bus` already names this deployed checkout, skip the next `marketplace add`; if it names another source, stop and reconcile that ownership before replacing it. These commands use the current user's Codex home; when configuring another home, pass its explicit `CODEX_HOME` consistently. *Checked read-only 2026-11-01* on both machines.
+Expected: native plugin commands and the configured marketplaces. If `agent-bus` already names `MARKETPLACE_ROOT`, skip the next `marketplace add`; otherwise follow the ownership and first-migration checks above. These commands use the current user's Codex home; when configuring another home, pass its explicit `CODEX_HOME` consistently. *Checked read-only 2026-11-01* on both machines for source; release inventory agreement *Checked read-only 2026-11-11*.
 
 ```sh
-"$CODEX_BIN" plugin marketplace add "$PWD" --json
+"$CODEX_BIN" plugin marketplace add "$MARKETPLACE_ROOT" --json
 "$CODEX_BIN" plugin add agent-bus@agent-bus --json
 "$CODEX_BIN" plugin list --marketplace agent-bus --json
 ```
 
-Expected: `agent-bus@agent-bus` is installed and enabled, sourced from this checkout's `plugin/`. The native `plugin add` also refreshes an existing incomplete copy. *Observed live 2026-11-01:* one machine's manifest-only copy was refreshed; the other machine's marketplace and plugin were installed. Other plugin and marketplace settings stayed unchanged; the resulting inventory was *Checked read-only 2026-11-01*.
+Expected: `agent-bus@agent-bus` is installed and enabled from `BUS_PLUGIN_ROOT`, at the release id when release-bound. Native `plugin add` also refreshes an existing copy and is the steady-state Codex update after a release link changes. *Observed live 2026-11-01* for source installation and repair; release inventory agreement *Checked read-only 2026-11-11*.
 
-Select the installed cache from that result's version, not its `source.path` (which names the source checkout). Check the whole installed plugin against deployed source, then render a fresh prompt without calling a model:
+Select the installed cache from that result's version, not its `source.path` (which names the plugin source). Check the whole installed plugin against the selected tree, then render a fresh prompt without calling a model:
 
 ```sh
 version=$("$CODEX_BIN" plugin list --marketplace agent-bus --json | bun -e '
@@ -247,7 +276,7 @@ console.log(plugin.version);
 ')
 installed="${CODEX_HOME:-$HOME/.codex}/plugins/cache/agent-bus/agent-bus/$version"
 ls "$installed/.claude-plugin/plugin.json" "$installed/skills/agent-bus/SKILL.md" "$installed/skills/agent-bus/references"
-diff -r plugin "$installed"
+diff -r "$BUS_PLUGIN_ROOT" "$installed"
 "$CODEX_BIN" debug prompt-input | grep -o 'agent-bus:agent-bus'
 ```
 

@@ -1,20 +1,103 @@
 # Deploy
 
-Use this to put a new version of agent-bus into service: the primary-checkout rule, fast-forward, restart, verify and roll back. Restarting alone is in [operate](operate.md); the first install is in [install](install.md).
+Use this to put a reviewed packaged release or source version into service, verify its bindings and roll back. Restarting alone is in [operate](operate.md); the first source install is in [install](install.md).
 
 ## Before you start
 
-The primary checkout stays clean and detached at the exact approved deployed commit. It is live source for `serve` and the Claude hook, not a development worktree. Never edit or switch it for development. Graphite owns development and merging; the commands below are the narrow activation and rollback exception. Coordinate with the deployment owner before changing any primary or shared branch metadata.
+The primary checkout stays clean and detached at its approved retained commit, never used for development. It supplies live code only in a source installation; a packaged installation runs immutable release files and retains the checkout for source rollback. Git/Graphite synchronization activates neither. Coordinate with the deployment owner before changing any installed binding, primary or shared branch metadata. Activation is single-operator.
 
-A source change reaches a newly started hook immediately, but reaches `serve` only on restart; an already-waiting hook retains its loaded code and runtime until it rearms. Restarting `serve` loses its in-memory wake state and held search rankings (a search in progress must start again), not the ledger. Plugin changes require a separate cache refresh ([When the plugin changed](#when-the-plugin-changed)).
+A launcher change reaches a newly started hook immediately, but reaches `serve` only on restart; an already-waiting hook retains its loaded code and runtime until it rearms. Restarting `serve` loses its in-memory wake state and held search rankings (a search in progress must start again), not the ledger. Plugin changes require a separate cache refresh ([When the plugin changed](#when-the-plugin-changed)). Never restart another owner's session to force adoption.
 
 **Rehearsed 2026-11-02:** the source, frozen-dependency, launcher and launchd transition and complete cohort rollback passed on a disposable same-path installation, including an old waiting hook to the new server and a new waiting hook to the restored server. Configuration, credentials and the Fluree process were unchanged; all owned jobs and processes were removed. A rehearsal alone is not a release decision. The existing [end-to-end check](#check-the-bus-end-to-end) uses a stand-in hook and is not a real session wake.
 
 **Observed live 2026-11-02:** the query and viewer release was activated on both machines with clean, detached primaries and source-only `serve` restarts. The pinned runtime cohort, Fluree, configuration and credentials were preserved. The [query tools](#query-tools) check and controlled delivery checks passed on both endpoints. A real idle Claude wake passed on each host: one was independently observed, the other established by a correlated participant receipt, not independent process output. A separate fresh-session probe on the latter host ended before join because a prerequisite was unmet. The existing tunnel on one host was reconnected separately with owner approval to resolve pre-existing latency; no network configuration changed. A live rollback was not needed and remains unverified.
 
-The activation decision must name the exact merged source commit and tree, each machine's previous source and Bun executable, the new executable, frozen dependencies, affected services, checks and rollback. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed. The [query tools' check and rollback constraint](#query-tools) applies to every server and rollback: every `serve` fronting the shared ledger answers queries against it, so one machine's upgrade says nothing about another's.
+The activation decision must name the exact reviewed source commit and tree, candidate and previous installed bindings, runtime/dependency identities, affected services, checks and complete rollback. For a release, record its absolute root and manifest sha256 outside the release; its source identity is not necessarily the checkout's HEAD. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed. The [query tools' check and rollback constraint](#query-tools) applies to every server and rollback: one machine's upgrade says nothing about another's. Preserve state, credentials, cursors and `installation-id`; a release never initializes an established installation's missing identity ([recover](recover.md#the-installation-identity-is-missing-or-invalid)).
+
+## Deploy a packaged release
+
+This lane needs an established installation and its valid delivery identity. First provisioning still follows [install](install.md). The release carries its own runtime, bundles and installer; the destination needs no build, dependency install or checkout change. Retain previous releases, runtimes, source dependencies and recorded launcher/viewer bindings for rollback. Never edit a sealed release or remove one named by a running process or rollback record.
+
+The binding mechanism, source/release transitions and complete rollback have been rehearsed under disposable launchd jobs. These newly written manual steps remain *Unverified as an exact operator sequence*; their individual mechanisms have qualification and rehearsal coverage. Do not equate that with live client proof. *Observed live 2026-11-11:* both installations' CLI/server/plugin bindings agreed on one release; the existing viewer on one installation agreed too. A fresh native desktop session there loaded the skill and handled an independently sent idle wake/read, and its viewer rendered six pinned rows. An existing Claude session on the other installation handled its installed-hook wake/read. **A fresh Claude session's skill loading and idle-start wake on that installation remain Unverified.** This is not a claim that all release checks are complete.
+
+1. **Pin and bootstrap-check the artifact.** Build from the reviewed commit in a development worktree if needed, using the approved Bun first on `PATH`:
+
+   ```sh
+   "$approved_bun" --no-env-file scripts/release.ts build \
+     --bun "$approved_bun" --out "$releases" --commit "$candidate"
+   ```
+
+   Record the printed id and manifest digest in the release decision. Copy the complete read-only directory, preserving modes. Set `R` to its absolute destination root and `D` to that externally recorded digest, not a freshly trusted value read from the candidate. Before executing any bundled code, use system tools:
+
+   ```sh
+   ls -ld "$R" "$R/runtime" "$R/app" "$R/manifest.json" \
+     "$R/runtime/bun" "$R/app/release.js" "$R/app/bunfig.toml" \
+     "$R/app/install-launch-agents.sh"
+   shasum -a 256 "$R/manifest.json"
+   grep -A1 -E '"path": "(runtime/bun|app/release.js|app/bunfig.toml|app/install-launch-agents.sh)"' "$R/manifest.json"
+   shasum -a 256 "$R/runtime/bun" "$R/app/release.js" \
+     "$R/app/bunfig.toml" "$R/app/install-launch-agents.sh"
+   ```
+
+   Expected: manifest digest equals `D`, and each listed file hash equals its entry in that anchored manifest; root, runtime, app and bootstrap files are real directories/regular files, not links. Stop on any mismatch before running them. Then verify the complete cohort:
+
+   ```sh
+   "$R/runtime/bun" --no-env-file --config="$R/app/bunfig.toml" \
+     "$R/app/release.js" verify "$R" --expect "$D"
+   ```
+
+   Expected: exit 0 and `ok: true`; exact file set, hashes, modes, runtime and embedded release identities match.
+
+2. **Preserve and inspect the previous cohort.** Record the launcher binding, owned `serve` plist/process, stable marketplace and client versions, any installed viewer and its previous plist, plus state/configuration identity. Use the status command in step 5 and the existing health/query/delivery checks before changing anything. Keep the source primary detached and unchanged for a release activation. Stop on foreign ownership or an unknown binding. *Checked read-only 2026-11-11* for the paired activation's release agreement; a new candidate still needs its own baseline.
+
+3. **Bind the launcher and restart only `serve`:**
+
+   ```sh
+   /bin/sh "$R/app/install-launch-agents.sh" --release "$R" --expect "$D"
+   ```
+
+   Expected: launcher selects R's own Bun, sealed config and `app/cli.js`; the existing owned serve plist, Fluree, tunnel, configuration, credentials and identity remain unchanged. Release mode cannot combine with `--bun`, `--remote` or `--runtime-only`. Run the restart, query-tools and end-to-end checks below before advancing guidance. If first upgrading hostname routing, use [the paired transition](#switch-to-stable-native-delivery), not independent restarts.
+
+4. **Move an existing viewer, then select and refresh plugins:**
+
+   ```sh
+   "$R/runtime/bun" --no-env-file --config="$R/app/bunfig.toml" \
+     "$R/app/release.js" viewer "$R" --expect "$D"
+   "$R/runtime/bun" --no-env-file --config="$R/app/bunfig.toml" \
+     "$R/app/release.js" plugin "$R" --expect "$D" \
+     --marketplace "$HOME/.local/share/agent-bus/marketplace"
+   ```
+
+   Expected: an owned viewer keeps its port, environment and logs and runs R's viewer; an absent viewer stays absent. The real marketplace directory's `plugin` link names R. Use [first marketplace migration](install.md#select-the-plugin-marketplace) once when leaving source; otherwise use [the steady-state refresh](#when-the-plugin-changed). Never replace a foreign job or marketplace.
+
+5. **Verify agreement and real behavior on every affected installation.** Use absolute native client executable paths for the intended client homes:
+
+   ```sh
+   "$R/runtime/bun" --no-env-file --config="$R/app/bunfig.toml" \
+     "$R/app/release.js" status --claude "$CLAUDE_BIN" --codex "$CODEX_BIN"
+   agent-bus --version
+   ```
+
+   Expected: JSON `agree: true`, all applicable surface identities name R, no pending viewer start, and CLI reports R's embedded identity. **Status exit 0 alone is not success.** Missing inspection is unknown, not absence; use `none` only to exclude an intentionally unused client. Repeat health/query/delivery checks, real owned native wake/read and fresh skill discovery, and an existing viewer's pinned real-data check. Installed agreement alone proves none of those. Record results individually, including missing proof. *Checked read-only 2026-11-11* for paired release agreement; live behavioral proof is bounded by the receipt above.
+
+### Release rollback and partial failure
+
+Verify the previous release against its retained external digest before using it. Review overlap compatibility: waiting hooks and loaded guidance from the newer release must work with or be refused safely by the older server, which must decode newer stored entries and retain public-query guarding. On downgrade, move guidance first: select the previous marketplace link and refresh clients, restore/rebind an existing viewer, then bind the launcher to the previous release with the same installer command. Repeat step 5 and all applicable checks. Keep newer release files while an old process still uses them. The source → release A → B → A → source mechanism is rehearsed; live rollback remains *Unverified*.
+
+To return to source, first migrate the clients back to the recorded primary marketplace using [install's remove-and-add procedure](install.md#select-the-plugin-marketplace), not a release marketplace link pointed at an unversioned source plugin. Restore the viewer with the trusted release tool's `viewer-restore --from "$record"`, using its recorded source plist. Restore the approved clean, detached source and frozen dependencies with its exact Bun as in [the source lane](#deploy-a-new-version), then use the retained upgraded installer:
+
+```sh
+AGENT_BUS_REPO="$primary" /bin/sh "$R/app/install-launch-agents.sh" \
+  --runtime-only --bun "$previous_bun"
+```
+
+Expected: source launcher, server, viewer and source plugins match the recorded previous cohort; state and delivery identity remain intact. Verify those identities and behavior through the source lane: release status's `agree` is release-specific and is not a source-success criterion. An older installer may refuse the release launcher, so do not substitute it. The manual sequence's shared verification mark above applies; this is not live rollback evidence.
+
+If a step fails, inspect `status` per surface and re-run only the failed owned step for the named target, or restore every changed surface in downgrade order. An unfinished viewer start leaves a marker and the viewer stopped: re-run `viewer` or `viewer-restore`, never remove the marker to claim success. If no coherent state can be restored, disable and boot out only the positively identified owned serve/viewer jobs (`launchctl disable gui/$(id -u)/<label>`, then `launchctl bootout gui/$(id -u)/<label>`). They stay stopped across login; enable and bootstrap only after reviewed repair. A held failure is not successful rollback. *Unverified for live recovery; split-binding recovery and guarded stop were exercised in the disposable rehearsal.*
 
 ## Deploy a new version
+
+This is the supported **source-binding lane**, including source rollback. For an installation already bound to a package, use [the release lane](#deploy-a-packaged-release) instead; do not advance its retained primary merely to activate a release.
 
 1. **Identify the primary explicitly** from the deployment record, not from `readlink`: the launcher may be a regular managed file. In that checkout record `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, the running `serve` process and its launcher/runtime binding. Stop if the tree is dirty, attached to a branch, or its identity differs from the approved record. Preserve both old source and exact runtime for rollback. *Observed live 2026-11-05* on both machines.
 
@@ -56,7 +139,7 @@ The activation decision must name the exact merged source commit and tree, each 
 
 For every deployment or rollback, enumerate every `serve` that can front the shared ledger. Each must run a commit that either refuses public queries (public-query containment) or validates them ([connections rule 6](../architecture/connections.md#rules)); a commit from before containment runs SPARQL unvalidated. No Fluree credential change, reindex, migration or rejoin is needed. Do not widen credentials or change governance to make a query succeed. Refresh cached tool and skill guidance as described in [upgrade](upgrade.md#refreshing-guidance-in-running-sessions). This check is about the endpoint: a session that connected before the restart keeps the tool list it was given, so it says nothing about what running sessions can call.
 
-From each machine's activated checkout, verify its local endpoint with this bounded check. It reads the head commit, runs one pinned query and one forbidden one, prints no result data and changes no bus state:
+From a credential-free verification worktree with its frozen dependencies and approved Bun, verify each machine's local endpoint with this bounded check. A release needs no source dependencies to run; this SDK-based check uses the verification worktree, not the retained primary or release directory. It reads the ledger head, runs one pinned query and one forbidden one, prints no result data and changes no bus state:
 
 ```sh
 bun --no-env-file -e '
@@ -215,7 +298,7 @@ Rolling back to an earlier release from the orientation release onwards is allow
 
 ## When the plugin changed
 
-A change under `plugin/` or `.claude-plugin/` isn't deployed by the fast-forward. Claude Code copies the plugin into its cache, so the change reaches sessions only after `claude plugin update` and a restart of each session ([platforms: Claude Code](../platforms/claude-code.md#plugins)). Run this after verifying the new `serve`, so it already has `bus_wake` for the new hook to find:
+A change under `plugin/` or `.claude-plugin/` isn't delivered by a source fast-forward or launcher swap. For a release, first select the verified release's stable marketplace link in the release lane above. After the [one-time marketplace migration](install.md#select-the-plugin-marketplace), the native refresh commands are the same for both bindings. Run them after verifying the new `serve`, so it already has the commands and tools the new hook expects:
 
 ```sh
 claude plugin marketplace update agent-bus
@@ -223,9 +306,9 @@ claude plugin update agent-bus@agent-bus
 claude plugin list
 ```
 
-Expected: `claude plugin list` shows `agent-bus@agent-bus` enabled at a new version. Sessions get the change when they next start, or with `/reload-plugins`. A change to `src/` alone needs none of this. *Done 2026-10-29* at the docs-consolidation deploy: the update printed `updated from … to …`, and the list showed the new version enabled.
+Expected: `claude plugin list` shows `agent-bus@agent-bus` enabled at the selected version. Sessions get the change when they next start, or with `/reload-plugins`. A source-only code change needs no plugin refresh; every release link change does, because its manifests carry that release's identity. *Done 2026-10-29* for the source docs-consolidation deploy; release inventory agreement *Checked read-only 2026-11-11*.
 
-Then check that the installed copy holds what the checkout's `plugin/` holds, the hooks manifest and the agent skill, in the newest cache directory (read-only):
+Then check that the installed copy holds what the selected source or release's `plugin/` holds, the hooks manifest and the agent skill, in the cache directory named by its reported version (read-only):
 
 ```sh
 cache=~/.claude/plugins/cache/agent-bus/agent-bus
@@ -247,5 +330,6 @@ Stop if the primary is dirty, attached, divergent or its deployed identity is un
 | --- | --- |
 | Dirty, attached or divergent primary, or unexpected source identity | Stop and [recover the checkout](#recover-a-diverged-primary-checkout); preserve the work. |
 | Foreign or modified launcher refused | Stop before replacing it. Establish ownership and resolve it explicitly; do not bypass the installer check. |
+| Release verification fails, `agree` is false/unknown, or a viewer start is pending | Do not advance guidance or delete markers. Follow [release rollback and partial failure](#release-rollback-and-partial-failure); status exit 0 is not agreement. |
 | Launcher or plist rename or launchd bootstrap fails | The two file replacements are atomic individually, not together. Inspect both files and the job, then rerun the qualified narrow installer for the intended source and runtime or complete the approved rollback; do not assume either pair is active. *Unverified* on launchd. |
 | Health, process identity, query tools or delivery fails | Keep the affected `serve` stopped if query guarding is uncertain; otherwise use the complete approved rollback above. Consult [operate](operate.md) and [recover](recover.md) for diagnosis. |

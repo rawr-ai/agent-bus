@@ -372,9 +372,24 @@ The CLI adds messages of its own, each printed alone with exit status 1:
 
 ### The CLI
 
-`agent-bus` is `src/bin.ts`. The installer writes one managed `~/.local/bin/agent-bus` launcher that executes an exact Bun and the canonical source entry with `--no-env-file`; the hook calls it, and the `serve` LaunchAgent's arguments are that launcher and `serve`. Thus neither loads a `.env` from its working directory. `agent-bus --help` and `--version` work. A refused or failed bus call, or a missing store, prints its message alone and sets exit status 1. The CLI finds `serve` at `http://127.0.0.1:<AGENT_BUS_PORT>/mcp` and opens a fresh MCP connection for each call, with the deadline `CALL_TIMEOUT_SECONDS` (`WAKE_CALL_TIMEOUT_SECONDS` for `claude-wake`'s `bus_wake` calls).
+`agent-bus` runs `src/bin.ts` in a source installation, or its bundle in a release installation. The installer writes one managed `~/.local/bin/agent-bus` launcher; the hook calls it, and the `serve` LaunchAgent's arguments are that launcher and `serve`. Both bindings name an exact Bun with `--no-env-file`. A release additionally names `--config=<release>/app/bunfig.toml` and `<release>/app/cli.js`, preventing caller-directory Bun preloads while preserving the caller's cwd ([Bun](../platforms/bun.md#runtime-and-toml)). `agent-bus --help` and `--version` work. A refused or failed bus call, or a missing store, prints its message alone and sets exit status 1. The CLI finds `serve` at `http://127.0.0.1:<AGENT_BUS_PORT>/mcp` and opens a fresh MCP connection for each call, with the deadline `CALL_TIMEOUT_SECONDS` (`WAKE_CALL_TIMEOUT_SECONDS` for `claude-wake`'s `bus_wake` calls).
 
-The installer accepts `--bun /absolute/path` to select a runtime, checks it against both exact source pins, and resolves it once. `--runtime-only --bun /absolute/path` updates only the launcher and `serve` LaunchAgent; `--remote` cannot be combined with it. The installer adopts its old source symlink or a recognized unmodified managed launcher, but refuses foreign files and symlinks. Writes are atomic per file, not across both files. Full installation uses the same launcher machinery ([install](../runbooks/install.md)); controlled activation and rollback are in [deploy](../runbooks/deploy.md).
+For source, the installer accepts `--bun /absolute/path`, checks it against both exact source pins, and resolves it once. `--runtime-only --bun /absolute/path` changes only the launcher and `serve`; `--remote` cannot be combined with it. For a release, `--release /absolute/releases/<id> --expect <manifest-sha256>` verifies the externally anchored cohort and uses its own Bun; it cannot combine with `--bun`, `--remote` or `--runtime-only`. It requires this installation's existing valid `installation-id` and creates none. Both narrow modes preserve an existing owned `serve` plist byte for byte, check its state directory and port, and restart only `serve`. The installer adopts its old source symlink or a recognized unmodified source/release launcher, but refuses foreign files and symlinks. Writes are atomic per file, not across surfaces. Full source installation is in [install](../runbooks/install.md); controlled activation and rollback are in [deploy](../runbooks/deploy.md).
+
+#### Release tools
+
+`scripts/release.ts` builds a frozen export of one Git commit, not the current dependency directory. A release carries the tool as `app/release.js`; run it with that release's Bun, `--no-env-file` and sealed `--config`, after the bootstrap hash checks in [deploy](../runbooks/deploy.md#deploy-a-packaged-release).
+
+| Command | Required inputs | Contract |
+| --- | --- | --- |
+| `build` | `--bun <absolute-executable> --out <absolute-releases-directory>`; optional `--commit <rev>` (default `HEAD`) | Build the commit from the cwd's repository; print release id and externally retainable manifest digest; never overwrite an existing id |
+| `verify <release>` | `--expect <manifest-sha256>`; optional `--bun <approved-executable>` | Check exact file set, hashes, modes, embedded identities and hook commands; exit 1 on rejection |
+| `plugin <release>` | `--expect <digest> --marketplace <absolute-directory>` | Verify, then atomically select the stable marketplace's plugin link; native client refresh is separate |
+| `viewer <release>` | `--expect <digest>`; optional `--plist <path> --viewer-label <label>` | Rebind only a recognized existing owned viewer; retain its previous plist and record any unfinished start; an absent viewer stays absent |
+| `viewer-restore` | `--from <absolute-binding-record>`; optional `--plist <path> --viewer-label <label>` | Restore a recorded viewer binding, including source; records belong in `bindings/` beside the release's `releases/` |
+| `status` | Optional `--launcher`, `--marketplace`, `--label`, `--viewer-label`, `--plist`, `--bindings`, `--claude <executable\|none>`, `--codex <executable\|none>` | Read per-surface identities and `agree`; missing inspection is `unknown`, not absence. Exit 0 does not imply `agree: true` |
+
+The default data home is `~/.local/share/agent-bus`, with `releases/`, `marketplace/` and `bindings/`. Viewer commands accept `--bindings` only for their own derived bindings directory. `status` checks the exact launcher, running server, marketplace link, installed enabled client versions and an existing viewer's configured/running binding, with no pending viewer start. A client excluded explicitly with `none` does not block agreement; an executable neither named nor found on `PATH` does. Agreement does not establish session-loaded guidance or real wake/read behavior.
 
 | Subcommand | Purpose | Calls |
 | --- | --- | --- |
@@ -450,6 +465,7 @@ The CLI presents the session id of the runtime in question and never another run
 | `CODEX_THREAD_ID` | set by Codex in a thread's shell | the CLI; agents, who read it for `session` | The session id of a Codex thread ([platforms: Codex](../platforms/codex.md#thread-ids-and-codex_thread_id)) |
 | `CLAUDE_CODE_SESSION_ID` | set by Claude Code in a session's shell | the CLI; agents, who read it for `session` | The session id of a Claude Code session ([platforms: Claude Code](../platforms/claude-code.md#session-ids)) |
 | `AGENT_BUS_REPO` | Installer's checkout | installer | Absolute source root, including for a retained installer to bind restored source during rollback |
+| `AGENT_BUS_RELEASES` | `~/.local/share/agent-bus/releases` | installer | Absolute parent directory of the selected release; release mode refuses a root elsewhere |
 | `AGENT_BUS_LAUNCHER`, `AGENT_BUS_LABEL` | `~/.local/bin/agent-bus`, `ai.rawr.agent-bus` | installer | Managed launcher path and LaunchAgent label prefix; useful for isolated installations |
 | `HOME` | the user's home | installer; also locates the Codex daemon's socket | Where the default launcher, state and `~/.codex` are; absent `--bun`, the installer selects Bun from `PATH` |
 
@@ -462,7 +478,7 @@ Files in the state directory that the code reads:
 | `fluree-token` | `serve` | The bearer token for the bus's Fluree server, trimmed. Absent means no `Authorization` header is sent. Never logged |
 | `fluree-cursors/<ledger>/<instance>/` | `serve` | One cursor file per address. The `<ledger>` segment is the URI-encoded ledger id, and `<instance>` names the ledger's incarnation ([messaging](messaging.md#rules)) |
 
-Fixed in code, with no setting: `serve` binds only `127.0.0.1`; the MCP path is `/mcp`; the Codex daemon's socket is `~/.codex/app-server-control/app-server-control.sock`; query caps (500 raw rows, 65,536 result bytes, 32,768 query characters) have no setting. The query tools share 4 permits, and an operation holds its permit until it ends. Each query request it sends to Fluree (a catalogue query, or `bus_query`'s SPARQL) ends after 10 seconds, and a response over 256 KiB (`bus_query`) or 32 MiB (catalogue) is refused as it arrives. The incarnation and head reads that pin each page have no deadline, and neither has an operation as a whole, which can send several requests, except orientation: `bus_orient` and a join's orientation end after 20 seconds as a whole. Directory discovery's fetch phase has a separate 10-second deadline; its surrounding pin reads do not. An accepted MCP cancellation interrupts its operation; the permit is released when that operation unwinds. A dropped connection sends no cancel, so its operation keeps the permit until it finishes or fails: a query request fails at its deadline, but a stalled pin read has none. Ending a request says nothing about whether Fluree stops computing. Timeouts, retries, schedules and limits are constants exported by `src/timing.ts`: the longest wait, the HTTP idle timeout, the CLI's call timeout, `bus_history`'s default `limit`, and the delivery schedules. Their values are in [delivery's table](delivery.md#timeouts-and-schedules). The agent-bus version is `VERSION` in `src/version.ts`: the CLI's `--version`, the version `serve` and the CLI give to MCP peers, and the one Codex's app-server sees.
+Fixed in code, with no setting: `serve` binds only `127.0.0.1`; the MCP path is `/mcp`; the Codex daemon's socket is `~/.codex/app-server-control/app-server-control.sock`; query caps (500 raw rows, 65,536 result bytes, 32,768 query characters) have no setting. The query tools share 4 permits, and an operation holds its permit until it ends. Each query request it sends to Fluree (a catalogue query, or `bus_query`'s SPARQL) ends after 10 seconds, and a response over 256 KiB (`bus_query`) or 32 MiB (catalogue) is refused as it arrives. The incarnation and head reads that pin each page have no deadline, and neither has an operation as a whole, which can send several requests, except orientation: `bus_orient` and a join's orientation end after 20 seconds as a whole. Directory discovery's fetch phase has a separate 10-second deadline; its surrounding pin reads do not. An accepted MCP cancellation interrupts its operation; the permit is released when that operation unwinds. A dropped connection sends no cancel, so its operation keeps the permit until it finishes or fails: a query request fails at its deadline, but a stalled pin read has none. Ending a request says nothing about whether Fluree stops computing. Timeouts, retries, schedules and limits are constants exported by `src/timing.ts`: the longest wait, the HTTP idle timeout, the CLI's call timeout, `bus_history`'s default `limit`, and the delivery schedules. Their values are in [delivery's table](delivery.md#timeouts-and-schedules). `VERSION` in `src/version.ts` supplies the source version; `BUILD` reports that version with `+source`, or the embedded release id, through CLI `--version` and MCP server information.
 
 ### Instructions and wake texts
 
@@ -493,6 +509,7 @@ The rules about who owns an address, takeover and rejoining are [messaging's rul
 8. **Wake texts carry no text from other sessions,** and the Codex nudge's first sentence never changes.
 9. **The tools and parameters named on this page are the tools and parameters in code.** A new tool, a new parameter, a changed bound or a changed refusal updates this page in the same change; `test/docs-coverage.test.ts` fails otherwise.
 10. **Every parameter and every result field has a description in its schema,** and a bounded one (`limit` an integer of at least 1, `t` an integer, `timeoutSeconds` from 0 to 50) says so in its schema, so the schema refuses a bad value (`limit` of 0, for one) with a message that names the bound.
+11. **Release selection verifies an externally anchored immutable cohort before changing a binding.** Self-consistent manifest contents alone are insufficient; activation names its recorded digest. Configuration, credentials, delivery identity and cursors remain outside the release and are retained.
 
 ## Why
 
@@ -516,6 +533,7 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 - **Aggregates do not check damage.** `counts` and `director-dm-volume` count graph predicates without decoding entries, so they are never complete and `missingJson` is only a lower bound. Known limit.
 - **Claude Code approval is not established.** The matrix follows Codex's rule. Nothing here claims that Claude Code's permission rules follow the annotations. Unverified.
 - **The hook needs the same port as `serve`.** It inherits Claude Code's environment, not the shell's, so a non-default `AGENT_BUS_PORT` must be set there too. Accepted risk.
+- **Release verification is provenance checking, not protection from an owner who can rewrite local files.** Signatures, extended attributes, concurrent operators and adversarial filesystems are outside its contract. Source launchers do not isolate caller `bunfig.toml`; the sealed explicit config is a release binding's protection.
 
 ## Rests on
 
@@ -523,11 +541,13 @@ Why addresses have owners, why `session` is an argument and optional in the sche
 - [Codex: thread ids and `CODEX_THREAD_ID`](../platforms/codex.md#thread-ids-and-codex_thread_id): the thread id a thread's shell exposes as `CODEX_THREAD_ID`, which `session` carries.
 - [Claude Code: session ids](../platforms/claude-code.md#session-ids): `CLAUDE_CODE_SESSION_ID`, which a `/clear` or fork changes; [hooks](../platforms/claude-code.md#hooks): the hook input's `session_id` equals it.
 - [Fluree: query limits](../platforms/fluree.md#query-limits) and [full-text search](../platforms/fluree.md#full-text-search): how a query is pinned and budgeted, and what search ranks with.
+- [Bun: runtime and TOML](../platforms/bun.md#runtime-and-toml): exact-runtime selection and caller-directory configuration.
 
 ## History
 
 Frames are indexed in [frames/README](../frames/README.md).
 
+- [Release packaging](../frames/release-packaging.md): immutable cohorts, anchored verification and release-tool contracts.
 - [search-retained-selection](../frames/search-retained-selection.md): search evaluates its ranking once per traversal and the bus holds it for later pages, with bounded capacity and expiry.
 - [turnaround-query-design](../frames/turnaround-query-design.md): the saved-query catalogue, pinned snapshots and cursors, explicit completeness, and raw SPARQL restored under validation and caps.
 - [public-query-containment](../frames/public-query-containment.md): temporarily withdrew public SPARQL with a fixed refusal; retired by turnaround-query-design.

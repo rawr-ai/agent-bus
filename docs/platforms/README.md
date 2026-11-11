@@ -13,7 +13,7 @@ What was installed on 2026-10-27, read on both machines with the read-only comma
 | Component | Bus host | Other machine | How to check |
 | --- | --- | --- | --- |
 | macOS | 27.0.1 | 27.0 | `sw_vers` |
-| Bun running agent-bus (`serve` and the hook), since 2026-11-02 | 1.4.4+38afee6c8 | 1.4.4+38afee6c8 | The executable named in `~/.local/bin/agent-bus`, with `--revision` (pinned in `package.json`) |
+| Bun bound by the launcher and running `serve`, release binding checked 2026-11-11 | 1.4.4+38afee6c8 | 1.4.4+38afee6c8 | The release's copied executable named in `~/.local/bin/agent-bus`, with `--revision`; waiting hooks may retain the previous binding |
 | Bun on `PATH`, intentionally unchanged by the agent-bus upgrade | 1.3.14 | 1.3.14 | `bun --version`; agent-bus doesn't use it |
 | Fluree | 4.2.4 | Not installed: reaches the bus host's server through the tunnel | `fluree --version` |
 | Codex CLI on `PATH` | 0.165.0-alpha.1.2 as of 2026-10-28 (0.164.0-alpha.11.1 on 2026-10-27) | 0.164.0 | `codex --version` |
@@ -40,6 +40,7 @@ Each finding below was observed on the versions named. The last column says what
 | --- | --- | --- | --- | --- |
 | TOML multiline literal opening newline is trimmed; generated adapter parity must account for it | Bun 1.4.4+38afee6c8 compared with 1.3.14 | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or the native adapter renderer changes |
 | An absolute `bun run` can execute a script's bare `bun` from `PATH` instead of the parent executable | Bun 1.4.4+38afee6c8 with 1.3.14 on `PATH` | Verified in development, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun or script runtime selection changes |
+| `--no-env-file` still permits cwd `bunfig.toml` preloads; an explicit sealed `--config` replaces that lookup | Bun 1.4.4+38afee6c8 | Verified in release packaging qualification with a decoy working directory | [Bun](bun.md#runtime-and-toml) | Bun, release launcher/verifier or installer validation invocation changes |
 | The managed exact-runtime launcher runs under launchd; waiting hooks communicate across an old/new/old cohort transition | Bun 1.4.4+38afee6c8 and 1.3.14 on macOS, 2026-11-02 | Verified on a disposable same-path installation; activation and actual Claude wake observed live on both machines, 2026-11-02 | [Bun](bun.md#runtime-and-toml) | Bun, the launcher, hook, server or scheduled execution context changes |
 | One writer per Codex thread (`thread-writer-locks/`); a second app-server's resume is refused | Codex 0.164.0-alpha.11.1; the lock code is also in 0.165.0 | Verified live, read in code | [Codex](codex.md#one-writer-per-thread) | Codex is upgraded on any machine: rerun the two-app-server resume |
 | A private app-server's queue list, add, delete and read load no thread and meet no lock; the bundled CLI is the desktop's build | Codex 0.164.0-alpha.11.1 (bundled CLI on both machines; daemon 0.165.0 on the other) | Verified live, read in code | [Codex](codex.md#the-bundled-cli-and-private-app-servers) | The desktop app or the daemon is upgraded, or the bundled CLI's version stops matching the daemon's |
