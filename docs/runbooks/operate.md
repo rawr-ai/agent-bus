@@ -185,7 +185,7 @@ A job stopped with `bootout` should load again at your next login, since its pli
 
 ## Rerun the installer instead
 
-Use the installer, rather than `kickstart` or `bootstrap`, when the plist itself must change: `bun` or `fluree` has moved, the checkout `serve` runs from has moved, a port or flag has changed, or `bootstrap` keeps failing. It rewrites the plists from the current `PATH`, restarts both LaunchAgents, and keeps `config.json`, the key, the token and the ledger. Run it from the checkout that `serve` should run: the primary checkout ([deploy](deploy.md)).
+For a source installation, use the full installer when service provisioning must change: `fluree` has moved, a port or flag has changed, or `bootstrap` keeps failing. It rewrites the plists from the current `PATH`, restarts both LaunchAgents, and keeps `config.json`, the key, the token and the ledger. Run it from the approved primary checkout. A source/runtime-only rebinding or packaged-release change instead follows [deploy](deploy.md); do not accidentally replace a release launcher with source or restart Fluree to repair a release binding. Full Fluree/tunnel reprovisioning on a release installation needs a separately reviewed plan that preserves its release binding.
 
 1. Rerun it. On another machine, add `-- --remote <ssh host of the bus host>`; [install](install.md) has the prerequisites.
 
