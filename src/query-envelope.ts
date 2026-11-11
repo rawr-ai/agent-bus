@@ -88,22 +88,6 @@ export const QueryEnvelope = Schema.Struct({
   root: Schema.optionalKey(Schema.String),
   members: Schema.optionalKey(Schema.Int),
   missingReplyTargets: Schema.optionalKey(Schema.Array(Schema.String)),
-  omitted: Schema.optionalKey(
-    Schema.Int.annotate({ description: "Evidence rows withheld on this page." })
-  ),
-  omittedTotal: Schema.optionalKey(
-    Schema.Int.annotate({ description: "Evidence rows withheld so far in this traversal." })
-  ),
-  omittedReplyTargets: Schema.optionalKey(
-    Schema.Int.annotate({
-      description: "References to withheld or unreadable targets on this evidence page.",
-    })
-  ),
-  rootOmitted: Schema.optionalKey(
-    Schema.Boolean.annotate({
-      description: "The reply tree's root could not be disclosed as message evidence.",
-    })
-  ),
   total: Schema.optionalKey(Schema.Int),
   totals: Schema.optionalKey(
     Schema.Struct({

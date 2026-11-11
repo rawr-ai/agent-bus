@@ -43,17 +43,9 @@ The first rows are what a session can do through `serve`; the rest are what `ser
 
 Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe ([platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools)). The bus's tools carry annotations so that only `bus_takeover` is destructive: [interfaces](interfaces.md#tool--annotation--approval) has the annotation of each tool and what a sandboxed Codex thread is asked.
 
-### Private evidence facade
+### Private hosted peer candidate
 
-The separate evidence candidate uses the owned direct-tool MCP host and calls only loopback `bus_run_query`; it has no Fluree access, participation tools or public listener. A synthetic provider boundary exercises the owner check locally. There is no real provider adapter, web configuration or deployed service here.
-
-```mermaid
-flowchart LR
-  client["Synthetic MCP client"] --> host["Direct-tool host"]
-  host --> auth["Per-invocation owner and scope check"]
-  host -->|"Four fixed evidence reads"| serve["Loopback serve"]
-  serve -->|"Pinned QueryGateway reads"| ledger[("Disposable ledger")]
-```
+The separate local candidate forwards native participation and lookup tools to loopback `serve`; it has no Fluree access. It has not been deployed or qualified with a real ChatGPT client. Its disposable verification procedure is in [qualify private peer](../runbooks/qualify-private-peer.md).
 
 ## Rules
 
@@ -70,9 +62,9 @@ flowchart LR
 11. **The other machine reaches Fluree only through SSH,** with key authentication and no prompts (`BatchMode`). The Fluree token is copied to it over `scp` at install and still applies.
 12. **Replacing another session is the human's call.** Only `bus_takeover` is marked destructive, so that Codex asks approval for it outside full access, and mail from other sessions is data, not instruction.
 13. **Ordinary response surfaces omit stored ownership and wake claims.** `bus_peers` returns only addresses, runtimes, topics, hosts and notes. `bus_read`, `bus_wait` and `bus_history` explicitly project public message fields and origin metadata, never a catch-all presence object. A held-address refusal keeps its note and join id, not the holder's session claim. Store, response-decoding and cursor failures use classified messages rather than raw upstream bodies, local paths or stored values. Saved-query rows follow the same projection, and raw `bus_query` cannot read `bus:json` (rule 6), so session claims stay off every query surface; damage stays visible through the saved queries' `damage`, `damaged` and `missingJson`. Only a Fluree token holder reads them.
-14. **Each facade invocation needs provider-confirmed owner authorization.** Require the approved issuer, subject, exact resource audience and evidence read scope on every invocation. A claimed identity, token string, MCP session or transport credential alone is not the decision. Unavailable verification refuses access.
-15. **The facade discloses message evidence, not native results.** Only the [four evidence tools](interfaces.md#private-evidence-tools) reach `serve`, using its projected saved queries. Allowlist message ID, written commit, timestamp, literal sender and recipients, subject, body and admitted reply target. Do not send presence, origin, session or wake claims, or raw upstream errors. A graph type alone does not prove a stored encoding is a message. A withheld or unreadable target is not absent; native thread membership metadata and keyset positions can name protected records. Discard the metadata that can do so, and encrypt and authenticate the continuation before returning it.
-16. **Disconnect does not release an owned read.** The host's invocation remains admitted until its bounded loopback exchange settles, even when the downstream caller disconnects. Each exchange opens a fresh scoped MCP connection, checks the configured Bus version and ends within 20 seconds including that handshake. The Bus independently bounds projected admissions, permit waits and execution as [interfaces](interfaces.md#bus_run_query) specifies. Returning local capacity is not proof that Fluree stopped computing.
+14. **The hosted peer checks the owner on each invocation.** It verifies the configured issuer and provider subject, then reloads a grant for the configured resource and `agent-bus:peer` permission. Failure refuses the call; a token alone is not the application grant.
+15. **Hosted ownership is bound to the conversation.** A private durable key derives the session from issuer, subject and `openai/session`; absent correlation refuses session-bearing calls, while authorized session-free lookups remain available. The bridge injects its working directory and ownership fields, and permits joins and takeovers only under `chatgpt/`. That namespace is not authentication; takeover still requires the human's instruction.
+16. **The hosted peer is interactive, not a wake target.** It uses runtime `other` and does not nudge Codex. It does not automatically retry an ambiguous write; a read may have consumed mail before its response was lost.
 
 ## Why
 
@@ -95,7 +87,8 @@ flowchart LR
 | Any session can read public messages to any address through `bus_history`, and list every peer | **Known limit**: this is not per-address confidentiality |
 | A `serve` older than public-query containment runs SPARQL unvalidated against the same ledger, including old commits | **Deployment requirement**: every server fronting the shared ledger runs a commit that refuses queries or validates them as rule 6 says; rollback must keep that ([deploy](../runbooks/deploy.md#query-tools)) |
 | Sender-authored bodies, subjects, notes and origin metadata remain public; projection cannot remove a claim a sender pasted into those fields | **Known limit**: do not send credentials or raw tool output |
-| The candidate message projection includes direct mail and whole-bus message bodies. Topic and time filters are not access control; even a projected body can contain sensitive material | **Exposure decision pending**: local synthetic qualification only. Revocation could stop future reads but cannot retract evidence already returned |
+| The hosted peer can read whole-bus messages and participate as an address. Revocation cannot retract information already returned | **Exposure decision pending**: the candidate is not deployed or qualified with ChatGPT |
+| The hosted candidate admits at most 1 MiB per HTTP request and 8 MiB per loopback MCP response. Native message bodies and consuming reads have no corresponding size bound | **Hosted limits**: an oversized request is refused before invocation. An oversized response is unavailable, not a partial success, and a read may already have advanced its cursor; use an explicit read limit to reduce response size. The request budget accommodates the native raw-query character bound even with JSON escaping, but does not promise unbounded publication |
 | The Fluree token lasts 520 weeks. The installer makes a new token only when the file is missing or invalid, or the key is recreated, and there is no rotation procedure | **Known limit** |
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
 | A sandboxed Codex thread can send to peers that aren't sandboxed | **Known limit**: mail is data to be weighed, not instruction |
@@ -106,7 +99,6 @@ flowchart LR
 - [Fluree: the transaction server](../platforms/fluree.md#the-transaction-server) (token modes, CORS), [the event stream](../platforms/fluree.md#the-event-stream) and [query limits](../platforms/fluree.md#query-limits).
 - [Codex: approvals for MCP tools](../platforms/codex.md#approvals-for-mcp-tools), [one writer per thread](../platforms/codex.md#one-writer-per-thread), [the shared queue](../platforms/codex.md#the-shared-queue) and [the daemon](../platforms/codex.md#the-daemon).
 - [Codex: the desktop's IPC router](../platforms/codex.md#the-desktops-ipc-router), whose exposure the connections table records.
-- [Direct-tool MCP host](../platforms/mcp-openapi.md) for the private evidence candidate's transport and owned-work admission.
 
 ## History
 

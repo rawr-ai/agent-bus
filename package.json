@@ -23,7 +23,6 @@
     "qualify:fluree": "bun scripts/qualify-fluree.ts",
     "qualify:release": "bun --no-env-file scripts/qualify-release.ts",
     "rehearse:release": "bun --no-env-file scripts/rehearse-release.ts",
-    "qualify:private-web": "bun --no-env-file scripts/qualify-private-web.ts",
     "qualify:toolchain": "bun --no-env-file scripts/qualify-toolchain.ts",
     "install:launch-agents": "./scripts/install-launch-agents.sh",
     "viewer:build": "bun --no-env-file scripts/build-viewer.ts",

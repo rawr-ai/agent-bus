@@ -23,7 +23,6 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Duration, Effect, Layer, ManagedRuntime } from "effect";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { evidenceTools } from "../src/private-web/tools.ts";
 import * as Serve from "../src/serve.ts";
 import * as Timing from "../src/timing.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
@@ -69,9 +68,6 @@ const served = async () => {
 
 const { tools, instructions } = await served();
 const toolNamed = (name: string) => tools.find((tool) => tool.name === name);
-const evidenceNames = evidenceTools(async () => ({ refusal: "UNAVAILABLE" })).map(
-  (tool) => tool.name
-);
 type Schema = {
   type?: string;
   items?: Schema;
@@ -392,11 +388,7 @@ describe("tool names in the pages are real", () => {
       ([name = ""]) => name
     );
     expect(written.length).toBeGreaterThan(0);
-    const privateNames = path === "docs/architecture/interfaces.md" ? evidenceNames : [];
-    expect(
-      written.filter((name) => toolNamed(name) === undefined && !privateNames.includes(name))
-    ).toEqual([]);
-    for (const name of privateNames) expect(written).toContain(name);
+    expect(written.filter((name) => toolNamed(name) === undefined)).toEqual([]);
   });
 });
 

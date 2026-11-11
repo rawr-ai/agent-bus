@@ -1,4 +1,4 @@
-import { Context, Effect, Layer, Option, Schema, Semaphore } from "effect";
+import { Context, Effect, Layer, Schema, Semaphore } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { Bus, ORIENTATION_JOIN_TOO_LARGE } from "./Bus.ts";
 import {
@@ -26,7 +26,6 @@ import {
   PresenceConflict,
   QueryCapacity,
   Runtime,
-  SavedQueryRefusal,
   validSession,
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
@@ -640,15 +639,9 @@ const RunQuery = Tool.make("bus_run_query", {
           description: "Optional smaller logical JSON page ceiling, not a transport byte limit.",
         })
     ),
-    projection: Schema.optionalKey(
-      Schema.Literal("message-evidence").annotate({
-        description:
-          "For history, search, thread and messages only: omit non-message rows and protected metadata before sizing the page. Returns machine-readable refusals.",
-      })
-    ),
   }),
   success: QueryEnvelope,
-  failure: Schema.Union([Failure, SavedQueryRefusal]),
+  failure: Failure,
 }).annotateMerge(Lookup);
 
 const Queries = Tool.make("bus_queries", {
@@ -692,6 +685,27 @@ const Leave = Tool.make("bus_leave", {
   success: Left,
   failure: Failure,
 }).annotateMerge(Local);
+
+// The hosted peer derives its input contracts from these native definitions while
+// replacing caller-controlled ownership fields at its own boundary.
+export const HostedNativeTools = {
+  Join,
+  Takeover,
+  Publish,
+  SetActivity,
+  Directory,
+  Bulletin,
+  Orient,
+  Read,
+  Wait,
+  Owned,
+  ListPeers,
+  History,
+  Query,
+  RunQuery,
+  Queries,
+  Leave,
+};
 
 const BusToolkit = Toolkit.make(
   Join,
@@ -815,9 +829,6 @@ const BusHandlers = BusToolkit.toLayer(
     );
     // One pool for every query operation, presets included.
     const pool = yield* Semaphore.make(QUERY_PERMITS);
-    // An interrupted facade exchange cannot prove the Bus stopped. Bound its running or
-    // queued work here too, without changing the shared pool's ordinary wait order.
-    const evidenceReservation = yield* Semaphore.make(1);
     // The rankings that searches page across calls, shared by every session this server serves.
     const selections = yield* selectionStore(PROCESS_POLICY);
     const queries = <A, E>(effect: Effect.Effect<A, E, QueryGateway | RankedSelections>) =>
@@ -899,71 +910,28 @@ const BusHandlers = BusToolkit.toLayer(
       bus_peers: () => queries(peersPreset),
       bus_history: (params) => queries(historyPreset(params)),
       bus_query: ({ query, t }) => queries(runSparql(query, t)),
-      bus_run_query: ({ name, args, ledger, t, cursor, maxPageBytes, projection }) => {
+      bus_run_query: ({ name, args, ledger, t, cursor, maxPageBytes }) => {
         const query = queries(
           Effect.suspend(() => {
             const operation = byName(name);
             if (operation === undefined) {
               return Effect.fail(new InvalidQuery({ message: `No saved query is named ${name}.` }));
             }
-            if (
-              projection !== undefined &&
-              name !== "history" &&
-              name !== "search" &&
-              name !== "thread" &&
-              name !== "messages"
-            ) {
-              return Effect.fail(
-                new InvalidQuery({ message: "This operation has no message evidence projection." })
-              );
-            }
             return operation.invoke(
               args ?? {},
-              { ledger, t, cursor, projection },
+              { ledger, t, cursor },
               maxPageBytes ?? MAX_ENVELOPE_BYTES
             );
           })
         );
-        const admitted =
-          projection === undefined
-            ? query
-            : evidenceReservation
-                .withPermitsIfAvailable(1)(query)
-                .pipe(
-                  Effect.flatMap(
-                    Option.match({
-                      onNone: () =>
-                        Effect.fail(
-                          new QueryCapacity({ message: "An evidence read is already admitted." })
-                        ),
-                      onSome: Effect.succeed,
-                    })
-                  )
-                );
-        return admitted.pipe(
-          Effect.mapError((error) =>
-            projection === undefined
-              ? error
-              : new SavedQueryRefusal({
-                  code:
-                    error._tag === "InvalidQuery"
-                      ? (error.code ?? "INVALID_REQUEST")
-                      : error._tag === "QueryCapacity"
-                        ? error.selectionTooLarge
-                          ? "SEARCH_TOO_BROAD"
-                          : "CAPACITY"
-                        : "UNAVAILABLE",
-                })
-          ),
+        return query.pipe(
           Effect.timeoutOrElse({
             duration: `${SAVED_QUERY_DEADLINE_SECONDS} seconds`,
             orElse: () =>
               Effect.fail(
-                projection !== undefined
-                  ? new SavedQueryRefusal({ code: "DEADLINE" })
-                  : new LedgerError({
-                      message: `The saved query did not finish within ${SAVED_QUERY_DEADLINE_SECONDS} seconds.`,
-                    })
+                new LedgerError({
+                  message: `The saved query did not finish within ${SAVED_QUERY_DEADLINE_SECONDS} seconds.`,
+                })
               ),
           })
         );

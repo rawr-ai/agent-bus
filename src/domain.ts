@@ -148,37 +148,8 @@ export class PresenceConflict extends Schema.TaggedError<PresenceConflict>()("Pr
  */
 export class InvalidQuery extends Schema.TaggedError<InvalidQuery>()("InvalidQuery", {
   message: Schema.String,
-  code: Schema.optionalKey(
-    Schema.Literals([
-      "RANKING_UNAVAILABLE",
-      "EVIDENCE_TOO_LARGE",
-      "EVIDENCE_DAMAGED",
-      "STALE_LEDGER",
-      "NOT_FOUND",
-      "WITHHELD",
-    ])
-  ),
+  code: Schema.optionalKey(Schema.Literals(["RANKING_UNAVAILABLE", "STALE_LEDGER"])),
 }) {}
-
-/** Safe, machine-readable refusal for the opt-in evidence projection. */
-export class SavedQueryRefusal extends Schema.TaggedError<SavedQueryRefusal>()(
-  "SavedQueryRefusal",
-  {
-    code: Schema.Literals([
-      "RANKING_UNAVAILABLE",
-      "EVIDENCE_TOO_LARGE",
-      "EVIDENCE_DAMAGED",
-      "STALE_LEDGER",
-      "DEADLINE",
-      "NOT_FOUND",
-      "WITHHELD",
-      "INVALID_REQUEST",
-      "CAPACITY",
-      "SEARCH_TOO_BROAD",
-      "UNAVAILABLE",
-    ]),
-  }
-) {}
 
 /**
  * A ranked search could not hold its selection: the bus's retained selections are at capacity,
@@ -186,7 +157,6 @@ export class SavedQueryRefusal extends Schema.TaggedError<SavedQueryRefusal>()(
  */
 export class QueryCapacity extends Schema.TaggedError<QueryCapacity>()("QueryCapacity", {
   message: Schema.String,
-  selectionTooLarge: Schema.optionalKey(Schema.Literal(true)),
 }) {}
 
 /** A join's topic list is malformed; no subscription or cursor was changed. */

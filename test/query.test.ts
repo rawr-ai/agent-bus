@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
-import { Context, type Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Clock, Context, Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
@@ -19,7 +19,6 @@ import { CATALOGUE_VERSION, operationNames, search } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { busReader, type Query } from "../src/private-web/reader.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Selections from "../src/RankedSelections.ts";
 import * as Serve from "../src/serve.ts";
@@ -52,7 +51,10 @@ type Store = Layer.Layer<Ledger | QueryGateway, unknown, never>;
  * A bus serving MCP over one store, with an official SDK client. With `testClock`, the whole
  * bus runs on a TestClock that only `adjust` moves, so deadlines pass without waiting.
  */
-const startBus = async (store: Store, options: { readonly testClock?: boolean } = {}) => {
+const startBus = async (
+  store: Store,
+  options: { readonly testClock?: boolean; readonly onSleep?: (milliseconds: number) => void } = {}
+) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-query-"));
   dirs.push(dir);
   const port = freePort();
@@ -65,9 +67,20 @@ const startBus = async (store: Store, options: { readonly testClock?: boolean } 
       )
     )
   );
+  const clock = Layer.effect(
+    Clock.Clock,
+    Effect.map(Clock.Clock, (underlying) => ({
+      ...underlying,
+      sleep: (duration: Duration.Duration) =>
+        Effect.suspend(() => {
+          options.onSleep?.(Duration.toMillis(duration));
+          return underlying.sleep(duration);
+        }),
+    }))
+  ).pipe(Layer.provideMerge(TestClock.layer()));
   const runtime = ManagedRuntime.make(
     options.testClock === true
-      ? (layer.pipe(Layer.provideMerge(TestClock.layer())) as unknown as typeof layer)
+      ? (layer.pipe(Layer.provideMerge(clock)) as unknown as typeof layer)
       : layer
   );
   await runtime.runPromise(Effect.void);
@@ -1043,108 +1056,29 @@ describe("aggregates and peers", () => {
 });
 
 describe("snapshots and cursors", () => {
-  test("private evidence budgets only projected rows and refuses an oversized middle row without consuming it", async () => {
-    const config = await freshLedger("evidence-pages");
+  test("whole-row budgets refuse an oversized middle row without consuming the cursor", async () => {
+    const config = await freshLedger("native-budget-pages");
     const bus = await startBus(flureeStore(config));
-    const reader = await busReader({
-      busPort: bus.port,
-      expectedBusVersion: "test",
-      pageBytes: 32_768,
-    });
-    disposers.push(reader.dispose);
-    const page = async (request: Query) => {
-      const result = await reader.read(request);
-      if ("refusal" in result) throw new Error(result.refusal);
-      return result.page;
-    };
-    const hidden = "withheld/entry-canary";
-    const protectedEntry = new Message({
-      ...presence("protected-sender", "joined"),
-      id: hidden,
-      body: "withheld-body-canary",
-    });
-    await insertRaw(config, {
-      ...toNode(protectedEntry, encodeJson(protectedEntry)),
-      "@type": "bus:Message",
-    });
-    const replies = message({ from: "reply-sender", to: ["*"], body: "reply", replyTo: hidden });
     const narrow = message({ from: "budget-match", to: ["*"], body: "x".repeat(27_000) });
-    const huge = message({ from: "claude/a", to: ["*"], body: "€".repeat(13_000) });
-    await bus.append(replies, narrow, huge);
+    const huge = message({ from: "budget-match", to: ["*"], body: "€".repeat(13_000) });
+    const last = message({ from: "budget-match", to: ["*"], body: "last" });
+    await bus.append(narrow, huge, last);
     const { ledger, headT: t } = await bus.ok("bus_queries");
-    const snapshot = { ledger, t };
-
-    const first = await page({ name: "history", args: { limit: 1 }, snapshot });
-    expect(first).toMatchObject({ rows: [], omitted: 1, omittedTotal: 1, complete: false });
+    const args = { ids: [narrow.id, huge.id, last.id] };
+    const options = { ledger, t, maxPageBytes: 32_768 };
+    const first = await bus.run("messages", args, options);
+    expect(ids(first.rows)).toEqual([narrow.id]);
     expect(first.next).toBeDefined();
-    const next = await page({ name: "history", args: { limit: 1 }, cursor: first.next });
-    expect(next).toMatchObject({
-      snapshot,
-      rows: [{ id: replies.id, body: "reply" }],
-      omitted: 0,
-      omittedTotal: 1,
-      omittedReplyTargets: 1,
-    });
-    expect(next.rows[0]?.replyTo).toBeUndefined();
-    expect(next.missingReplyTargets).toBeUndefined();
-    expect(JSON.stringify([first, next])).not.toMatch(
-      /withheld-body-canary|withheld\/entry-canary|fixture-host/
-    );
-
-    const lookup = await page({
-      name: "messages",
-      args: { ids: [hidden, "absent/id"] },
-      snapshot,
-    });
-    expect(lookup).toMatchObject({
-      rows: [],
-      omitted: 1,
-      notFound: ["absent/id"],
-      complete: false,
-    });
-    expect(await reader.read({ name: "thread", args: { id: hidden }, snapshot })).toEqual({
-      refusal: "WITHHELD",
-    });
-
-    const narrowPage = await page({
-      name: "history",
-      args: { participants: ["budget-match"] },
-      snapshot,
-    });
-    const widePage = await page({
-      name: "history",
-      args: {
-        participants: [
-          "budget-match",
-          ...Array.from({ length: 49 }, (_, i) => `miss-${i}-${"x".repeat(128)}`),
-        ],
-      },
-      snapshot,
-    });
-    expect(widePage).toEqual(narrowPage);
-    expect(widePage).toMatchObject({
-      complete: true,
-      exhausted: true,
-      rows: [{ body: narrow.body }],
-    });
-    expect(widePage.rows[0]?.writtenT).toBeLessThan(snapshot.t);
-    expect(Object.keys(widePage.rows[0] ?? {}).sort()).toEqual([
-      "body",
-      "from",
-      "id",
-      "to",
-      "ts",
-      "writtenT",
-    ]);
-
-    const args = { ids: [narrow.id, huge.id, replies.id] };
-    const beforeLarge = await page({ name: "messages", args, snapshot });
-    expect(ids(beforeLarge.rows)).toEqual([narrow.id]);
-    expect(beforeLarge.next).toBeDefined();
-    const continuation = { name: "messages", args, snapshot, cursor: beforeLarge.next } as const;
+    const continuation = { name: "messages", args, ...options, cursor: first.next };
     for (let attempt = 0; attempt < 2; attempt++) {
-      expect(await reader.read(continuation)).toEqual({ refusal: "EVIDENCE_TOO_LARGE" });
+      expect(await bus.refused("bus_run_query", continuation)).toContain("alone exceeds");
     }
+    expect(
+      await bus.refused("bus_run_query", {
+        ...continuation,
+        args: { ids: [narrow.id, last.id, huge.id] },
+      })
+    ).toContain("different args");
   });
 
   test("appends between pages and during input resolution leave the snapshot unchanged", async () => {
@@ -1798,7 +1732,13 @@ describe("transport bounds", () => {
   }
 
   /** A bus whose Fluree requests cross a controlled boundary, with one entry written. */
-  const throughBoundary = async (name: string, options: { readonly testClock?: boolean } = {}) => {
+  const throughBoundary = async (
+    name: string,
+    options: {
+      readonly testClock?: boolean;
+      readonly onSleep?: (milliseconds: number) => void;
+    } = {}
+  ) => {
     const config = await freshLedger(name);
     const edge = boundary(config.url);
     disposers.push(async () => edge.stop());
@@ -1849,18 +1789,17 @@ describe("transport bounds", () => {
     await poolHolds(4);
   });
 
-  test("evidence admission bounds waiters, and the saved-query deadline includes the permit wait", async () => {
+  test("the saved-query deadline includes the shared permit wait", async () => {
+    let queuedDeadline: (() => void) | undefined;
     const { bus, edge, history, raw, failure, poolHolds } = await throughBoundary(
-      "evidence-deadline",
+      "saved-query-deadline",
       {
         testClock: true,
+        onSleep: (milliseconds) => {
+          if (milliseconds === 15_000) queuedDeadline?.();
+        },
       }
     );
-    const project = () =>
-      bus.call("bus_run_query", {
-        name: "history",
-        projection: "message-evidence",
-      });
     const pinned = [
       edge.nextPin(stallBeforeHeaders),
       edge.nextPin(stallMidBody),
@@ -1870,17 +1809,19 @@ describe("transport bounds", () => {
     const native = pinned.map(history);
     const heldPins = await Promise.all(pinned);
     const queuedQuery = edge.next(stallMidBody);
-    const projected = [project(), project()];
-    const refused = await Promise.race(projected);
-    expect(refused.isError).toBe(true);
-    expect(JSON.parse(bus.text(refused))).toEqual({ _tag: "SavedQueryRefusal", code: "CAPACITY" });
+    const deadlineRegistered = new Promise<void>((resolve) => {
+      queuedDeadline = resolve;
+    });
+    const queued = history();
+    await deadlineRegistered;
+    queuedDeadline = undefined;
     expect(heldPins.every((pin) => !pin.isFinalised())).toBe(true);
 
-    // All four pins reached their own request deadline before the queued evidence read runs.
+    // All four pins reach their own request deadline before the queued read runs.
     await bus.adjust("10 seconds");
     for (const call of native) expect(await failure(call)).toBe("Fluree request timed out.");
     await Promise.all(heldPins.map((pin) => pin.finalised));
-    const heldEvidence = await queuedQuery;
+    const heldQueued = await queuedQuery;
     const heldOthers = Array.from({ length: 3 }, () => edge.next(stallBeforeHeaders));
     const others = heldOthers.map(history);
     const blockers = await Promise.all(heldOthers);
@@ -1888,34 +1829,31 @@ describe("transport bounds", () => {
     const sentinel = raw();
     await bus.adjust("4999 millis");
     expect(edge.passed()).toBe(passes);
-    expect(heldEvidence.isFinalised()).toBe(false);
+    expect(heldQueued.isFinalised()).toBe(false);
 
     // No provider response was released. With three other permits held, the sentinel can
-    // complete only if the evidence call releases its own permit at the outer deadline.
+    // complete only if the queued call releases its own permit at the outer deadline.
     await bus.adjust("1 millis");
-    const codes = await Promise.all(
-      projected.map(async (call) => JSON.parse(await failure(call)).code)
-    );
-    expect(codes.sort()).toEqual(["CAPACITY", "DEADLINE"]);
-    await heldEvidence.finalised;
+    expect(await failure(queued)).toBe("The saved query did not finish within 15 seconds.");
+    await heldQueued.finalised;
     expect((await sentinel).isError).toBe(false);
     expect(blockers.every((request) => !request.isFinalised())).toBe(true);
-    expect((await project()).isError).toBe(false);
+    expect((await history()).isError).toBe(false);
 
     await bus.adjust("5 seconds");
     for (const call of others) expect(await failure(call)).toBe(DEADLINE);
     await poolHolds(4);
   });
 
-  test("evidence reads neither consume unread mail nor change its wake mark", async () => {
-    const { bus } = await throughBoundary("evidence-unread");
-    const recipient = { address: "evidence-reader", session: "evidence-reader-session" };
-    const sender = { address: "evidence-writer", session: "evidence-writer-session" };
+  test("saved-query reads neither consume unread mail nor change its wake mark", async () => {
+    const { bus } = await throughBoundary("query-unread");
+    const recipient = { address: "query-reader", session: "query-reader-session" };
+    const sender = { address: "query-writer", session: "query-writer-session" };
     for (const owner of [recipient, sender]) {
       await bus.ok("bus_join", { ...owner, runtime: "claude", cwd: "/tmp" });
     }
-    const body = "Synthetic evidence and unread mail.";
-    const id = "evidence-unread-fixture";
+    const body = "Synthetic query and unread mail.";
+    const id = "query-unread-fixture";
     await bus.append(message({ id, body, from: sender.address, to: [recipient.address] }));
     const snapshot = () =>
       bus.runtime.runPromise(Effect.flatMap(QueryGateway, (gateway) => gateway.pin));
@@ -1928,7 +1866,7 @@ describe("transport bounds", () => {
     expect((await wake()).addresses).toEqual([recipient.address]);
     const before = await cursor();
     const pin = await snapshot();
-    const options = { ledger: pin.incarnation, t: pin.head, projection: "message-evidence" };
+    const options = { ledger: pin.incarnation, t: pin.head };
     expect((await bus.run("messages", { ids: [id] }, options)).rows).toMatchObject([{ id, body }]);
     expect((await bus.run("thread", { id }, options)).rows).toMatchObject([{ id, body }]);
     expect(await snapshot()).toEqual(pin);

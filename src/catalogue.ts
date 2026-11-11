@@ -375,12 +375,9 @@ type Item<Row> =
       readonly row: Row;
       readonly at: Position;
       readonly label: string;
-      readonly omittedReplyTarget?: true;
-      readonly missingReplyTarget?: string;
     }
   | { readonly kind: "damaged"; readonly t?: number; readonly at: Position }
   | { readonly kind: "absent"; readonly id: string; readonly at: Position }
-  | { readonly kind: "withheld"; readonly at: Position }
   | { readonly kind: "passed"; readonly at: Position };
 
 interface Fetched<Row> {
@@ -395,13 +392,7 @@ interface Fetched<Row> {
   readonly extra?: Partial<
     Pick<
       typeof QueryEnvelope.Type,
-      | "root"
-      | "members"
-      | "missingReplyTargets"
-      | "rootOmitted"
-      | "total"
-      | "totals"
-      | "missingJson"
+      "root" | "members" | "missingReplyTargets" | "total" | "totals" | "missingJson"
     >
   >;
 }
@@ -409,7 +400,6 @@ interface Fetched<Row> {
 interface At {
   readonly t: number;
   readonly position: Position;
-  readonly projection?: "message-evidence" | undefined;
   /** For a retaining operation's later pages: the selection its cursor names. */
   readonly retained?: Retained;
 }
@@ -455,7 +445,6 @@ export interface RunInput {
   readonly ledger?: string | undefined;
   readonly t?: number | undefined;
   readonly cursor?: string | undefined;
-  readonly projection?: "message-evidence" | undefined;
 }
 
 // ---- Cursors ----------------------------------------------------------------------------------
@@ -475,8 +464,6 @@ const cursorFields = {
   n: Int.check(Schema.isGreaterThanOrEqualTo(1)),
   p: PositionSchema,
   u: Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  o: Schema.optionalKey(Int.check(Schema.isGreaterThanOrEqualTo(0))),
-  q: Schema.optionalKey(Int.check(Schema.isGreaterThanOrEqualTo(0))),
 };
 /** A retaining operation's cursor: its own revision and the handle of the selection it pages. */
 const SelectionCursor = Schema.Struct({
@@ -592,9 +579,7 @@ const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never },
   Effect.gen(function* () {
     const gateway = yield* QueryGateway;
     const normalized: Readonly<Record<string, unknown>> = { ...(args as object) };
-    const hash = argsHash(
-      input.projection === undefined ? normalized : { ...normalized, $projection: input.projection }
-    );
+    const hash = argsHash(normalized);
     const size = spec.pageSize(args);
     const cursor = input.cursor === undefined ? undefined : yield* decodeCursor(input.cursor);
     if (cursor !== undefined) {
@@ -665,10 +650,8 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
     const fetched = yield* spec.fetch(args, {
       t,
       position,
-      projection: input.projection,
       ...(retained === undefined ? {} : { retained }),
     });
-    const evidence = input.projection === "message-evidence";
     const after = yield* gateway.pin;
     if (after.incarnation !== pin.incarnation) {
       if (input.ledger !== undefined) {
@@ -701,16 +684,10 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
       const damagedAt: Array<number> = [...outside];
       let damaged = outside.length;
       const notFound: Array<string> = [];
-      let omitted = 0;
-      let omittedReplyTargets = 0;
-      const missingTargets = new Set<string>();
       for (const item of items) {
         if (item.kind === "row") {
           rows.push(item.row);
-          if (item.omittedReplyTarget) omittedReplyTargets += 1;
-          if (item.missingReplyTarget !== undefined) missingTargets.add(item.missingReplyTarget);
-        } else if (item.kind === "withheld") omitted += 1;
-        else if (item.kind === "damaged") {
+        } else if (item.kind === "damaged") {
           damaged += 1;
           if (item.t !== undefined) damagedAt.push(item.t);
         } else if (item.kind === "absent") notFound.push(item.id);
@@ -718,8 +695,6 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
       const more = fetched.more || kept < fetched.items.length;
       const last = items.at(-1);
       const damagedTotal = previous + damaged;
-      const omittedTotal = (cursor?.o ?? 0) + omitted;
-      const omittedReferencesTotal = (cursor?.q ?? 0) + omittedReplyTargets;
       const exhausted = !more;
       const shown = held ?? (more ? standIn : undefined);
       return {
@@ -729,21 +704,14 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
         t,
         ...(after.head > t ? { currentHeadT: after.head } : {}),
         unit: spec.unit,
-        // This projection serves a separate closed facade; the original arguments remain
-        // cursor-bound but are not evidence and should not compete with whole message bodies.
-        args: evidence ? {} : normalized,
+        args: normalized,
         rows,
         damage: spec.coverage === "predicates" ? "not-checked" : "checked",
         damaged,
         ...(damagedAt.length === 0 ? {} : { damagedAt: damagedAt.slice(0, MAX_DAMAGED_AT) }),
         damagedTotal,
         exhausted,
-        complete:
-          exhausted &&
-          damagedTotal === 0 &&
-          spec.coverage === "entries" &&
-          (!evidence ||
-            (omittedTotal === 0 && omittedReferencesTotal === 0 && !fetched.extra?.rootOmitted)),
+        complete: exhausted && damagedTotal === 0 && spec.coverage === "entries",
         ...(more && last !== undefined
           ? {
               next: encodeCursor({
@@ -756,7 +724,6 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
                 n: size,
                 p: last.at,
                 u: damagedTotal,
-                ...(evidence ? { o: omittedTotal, q: omittedReferencesTotal } : {}),
                 ...(spec.retains === true && shown !== undefined
                   ? { r: SEARCH_REVISION, s: shown.handle }
                   : {}),
@@ -774,19 +741,9 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
                   : {}),
               },
             }),
-        note: evidence ? "Projected message evidence at this snapshot." : spec.note,
+        note: spec.note,
         ...(spec.name === "messages" ? { notFound } : {}),
         ...fetched.extra,
-        ...(evidence
-          ? {
-              omitted,
-              omittedTotal,
-              omittedReplyTargets,
-              ...(missingTargets.size === 0
-                ? {}
-                : { missingReplyTargets: [...missingTargets].sort() }),
-            }
-          : {}),
       };
     };
     /**
@@ -827,7 +784,6 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
     // starts right after that row.
     let consumed = largestFitting(all - 1, (k) => bytes(envelope(k)) <= budget);
     while (
-      !evidence &&
       consumed > 0 &&
       fetched.items[consumed - 1]?.kind !== "row" &&
       (spec.name !== "orientation_directories" || fetched.items[consumed - 1]?.kind !== "passed")
@@ -846,7 +802,6 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
         );
       }
       return yield* new InvalidQuery({
-        ...(evidence ? { code: "EVIDENCE_TOO_LARGE" } : {}),
         message:
           first?.kind === "row"
             ? `The entry ${first.label} alone exceeds the ${budget}-byte result limit; read it with bus_query, selecting fewer fields.`
@@ -917,10 +872,7 @@ const decodeEntry = (id: string, json: string | null) => {
 
 const dateTime = (value: string) => ({ "@value": value, "@type": "xsd:dateTime" });
 
-/**
- * The ordinary catalogue's historical ID alphabet. The evidence projection must
- * not infer absence from this shortcut: imported IRIs can contain other characters.
- */
+/** The ordinary catalogue's historical ID alphabet. */
 const isEntryId = (id: string) => /^[A-Za-z0-9._~:@-]+$/.test(id);
 const entryIri = (id: string) => ({ "@type": "@id", "@value": `${MESSAGE_IRI}${id}` });
 
@@ -984,9 +936,6 @@ const windowValues = (window: {
 const CandidateRows = Schema.Array(
   Schema.Tuple([Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
 );
-const LocatedCandidateRows = Schema.Array(
-  Schema.Tuple([Schema.String, Schema.Number, Schema.String, Schema.NullOr(Schema.String)])
-);
 
 /** Keyset filters on (?t, ?id) against a bound key (?bt, ?bid). */
 const AFTER_KEY = "(or (> ?t ?bt) (and (= ?t ?bt) (> ?id ?bid)))";
@@ -1034,8 +983,7 @@ const decodeGroup = <R extends Candidate>(group: Group<R>) =>
 
 const entriesById = (wanted: ReadonlyArray<string>, at: At) =>
   Effect.gen(function* () {
-    const evidence = at.projection === "message-evidence";
-    const lookup = [...new Set(evidence ? wanted : wanted.filter(isEntryId))];
+    const lookup = [...new Set(wanted.filter(isEntryId))];
     const gateway = yield* QueryGateway;
     const found = new Map<string, Group<Candidate>>();
     if (lookup.length === 0) return found;
@@ -1043,26 +991,9 @@ const entriesById = (wanted: ReadonlyArray<string>, at: At) =>
       values: [["?m"], lookup.map((id) => [entryIri(id)])],
       where: [candidate("?m"), storedJson("?m")],
     };
-    let rows: ReadonlyArray<Candidate>;
-    if (evidence) {
-      // Only a lookup of the actual requested subject proves absence. A contradictory
-      // bus:id at that subject is damaged, not a row for a different requested ID.
-      const located = yield* gateway
-        .jsonld(at.t, { selectDistinct: ["?m", "?t", "?id", "?json"], ...where })
-        .pipe(Effect.flatMap(decodeRows(LocatedCandidateRows)));
-      const expected = new Map(lookup.map((id) => [messageIri(id), id]));
-      const checked: Candidate[] = [];
-      for (const [subject, t, id, json] of located) {
-        const asked = expected.get(subject);
-        if (asked === undefined) return yield* invalidResponse();
-        checked.push([t, asked, id === asked ? json : null]);
-      }
-      rows = checked;
-    } else {
-      rows = yield* gateway
-        .jsonld(at.t, { selectDistinct: ["?t", "?id", "?json"], ...where })
-        .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-    }
+    const rows = yield* gateway
+      .jsonld(at.t, { selectDistinct: ["?t", "?id", "?json"], ...where })
+      .pipe(Effect.flatMap(decodeRows(CandidateRows)));
     for (const [index, row] of rows.entries()) {
       const group = found.get(row[1]);
       if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
@@ -1070,70 +1001,6 @@ const entriesById = (wanted: ReadonlyArray<string>, at: At) =>
     }
     return found;
   });
-
-const entryKind = (group: Group<Candidate> | undefined) =>
-  group === undefined
-    ? "absent"
-    : Option.match(decodeGroup(group), { onNone: () => "damaged" as const, onSome: (m) => m.kind });
-
-const evidenceRow = (row: EntryRow, replyTo: string | undefined): EntryRow => ({
-  t: row.t,
-  id: row.id,
-  ts: row.ts,
-  from: row.from,
-  to: row.to,
-  kind: "message",
-  body: row.body,
-  ...(row.subject === undefined ? {} : { subject: row.subject }),
-  ...(replyTo === undefined ? {} : { replyTo }),
-});
-
-/** Redact before whole-row sizing. A target must be an admitted message or genuinely absent. */
-const asEvidence = <Row extends EntryRow>(
-  fetched: Fetched<Row>,
-  at: At,
-  rowOf: (entry: EntryRow, original: Row) => Row
-) =>
-  Effect.gen(function* () {
-    if (at.projection !== "message-evidence") return fetched;
-    const root = fetched.extra?.root;
-    const targets = yield* entriesById(
-      [
-        ...(root === undefined ? [] : [root]),
-        ...fetched.items.flatMap((item) =>
-          item.kind === "row" && item.row.kind === "message" && item.row.replyTo !== undefined
-            ? [item.row.replyTo]
-            : []
-        ),
-      ],
-      at
-    );
-    const targetKinds = new Map([...targets].map(([id, group]) => [id, entryKind(group)]));
-    const items = fetched.items.map((item): Item<Row> => {
-      if (item.kind !== "row") return item;
-      if (item.row.kind !== "message") return { kind: "withheld", at: item.at };
-      const target = item.row.replyTo;
-      const kind = target === undefined ? undefined : (targetKinds.get(target) ?? "absent");
-      const omitted = kind === "presence" || kind === "damaged";
-      return {
-        ...item,
-        row: rowOf(evidenceRow(item.row, omitted ? undefined : target), item.row),
-        ...(omitted ? { omittedReplyTarget: true } : {}),
-        ...(target !== undefined && kind === "absent" ? { missingReplyTarget: target } : {}),
-      };
-    });
-    // Native member counts and missing targets can describe withheld rows, not just this page.
-    const extra =
-      root === undefined
-        ? {}
-        : targetKinds.get(root) === "message"
-          ? { root }
-          : { rootOmitted: true };
-    return { ...fetched, items, extra };
-  });
-
-const entryEvidence = (fetched: Fetched<EntryRow>, at: At) =>
-  asEvidence(fetched, at, (entry) => entry);
 
 /** Keyset items from (t, id, json) rows fetched with limit size + 1, damaged ones in place. */
 const entryItems = (
@@ -1187,9 +1054,6 @@ export const history = define({
     args.direction === "backward" ? { before: [t + 1, ""] } : { after: [0, ""] },
   fetch: (args, at) =>
     Effect.gen(function* () {
-      if (at.projection === "message-evidence" && args.kinds?.some((kind) => kind !== "message")) {
-        return yield* invalid("Message evidence cannot include presence in history.");
-      }
       const gateway = yield* QueryGateway;
       const size = args.limit ?? 50;
       const backward = "before" in at.position;
@@ -1220,7 +1084,7 @@ export const history = define({
           limit: size + 1,
         })
         .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      return yield* entryEvidence(entryItems(rows, size, backward ? "before" : "after"), at);
+      return entryItems(rows, size, backward ? "before" : "after");
     }),
 });
 
@@ -1257,7 +1121,7 @@ export const messages = define({
             }
           : { kind: "damaged", t: row[0], at: position };
       });
-      return yield* entryEvidence({ items, more: false }, at);
+      return { items, more: false };
     }),
 });
 
@@ -1285,36 +1149,20 @@ export const thread = define({
     Effect.gen(function* () {
       const gateway = yield* QueryGateway;
       const size = args.limit ?? 100;
-      if (at.projection === undefined && !isEntryId(args.id)) {
+      if (!isEntryId(args.id)) {
         return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
       }
       const focusIri = entryIri(args.id);
       const focus = { values: [["?f"], [[focusIri]]] };
-      if (at.projection === "message-evidence") {
-        const found = yield* entriesById([args.id], at);
-        const kind = entryKind(found.get(args.id));
-        if (kind !== "message") {
-          return yield* new InvalidQuery({
-            message: "The thread focus is not available as message evidence.",
-            code:
-              kind === "presence"
-                ? "WITHHELD"
-                : kind === "damaged"
-                  ? "EVIDENCE_DAMAGED"
-                  : "NOT_FOUND",
-          });
-        }
-      } else {
-        const resolved = yield* gateway
-          .jsonld(at.t, {
-            select: ["?t"],
-            ...focus,
-            where: [{ "@id": "?f", "bus:id": { "@value": "?fid", "@t": "?t" } }],
-          })
-          .pipe(Effect.flatMap(decodeRows(ResolvedRows)));
-        if (resolved.length === 0) {
-          return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
-        }
+      const resolved = yield* gateway
+        .jsonld(at.t, {
+          select: ["?t"],
+          ...focus,
+          where: [{ "@id": "?f", "bus:id": { "@value": "?fid", "@t": "?t" } }],
+        })
+        .pipe(Effect.flatMap(decodeRows(ResolvedRows)));
+      if (resolved.length === 0) {
+        return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
       }
       const tree = [
         { "@id": "?f", up: "?top" },
@@ -1359,17 +1207,14 @@ export const thread = define({
           limit: size + 1,
         })
         .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      return yield* entryEvidence(
-        {
-          ...entryItems(rows, size, "after"),
-          extra: {
-            ...optionalKey("root", root),
-            members: memberIris.size,
-            missingReplyTargets: [...missing].sort(),
-          },
+      return {
+        ...entryItems(rows, size, "after"),
+        extra: {
+          ...optionalKey("root", root),
+          members: memberIris.size,
+          missingReplyTargets: [...missing].sort(),
         },
-        at
-      );
+      };
     }),
 });
 
@@ -1499,15 +1344,11 @@ export const search = define({
             }
           : { kind: "damaged", t: entry.t, at: position };
       });
-      return yield* asEvidence(
-        {
-          items,
-          more: offset + size < selection.entries.length,
-          selection: { entries: selection.entries, truncated: selection.truncated },
-        },
-        at,
-        (entry, original) => ({ ...entry, score: original.score })
-      );
+      return {
+        items,
+        more: offset + size < selection.entries.length,
+        selection: { entries: selection.entries, truncated: selection.truncated },
+      };
     }),
 });
 
