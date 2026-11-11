@@ -10,6 +10,8 @@ Earlier full-install rehearsal marks refer to the previous installer. The manage
 
 Install from the canonical checkout that `serve` will run, which stays clean and detached at its approved deployed commit ([deploy](deploy.md#before-you-start)). The installer binds a managed launcher to that checkout and an exact Bun executable; moving either requires a controlled rebinding.
 
+The installer also has a `--release` mode that binds the launcher to a sealed, versioned release instead of the checkout. It needs this installation's `installation-id` already in place and creates none. It is qualified and rehearsed under disposable launchd jobs but not activated on either machine; until an activation decision names a release, install and deploy from the checkout as this page describes.
+
 What each machine needs:
 
 | Needs | On | Why |
@@ -82,7 +84,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
 
    | Created | Where | Note |
    | --- | --- | --- |
-   | The launcher | `~/.local/bin/agent-bus`, a managed executable | What the hook and `serve` run; it binds exact Bun and canonical source with `--no-env-file`. The installer checks minimal-environment execution, adopts its old source symlink, and refuses foreign files, symlinks or modified wrappers |
+   | The launcher | `~/.local/bin/agent-bus`, a managed executable | What the hook and `serve` run; it binds exact Bun and canonical source with `--no-env-file`. The installer checks minimal-environment execution, adopts its old source symlink, accepts its own release launcher, and refuses foreign files, symlinks or modified wrappers |
    | The signing key | `~/.agent-bus/fluree-key.json`, mode 0600 | The key the Fluree server trusts tokens from |
    | The token | `~/.agent-bus/fluree-token`, mode 0600 | The bearer token for Fluree's data and admin APIs. It has no subject and lasts 520 weeks ([connections](../architecture/connections.md#limits)) |
    | `config.json` | `~/.agent-bus/config.json` | `{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`, written only if absent. `serve` won't start without it |

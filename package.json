@@ -21,6 +21,8 @@
     "sync:stewards": "bun scripts/sync-stewards.ts",
     "check:stewards": "bun scripts/sync-stewards.ts --check",
     "qualify:fluree": "bun scripts/qualify-fluree.ts",
+    "qualify:release": "bun --no-env-file scripts/qualify-release.ts",
+    "rehearse:release": "bun --no-env-file scripts/rehearse-release.ts",
     "qualify:toolchain": "bun --no-env-file scripts/qualify-toolchain.ts",
     "install:launch-agents": "./scripts/install-launch-agents.sh",
     "viewer:build": "bun --no-env-file scripts/build-viewer.ts",
