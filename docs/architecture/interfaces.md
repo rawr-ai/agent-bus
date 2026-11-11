@@ -187,9 +187,12 @@ Returns `status`, `cut`, `currentHeadT`, `evaluatedAt` and `catalogueVersion` wh
 | --- | --- | --- | --- | --- |
 | `address` | string | yes | — | The address to read; you must own it |
 | `session` | string | yes (optional in the schema) | — | As for `bus_join` |
-| `limit` | integer ≥ 1 | no | all unread | The most messages to return, oldest first; the rest stay unread. `0` is refused |
+| `limit` | integer ≥ 1 | no | all unread | The most messages to return, oldest first; the rest stay unread. A commit group is never split, so a first group larger than the limit is refused. `0` is refused |
+| `maxResultBytes` | integer ≥ 128 | no | no byte admission | Maximum UTF-8 JSON bytes of the complete public MCP result carrier, including text and structured content; JSON-RPC envelope excluded |
 
 Returns `messages`, possibly empty. Each message has `id`, `ts`, `from`, `to`, `kind`, `body` and, when set, `subject`, `replyTo` and `origin` (`host`, and when known `cwd`, `repo` and `branch`: where it was written). These are explicit public fields, not the stored entry: nested `presence`, session claims, wake state and extra internal objects are omitted, including on legacy ordinary messages. Presence entries are not delivered as mail. It marks what it returns read before the response is sent. MCP text and structured content carry the same projected object.
+
+With either limit, the result is the oldest whole messages that satisfy the limits, ending only at a complete commit group. Remaining messages stay unread. If the oldest unread commit cannot fit, the call is refused before moving the cursor. The hosted candidate supplies a 4 MiB carrier limit; it is not a promise that a successfully admitted response reaches the caller.
 
 #### `bus_wait`
 
@@ -198,6 +201,7 @@ Returns `messages`, possibly empty. Each message has `id`, `ts`, `from`, `to`, `
 | `address` | string | yes | — | The address to wait on; you must own it |
 | `session` | string | yes (optional in the schema) | — | As for `bus_join` |
 | `timeoutSeconds` | number from 0 to 50 | no | 50 | Seconds to wait; `MAX_WAIT_SECONDS` ([delivery](delivery.md#timeouts-and-schedules)) is the maximum and the default |
+| `maxResultBytes` | integer ≥ 128 | no | no byte admission | The same whole-result byte admission as `bus_read` |
 
 Returns `messages` as `bus_read` does, as soon as there are any, or an empty list on timeout. A timeout isn't a refusal. Ownership is checked again on every read, so a wait that outlives its session's ownership is refused.
 
@@ -338,6 +342,7 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | "`<address>` is not in this message's audience: pierce names only joined peers it already reaches. Nothing was sent." | `bus_publish` with a named `pierce` address that isn't a joined peer its `to` reaches, the sender included | Pierce only members of the audience, or add the address to `to` |
 | "operation must be a UUIDv7, the same for every retry. …" | `bus_activity` with an `operation` that isn't a UUIDv7. Each input refusal ends "Nothing was written.", as do "Give activity, mutes or both.", an `activity` other than `active` or `inactive`, a mute that isn't one of the four scopes, or a key the tool doesn't take | Correct the input; nothing was read or written |
 | "`<address>` has not joined the bus; join first." | The same four tools on an address with no current join: never joined, left, or no cursor on this machine's ledger | `bus_join` first, unless this was a wake's read: then carry on (Claude) or end the turn (Codex) without joining |
+| "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Use a reader with larger limits." | The first unread commit group exceeds the requested count or byte admission | Use a reader whose limits can return the whole group; no unread message was consumed |
 | "Cursor t=<t> is ahead of <ledger> (t=<head>): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again." | A read or wait finds the address's cursor beyond the ledger's end (a wake logs it and skips that address for the pass) | Tell the human; it is theirs to settle ([recover](../runbooks/recover.md#a-cursor-is-ahead-of-the-ledger)). A plain rejoin changes nothing; only a rejoin with `replay`, once the human agrees to receive the past mail again, resets the cursor |
 | "A ledger entry at t=<t> could not be decoded." | A complete read, presence history or address-command history contains malformed or schema-invalid stored JSON at commit `t`; a typed presence node without exactly one entry and one id that agree, with more than one sender, or whose entry holds a session but isn't the node its id names or is recorded under another sender (the same law for the presence read that decides ownership and the activity log); a presence node with neither an id nor an entry, or a typed address command with no value (each named at the read's own commit); or an address command stored with several values, under a malformed id or with a field or mute scope this serve doesn't know | Tell the human the commit; no partial read or ownership inference is made ([recover](../runbooks/recover.md#an-entry-cannot-be-decoded)) |
 | "Only SELECT queries are allowed." | `bus_query` with an update, ASK, CONSTRUCT or DESCRIBE | Rewrite it as a SELECT |

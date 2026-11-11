@@ -105,6 +105,33 @@ const publicMessages = (messages: ReadonlyArray<Message>): typeof Messages.Type 
         }),
   })),
 });
+
+/** Exact JSON bytes of the duplicated public MCP result, excluding the JSON-RPC envelope. */
+export const messageCarrierBytes = (messages: ReadonlyArray<Message>) => {
+  const structuredContent = publicMessages(messages);
+  return Buffer.byteLength(
+    JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+      structuredContent,
+      isError: false,
+    }),
+    "utf8"
+  );
+};
+
+const messageAdmission = (maximum: number | undefined) =>
+  maximum === undefined
+    ? undefined
+    : (messages: ReadonlyArray<Message>) => {
+        let low = 0;
+        let high = messages.length;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          if (messageCarrierBytes(messages.slice(0, middle)) <= maximum) low = middle;
+          else high = middle - 1;
+        }
+        return low;
+      };
 export const Joined = Schema.Struct({
   address: Schema.String.annotate({ description: "The address you joined." }),
   // Older servers did not echo topics; the CLI uses this schema to decode their results too.
@@ -458,7 +485,13 @@ const Read = Tool.make("bus_read", {
     limit: Schema.optionalKey(
       Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
         description:
-          "The most messages to return, oldest first; the rest stay unread. Defaults to all of them.",
+          "The most messages to return, oldest first; the rest stay unread. A commit group is never split, so a group larger than the limit is refused without advancing the cursor. Defaults to all of them.",
+      })
+    ),
+    maxResultBytes: Schema.optionalKey(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(128)).annotate({
+        description:
+          "Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte and count limits, the call is refused without advancing the cursor. Minimum 128.",
       })
     ),
   }),
@@ -474,6 +507,12 @@ const Wait = Tool.make("bus_wait", {
     timeoutSeconds: Schema.optionalKey(
       Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_WAIT_SECONDS })).annotate({
         description: `Seconds to wait, 0 to ${MAX_WAIT_SECONDS}; defaults to ${MAX_WAIT_SECONDS}.`,
+      })
+    ),
+    maxResultBytes: Schema.optionalKey(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(128)).annotate({
+        description:
+          "Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte limit, the call is refused without advancing the cursor. Minimum 128.",
       })
     ),
   }),
@@ -898,11 +937,18 @@ const BusHandlers = BusToolkit.toLayer(
       bus_directory: (params) => updateDirectory(params).pipe(Effect.provide(environment)),
       bus_bulletin: (params) => updateBulletin(params).pipe(Effect.provide(environment)),
       bus_orient: (params) => timedOrient(params),
-      bus_read: ({ address, session, limit }) =>
-        bus.take(address, session, limit).pipe(Effect.map(publicMessages)),
-      bus_wait: ({ address, session, timeoutSeconds }) =>
+      bus_read: ({ address, session, limit, maxResultBytes }) =>
         bus
-          .wait(address, session, timeoutSeconds ?? MAX_WAIT_SECONDS)
+          .take(address, session, limit, messageAdmission(maxResultBytes))
+          .pipe(Effect.map(publicMessages)),
+      bus_wait: ({ address, session, timeoutSeconds, maxResultBytes }) =>
+        bus
+          .wait(
+            address,
+            session,
+            timeoutSeconds ?? MAX_WAIT_SECONDS,
+            messageAdmission(maxResultBytes)
+          )
           .pipe(Effect.map(publicMessages)),
       bus_wake: ({ session, fresh }) => bus.wake(session, MAX_WAIT_SECONDS, fresh),
       bus_owned_addresses: ({ session, runtime }) =>

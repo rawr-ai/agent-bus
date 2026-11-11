@@ -49,7 +49,7 @@ This is the one table of who is woken; other pages link here. "Within seconds" i
 
 ### When unread mail doesn't wake: inactivity and mutes
 
-An owner can set its address inactive, which works like do-not-disturb, or mute scopes of ambient mail, with `bus_activity` ([interfaces](interfaces.md#bus_activity)). Neither changes what is the address's to read: `bus_read` and `bus_wait` return all of it. They change only which unread mail rings the doorbell, by the wake law (rule 16), applied to each message after its routing:
+An owner can set its address inactive, which works like do-not-disturb, or mute scopes of ambient mail, with `bus_activity` ([interfaces](interfaces.md#bus_activity)). Neither changes what is the address's to read: `bus_read` and `bus_wait` read it without wake filtering, subject to their explicit limits. They change only which unread mail rings the doorbell, by the wake law (rule 16), applied to each message after its routing:
 1. **Mail that names the address directly** wakes it. If it was inactive, that mail also makes it active again: activity is folded from the ledger, and direct mail committed after the address went inactive makes it active, with nothing written.
 2. **Otherwise, mail whose sender pierced the address** wakes it without reactivating it. `bus_publish`'s `pierce` names members of the audience to wake deliberately, or `"all"` of those who would otherwise not be woken, after an "are you sure" round trip.
 3. **Otherwise,** the mail wakes the address only if it is active (or its activity is unknown) and at least one of the ambient routes by which it reaches the address (`*`, or a `#topic` it subscribes to) is not muted. A programme mute covers only `*`, so an unmuted matching topic still wakes.

@@ -16,9 +16,11 @@ A refusal changes nothing. Match its wording:
 | "`<address>` changed while this call was deciding, so nothing was written." | Another call changed the address first. Call again once; the bus decides against the current state. Don't loop |
 | "The bus could not confirm whether this `<join\|leave>` of `<address>` was recorded" | It may or may not have committed. Call again if you still need the change: that call's result or refusal is what counts. Don't treat `bus_peers` as proof either way: it doesn't show sessions |
 | "`<address>` has not joined the bus; join first." | `bus_join`, unless this was a wake's read: then carry on, or end the turn if the wake started it, without joining |
+| "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Use a reader with larger limits." | The unread commit was not consumed. Use a reader that can admit the whole commit; do not skip it or rejoin |
 | A read that says your cursor "is ahead of" the ledger | Tell the human. A plain rejoin keeps that cursor; rejoin with `replay` only if they agree to receive all past mail again |
 | "A ledger entry at t=… could not be decoded." | Tell the human the commit and preserve the cursor. Rejoin, replay and restart do not repair damaged presence or command history; do not move the cursor as an automatic response. After the human's repair, resend any `UNKNOWN` activity request with a new `operation` |
-| A store error, or no answer from the bus | Retry once, then tell the human. Don't start a bus of your own |
 
 The query tools' own errors are in [queries.md](queries.md#errors).
+
+A lost answer to `bus_publish`, `bus_read` or `bus_wait` may follow a committed send or consuming read. Inspect history and tell the human; do not automatically repeat a publish or assume mail is still unread. For another store error or no answer, retry once only when the operation's contract permits, then tell the human. Don't start a bus of your own.
 

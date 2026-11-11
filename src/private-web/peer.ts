@@ -12,9 +12,9 @@ const specs = [
   [native.SetActivity, ["session"], true],
   [native.Directory, ["session"], true],
   [native.Bulletin, ["session"], true],
-  [native.Orient, ["cwd"], false],
-  [native.Read, ["session"], true],
-  [native.Wait, ["session"], true],
+  [native.Orient, [], false],
+  [native.Read, ["session", "maxResultBytes"], true],
+  [native.Wait, ["session", "maxResultBytes"], true],
   [native.Owned, ["session", "runtime"], true],
   [native.ListPeers, [], false],
   [native.History, [], false],
@@ -66,7 +66,7 @@ const wire = (schema: Schema.ConstraintDecoder<unknown>, hidden: ReadonlyArray<s
           return { issues: [{ message: "Invalid tool input." }] };
         const injected = Object.fromEntries(
           hidden
-            .filter((key) => key !== "codexThreadId")
+            .filter((key) => key !== "codexThreadId" && key !== "maxResultBytes")
             .map((key) => [
               key,
               key === "runtime" ? "other" : key === "cwd" ? "/" : "hosted-placeholder",
@@ -87,7 +87,8 @@ const wire = (schema: Schema.ConstraintDecoder<unknown>, hidden: ReadonlyArray<s
 
 type Exchange = (
   name: string,
-  args: Record<string, unknown>
+  args: Record<string, unknown>,
+  signal?: AbortSignal
 ) => Promise<{
   readonly content: ReadonlyArray<Readonly<Record<string, unknown>>>;
   readonly structuredContent?: Record<string, unknown> | undefined;
@@ -100,6 +101,9 @@ const failure = (message: string) => ({
   content: [{ type: "text", text: message }],
 });
 
+const HOSTED_READ_BYTES = 4 * 1024 * 1024;
+class BeforeDispatch extends Error {}
+
 /** Ownership parameters are never accepted from a caller, even as excess input. */
 export const peerTools = (exchange: Exchange, cwd: string) =>
   specs.map(([tool, hidden, sessionRequired]) => {
@@ -111,9 +115,13 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
         : name === "bus_owned_addresses"
           ? "List addresses held by this conversation as runtime other. This read does not change mail, activity or ownership."
           : (tool.description ?? "");
+    const readLimit =
+      name === "bus_read" || name === "bus_wait"
+        ? " The oldest whole messages fitting a 4 MiB result carrier are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor."
+        : "";
     return {
       name,
-      description: `${description} Hosted calls bind conversation identity and bridge directory automatically. Join and takeover only chatgpt/ addresses; take over only on explicit human instruction.`,
+      description: `${description}${readLimit} Hosted calls bind conversation identity automatically; joins use the bridge directory. Join and takeover only chatgpt/ addresses; take over only on explicit human instruction.`,
       annotations: {
         openWorldHint: false,
         readOnlyHint: [
@@ -160,12 +168,16 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
           Object.assign(args, { session: context.actor.session, runtime: "other" });
         } else if (sessionRequired) {
           Object.assign(args, { session: context.actor.session });
-        } else if (name === "bus_orient") {
-          Object.assign(args, { cwd });
         }
+        if (name === "bus_read" || name === "bus_wait")
+          Object.assign(args, { maxResultBytes: HOSTED_READ_BYTES });
         try {
-          return await exchange(name, args);
-        } catch {
+          return await exchange(name, args, context.signal);
+        } catch (error) {
+          if (error instanceof BeforeDispatch)
+            return failure(
+              "The Bus call was not sent; the connection or required tool is unavailable."
+            );
           return failure(
             "The Bus result is unavailable. The operation may have committed or consumed messages; inspect state and do not automatically retry an ambiguous write."
           );
@@ -195,8 +207,9 @@ export const busPeer = async (options: {
     timeout: "5 seconds",
     maxMessageBytes: 8 * 1024 * 1024,
   });
-  const exchange: Exchange = (name, args) =>
-    runtime
+  const exchange: Exchange = (name, args, signal) => {
+    let dispatched = false;
+    return runtime
       .runPromise(
         Effect.gen(function* () {
           const client = yield* McpClient.McpClient;
@@ -204,8 +217,22 @@ export const busPeer = async (options: {
             return yield* Effect.fail(new Error("Unexpected Bus version."));
           const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
           if (!tool) return yield* Effect.fail(new Error("Bus tool unavailable."));
+          if (name === "bus_read" || name === "bus_wait") {
+            const properties = tool.inputSchema.properties;
+            const budget = object(properties) ? properties.maxResultBytes : undefined;
+            if (
+              !object(budget) ||
+              budget.type !== "integer" ||
+              budget.minimum !== 128 ||
+              (budget.maximum !== undefined &&
+                (typeof budget.maximum !== "number" || budget.maximum < HOSTED_READ_BYTES))
+            )
+              return yield* Effect.fail(new Error("Bus read byte admission unavailable."));
+          }
+          dispatched = true;
           return yield* client.callTool({ tool, arguments: args }, { timeout: "60 seconds" });
-        }).pipe(Effect.provide(layer))
+        }).pipe(Effect.provide(layer)),
+        { signal }
       )
       .then((result) => {
         const { structuredContent, ...rest } = result;
@@ -216,6 +243,11 @@ export const busPeer = async (options: {
           content: result.content.map((item) => ({ ...item })),
           ...(structuredContent === undefined ? {} : { structuredContent }),
         };
+      })
+      .catch((error: unknown) => {
+        if (!dispatched) throw new BeforeDispatch();
+        throw error;
       });
+  };
   return { exchange, dispose: () => runtime.dispose() };
 };

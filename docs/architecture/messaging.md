@@ -68,6 +68,7 @@ An address is in one of five states: free (never joined, or joined only by prese
 
 Each address has a cursor: how far its owner has read. Only the owner's read consumes mail.
 - **`bus_read`** returns the unread mail, oldest first, and moves the cursor past everything it looked at. With a limit, it stops at the last message it returns, and the cursor moves only that far.
+- **Count and byte admission** select a whole-message prefix under the same address lock, before moving the cursor. They stop only between commits, so messages sharing one commit cannot be split; if the oldest unread commit cannot fit, the call refuses without moving the cursor. Without either limit, the usual complete read remains.
 - **`bus_wait`** reads the same way. If nothing is waiting, it reads again at each change in the ledger, until mail arrives or its timeout ends.
 - **A failed or refused read** moves nothing: the cursor advances only after a complete read.
 

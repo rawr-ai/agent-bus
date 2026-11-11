@@ -4,11 +4,12 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Effect, Layer, ManagedRuntime } from "effect";
+import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
+import { Messages } from "../src/mcp.ts";
 import { clerkPeerResolver, PEER_PERMISSION, peerSession } from "../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 import * as Serve from "../src/serve.ts";
@@ -102,10 +103,53 @@ test("hosted catalogue excludes hook and caller-controlled identity fields", () 
     expect(properties).not.toHaveProperty("session");
     if (["bus_join", "bus_takeover", "bus_owned_addresses"].includes(tool.name))
       expect(properties).not.toHaveProperty("runtime");
-    if (["bus_join", "bus_takeover", "bus_orient"].includes(tool.name))
+    if (["bus_join", "bus_takeover"].includes(tool.name))
       expect(properties).not.toHaveProperty("cwd");
+    if (tool.name === "bus_orient") expect(properties).toHaveProperty("cwd");
+    if (["bus_read", "bus_wait"].includes(tool.name))
+      expect(properties).not.toHaveProperty("maxResultBytes");
     expect(properties).not.toHaveProperty("codexThreadId");
   }
+});
+
+test("hosted orientation forwards only an explicitly supplied lexical cwd and reads bind the budget", async () => {
+  const calls: Array<{ name: string; args: Record<string, unknown> }> = [];
+  const tools = peerTools(async (name, args) => {
+    calls.push({ name, args });
+    return { content: [] };
+  }, "/bridge");
+  const actor = { session: "fixture-session" };
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const tool = tools.find((candidate) => candidate.name === name);
+    if (!tool) throw new Error("Missing tool.");
+    return tool.execute(args, { actor, signal });
+  };
+  await call("bus_orient", {});
+  await call("bus_orient", { cwd: "/project", candidateCursor: "continuation" });
+  await call("bus_join", { address: "chatgpt/test" });
+  await call("bus_read", { address: "chatgpt/test" });
+  expect(calls[0]).toEqual({ name: "bus_orient", args: {} });
+  expect(calls[1]).toEqual({
+    name: "bus_orient",
+    args: { cwd: "/project", candidateCursor: "continuation" },
+  });
+  expect(calls[2]?.args).toMatchObject({
+    cwd: "/bridge",
+    runtime: "other",
+    session: actor.session,
+  });
+  expect(calls[3]?.args).toMatchObject({ session: actor.session, maxResultBytes: 4 * 1024 * 1024 });
+  expect(
+    (await call("bus_read", { address: "chatgpt/test", maxResultBytes: 8 * 1024 * 1024 })).isError
+  ).toBe(true);
+  const abort = new AbortController();
+  abort.abort();
+  const read = tools.find((tool) => tool.name === "bus_read");
+  if (!read) throw new Error("Missing read.");
+  expect(
+    (await read.execute({ address: "chatgpt/test" }, { actor, signal: abort.signal })).isError
+  ).toBe(true);
+  expect(calls).toHaveLength(4);
 });
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-hosted-peer-"));
@@ -286,6 +330,71 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     await ok("bus_leave", { address: "chatgpt/a" }, b);
     expect((await call("bus_read", { address: "chatgpt/a" }, b)).isError).toBe(true);
     await ok("bus_join", { address: "chatgpt/a" }, b);
+  } finally {
+    await peer.dispose();
+  }
+}, 60_000);
+
+test("hosted reads drain a carrier larger than the loopback ceiling without losing messages", async () => {
+  const peer = await busPeer({ busPort: port, expectedBusVersion: "hosted-fixture" });
+  try {
+    const actor = { session: "large-hosted-session" };
+    const tools = peerTools(peer.exchange, process.cwd());
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const tool = tools.find((item) => item.name === name);
+      if (!tool) throw new Error("Missing hosted tool.");
+      const result = await tool.execute(args, { actor, signal });
+      expect(result.isError).not.toBe(true);
+      return result;
+    };
+    const address = "chatgpt/large-reader";
+    const sender = "fixture/large-sender";
+    await call("bus_join", { address });
+    await server.runPromise(
+      Effect.flatMap(Bus.Bus, (bus) =>
+        bus.join({
+          address: sender,
+          session: sender,
+          runtime: "other",
+          cwd: process.cwd(),
+        })
+      )
+    );
+    const bodies = Array.from({ length: 6 }, (_, i) => `${i}:` + '"\\€'.repeat(120_000));
+    for (const body of bodies)
+      await server.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) =>
+          bus.publish({ from: sender, session: sender, to: [address], body })
+        )
+      );
+    const received: Array<(typeof Messages.Type)["messages"][number]> = [];
+    let drained = false;
+    for (let attempt = 0; attempt <= bodies.length; attempt++) {
+      const result = await call("bus_read", { address });
+      expect(Buffer.byteLength(JSON.stringify(result), "utf8")).toBeLessThanOrEqual(
+        4 * 1024 * 1024
+      );
+      const structured = "structuredContent" in result ? result.structuredContent : undefined;
+      const page = Schema.decodeUnknownSync(Messages)(structured).messages;
+      if (page.length === 0) {
+        drained = true;
+        break;
+      }
+      received.push(...page);
+      expect(received.length).toBeLessThanOrEqual(bodies.length);
+    }
+    expect(drained).toBe(true);
+    expect(received.length).toBe(bodies.length);
+    expect(received.map((message) => Bun.hash(message.body))).toEqual(
+      bodies.map((body) => Bun.hash(body))
+    );
+    const complete = { messages: received };
+    const fullCarrier = {
+      content: [{ type: "text", text: JSON.stringify(complete) }],
+      structuredContent: complete,
+      isError: false,
+    };
+    expect(Buffer.byteLength(JSON.stringify(fullCarrier), "utf8")).toBeGreaterThan(8 * 1024 * 1024);
   } finally {
     await peer.dispose();
   }
