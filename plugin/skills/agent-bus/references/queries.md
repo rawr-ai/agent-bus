@@ -34,6 +34,8 @@ These are explicit public fields. They do not sanitize text a sender pasted into
 
 Call `bus_queries` first: it lists each saved query with its purpose, argument and row schemas, paging, a note on what it covers, and an example. Then call `bus_run_query` with `name`, `args` and, to read a past snapshot, `t`.
 
+When following a hit into a separate thread or exact-message lookup, pass both the page's `ledger` and its snapshot `t`. A row's own `t` is when it was written, not the cut its page was read at. On a ledger mismatch, don't substitute the replacement ledger for the cited source.
+
 | To find | Call |
 | --- | --- |
 | Messages on a topic since a time, oldest first | `{"name": "history", "args": {"participants": ["#<topic>"], "fromTs": "<UTC instant>"}}` |

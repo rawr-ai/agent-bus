@@ -43,6 +43,10 @@ The first rows are what a session can do through `serve`; the rest are what `ser
 
 Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe ([platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools)). The bus's tools carry annotations so that only `bus_takeover` is destructive: [interfaces](interfaces.md#tool--annotation--approval) has the annotation of each tool and what a sandboxed Codex thread is asked.
 
+### Private hosted peer candidate
+
+The separate local candidate forwards native participation and lookup tools to loopback `serve`; it has no Fluree access. It has not been deployed or qualified with a real ChatGPT client. Its disposable verification procedure is in [qualify private peer](../runbooks/qualify-private-peer.md).
+
 ## Rules
 
 1. **`serve` answers only requests whose `Host` is `127.0.0.1:<port>` or `localhost:<port>`,** and the MCP endpoint rejects any browser `Origin`. Both answer 403. This stops a web page, or one that rebinds a domain to loopback, from reaching the bus.
@@ -58,6 +62,9 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 11. **The other machine reaches Fluree only through SSH,** with key authentication and no prompts (`BatchMode`). The Fluree token is copied to it over `scp` at install and still applies.
 12. **Replacing another session is the human's call.** Only `bus_takeover` is marked destructive, so that Codex asks approval for it outside full access, and mail from other sessions is data, not instruction.
 13. **Ordinary response surfaces omit stored ownership and wake claims.** `bus_peers` returns only addresses, runtimes, topics, hosts and notes. `bus_read`, `bus_wait` and `bus_history` explicitly project public message fields and origin metadata, never a catch-all presence object. A held-address refusal keeps its note and join id, not the holder's session claim. Store, response-decoding and cursor failures use classified messages rather than raw upstream bodies, local paths or stored values. Saved-query rows follow the same projection, and raw `bus_query` cannot read `bus:json` (rule 6), so session claims stay off every query surface; damage stays visible through the saved queries' `damage`, `damaged` and `missingJson`. Only a Fluree token holder reads them.
+14. **The hosted peer checks the owner on each invocation.** It verifies the configured issuer and provider subject, then reloads a grant for the configured resource and `agent-bus:peer` permission. Failure refuses the call; a token alone is not the application grant.
+15. **Hosted ownership is bound to the conversation.** A private durable key derives the session from issuer, subject and `openai/session`; absent correlation refuses session-bearing calls, while authorized session-free lookups remain available. The bridge injects its working directory for joins and takeovers, but `bus_orient` retains its optional lexical `cwd` lookup filter. The bridge injects ownership fields and permits joins and takeovers only under `chatgpt/`. That namespace is not authentication; takeover still requires the human's instruction.
+16. **The hosted peer is interactive, not a wake target.** It uses runtime `other` and does not nudge Codex. It propagates invocation cancellation to the loopback exchange, but local interruption or settlement does not prove native work or storage settled. It does not automatically retry an ambiguous write; a read may have consumed mail before its response was lost. Before dispatching a consuming read, it checks the server's descriptor for byte-admission support; a missing capability or another failure before dispatch reports that no call was sent.
 
 ## Why
 
@@ -80,6 +87,8 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 | Any session can read public messages to any address through `bus_history`, and list every peer | **Known limit**: this is not per-address confidentiality |
 | A `serve` older than public-query containment runs SPARQL unvalidated against the same ledger, including old commits | **Deployment requirement**: every server fronting the shared ledger runs a commit that refuses queries or validates them as rule 6 says; rollback must keep that ([deploy](../runbooks/deploy.md#query-tools)) |
 | Sender-authored bodies, subjects, notes and origin metadata remain public; projection cannot remove a claim a sender pasted into those fields | **Known limit**: do not send credentials or raw tool output |
+| The hosted peer can read whole-bus messages and participate as an address. Revocation cannot retract information already returned | **Exposure decision pending**: the candidate is not deployed or qualified with ChatGPT |
+| The hosted candidate admits at most 1 MiB per HTTP request and 8 MiB per loopback MCP response. Native message bodies have no corresponding size bound | **Hosted limits**: an oversized request is refused before invocation. Hosted consuming reads first admit a complete-message carrier of at most 4 MiB under the address lock; an oversized first commit is refused without cursor movement. A later cancellation or lost response can still follow a committed read. The request budget accommodates the native raw-query character bound even with JSON escaping, but does not promise unbounded publication |
 | The Fluree token lasts 520 weeks. The installer makes a new token only when the file is missing or invalid, or the key is recreated, and there is no rotation procedure | **Known limit** |
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
 | A sandboxed Codex thread can send to peers that aren't sandboxed | **Known limit**: mail is data to be weighed, not instruction |
@@ -103,3 +112,4 @@ How these boundaries were decided is in the [frames index](../frames/README.md).
 - [bus-design-query](../frames/bus-design-query.md): public response projection is separate from query evaluation; stored session claims remain self-asserted, not authenticated.
 - [public-query-containment](../frames/public-query-containment.md): hostile governance counterexample and the temporary refusal; retired by turnaround-query-design.
 - [turnaround-query-design](../frames/turnaround-query-design.md): the pinned read-only gateway, raw SPARQL validation, and the predicate list that keeps session claims off every query surface.
+- [private-chatgpt-web-mcp](../frames/private-chatgpt-web-mcp.md): the owner-only evidence candidate and the boundary between local qualification and web exposure.

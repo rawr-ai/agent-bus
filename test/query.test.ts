@@ -10,7 +10,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { AjvJsonSchemaValidator } from "@modelcontextprotocol/sdk/validation/ajv";
 import type { JsonSchemaType } from "@modelcontextprotocol/sdk/validation/types.js";
-import { Context, type Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Clock, Context, Duration, Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
@@ -51,7 +51,10 @@ type Store = Layer.Layer<Ledger | QueryGateway, unknown, never>;
  * A bus serving MCP over one store, with an official SDK client. With `testClock`, the whole
  * bus runs on a TestClock that only `adjust` moves, so deadlines pass without waiting.
  */
-const startBus = async (store: Store, options: { readonly testClock?: boolean } = {}) => {
+const startBus = async (
+  store: Store,
+  options: { readonly testClock?: boolean; readonly onSleep?: (milliseconds: number) => void } = {}
+) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-query-"));
   dirs.push(dir);
   const port = freePort();
@@ -64,9 +67,20 @@ const startBus = async (store: Store, options: { readonly testClock?: boolean } 
       )
     )
   );
+  const clock = Layer.effect(
+    Clock.Clock,
+    Effect.map(Clock.Clock, (underlying) => ({
+      ...underlying,
+      sleep: (duration: Duration.Duration) =>
+        Effect.suspend(() => {
+          options.onSleep?.(Duration.toMillis(duration));
+          return underlying.sleep(duration);
+        }),
+    }))
+  ).pipe(Layer.provideMerge(TestClock.layer()));
   const runtime = ManagedRuntime.make(
     options.testClock === true
-      ? (layer.pipe(Layer.provideMerge(TestClock.layer())) as unknown as typeof layer)
+      ? (layer.pipe(Layer.provideMerge(clock)) as unknown as typeof layer)
       : layer
   );
   await runtime.runPromise(Effect.void);
@@ -118,6 +132,7 @@ const startBus = async (store: Store, options: { readonly testClock?: boolean } 
     return pages;
   };
   return {
+    port,
     runtime,
     tools,
     client,
@@ -1041,6 +1056,31 @@ describe("aggregates and peers", () => {
 });
 
 describe("snapshots and cursors", () => {
+  test("whole-row budgets refuse an oversized middle row without consuming the cursor", async () => {
+    const config = await freshLedger("native-budget-pages");
+    const bus = await startBus(flureeStore(config));
+    const narrow = message({ from: "budget-match", to: ["*"], body: "x".repeat(27_000) });
+    const huge = message({ from: "budget-match", to: ["*"], body: "€".repeat(13_000) });
+    const last = message({ from: "budget-match", to: ["*"], body: "last" });
+    await bus.append(narrow, huge, last);
+    const { ledger, headT: t } = await bus.ok("bus_queries");
+    const args = { ids: [narrow.id, huge.id, last.id] };
+    const options = { ledger, t, maxPageBytes: 32_768 };
+    const first = await bus.run("messages", args, options);
+    expect(ids(first.rows)).toEqual([narrow.id]);
+    expect(first.next).toBeDefined();
+    const continuation = { name: "messages", args, ...options, cursor: first.next };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      expect(await bus.refused("bus_run_query", continuation)).toContain("alone exceeds");
+    }
+    expect(
+      await bus.refused("bus_run_query", {
+        ...continuation,
+        args: { ids: [narrow.id, last.id, huge.id] },
+      })
+    ).toContain("different args");
+  });
+
   test("appends between pages and during input resolution leave the snapshot unchanged", async () => {
     const config = await freshLedger("snapshot");
     const late = message({ from: "claude/a", to: ["*"], body: "written mid-resolution" });
@@ -1692,7 +1732,13 @@ describe("transport bounds", () => {
   }
 
   /** A bus whose Fluree requests cross a controlled boundary, with one entry written. */
-  const throughBoundary = async (name: string, options: { readonly testClock?: boolean } = {}) => {
+  const throughBoundary = async (
+    name: string,
+    options: {
+      readonly testClock?: boolean;
+      readonly onSleep?: (milliseconds: number) => void;
+    } = {}
+  ) => {
     const config = await freshLedger(name);
     const edge = boundary(config.url);
     disposers.push(async () => edge.stop());
@@ -1741,6 +1787,92 @@ describe("transport bounds", () => {
     await Promise.all(requests.map((request) => request.finalised));
     // Every permit came back: four new queries are held at once.
     await poolHolds(4);
+  });
+
+  test("the saved-query deadline includes the shared permit wait", async () => {
+    let queuedDeadline: (() => void) | undefined;
+    const { bus, edge, history, raw, failure, poolHolds } = await throughBoundary(
+      "saved-query-deadline",
+      {
+        testClock: true,
+        onSleep: (milliseconds) => {
+          if (milliseconds === 15_000) queuedDeadline?.();
+        },
+      }
+    );
+    const pinned = [
+      edge.nextPin(stallBeforeHeaders),
+      edge.nextPin(stallMidBody),
+      edge.nextPin(stallBeforeHeaders),
+      edge.nextPin(stallMidBody),
+    ];
+    const native = pinned.map(history);
+    const heldPins = await Promise.all(pinned);
+    const queuedQuery = edge.next(stallMidBody);
+    const deadlineRegistered = new Promise<void>((resolve) => {
+      queuedDeadline = resolve;
+    });
+    const queued = history();
+    await deadlineRegistered;
+    queuedDeadline = undefined;
+    expect(heldPins.every((pin) => !pin.isFinalised())).toBe(true);
+
+    // All four pins reach their own request deadline before the queued read runs.
+    await bus.adjust("10 seconds");
+    for (const call of native) expect(await failure(call)).toBe("Fluree request timed out.");
+    await Promise.all(heldPins.map((pin) => pin.finalised));
+    const heldQueued = await queuedQuery;
+    const heldOthers = Array.from({ length: 3 }, () => edge.next(stallBeforeHeaders));
+    const others = heldOthers.map(history);
+    const blockers = await Promise.all(heldOthers);
+    const passes = edge.passed();
+    const sentinel = raw();
+    await bus.adjust("4999 millis");
+    expect(edge.passed()).toBe(passes);
+    expect(heldQueued.isFinalised()).toBe(false);
+
+    // No provider response was released. With three other permits held, the sentinel can
+    // complete only if the queued call releases its own permit at the outer deadline.
+    await bus.adjust("1 millis");
+    expect(await failure(queued)).toBe("The saved query did not finish within 15 seconds.");
+    await heldQueued.finalised;
+    expect((await sentinel).isError).toBe(false);
+    expect(blockers.every((request) => !request.isFinalised())).toBe(true);
+    expect((await history()).isError).toBe(false);
+
+    await bus.adjust("5 seconds");
+    for (const call of others) expect(await failure(call)).toBe(DEADLINE);
+    await poolHolds(4);
+  });
+
+  test("saved-query reads neither consume unread mail nor change its wake mark", async () => {
+    const { bus } = await throughBoundary("query-unread");
+    const recipient = { address: "query-reader", session: "query-reader-session" };
+    const sender = { address: "query-writer", session: "query-writer-session" };
+    for (const owner of [recipient, sender]) {
+      await bus.ok("bus_join", { ...owner, runtime: "claude", cwd: "/tmp" });
+    }
+    const body = "Synthetic query and unread mail.";
+    const id = "query-unread-fixture";
+    await bus.append(message({ id, body, from: sender.address, to: [recipient.address] }));
+    const snapshot = () =>
+      bus.runtime.runPromise(Effect.flatMap(QueryGateway, (gateway) => gateway.pin));
+    const cursor = () =>
+      bus.runtime.runPromise(
+        Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(recipient.address))
+      );
+    const wake = () =>
+      bus.runtime.runPromise(Effect.flatMap(Bus.Bus, (owner) => owner.wake(recipient.session, 1)));
+    expect((await wake()).addresses).toEqual([recipient.address]);
+    const before = await cursor();
+    const pin = await snapshot();
+    const options = { ledger: pin.incarnation, t: pin.head };
+    expect((await bus.run("messages", { ids: [id] }, options)).rows).toMatchObject([{ id, body }]);
+    expect((await bus.run("thread", { id }, options)).rows).toMatchObject([{ id, body }]);
+    expect(await snapshot()).toEqual(pin);
+    expect(await cursor()).toEqual(before);
+    expect((await wake()).addresses).toEqual([]);
+    expect((await bus.ok("bus_read", recipient)).messages).toMatchObject([{ id, body }]);
   });
 
   test("an MCP cancel ends its query and frees its permit at once; a lost connection's query ends by the deadline", async () => {

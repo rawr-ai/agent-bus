@@ -233,7 +233,7 @@ test("a ranking over its bounds is refused before any result", async () => {
   const refused = await runtime.runPromise(
     Effect.flip(search.run({ text: "kiwi", limit: 50 }, {}, undefined))
   );
-  expect(refused._tag).toBe("QueryCapacity");
+  expect(refused).toMatchObject({ _tag: "QueryCapacity" });
   expect(ledger.hydrated).toEqual([]);
   await runtime.dispose();
 });

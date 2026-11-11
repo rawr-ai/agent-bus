@@ -47,7 +47,7 @@ import {
   make as selectionStore,
 } from "./RankedSelections.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
-import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS } from "./timing.ts";
+import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS, SAVED_QUERY_DEADLINE_SECONDS } from "./timing.ts";
 
 export { OrientationResult } from "./orientation-model.ts";
 
@@ -105,6 +105,33 @@ const publicMessages = (messages: ReadonlyArray<Message>): typeof Messages.Type 
         }),
   })),
 });
+
+/** Exact JSON bytes of the duplicated public MCP result, excluding the JSON-RPC envelope. */
+export const messageCarrierBytes = (messages: ReadonlyArray<Message>) => {
+  const structuredContent = publicMessages(messages);
+  return Buffer.byteLength(
+    JSON.stringify({
+      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
+      structuredContent,
+      isError: false,
+    }),
+    "utf8"
+  );
+};
+
+const messageAdmission = (maximum: number | undefined) =>
+  maximum === undefined
+    ? undefined
+    : (messages: ReadonlyArray<Message>) => {
+        let low = 0;
+        let high = messages.length;
+        while (low < high) {
+          const middle = Math.ceil((low + high) / 2);
+          if (messageCarrierBytes(messages.slice(0, middle)) <= maximum) low = middle;
+          else high = middle - 1;
+        }
+        return low;
+      };
 export const Joined = Schema.Struct({
   address: Schema.String.annotate({ description: "The address you joined." }),
   // Older servers did not echo topics; the CLI uses this schema to decode their results too.
@@ -458,7 +485,13 @@ const Read = Tool.make("bus_read", {
     limit: Schema.optionalKey(
       Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
         description:
-          "The most messages to return, oldest first; the rest stay unread. Defaults to all of them.",
+          "The most messages to return, oldest first; the rest stay unread. A commit group is never split, so a group larger than the limit is refused without advancing the cursor. Defaults to all of them.",
+      })
+    ),
+    maxResultBytes: Schema.optionalKey(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(128)).annotate({
+        description:
+          "Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte and count limits, the call is refused without advancing the cursor. Minimum 128.",
       })
     ),
   }),
@@ -474,6 +507,12 @@ const Wait = Tool.make("bus_wait", {
     timeoutSeconds: Schema.optionalKey(
       Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_WAIT_SECONDS })).annotate({
         description: `Seconds to wait, 0 to ${MAX_WAIT_SECONDS}; defaults to ${MAX_WAIT_SECONDS}.`,
+      })
+    ),
+    maxResultBytes: Schema.optionalKey(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(128)).annotate({
+        description:
+          "Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte limit, the call is refused without advancing the cursor. Minimum 128.",
       })
     ),
   }),
@@ -608,12 +647,17 @@ const Query = Tool.make("bus_query", {
 }).annotateMerge(Lookup);
 
 const RunQuery = Tool.make("bus_run_query", {
-  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search continues the ranking of its first page while the bus holds it: see its note and selection). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Results are at most ${MAX_ENVELOPE_BYTES} bytes; whole rows are kept.`,
+  description: `Run one saved query from the catalogue (bus_queries lists them, with argument and row schemas) at one commit t, and return one page. Pass next back as cursor, with the same name and args, for the following page at the same t (search continues the ranking of its first page while the bus holds it: see its note and selection). exhausted means no page follows; complete means exhausted with every record read, which ranked and predicate-only queries never claim. Whole rows fit in at most ${MAX_ENVELOPE_BYTES} UTF-8 JSON bytes by default, or in maxPageBytes when supplied. The call has ${SAVED_QUERY_DEADLINE_SECONDS} seconds, including waiting for a query permit.`,
   parameters: Schema.Struct({
     name: Schema.Literals(operationNames).annotate({ description: "The saved query to run." }),
     args: Schema.optionalKey(
       Schema.Record(Schema.String, Schema.Unknown).annotate({
         description: "Its arguments, as bus_queries describes them; unknown keys are refused.",
+      })
+    ),
+    ledger: Schema.optionalKey(
+      Schema.String.annotate({
+        description: "Refuse unless this is still the ledger incarnation being read.",
       })
     ),
     t: Schema.optionalKey(
@@ -626,6 +670,13 @@ const RunQuery = Tool.make("bus_run_query", {
       Schema.String.annotate({
         description: "A previous result's next, to continue that traversal.",
       })
+    ),
+    maxPageBytes: Schema.optionalKey(
+      Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))
+        .check(Schema.isLessThanOrEqualTo(MAX_ENVELOPE_BYTES))
+        .annotate({
+          description: "Optional smaller logical JSON page ceiling, not a transport byte limit.",
+        })
     ),
   }),
   success: QueryEnvelope,
@@ -673,6 +724,27 @@ const Leave = Tool.make("bus_leave", {
   success: Left,
   failure: Failure,
 }).annotateMerge(Local);
+
+// The hosted peer derives its input contracts from these native definitions while
+// replacing caller-controlled ownership fields at its own boundary.
+export const HostedNativeTools = {
+  Join,
+  Takeover,
+  Publish,
+  SetActivity,
+  Directory,
+  Bulletin,
+  Orient,
+  Read,
+  Wait,
+  Owned,
+  ListPeers,
+  History,
+  Query,
+  RunQuery,
+  Queries,
+  Leave,
+};
 
 const BusToolkit = Toolkit.make(
   Join,
@@ -865,11 +937,18 @@ const BusHandlers = BusToolkit.toLayer(
       bus_directory: (params) => updateDirectory(params).pipe(Effect.provide(environment)),
       bus_bulletin: (params) => updateBulletin(params).pipe(Effect.provide(environment)),
       bus_orient: (params) => timedOrient(params),
-      bus_read: ({ address, session, limit }) =>
-        bus.take(address, session, limit).pipe(Effect.map(publicMessages)),
-      bus_wait: ({ address, session, timeoutSeconds }) =>
+      bus_read: ({ address, session, limit, maxResultBytes }) =>
         bus
-          .wait(address, session, timeoutSeconds ?? MAX_WAIT_SECONDS)
+          .take(address, session, limit, messageAdmission(maxResultBytes))
+          .pipe(Effect.map(publicMessages)),
+      bus_wait: ({ address, session, timeoutSeconds, maxResultBytes }) =>
+        bus
+          .wait(
+            address,
+            session,
+            timeoutSeconds ?? MAX_WAIT_SECONDS,
+            messageAdmission(maxResultBytes)
+          )
           .pipe(Effect.map(publicMessages)),
       bus_wake: ({ session, fresh }) => bus.wake(session, MAX_WAIT_SECONDS, fresh),
       bus_owned_addresses: ({ session, runtime }) =>
@@ -877,15 +956,32 @@ const BusHandlers = BusToolkit.toLayer(
       bus_peers: () => queries(peersPreset),
       bus_history: (params) => queries(historyPreset(params)),
       bus_query: ({ query, t }) => queries(runSparql(query, t)),
-      bus_run_query: ({ name, args, t, cursor }) =>
-        queries(
+      bus_run_query: ({ name, args, ledger, t, cursor, maxPageBytes }) => {
+        const query = queries(
           Effect.suspend(() => {
             const operation = byName(name);
-            return operation === undefined
-              ? Effect.fail(new InvalidQuery({ message: `No saved query is named ${name}.` }))
-              : operation.invoke(args ?? {}, { t, cursor }, MAX_ENVELOPE_BYTES);
+            if (operation === undefined) {
+              return Effect.fail(new InvalidQuery({ message: `No saved query is named ${name}.` }));
+            }
+            return operation.invoke(
+              args ?? {},
+              { ledger, t, cursor },
+              maxPageBytes ?? MAX_ENVELOPE_BYTES
+            );
           })
-        ),
+        );
+        return query.pipe(
+          Effect.timeoutOrElse({
+            duration: `${SAVED_QUERY_DEADLINE_SECONDS} seconds`,
+            orElse: () =>
+              Effect.fail(
+                new LedgerError({
+                  message: `The saved query did not finish within ${SAVED_QUERY_DEADLINE_SECONDS} seconds.`,
+                })
+              ),
+          })
+        );
+      },
       bus_queries: () =>
         queries(
           Effect.map(

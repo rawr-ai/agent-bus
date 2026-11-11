@@ -370,7 +370,12 @@ export type Position =
   | { readonly offset: number };
 
 type Item<Row> =
-  | { readonly kind: "row"; readonly row: Row; readonly at: Position; readonly label: string }
+  | {
+      readonly kind: "row";
+      readonly row: Row;
+      readonly at: Position;
+      readonly label: string;
+    }
   | { readonly kind: "damaged"; readonly t?: number; readonly at: Position }
   | { readonly kind: "absent"; readonly id: string; readonly at: Position }
   | { readonly kind: "passed"; readonly at: Position };
@@ -437,6 +442,7 @@ export type Envelope<Row> = Omit<typeof QueryEnvelope.Type, "rows"> & {
 };
 
 export interface RunInput {
+  readonly ledger?: string | undefined;
   readonly t?: number | undefined;
   readonly cursor?: string | undefined;
 }
@@ -526,6 +532,12 @@ const bytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8
 /** Pins the snapshot: an explicit t, the cursor's, or head, all checked against the pin. */
 const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
   Effect.gen(function* () {
+    if (input.ledger !== undefined && input.ledger !== pin.incarnation) {
+      return yield* new InvalidQuery({
+        message: "The requested ledger is not the current incarnation.",
+        code: "STALE_LEDGER",
+      });
+    }
     if (
       input.t !== undefined &&
       (!Number.isInteger(input.t) || input.t < 1 || input.t > pin.head)
@@ -534,9 +546,10 @@ const choose = (pin: Pin, input: RunInput, cursor: Cursor | undefined) =>
     }
     if (cursor === undefined) return input.t ?? pin.head;
     if (cursor.i !== pin.incarnation) {
-      return yield* invalid(
-        "The ledger was replaced since this cursor was issued; start the traversal again."
-      );
+      return yield* new InvalidQuery({
+        message: "The ledger was replaced since this cursor was issued; start the traversal again.",
+        code: "STALE_LEDGER",
+      });
     }
     if (cursor.t > pin.head) {
       return yield* invalid(`The cursor's t=${cursor.t} is ahead of the ledger (t=${pin.head}).`);
@@ -615,9 +628,10 @@ const prepareRun = <S extends Schema.Top & { readonly DecodingServices: never },
         record.hash !== hash ||
         record.size !== size
       ) {
-        return yield* invalid(
-          `This ${spec.name}'s ranking is no longer held: it expired, the bus restarted, or the cursor is from another server. Start a new ${spec.name}, passing t=${t} to keep the snapshot; its ranking is evaluated again, so its order can differ.`
-        );
+        return yield* new InvalidQuery({
+          message: `This ${spec.name}'s ranking is no longer held: it expired, the bus restarted, or the cursor is from another server. Start a new ${spec.name}, passing t=${t} to keep the snapshot; its ranking is evaluated again, so its order can differ.`,
+          code: "RANKING_UNAVAILABLE",
+        });
       }
       retained = record;
     }
@@ -640,6 +654,12 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
     });
     const after = yield* gateway.pin;
     if (after.incarnation !== pin.incarnation) {
+      if (input.ledger !== undefined) {
+        return yield* new InvalidQuery({
+          message: "The requested ledger is not the current incarnation.",
+          code: "STALE_LEDGER",
+        });
+      }
       return yield* new LedgerError({
         message: "The ledger was replaced while the query ran; run it again.",
       });
@@ -665,8 +685,9 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
       let damaged = outside.length;
       const notFound: Array<string> = [];
       for (const item of items) {
-        if (item.kind === "row") rows.push(item.row);
-        else if (item.kind === "damaged") {
+        if (item.kind === "row") {
+          rows.push(item.row);
+        } else if (item.kind === "damaged") {
           damaged += 1;
           if (item.t !== undefined) damagedAt.push(item.t);
         } else if (item.kind === "absent") notFound.push(item.id);
@@ -780,11 +801,12 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
           `An association unit exceeds the ${budget}-byte result limit at t=${t}; retry at the same cut without consuming this cursor.`
         );
       }
-      return yield* invalid(
-        first?.kind === "row"
-          ? `The entry ${first.label} alone exceeds the ${budget}-byte result limit; read it with bus_query, selecting fewer fields.`
-          : `The result exceeds the ${budget}-byte limit; narrow the query.`
-      );
+      return yield* new InvalidQuery({
+        message:
+          first?.kind === "row"
+            ? `The entry ${first.label} alone exceeds the ${budget}-byte result limit; read it with bus_query, selecting fewer fields.`
+            : `The result exceeds the ${budget}-byte limit; narrow the query.`,
+      });
     }
     return yield* serve(consumed);
   });
@@ -850,10 +872,7 @@ const decodeEntry = (id: string, json: string | null) => {
 
 const dateTime = (value: string) => ({ "@value": value, "@type": "xsd:dateTime" });
 
-/**
- * Ids are looked up by their subject IRI, which keeps the index lookup and the
- * commit t of bus:id. A token that cannot be part of an entry IRI names no entry.
- */
+/** The ordinary catalogue's historical ID alphabet. */
 const isEntryId = (id: string) => /^[A-Za-z0-9._~:@-]+$/.test(id);
 const entryIri = (id: string) => ({ "@type": "@id", "@value": `${MESSAGE_IRI}${id}` });
 
@@ -962,6 +981,27 @@ const TotalRows = Schema.Array(Schema.Tuple([Schema.Number]));
 const decodeGroup = <R extends Candidate>(group: Group<R>) =>
   group.copies > 1 ? Option.none<Message>() : decodeEntry(group.first[1], group.first[2]);
 
+const entriesById = (wanted: ReadonlyArray<string>, at: At) =>
+  Effect.gen(function* () {
+    const lookup = [...new Set(wanted.filter(isEntryId))];
+    const gateway = yield* QueryGateway;
+    const found = new Map<string, Group<Candidate>>();
+    if (lookup.length === 0) return found;
+    const where = {
+      values: [["?m"], lookup.map((id) => [entryIri(id)])],
+      where: [candidate("?m"), storedJson("?m")],
+    };
+    const rows = yield* gateway
+      .jsonld(at.t, { selectDistinct: ["?t", "?id", "?json"], ...where })
+      .pipe(Effect.flatMap(decodeRows(CandidateRows)));
+    for (const [index, row] of rows.entries()) {
+      const group = found.get(row[1]);
+      if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
+      else group.copies += 1;
+    }
+    return found;
+  });
+
 /** Keyset items from (t, id, json) rows fetched with limit size + 1, damaged ones in place. */
 const entryItems = (
   rows: ReadonlyArray<readonly [number, string, string | null]>,
@@ -1063,27 +1103,9 @@ export const messages = define({
   start: () => ({ offset: 0 }),
   fetch: (args, at) =>
     Effect.gen(function* () {
-      const gateway = yield* QueryGateway;
       const offset = "offset" in at.position ? at.position.offset : 0;
       const wanted = args.ids.slice(offset);
-      const lookup = wanted.filter(isEntryId);
-      const rows =
-        lookup.length === 0
-          ? []
-          : yield* gateway
-              .jsonld(at.t, {
-                selectDistinct: ["?t", "?id", "?json"],
-                values: [["?m"], lookup.map((id) => [entryIri(id)])],
-                where: [candidate("?m"), storedJson("?m")],
-              })
-              .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-      // An id with more than one stored row (several bus:json values) is damaged, not a pick.
-      const found = new Map<string, Group<(typeof rows)[number]>>();
-      for (const [index, row] of rows.entries()) {
-        const group = found.get(row[1]);
-        if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
-        else group.copies += 1;
-      }
+      const found = yield* entriesById(wanted, at);
       const items = wanted.map((id, index): Item<EntryRow> => {
         const position = { offset: offset + index + 1 };
         const group = found.get(id);

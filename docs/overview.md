@@ -78,8 +78,10 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Trust boundaries, and what `serve` may do to a thread; security: Fluree's token, `serve`'s `Host` check, what queries may read | [Connections](architecture/connections.md) |
 | Local browser observation, public projection, independent freshness and the read-only viewer boundary | [Viewer](architecture/viewer.md) |
 | Building, starting, stopping and recovering the optional viewer | [Viewer runbook](runbooks/viewer.md) |
+| Qualifying the private peer on a disposable bus | [Private peer runbook](runbooks/qualify-private-peer.md) |
+| Superseded evidence-only qualification | [Private evidence runbook](runbooks/qualify-private-evidence.md) |
 | Installed versions, the findings register, and how platform claims are marked | [Platforms](platforms/README.md) |
-| How Bun, Codex, Claude Code and Fluree behave | [Bun](platforms/bun.md), [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md), [Fluree](platforms/fluree.md) |
+| How Bun, Codex, Claude Code, Fluree and the direct-tool MCP host behave | [Bun](platforms/bun.md), [Codex](platforms/codex.md), [Claude Code](platforms/claude-code.md), [Fluree](platforms/fluree.md), [Direct host](platforms/mcp-openapi.md) |
 | Setting up the bus host and other machines | [Install](runbooks/install.md) |
 | Starting, stopping, health and logs | [Operate](runbooks/operate.md) |
 | Putting a new version into service | [Deploy](runbooks/deploy.md) |

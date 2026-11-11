@@ -57,6 +57,9 @@ import { type Pin, QueryGateway } from "./Query.ts";
 
 export const ORIENTATION_JOIN_TOO_LARGE = "Orientation cannot fit alongside this committed join.";
 
+/** Selects a whole prefix before the read cursor advances, while the address is locked. */
+export type ReadAdmission = (messages: ReadonlyArray<Message>) => number;
+
 export interface JoinInput {
   readonly address: string;
   readonly runtime: Runtime;
@@ -263,8 +266,9 @@ export class Bus extends Context.Service<
     readonly take: (
       address: string,
       session: string | undefined,
-      limit?: number
-    ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner>;
+      limit?: number,
+      admit?: ReadAdmission
+    ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner | InvalidQuery>;
     /**
      * Waits until messages arrive, or until the timeout when one is given.
      * Ownership is checked again on every read, so a wait outlived by its
@@ -273,8 +277,9 @@ export class Bus extends Context.Service<
     readonly wait: (
       address: string,
       session: string | undefined,
-      timeoutSeconds?: number
-    ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner>;
+      timeoutSeconds?: number,
+      admit?: ReadAdmission
+    ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner | InvalidQuery>;
     /**
      * Waits until an address `session` owns has unread mail, first to newest,
      * other than what it was last woken for, or the timeout, and returns those
@@ -1118,22 +1123,50 @@ const make = (installation: string, hostOf: () => string) =>
       }).pipe(exclusive(address), Effect.withSpan("Bus.deliver"));
 
     /** The owner's read: its reader checks ownership under the lock, just before the cursor moves. */
-    const take = (address: string, session: string | undefined, limit?: number) =>
+    const take = (
+      address: string,
+      session: string | undefined,
+      limit?: number,
+      admit?: ReadAdmission
+    ) =>
       Effect.gen(function* () {
-        const batch = yield* pending(address, owned(address, session), limit);
-        yield* ack(address, batch.next);
-        return batch.messages;
+        const batch = yield* pending(address, owned(address, session));
+        const offered = batch.messages.slice(0, limit);
+        let count = admit === undefined ? offered.length : admit(offered);
+        if (!Number.isInteger(count) || count < 0 || count > offered.length)
+          return yield* Effect.die(new Error("The read admission returned an invalid prefix."));
+        // A Fluree cursor names a commit, not a row. Never consume only part of one commit.
+        while (
+          count > 0 &&
+          count < batch.entries.length &&
+          batch.entries[count - 1]?.end === batch.entries[count]?.end
+        )
+          count--;
+        if (count === 0 && batch.messages.length > 0)
+          return yield* new InvalidQuery({
+            message:
+              "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Use a reader with larger limits.",
+          });
+        const next =
+          count === batch.messages.length && (limit === undefined || count < limit)
+            ? batch.next
+            : batch.entries[count - 1]?.end;
+        if (next === undefined)
+          return yield* Effect.die(new Error("The read prefix has no cursor."));
+        yield* ack(address, next);
+        return batch.messages.slice(0, count);
       }).pipe(exclusive(address), Effect.withSpan("Bus.take"));
 
     const waitFor = Effect.fn("Bus.wait")(function* (
       address: string,
       session: string | undefined,
-      timeoutSeconds?: number
+      timeoutSeconds?: number,
+      admit?: ReadAdmission
     ) {
-      const ready = yield* take(address, session);
+      const ready = yield* take(address, session, undefined, admit);
       if (ready.length > 0) return ready;
       const arrival = ledger.changes.pipe(
-        Stream.mapEffect(() => take(address, session)),
+        Stream.mapEffect(() => take(address, session, undefined, admit)),
         Stream.filter((messages) => messages.length > 0),
         Stream.runHead
       );
@@ -1144,12 +1177,17 @@ const make = (installation: string, hostOf: () => string) =>
       return Option.getOrElse(arrived, (): ReadonlyArray<Message> => []);
     });
     // Open waits are counted so a refused join can say whether the holder is listening.
-    const wait = (address: string, session: string | undefined, timeoutSeconds?: number) =>
+    const wait = (
+      address: string,
+      session: string | undefined,
+      timeoutSeconds?: number,
+      admit?: ReadAdmission
+    ) =>
       Effect.acquireUseRelease(
         Effect.sync(() => {
           seenOf(address).waits += 1;
         }),
-        () => waitFor(address, session, timeoutSeconds),
+        () => waitFor(address, session, timeoutSeconds, admit),
         () =>
           Effect.sync(() => {
             seenOf(address).waits -= 1;
