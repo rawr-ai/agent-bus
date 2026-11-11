@@ -244,8 +244,8 @@ No parameters. Returns the catalogue that `bus_run_query` runs, from the one def
 | Operation | Rows | Paging | Coverage |
 | --- | --- | --- | --- |
 | `history` | Entries (messages, joins, leaves) in commit order, forward or backward, filtered by kind, participant and `ts` window | keyset on (t, id) | entries |
-| `messages` | Entries by id, in the order asked; ids absent at t are in `notFound` | offset | entries |
-| `thread` | The reply tree containing a message, from the nearest top its `replyTo` links reach at `t` (its `root`, or a missing target, which cuts the tree there), in commit order, with `members` and `missingReplyTargets` | keyset on (t, id) | entries |
+| `messages` | Entries by exact canonical id, in the order asked; ids absent at `t` are in `notFound`, while conflicting identity claims and unreadable entries count as damage | offset | entries |
+| `thread` | The reply tree containing a message, from the nearest top its `replyTo` links reach at `t` (its `root`, or a missing target, which cuts the tree there), in commit order, with `members` and `missingReplyTargets`. A missing or conflicting identity on the exact canonical focus is refused | keyset on (t, id) | entries |
 | `search` | Full-text matches over subjects and bodies, best first | offset | ranked: never complete |
 | `counts` | Message or recipient-pair counts grouped by sender, recipient and UTC day, with a `total` | offset | predicates: never complete |
 | `peers` | The latest recorded presence per address at t, with its activity and mutes; a presence or address command that can't be read fails the whole query, since no standing can be folded past it | offset | entries |
@@ -363,6 +363,7 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | "The ledger was replaced while the query ran; run it again." | The ledger was replaced between the call's two pins | Run it again |
 | "The entry `<row>` alone exceeds the `<bytes>`-byte result limit; read it with bus_query, selecting fewer fields." | A saved-query page whose first row cannot fit alone | Read that entry's fields with `bus_query` |
 | "Message `<id>` is not in the ledger at t=`<t>`." | `thread` with an id absent at `t` | Check the id, or read at a later `t` |
+| "Message `<id>` has damaged identity at t=`<t>`." | `thread` focus has a missing or conflicting stored identity | Report the damage; reading again does not repair it |
 | "Queries need the Fluree ledger." | A query tool on a store without a query engine (the tests' JSONL ledger) | Use a Fluree-backed `serve` |
 | "Fluree request failed (HTTP `<status>`)." | A ledger request gets an HTTP error | The status is retained, never the upstream body. Tell the human and retry later ([recover](../runbooks/recover.md)) |
 | "Fluree could not complete the request." | A transport failure | Tell the human and retry later; raw transport details are not returned |

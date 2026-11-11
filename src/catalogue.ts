@@ -872,8 +872,7 @@ const decodeEntry = (id: string, json: string | null) => {
 
 const dateTime = (value: string) => ({ "@value": value, "@type": "xsd:dateTime" });
 
-/** The ordinary catalogue's historical ID alphabet. */
-const isEntryId = (id: string) => /^[A-Za-z0-9._~:@-]+$/.test(id);
+/** Ids are looked up by their exact subject IRI, with the commit t of bus:id. */
 const entryIri = (id: string) => ({ "@type": "@id", "@value": `${MESSAGE_IRI}${id}` });
 
 /** Every combination of the given variable columns, for one JSON-LD `values` clause. */
@@ -981,26 +980,59 @@ const TotalRows = Schema.Array(Schema.Tuple([Schema.Number]));
 const decodeGroup = <R extends Candidate>(group: Group<R>) =>
   group.copies > 1 ? Option.none<Message>() : decodeEntry(group.first[1], group.first[2]);
 
-const entriesById = (wanted: ReadonlyArray<string>, at: At) =>
+const ExactRows = Schema.Array(
+  Schema.Tuple([
+    Schema.String,
+    Schema.NullOr(Schema.Number),
+    Schema.NullOr(Schema.String),
+    Schema.NullOr(Schema.String),
+  ])
+);
+type ExactRow = (typeof ExactRows.Type)[number];
+type ExactGroup = [ExactRow, ...Array<ExactRow>];
+
+/** Keep the requested identity paired with its subject, even when its stored id is damaged. */
+const exactEntries = (gateway: QueryGateway["Service"], t: number, ids: ReadonlyArray<string>) =>
   Effect.gen(function* () {
-    const lookup = [...new Set(wanted.filter(isEntryId))];
-    const gateway = yield* QueryGateway;
-    const found = new Map<string, Group<Candidate>>();
-    if (lookup.length === 0) return found;
-    const where = {
-      values: [["?m"], lookup.map((id) => [entryIri(id)])],
-      where: [candidate("?m"), storedJson("?m")],
-    };
+    const found = new Map<string, ExactGroup>();
+    if (ids.length === 0) return found;
     const rows = yield* gateway
-      .jsonld(at.t, { selectDistinct: ["?t", "?id", "?json"], ...where })
-      .pipe(Effect.flatMap(decodeRows(CandidateRows)));
-    for (const [index, row] of rows.entries()) {
-      const group = found.get(row[1]);
-      if (group === undefined) found.set(row[1], { first: row, copies: 1, last: index });
-      else group.copies += 1;
+      .jsonld(t, {
+        selectDistinct: ["?requested", "?t", "?id", "?json"],
+        values: [["?m", "?requested"], ids.map((id) => [entryIri(id), { "@value": id }])],
+        where: [candidate("?m"), storedJson("?m")],
+      })
+      .pipe(Effect.flatMap(decodeRows(ExactRows)));
+    for (const row of rows) {
+      const group = found.get(row[0]);
+      if (group === undefined) found.set(row[0], [row]);
+      else group.push(row);
+    }
+    const unresolved = ids.filter((id) => !found.has(id));
+    if (unresolved.length > 0) {
+      const typedRows = yield* gateway
+        .jsonld(t, {
+          selectDistinct: ["?requested"],
+          values: [["?m", "?requested"], unresolved.map((id) => [entryIri(id), { "@value": id }])],
+          where: typed("?m", ["message", "presence"]),
+        })
+        .pipe(Effect.flatMap(decodeRows(Schema.Array(Schema.Tuple([Schema.String])))));
+      for (const [id] of typedRows) found.set(id, [[id, null, null, null]]);
     }
     return found;
   });
+
+const exactIdentity = (requested: string, rows: ExactGroup) => {
+  const identities = new Set(rows.map(([, t, id]) => JSON.stringify([t, id])));
+  const first = rows[0];
+  return identities.size === 1 && first[1] !== null && first[2] === requested;
+};
+const decodeExact = (requested: string, rows: ExactGroup) => {
+  const first = rows[0];
+  return rows.length === 1 && exactIdentity(requested, rows)
+    ? decodeEntry(requested, first[3])
+    : Option.none<Message>();
+};
 
 /** Keyset items from (t, id, json) rows fetched with limit size + 1, damaged ones in place. */
 const entryItems = (
@@ -1094,7 +1126,7 @@ export const messages = define({
   unit: "entry",
   paging: "offset",
   coverage: "entries",
-  note: "Each id is resolved at t: an id written after t, or never written, is in notFound.",
+  note: "Each id resolves its exact canonical subject at t: an id written after t, or never written, is in notFound. Conflicting identity claims or unreadable JSON count as damage.",
   Args: MessagesArgs,
   Row: EntryRow,
   example: { ids: ["<message id>"] },
@@ -1103,23 +1135,24 @@ export const messages = define({
   start: () => ({ offset: 0 }),
   fetch: (args, at) =>
     Effect.gen(function* () {
+      const gateway = yield* QueryGateway;
       const offset = "offset" in at.position ? at.position.offset : 0;
       const wanted = args.ids.slice(offset);
-      const found = yield* entriesById(wanted, at);
+      const found = yield* exactEntries(gateway, at.t, wanted);
       const items = wanted.map((id, index): Item<EntryRow> => {
         const position = { offset: offset + index + 1 };
         const group = found.get(id);
         if (group === undefined) return { kind: "absent", id, at: position };
-        const row = group.first;
-        const message = decodeGroup(group);
-        return Option.isSome(message)
+        const row = group[0];
+        const message = decodeExact(id, group);
+        return Option.isSome(message) && row[1] !== null
           ? {
               kind: "row",
-              row: entryRow(message.value, row[0]),
+              row: entryRow(message.value, row[1]),
               at: position,
-              label: `${id} (t=${row[0]})`,
+              label: `${id} (t=${row[1]})`,
             }
-          : { kind: "damaged", t: row[0], at: position };
+          : { kind: "damaged", ...optionalKey("t", row[1] ?? undefined), at: position };
       });
       return { items, more: false };
     }),
@@ -1129,7 +1162,6 @@ const threadContext = { up: { "@path": "bus:replyTo*" } };
 const MemberRows = Schema.Array(
   Schema.Tuple([Schema.String, Schema.NullOr(Schema.String), Schema.NullOr(Schema.String)])
 );
-const ResolvedRows = Schema.Array(Schema.Tuple([Schema.Number]));
 
 export const thread = define({
   name: "thread",
@@ -1138,7 +1170,7 @@ export const thread = define({
   unit: "entry",
   paging: "keyset",
   coverage: "entries",
-  note: "The tree follows replyTo links only, up to the nearest top they reach at t: a reply to an id that is not an entry at t cuts it there, so mail above that gap is outside it, and so is related mail without a reply link; whole-job coverage pairs thread with history. root is absent when the tree is cut; missingReplyTargets are the replied-to ids that are not entries at t.",
+  note: "The focus resolves its exact canonical subject at t; a missing or conflicting stored identity is refused. The tree follows replyTo links only, up to the nearest top they reach at t: a reply to an id that is not an entry at t cuts it there, so mail above that gap is outside it, and so is related mail without a reply link; whole-job coverage pairs thread with history. root is absent when the tree is cut; missingReplyTargets are the replied-to ids that are not entries at t.",
   Args: ThreadArgs,
   Row: EntryRow,
   example: { id: "<message id>" },
@@ -1149,20 +1181,14 @@ export const thread = define({
     Effect.gen(function* () {
       const gateway = yield* QueryGateway;
       const size = args.limit ?? 100;
-      if (!isEntryId(args.id)) {
-        return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
-      }
       const focusIri = entryIri(args.id);
       const focus = { values: [["?f"], [[focusIri]]] };
-      const resolved = yield* gateway
-        .jsonld(at.t, {
-          select: ["?t"],
-          ...focus,
-          where: [{ "@id": "?f", "bus:id": { "@value": "?fid", "@t": "?t" } }],
-        })
-        .pipe(Effect.flatMap(decodeRows(ResolvedRows)));
-      if (resolved.length === 0) {
+      const resolved = (yield* exactEntries(gateway, at.t, [args.id])).get(args.id);
+      if (resolved === undefined) {
         return yield* invalid(`Message ${args.id} is not in the ledger at t=${at.t}.`);
+      }
+      if (!exactIdentity(args.id, resolved)) {
+        return yield* invalid(`Message ${args.id} has damaged identity at t=${at.t}.`);
       }
       const tree = [
         { "@id": "?f", up: "?top" },
