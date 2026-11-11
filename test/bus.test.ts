@@ -470,20 +470,20 @@ for (const backend of backends) {
               cwd: process.cwd(),
             });
           }
-          const original = yield* bus.publish({
+          const original = (yield* bus.publish({
             from: "author",
             session: "author",
             to: ["*"],
             body: "question for everyone",
-          });
+          })).message;
           for (const address of ["reader", "observer"]) yield* bus.take(address, address);
-          const reply = yield* bus.publish({
+          const reply = (yield* bus.publish({
             from: "reader",
             session: "reader",
             to: ["observer"],
             replyTo: original.id,
             body: "@author is mentioned, but this answer is for observer",
-          });
+          })).message;
           expect(reply.replyTo).toBe(original.id);
           expect(yield* bus.take("author", "author")).toEqual([]);
           expect((yield* bus.take("observer", "observer")).map(({ id }) => id)).toEqual([reply.id]);
@@ -646,12 +646,12 @@ for (const backend of backends) {
         });
         rmSync(gone, { recursive: true });
 
-        const message = yield* bus.publish({
+        const message = (yield* bus.publish({
           from: "claude/a",
           session: sid("claude/a"),
           to: ["*"],
           body: "x",
-        });
+        })).message;
         expect(message.origin).toEqual(
           new Origin({ host: hostname(), cwd: repo, repo, branch: "fixture/origin" })
         );
@@ -660,23 +660,23 @@ for (const backend of backends) {
         expect(stored?.origin).toEqual(message.origin);
 
         // A detached checkout records its repo but no branch.
-        const fromDetached = yield* bus.publish({
+        const fromDetached = (yield* bus.publish({
           from: "claude/detached",
           session: sid("claude/detached"),
           to: ["*"],
           body: "w",
-        });
+        })).message;
         expect(fromDetached.origin).toEqual(
           new Origin({ host: hostname(), cwd: detached, repo: detached })
         );
 
         // A directory that has since disappeared records only the machine and the path.
-        const fromGone = yield* bus.publish({
+        const fromGone = (yield* bus.publish({
           from: "claude/gone",
           session: sid("claude/gone"),
           to: ["*"],
           body: "y",
-        });
+        })).message;
         expect(fromGone.origin).toEqual(new Origin({ host: hostname(), cwd: gone }));
         // A sender that never joined can't send at all.
         const anonymous = yield* Effect.flip(

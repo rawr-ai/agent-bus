@@ -305,6 +305,22 @@ test("the bundled CLI joins and publishes, its hooks wake and recover, and sourc
   expect(published.code).toBe(0);
   const id = published.stdout;
   expect(id).toMatch(/^[0-9a-f-]{36}$/);
+  expect(published.stderr).toBe("");
+  const unreachable = await run("bundle", [
+    "publish",
+    "--from",
+    "codex/release-b",
+    "--to",
+    "claude/release-absent",
+    "--body",
+    "no one joined",
+    "--session",
+    "s-release-b",
+  ]);
+  expect(unreachable.code).toBe(0);
+  // The id stays the only stdout line; the notice goes to stderr.
+  expect(unreachable.stdout).toMatch(/^[0-9a-f-]{36}$/);
+  expect(unreachable.stderr).toMatch(/^claude\/release-absent: not-joined at t=\d+$/);
 
   const wake = await run(
     "bundle",

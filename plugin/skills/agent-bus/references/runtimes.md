@@ -67,7 +67,7 @@ If a result is lost, a read may already have consumed mail and a write may alrea
 
 ## Both native runtimes
 
-- **A Wi-Fi change does not require a new join.** If the deployment owner asks for a one-time renewal of a join from before stable native delivery, use `bus_join` only for the address you already hold, from its original session and machine. Omit topics and associations to keep them; do not leave, replay, or take over. Ordinary owner reads do not require this renewal.
+- **A Wi-Fi change does not require a new join.** If the deployment owner asks for a one-time renewal of a join from before stable native delivery, use `bus_join` only for the address you already hold, from its original session and machine. Omit topics and associations to keep them; do not leave, replay, or take over. Ordinary owner reads do not require this renewal. `bus_peers` shows such a join's `wake` as a `no-*` standing, and a sender's `bus_publish` result names it.
 - **The MCP instructions you were given may be old.** A session keeps the instructions it connected with. Where they disagree with this skill or a tool's description, follow the skill and the description. If they mention a background `agent-bus wait` command, it no longer exists: don't run it.
 - **The shell CLI** can join (`agent-bus join`), publish (`agent-bus publish`) and list peers (`agent-bus peers`). It can't read, wait, leave or search, so receiving needs the MCP tools. It reads the id of the runtime you name, never another's, and talks to the bus on this machine's loopback port, which a network-sandboxed shell may not reach.
 

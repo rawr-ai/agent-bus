@@ -284,6 +284,20 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     expect(page).toMatchObject({ rows: [{ id: sent?.id, body: "full body" }], complete: true });
 
     await ok("bus_publish", { from: "chatgpt/b", to: ["chatgpt/a"], body: "carry over" }, b);
+    // A bounded wake notice passes the hosted wire's closed output schema, omissions counted.
+    const unwoken = await ok(
+      "bus_publish",
+      {
+        from: "chatgpt/b",
+        to: ["chatgpt/absent", `chatgpt/${"x".repeat(4096)}`],
+        body: "to absent",
+      },
+      b
+    );
+    expect(unwoken?.wake).toMatchObject({
+      lacking: [{ address: "chatgpt/absent", standing: "not-joined" }],
+      unlisted: 1,
+    });
     expect((await call("bus_takeover", { address: "chatgpt/a", holder: "stale" }, b)).isError).toBe(
       true
     );

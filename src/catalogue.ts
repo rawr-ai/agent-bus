@@ -17,6 +17,8 @@ import {
   OrientationId,
   QueryCapacity,
   Runtime,
+  WakeStanding,
+  wakeStanding,
 } from "./domain.ts";
 import {
   duplicatesProblem,
@@ -212,6 +214,12 @@ export const PeerRow = Schema.Struct({
   t: Int.annotate({ description: "The commit of that presence." }),
   host: Schema.optionalKey(Text),
   note: Schema.optionalKey(Text),
+  wake: Schema.optionalKey(
+    WakeStanding.annotate({
+      description:
+        "Joined rows only: what its join records toward a native wake. recorded means the prerequisites are present, not that a wake was checked; interactive runtimes have none by design; no-* names what its owner must renew.",
+    })
+  ),
   ...activityFields,
 });
 export type PeerRow = typeof PeerRow.Type;
@@ -1579,6 +1587,12 @@ export const peers = define({
             t,
             ...optionalKey("host", peer.host),
             ...optionalKey("note", peer.presence.note),
+            ...optionalKey(
+              "wake",
+              // activitiesAt below refuses the cut if any typed presence lacks its id, can't be
+              // read or has its id claimed twice, so a standing never comes from a superseded join.
+              peer.presence.status === "joined" ? wakeStanding(peer.presence) : undefined
+            ),
             ...shownFields(shown.get(peer.address)),
           },
           at: { offset: offset + index + 1 },

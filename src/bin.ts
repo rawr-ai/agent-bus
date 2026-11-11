@@ -88,6 +88,20 @@ const list = (value: Option.Option<string>) =>
   });
 
 const call = Client.call(endpoint);
+/**
+ * What the CLI reads back from bus_publish. The message is already stored when this decodes, so a
+ * standing a newer serve adds still prints instead of failing a send that would invite a resend.
+ */
+const Sent = Schema.Struct({
+  id: Mcp.Published.fields.id,
+  wake: Schema.optionalKey(
+    Schema.Struct({
+      t: Schema.Int,
+      lacking: Schema.Array(Schema.Struct({ address: Schema.String, standing: Schema.String })),
+      unlisted: Schema.optionalKey(Schema.Int),
+    })
+  ),
+});
 
 const address = Flag.String("address").pipe(Flag.withDescription("Your bus address"));
 const session = Flag.String("session").pipe(
@@ -282,7 +296,7 @@ const publish = Command.make(
   },
   (input) =>
     Effect.gen(function* () {
-      const published = yield* call("bus_publish", Mcp.Published, {
+      const published = yield* call("bus_publish", Sent, {
         from: input.from,
         session: yield* sessionOf(input.from, input.runtime, input.session),
         to: list(Option.some(input.to)) ?? [],
@@ -293,6 +307,12 @@ const publish = Command.make(
         }),
       });
       yield* Console.log(published.id);
+      // The id stays the only stdout line; what the send could not wake goes to stderr.
+      for (const { address, standing } of published.wake?.lacking ?? []) {
+        yield* Console.error(`${address}: ${standing} at t=${published.wake?.t}`);
+      }
+      if (published.wake?.unlisted !== undefined)
+        yield* Console.error(`${published.wake.unlisted} more not listed at t=${published.wake.t}`);
     })
 ).pipe(Command.withDescription("Send a message"));
 

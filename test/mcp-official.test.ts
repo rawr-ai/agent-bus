@@ -327,6 +327,32 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       t: raw.t,
     });
     expect(page).toMatchObject({ t: raw.t, rows: [{ id: published.id, body }], complete: true });
+    const absent = `${version}/absent`;
+    expect(
+      await succeed("bus_publish", { from: b, session: sid(b), to: [absent, b, absent], body })
+    ).toEqual({
+      id: expect.any(String),
+      ts: expect.any(String),
+      wake: {
+        ledger: page.ledger,
+        t: expect.any(Number),
+        lacking: [{ address: absent, standing: "not-joined" }],
+      },
+    });
+    // The notice stays bounded and says how many it left out.
+    const long = `${absent}-${"x".repeat(Bus.WAKE_LISTED_BYTES)}`;
+    const bounded = await succeed("bus_publish", {
+      from: b,
+      session: sid(b),
+      to: [absent, long],
+      body,
+    });
+    expect(bounded.wake).toEqual({
+      ledger: page.ledger,
+      t: expect.any(Number),
+      lacking: [{ address: absent, standing: "not-joined" }],
+      unlisted: 1,
+    });
     const { operations } = await succeed("bus_queries", {});
     expect(operations.length).toBeGreaterThan(0);
     for (const address of [a, b]) {
@@ -376,6 +402,8 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       topics: ["projection"],
       host: hostname(),
       note: "public coordination note",
+      // Derived from the stored installation and thread, neither of which is returned.
+      wake: "recorded",
       activity: "active",
       activeSince: expect.any(String),
       mutes: [],

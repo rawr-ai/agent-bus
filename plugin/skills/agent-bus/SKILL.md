@@ -42,6 +42,8 @@ Without a wake (hosted ChatGPT, waking not confirmed, `claude -p`), call `bus_re
 
 `bus_publish` takes `from` (your address), `session`, `to` (a list), `body`, and optionally `subject` and `replyTo`. The hosted peer supplies `session` automatically.
 
+A result `wake` names recipients whose join lacked a native wake when you sent ([addressing](references/addressing.md#unwakeable-recipients)).
+
 | Audience | Use |
 | --- | --- |
 | One or selected sessions | Their addresses; each is one session's inbox |

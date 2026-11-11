@@ -25,6 +25,31 @@ import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 const archiveHash = "4c95d202370fa3af4515a5993a659d733682c22f7f95e8bfc4ad834518ca3f4a";
 const entryHash = "78ac81acc5bb47bd001efd00d504d2adc42857263d21d32ffc3ddfc57b166642";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
+/** Every property path an output schema names, `[]` for array items, through local references. */
+const propertyPaths = (schema: unknown): ReadonlyArray<string> => {
+  const record = (value: unknown): Record<string, unknown> =>
+    typeof value === "object" && value !== null ? (value as Record<string, unknown>) : {};
+  const root = record(schema);
+  const definitions = { ...record(root.definitions), ...record(root.$defs) };
+  const paths = new Set<string>();
+  const walk = (node: unknown, path: string, seen: ReadonlySet<string>): void => {
+    const shape = record(node);
+    if (typeof shape.$ref === "string") {
+      const name = shape.$ref.replace(/^#\/(\$defs|definitions)\//, "");
+      if (!seen.has(name)) walk(definitions[name], path, new Set([...seen, name]));
+    }
+    for (const [key, value] of Object.entries(record(shape.properties))) {
+      const next = path === "" ? key : `${path}.${key}`;
+      paths.add(next);
+      walk(value, next, seen);
+    }
+    if (shape.items !== undefined) walk(shape.items, `${path}[]`, seen);
+    for (const branch of [shape.anyOf, shape.oneOf, shape.allOf])
+      if (Array.isArray(branch)) for (const member of branch) walk(member, path, seen);
+  };
+  walk(schema, "", new Set());
+  return [...paths].sort();
+};
 const artifact = process.argv[2];
 if (!artifact || hash(readFileSync(artifact)) !== archiveHash)
   throw new Error("Wrong host artifact.");
@@ -188,6 +213,29 @@ try {
     const names = (await client.listTools()).tools.map((tool) => tool.name);
     assert.equal(names.length, 16);
     assert(!names.includes("bus_wake"));
+    // The host's closed outputs name every field the serve's do, nested ones included. Inputs
+    // differ by design (the host supplies session and runtime), so only outputs are compared.
+    const native = new Client({ name: "peer-http-qualifier-native", version: "1" });
+    await native.connect(
+      new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${busPort}/mcp`))
+    );
+    clients.push(native);
+    const outputs = async (from: Client) =>
+      new Map(
+        (await from.listTools()).tools.map((tool) => [tool.name, propertyPaths(tool.outputSchema)])
+      );
+    const [hostedOutputs, nativeOutputs] = [await outputs(client), await outputs(native)];
+    for (const name of ["bus_publish", "bus_peers"])
+      assert.deepEqual(hostedOutputs.get(name), nativeOutputs.get(name), name);
+    for (const path of [
+      "wake.ledger",
+      "wake.t",
+      "wake.lacking[].address",
+      "wake.lacking[].standing",
+      "wake.unlisted",
+    ])
+      assert(hostedOutputs.get("bus_publish")?.includes(path), path);
+    assert(hostedOutputs.get("bus_peers")?.includes("peers[].wake"));
     const call = async (name: string, args: Record<string, unknown>, chat?: string) => {
       await Bun.sleep(300);
       return client.callTool({
@@ -276,6 +324,25 @@ try {
     assert.equal(largeRead.messages.length, 1);
     assert.equal(largeRead.messages[0].id, large.id);
     assert.equal(largeRead.messages[0].body, largeBody);
+    // A direct recipient that never joined is reported through the host's closed output schema.
+    const unwoken = await success(
+      "bus_publish",
+      { from: "chatgpt/http-b", to: ["chatgpt/never-joined"], body: "wake fixture" },
+      "chat-b"
+    );
+    assert(
+      typeof unwoken === "object" &&
+        unwoken !== null &&
+        "wake" in unwoken &&
+        typeof unwoken.wake === "object" &&
+        unwoken.wake !== null
+    );
+    const { ledger, t, ...observed } = unwoken.wake as Record<string, unknown>;
+    assert.equal(typeof ledger, "string");
+    assert(Number.isInteger(t));
+    assert.deepEqual(observed, {
+      lacking: [{ address: "chatgpt/never-joined", standing: "not-joined" }],
+    });
     const oversized = JSON.stringify({
       jsonrpc: "2.0",
       id: 999,

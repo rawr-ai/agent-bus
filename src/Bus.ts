@@ -31,6 +31,7 @@ import {
   InvalidTopics,
   isFor,
   LedgerError,
+  lackingWake,
   latestPresences,
   MAX_ASSOCIATED_ADDRESS_BYTES,
   MAX_ASSOCIATION_BYTES,
@@ -43,6 +44,7 @@ import {
   Origin,
   Presence,
   PresenceConflict,
+  type RecipientStanding,
   type Runtime,
   runOf,
   type Standing,
@@ -93,6 +95,48 @@ export interface PublishInput {
   readonly pierce?: ReadonlyArray<string> | "all" | undefined;
   /** The digest of a NOT_SENT pierce of all, to send exactly that set. */
   readonly confirm?: string | undefined;
+}
+
+/**
+ * Direct recipients whose wake prerequisites the sender's own ownership read showed lacking, at
+ * that read's commit `t`, before the send was appended. Recipients can join, leave or renew after
+ * it; and its absence never means a wake routes or will arrive.
+ */
+export interface WakeNotice {
+  /** The incarnation and commit of the read, as a query's snapshot names them. */
+  readonly ledger: string;
+  readonly t: number;
+  /** The first of them, in `to` order, whose JSON array fits {@link WAKE_LISTED_BYTES}; possibly none. */
+  readonly lacking: ReadonlyArray<{
+    readonly address: string;
+    readonly standing: RecipientStanding;
+  }>;
+  /** How many more lacked beyond those listed, when any did. */
+  readonly unlisted?: number;
+}
+
+/**
+ * The most UTF-8 bytes the JSON array of rows a wake notice lists may take. `to` and its addresses are unbounded, and
+ * a receipt that outgrew its carrier would fail after the message was already stored.
+ */
+export const WAKE_LISTED_BYTES = 4096;
+
+/** The longest prefix of `rows` whose JSON array fits the budget, and how many it leaves out. */
+const listWithin = <A>(rows: ReadonlyArray<A>, budget: number) => {
+  let used = 2; // the brackets
+  let listed = 0;
+  for (const row of rows) {
+    used += Buffer.byteLength(JSON.stringify(row), "utf8") + (listed > 0 ? 1 : 0);
+    if (used > budget) break;
+    listed += 1;
+  }
+  return { listed: rows.slice(0, listed), unlisted: rows.length - listed };
+};
+
+/** A sent message, with the wake notice its sender's presence observation produced, if any. */
+export interface Posted {
+  readonly message: Message;
+  readonly wake?: WakeNotice;
 }
 
 /** A pierce of all that was not confirmed: nothing was written. */
@@ -225,8 +269,8 @@ export class Bus extends Context.Service<
     readonly publish: {
       (
         input: PublishInput & { readonly pierce?: ReadonlyArray<string> | undefined }
-      ): Effect.Effect<Message, PublishError>;
-      (input: PublishInput): Effect.Effect<Message | NotSent, PublishError>;
+      ): Effect.Effect<Posted, PublishError>;
+      (input: PublishInput): Effect.Effect<Posted | NotSent, PublishError>;
     };
     /**
      * Sets the owner's activity, mutes or both by writing one command, never a no-op. A
@@ -885,13 +929,33 @@ const make = (installation: string, hostOf: () => string) =>
         )
         .digest("hex");
 
+    /**
+     * The send itself. Ownership and the wake notice come from one presence read, taken under
+     * the sender's claiming lock before the append; only the sender is held still by that lock.
+     */
     function publish(
       input: PublishInput & { readonly pierce?: ReadonlyArray<string> | undefined }
-    ): Effect.Effect<Message, PublishError>;
-    function publish(input: PublishInput): Effect.Effect<Message | NotSent, PublishError>;
-    function publish(input: PublishInput): Effect.Effect<Message | NotSent, PublishError> {
+    ): Effect.Effect<Posted, PublishError>;
+    function publish(input: PublishInput): Effect.Effect<Posted | NotSent, PublishError>;
+    function publish(input: PublishInput): Effect.Effect<Posted | NotSent, PublishError> {
       return Effect.gen(function* () {
-        const sender = yield* owned(input.from, input.session);
+        const read = yield* ledger.presenceAt();
+        const all = latestPresences(read.entries);
+        const sender = yield* ownedIn(all, input.from, input.session);
+        yield* touch(input.from);
+        const lacking = lackingWake(all, input.from, input.to);
+        const { listed, unlisted } = listWithin(lacking, WAKE_LISTED_BYTES);
+        const wake: WakeNotice | undefined =
+          lacking.length === 0
+            ? undefined
+            : {
+                ledger: read.cut.incarnation,
+                t: read.cut.head,
+                lacking: listed,
+                ...(unlisted > 0 ? { unlisted } : {}),
+              };
+        const sent = (message: Message): Posted =>
+          wake === undefined ? { message } : { message, wake };
         const draft = new Message({
           id: Bun.randomUUIDv7(),
           ts: yield* now,
@@ -905,7 +969,7 @@ const make = (installation: string, hostOf: () => string) =>
         });
         if (input.pierce === undefined) {
           yield* ledger.append(draft);
-          return draft;
+          return sent(draft);
         }
         const audience = (yield* peers).filter((peer) => isFor(draft, peer));
         let pierce: Array<string>;
@@ -937,7 +1001,7 @@ const make = (installation: string, hostOf: () => string) =>
         }
         const message = pierce.length === 0 ? draft : new Message({ ...draft, pierce });
         yield* ledger.append(message);
-        return message;
+        return sent(message);
       }).pipe(claiming(input.from), Effect.withSpan("Bus.publish"));
     }
 

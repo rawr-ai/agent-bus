@@ -184,7 +184,13 @@ const message = (fields: {
 const presence = (
   from: string,
   status: "joined" | "left",
-  extra: { readonly session?: string; readonly topics?: ReadonlyArray<string> } = {}
+  extra: {
+    readonly session?: string;
+    readonly topics?: ReadonlyArray<string>;
+    readonly runtime?: Presence["runtime"];
+    readonly installation?: string;
+    readonly codexThreadId?: string;
+  } = {}
 ) =>
   new Message({
     id: id("p"),
@@ -194,10 +200,12 @@ const presence = (
     kind: "presence",
     body: `${from} ${status}`,
     presence: new Presence({
-      runtime: "codex",
+      runtime: extra.runtime ?? "codex",
       status,
       topics: [...(extra.topics ?? [])],
       ...(extra.session === undefined ? {} : { session: extra.session }),
+      ...(extra.installation === undefined ? {} : { installation: extra.installation }),
+      ...(extra.codexThreadId === undefined ? {} : { codexThreadId: extra.codexThreadId }),
       note: "public note",
     }),
   });
@@ -1034,9 +1042,9 @@ describe("aggregates and peers", () => {
     const now = await bus.run("peers", {});
     expect(now.rows.map((row: Json) => row.address)).toEqual(["codex/b"]);
     const everyone = await bus.run("peers", { includeLeft: true });
-    expect(everyone.rows.map((row: Json) => [row.address, row.status])).toEqual([
-      ["claude/a", "left"],
-      ["codex/b", "joined"],
+    expect(everyone.rows.map((row: Json) => [row.address, row.status, row.wake])).toEqual([
+      ["claude/a", "left", undefined],
+      ["codex/b", "joined", "no-installation-or-codex-thread"],
     ]);
     // A historical cut decodes the presences of that cut, never today's.
     const then = await bus.run("peers", {}, { t: before });
@@ -1049,6 +1057,7 @@ describe("aggregates and peers", () => {
         since: expect.any(String),
         t: expect.any(Number),
         note: "public note",
+        wake: "no-installation-or-codex-thread",
         activity: "active",
         activeSince: expect.any(String),
         mutes: [],
@@ -1058,6 +1067,76 @@ describe("aggregates and peers", () => {
     expect(then).toMatchObject({ complete: true, currentHeadT: before + 1 });
     const preset = await bus.ok("bus_peers");
     expect(preset.peers.map((peer: Json) => peer.address)).toEqual(["codex/b"]);
+  });
+
+  test("peers shows a wake standing only when every presence at t was read", async () => {
+    const config = await freshLedger("peers-wake");
+    const bus = await startBus(flureeStore(config));
+    const installation = "installation-not-shown";
+    await bus.append(
+      presence("claude/hooked", "joined", { session: "s1", runtime: "claude", installation }),
+      presence("claude/legacy", "joined", { session: "s2", runtime: "claude" }),
+      presence("codex/threaded", "joined", {
+        session: "s3",
+        installation,
+        codexThreadId: "s3",
+      }),
+      presence("codex/unthreaded", "joined", { session: "s4", installation }),
+      presence("human/h", "joined", { session: "s5", runtime: "human" }),
+      presence("codex/gone", "joined", { session: "s6", installation, codexThreadId: "s6" })
+    );
+    await bus.append(presence("codex/gone", "left", { session: "s6" }));
+    const standings = (page: Json) => page.rows.map((row: Json) => [row.address, row.wake]);
+    const complete = await bus.run("peers", { includeLeft: true });
+    expect(standings(complete)).toEqual([
+      ["claude/hooked", "recorded"],
+      ["claude/legacy", "no-installation"],
+      ["codex/gone", undefined],
+      ["codex/threaded", "recorded"],
+      ["codex/unthreaded", "no-codex-thread"],
+      ["human/h", "interactive"],
+    ]);
+    expect(JSON.stringify(complete)).not.toContain(installation);
+    const preset = await bus.ok("bus_peers");
+    expect(preset.peers.map((peer: Json) => [peer.address, peer.wake])).toEqual(
+      standings(complete).filter(([address]: [string]) => address !== "codex/gone")
+    );
+
+    // One presence id claimed twice at one commit: the fold can't tell which is the newest, and
+    // the same read refuses the cut rather than show a standing from either.
+    const renewed = presence("claude/legacy", "joined", {
+      session: "s2",
+      runtime: "claude",
+      installation,
+    });
+    const left = presence("claude/legacy", "left", { session: "s2", runtime: "claude" });
+    const twin = new Message({ ...left, id: renewed.id });
+    await insertRaw(config, [
+      toNode(renewed, encodeJson(renewed)),
+      { ...toNode(twin, encodeJson(twin)), "@id": `${toNode(twin, "")["@id"]}-twin` },
+    ]);
+    expect(await bus.refused("bus_run_query", { name: "peers", args: {} })).toMatch(
+      /^A ledger entry at t=\d+ could not be decoded\.$/
+    );
+    expect(await bus.refused("bus_peers", {})).toMatch(/could not be decoded/);
+
+    // A typed presence without an id may be any address's newest state. The same read that folds
+    // activity refuses the cut, so no standing is ever shown from a superseded join.
+    const hidden = presence("claude/legacy", "joined", {
+      session: "s2",
+      runtime: "claude",
+      installation,
+    });
+    const { "bus:id": _id, ...withoutId } = toNode(hidden, encodeJson(hidden));
+    await insertRaw(config, withoutId);
+    expect(await bus.refused("bus_run_query", { name: "peers", args: {} })).toMatch(
+      /^A ledger entry at t=\d+ could not be decoded\.$/
+    );
+    expect(await bus.refused("bus_peers", {})).toMatch(/could not be decoded/);
+    // The earlier cut was complete and still shows them.
+    expect(standings(await bus.run("peers", { includeLeft: true }, { t: complete.t }))).toEqual(
+      standings(complete)
+    );
   });
 
   test("director-dm-volume counts distinct direct mail per UTC day beside observed traffic", async () => {
