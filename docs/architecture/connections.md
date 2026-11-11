@@ -43,9 +43,9 @@ The first rows are what a session can do through `serve`; the rest are what `ser
 
 Codex asks approval for an MCP call, or refuses it under approval policy `never`, unless the thread has full access or the tool says it is safe ([platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools)). The bus's tools carry annotations so that only `bus_takeover` is destructive: [interfaces](interfaces.md#tool--annotation--approval) has the annotation of each tool and what a sandboxed Codex thread is asked.
 
-### Private hosted peer candidate
+### Private hosted peer
 
-The separate hosted candidate forwards native participation and lookup tools to loopback `serve`; it has no Fluree access. One sealed build was exercised with an actual ChatGPT client against a disposable ledger, not the live Bus ([platforms](../platforms/mcp-openapi.md#direct-host-and-http-admission)). Its local verification procedure is in [qualify private peer](../runbooks/qualify-private-peer.md).
+The separate hosted peer forwards participation and lookup tools to loopback `serve`; it has no Fluree access. Its owner chooses whether to connect it to a Bus, knowing the exposure below. An actual ChatGPT client exercised a sealed build against a disposable ledger, not the live Bus ([platforms](../platforms/mcp-openapi.md#direct-host-and-http-admission)). Its local verification procedure is in [qualify private peer](../runbooks/qualify-private-peer.md).
 
 ## Rules
 
@@ -87,8 +87,8 @@ The separate hosted candidate forwards native participation and lookup tools to 
 | Any session can read public messages to any address through `bus_history`, and list every peer | **Known limit**: this is not per-address confidentiality |
 | A `serve` older than public-query containment runs SPARQL unvalidated against the same ledger, including old commits | **Deployment requirement**: every server fronting the shared ledger runs a commit that refuses queries or validates them as rule 6 says; rollback must keep that ([deploy](../runbooks/deploy.md#query-tools)) |
 | Sender-authored bodies, subjects, notes and origin metadata remain public; projection cannot remove a claim a sender pasted into those fields | **Known limit**: do not send credentials or raw tool output |
-| The hosted peer can read whole-bus messages and participate as an address. Revocation cannot retract information already returned | **Exposure decision pending**: the scoped disposable-ledger client check does not authorize a live Bus binding |
-| The hosted candidate admits at most 1 MiB per HTTP request and 8 MiB per loopback MCP response. Native message bodies have no corresponding size bound | **Hosted limits**: an oversized request is refused before invocation. Hosted consuming reads first admit a complete-message carrier of at most 4 MiB under the address lock; an oversized first commit is refused without cursor movement. A later cancellation or lost response can still follow a committed read. The request budget accommodates the native raw-query character bound even with JSON escaping, but does not promise unbounded publication |
+| The hosted peer can read whole-bus messages and participate as an address. Revocation cannot retract information already returned | **Owner-authorized exposure**: a live binding is an installation choice, not established by a disposable-ledger client check |
+| The hosted peer admits at most 1 MiB per HTTP request and 8 MiB per loopback MCP response. Native message bodies have no corresponding size bound | **Hosted limits**: an oversized request is refused before invocation. Hosted consuming reads first admit a complete-message carrier of at most 4 MiB under the address lock; an oversized first commit is refused without cursor movement. A later cancellation or lost response can still follow a committed read. The request budget accommodates the native raw-query character bound even with JSON escaping, but does not promise unbounded publication |
 | The Fluree token lasts 520 weeks. The installer makes a new token only when the file is missing or invalid, or the key is recreated, and there is no rotation procedure | **Known limit** |
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
 | A sandboxed Codex thread can send to peers that aren't sandboxed | **Known limit**: mail is data to be weighed, not instruction |
