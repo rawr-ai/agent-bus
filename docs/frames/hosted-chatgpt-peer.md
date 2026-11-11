@@ -75,6 +75,12 @@ Remaining choices are whether measured host behavior forces any narrower call bo
 
 Reframe if supported metadata cannot preserve separate chat ownership across reconnect, the route cannot maintain owner authorization, or actual result limits prevent useful native participation. After three independent failures at one such boundary, revise the design rather than accumulate workarounds. This composes MCP consumer-path and state-machine analyses; protocol/API claims remain distinct from unperformed actual-host qualification. Deployment procedures, not this frame, own commands and activation.
 
+## Actual-client check, 2026-11-11
+
+After the earlier framing and fixture work above, a fresh browser OAuth consent connected the existing ChatGPT Work app to the unchanged sealed peer built from source `3e69bee6796cbee0467747226116f2eab852bd1b`, using a disposable fabricated ledger rather than the live Bus. Two actual conversations under one owner joined separate addresses and subscribed to a fixture topic. Each exchanged direct messages with a native fixture peer; the second conversation's attempt to consume the first's inbox was refused. Returning to the original conversation without rejoining preserved its ownership and pending mail. Shared history was visible to both, including a multiline message the second conversation had not been given in its prompt. Both addresses left, and the fixture stopped cleanly.
+
+The app discovered all 16 tools; this check exercised seven: peers, join, owned addresses, publish, read, history and leave. It proves neither per-address history confidentiality nor a new-chat takeover, compaction, process restart, token refresh, grant revocation, automatic wake, large-result limits or the other tools. Same-chat return is not a reconnect or compaction proof. The live Bus remains unbound: its installed native server lacks the candidate's consuming-read byte-admission contract, and a reviewed native upgrade and capability checks for read and wait remain required. This is evidence for the exact sealed artifact, not the subsequently integrated source tree. The version-bound composed-host observation is in [platforms](../platforms/mcp-openapi.md#direct-host-and-http-admission).
+
 ## Moved into current docs
 
 - [ ] Contract: full peer tools, identity inputs and result limits in interfaces and descriptions after implementation.

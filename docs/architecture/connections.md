@@ -45,7 +45,7 @@ Codex asks approval for an MCP call, or refuses it under approval policy `never`
 
 ### Private hosted peer candidate
 
-The separate local candidate forwards native participation and lookup tools to loopback `serve`; it has no Fluree access. It has not been deployed or qualified with a real ChatGPT client. Its disposable verification procedure is in [qualify private peer](../runbooks/qualify-private-peer.md).
+The separate hosted candidate forwards native participation and lookup tools to loopback `serve`; it has no Fluree access. One sealed build was exercised with an actual ChatGPT client against a disposable ledger, not the live Bus ([platforms](../platforms/mcp-openapi.md#direct-host-and-http-admission)). Its local verification procedure is in [qualify private peer](../runbooks/qualify-private-peer.md).
 
 ## Rules
 
@@ -87,7 +87,7 @@ The separate local candidate forwards native participation and lookup tools to l
 | Any session can read public messages to any address through `bus_history`, and list every peer | **Known limit**: this is not per-address confidentiality |
 | A `serve` older than public-query containment runs SPARQL unvalidated against the same ledger, including old commits | **Deployment requirement**: every server fronting the shared ledger runs a commit that refuses queries or validates them as rule 6 says; rollback must keep that ([deploy](../runbooks/deploy.md#query-tools)) |
 | Sender-authored bodies, subjects, notes and origin metadata remain public; projection cannot remove a claim a sender pasted into those fields | **Known limit**: do not send credentials or raw tool output |
-| The hosted peer can read whole-bus messages and participate as an address. Revocation cannot retract information already returned | **Exposure decision pending**: the candidate is not deployed or qualified with ChatGPT |
+| The hosted peer can read whole-bus messages and participate as an address. Revocation cannot retract information already returned | **Exposure decision pending**: the scoped disposable-ledger client check does not authorize a live Bus binding |
 | The hosted candidate admits at most 1 MiB per HTTP request and 8 MiB per loopback MCP response. Native message bodies have no corresponding size bound | **Hosted limits**: an oversized request is refused before invocation. Hosted consuming reads first admit a complete-message carrier of at most 4 MiB under the address lock; an oversized first commit is refused without cursor movement. A later cancellation or lost response can still follow a committed read. The request budget accommodates the native raw-query character bound even with JSON escaping, but does not promise unbounded publication |
 | The Fluree token lasts 520 weeks. The installer makes a new token only when the file is missing or invalid, or the key is recreated, and there is no rotation procedure | **Known limit** |
 | The race when `serve` removes its own nudge | **Accepted risk**, owned by [delivery's limits](delivery.md#limits) |
@@ -97,6 +97,7 @@ The separate local candidate forwards native participation and lookup tools to l
 ## Rests on
 
 - [Fluree: the transaction server](../platforms/fluree.md#the-transaction-server) (token modes, CORS), [the event stream](../platforms/fluree.md#the-event-stream) and [query limits](../platforms/fluree.md#query-limits).
+- [Owned direct-tool MCP host](../platforms/mcp-openapi.md#direct-host-and-http-admission) (bounded actual-client and fixture observations).
 - [Codex: approvals for MCP tools](../platforms/codex.md#approvals-for-mcp-tools), [one writer per thread](../platforms/codex.md#one-writer-per-thread), [the shared queue](../platforms/codex.md#the-shared-queue) and [the daemon](../platforms/codex.md#the-daemon).
 - [Codex: the desktop's IPC router](../platforms/codex.md#the-desktops-ipc-router), whose exposure the connections table records.
 

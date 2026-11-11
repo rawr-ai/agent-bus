@@ -488,6 +488,9 @@ describe("entries", () => {
     const tree = await bus.run("thread", { id: clean.id });
     expect(ids(tree.rows)).toEqual([clean.id]);
     expect(tree).toMatchObject({ damaged: 1, members: 2, complete: false });
+    const damagedFocus = await bus.run("thread", { id: twin.id });
+    expect(ids(damagedFocus.rows)).toEqual([clean.id]);
+    expect(damagedFocus).toMatchObject({ damaged: 1, members: 2, complete: false });
     let found = await bus.run("search", { text: "twin doubled" });
     for (let attempt = 0; attempt < 50 && found.damaged === 0; attempt++) {
       await Bun.sleep(100);
@@ -596,6 +599,142 @@ describe("entries", () => {
     expect(
       await bus.refused("bus_run_query", { name: "messages", args: { ids: [a.id, a.id] } })
     ).toBe("ids has duplicates.");
+  });
+
+  test("exact lookups preserve literal canonical identities at one cut", async () => {
+    const config = await freshLedger("exact-identities");
+    const bus = await startBus(flureeStore(config));
+    const uuid = message({
+      from: "a",
+      to: ["b"],
+      body: "uuid",
+      id: "01900000-0000-7000-8000-000000000001",
+    });
+    const slash = message({ from: "a", to: ["b"], body: "slash", id: "import/one" });
+    const unicode = message({
+      from: "b",
+      to: ["a"],
+      body: "unicode",
+      id: "import-雪",
+      replyTo: slash.id,
+    });
+    const composed = message({ from: "a", to: ["b"], body: "composed", id: "import-\u00e9" });
+    const decomposed = message({ from: "a", to: ["b"], body: "decomposed", id: "import-e\u0301" });
+    const variable = message({ from: "a", to: ["b"], body: "variable", id: "?request" });
+    for (const entry of [uuid, slash, unicode, composed, decomposed, variable]) {
+      await insertRaw(config, {
+        ...toNode(entry, encodeJson(entry)),
+        "@id": `urn:agent-bus:message:${entry.id}`,
+      });
+    }
+    const first = await bus.run("messages", {
+      ids: [unicode.id, uuid.id, slash.id, decomposed.id, composed.id, variable.id],
+    });
+    expect(first.rows.map((row: Json) => [row.id, row.body])).toEqual([
+      [unicode.id, "unicode"],
+      [uuid.id, "uuid"],
+      [slash.id, "slash"],
+      [decomposed.id, "decomposed"],
+      [composed.id, "composed"],
+      [variable.id, "variable"],
+    ]);
+    expect(first).toMatchObject({ notFound: [], damaged: 0, complete: true });
+    const later = message({
+      from: "a",
+      to: ["b"],
+      body: "later",
+      id: "import/later",
+      replyTo: slash.id,
+    });
+    await insertRaw(config, {
+      ...toNode(later, encodeJson(later)),
+      "@id": `urn:agent-bus:message:${later.id}`,
+    });
+    const pinned = await bus.run("messages", { ids: [later.id, slash.id] }, { t: first.t });
+    expect(ids(pinned.rows)).toEqual([slash.id]);
+    expect(pinned.notFound).toEqual([later.id]);
+    const tree = await bus.run("thread", { id: unicode.id }, { t: first.t });
+    expect(tree.rows.map((row: Json) => [row.id, row.body])).toEqual([
+      [slash.id, "slash"],
+      [unicode.id, "unicode"],
+    ]);
+    expect(tree).toMatchObject({ root: slash.id, members: 2, complete: true });
+  });
+
+  test("exact lookups report conflicting identity claims without cross-assigning", async () => {
+    const config = await freshLedger("exact-damage");
+    const bus = await startBus(flureeStore(config));
+    const a = message({ from: "a", to: ["b"], body: "a", id: "claim-a" });
+    const b = message({ from: "a", to: ["b"], body: "b", id: "claim-b" });
+    const jsonMismatch = message({ from: "a", to: ["b"], body: "json mismatch", id: "claim-json" });
+    const doubled = message({ from: "a", to: ["b"], body: "doubled", id: "claim-double" });
+    const missingJson = message({ from: "a", to: ["b"], body: "missing", id: "claim-missing" });
+    const missingId = message({ from: "a", to: ["b"], body: "missing id", id: "claim-no-id" });
+    await insertRaw(config, { ...toNode(a, encodeJson(a)), "bus:id": b.id });
+    await insertRaw(config, toNode(b, encodeJson(b)));
+    await insertRaw(config, {
+      ...toNode(jsonMismatch, encodeJson(jsonMismatch)),
+      "bus:json": encodeJson(b),
+    });
+    await insertRaw(config, {
+      ...toNode(doubled, encodeJson(doubled)),
+      "bus:id": [doubled.id, "claim-alias"],
+    });
+    const { "bus:json": _, ...withoutJson } = toNode(missingJson, encodeJson(missingJson));
+    await insertRaw(config, withoutJson);
+    const { "bus:id": _id, ...withoutId } = toNode(missingId, encodeJson(missingId));
+    await insertRaw(config, withoutId);
+    for (const damagedId of [a.id, doubled.id, missingId.id]) {
+      const lookup = await bus.run("messages", { ids: [damagedId] });
+      expect(lookup).toMatchObject({ rows: [], notFound: [], damaged: 1, complete: false });
+      expect(await bus.refused("bus_run_query", { name: "thread", args: { id: damagedId } })).toBe(
+        `Message ${damagedId} has damaged identity at t=${lookup.t}.`
+      );
+    }
+    const noId = await bus.run("messages", { ids: [missingId.id] });
+    expect(noId).not.toHaveProperty("damagedAt");
+    for (const damagedId of [jsonMismatch.id, missingJson.id]) {
+      const lookup = await bus.run("messages", { ids: [damagedId] });
+      expect(lookup).toMatchObject({ rows: [], notFound: [], damaged: 1, complete: false });
+      const tree = await bus.run("thread", { id: damagedId });
+      expect(tree).toMatchObject({ rows: [], damaged: 1, complete: false });
+    }
+    const together = await bus.run("messages", { ids: [a.id, b.id, "claim-alias"] });
+    expect(together.rows.map((row: Json) => [row.id, row.body])).toEqual([[b.id, "b"]]);
+    expect(together).toMatchObject({ damaged: 1, notFound: ["claim-alias"], complete: false });
+    const bOnly = await bus.run("messages", { ids: [b.id] });
+    expect(bOnly.rows.map((row: Json) => [row.id, row.body])).toEqual([[b.id, "b"]]);
+  });
+
+  test("exact lookups do not resolve other namespaces or encoded aliases", async () => {
+    const config = await freshLedger("exact-decoys");
+    const bus = await startBus(flureeStore(config));
+    const foreign = message({ from: "a", to: ["b"], body: "foreign", id: "foreign" });
+    const encoded = message({ from: "a", to: ["b"], body: "encoded", id: "alias/slash" });
+    await insertRaw(config, {
+      ...toNode(foreign, encodeJson(foreign)),
+      "@id": "urn:other:foreign",
+    });
+    await insertRaw(config, {
+      ...toNode(encoded, encodeJson(encoded)),
+      "@id": "urn:agent-bus:message:alias%2Fslash",
+    });
+    const lookup = await bus.run("messages", { ids: [foreign.id, encoded.id] });
+    expect(lookup).toMatchObject({
+      rows: [],
+      notFound: [foreign.id, encoded.id],
+      damaged: 0,
+      complete: true,
+    });
+    expect(await bus.refused("bus_run_query", { name: "thread", args: { id: encoded.id } })).toBe(
+      `Message ${encoded.id} is not in the ledger at t=${lookup.t}.`
+    );
+    const suspicious = 'bad\" ) (filter true)';
+    const control = message({ from: "a", to: ["b"], body: "control", id: "control" });
+    await bus.append(control);
+    const safe = await bus.run("messages", { ids: [suspicious, control.id] });
+    expect(safe).toMatchObject({ notFound: [suspicious], damaged: 0 });
+    expect(ids(safe.rows)).toEqual([control.id]);
   });
 
   test("thread is the reply tree from its nearest reachable top; a missing target cuts it", async () => {
@@ -1762,6 +1901,19 @@ describe("transport bounds", () => {
     };
     return { bus, edge, history, raw, failure, poolHolds };
   };
+
+  test("an exact lookup propagates a sanitized provider rejection instead of absence", async () => {
+    const { bus, edge, failure } = await throughBoundary("exact-rejection");
+    for (const [name, args] of [
+      ["messages", { ids: ["bad-iri"] }],
+      ["thread", { id: "bad-iri" }],
+    ] as const) {
+      const held = edge.next(() => new Response("private provider details", { status: 400 }));
+      const call = bus.call("bus_run_query", { name, args });
+      await held;
+      expect(await failure(call)).toBe("Fluree request failed (HTTP 400).");
+    }
+  });
 
   test("a query stalled before headers or mid-body fails at the 10 s deadline, ends its request and returns its permit", async () => {
     const { bus, edge, history, raw, failure, poolHolds } = await throughBoundary("deadline", {

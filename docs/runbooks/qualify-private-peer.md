@@ -33,7 +33,7 @@ Use a development worktree with frozen dependencies, the pinned Bun and Fluree o
 
    Expected: the builder verifies the exact host and prints a new review directory with its checksum manifest. The qualifier copies it away from the checkout, checks there are no `node_modules` ancestors, starts its entry with a synthetic private config and local HTTPS discovery provider, checks the unauthenticated OAuth challenge, then exercises joined peer messaging through the relocated bundle. Supervised children and temporary files are removed. The working-tree source is not attested by this review manifest. *Rehearsed 2026-11-11.*
 
-4. Do not activate a connection on this evidence. Real provider authorization, actual ChatGPT two-conversation behavior and reviewed end-to-end qualification remain required. *Unverified: those checks have not run.*
+4. Do not bind a live Bus on this fixture evidence alone. A separate [actual-client check](../platforms/mcp-openapi.md#direct-host-and-http-admission) exercised fresh OAuth and two conversations against a disposable ledger; live activation and the remaining untested behaviors still need their own review and qualification. *Unverified: live Bus activation has not been rehearsed by this procedure.*
 
 ## If it fails
 
