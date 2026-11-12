@@ -232,6 +232,76 @@ export const latestPresences = (entries: Iterable<Message>): Map<string, Subscri
   return latest;
 };
 
+/**
+ * What a joined subscriber's latest presence records toward a native wake. `recorded` means the
+ * prerequisites this bus routes by are present, not that a wake was checked or will arrive;
+ * `interactive` runtimes have no native wake by design. The `no-*` values name what is missing.
+ */
+export const WakeStanding = Schema.Literals([
+  "recorded",
+  "interactive",
+  "no-installation",
+  "no-codex-thread",
+  "no-installation-or-codex-thread",
+]);
+export type WakeStanding = typeof WakeStanding.Type;
+
+/** A direct recipient's standing in one observation: a wake standing, or not joined in it. */
+export const RecipientStanding = Schema.Literals([
+  "not-joined",
+  "no-installation",
+  "no-codex-thread",
+  "no-installation-or-codex-thread",
+]);
+export type RecipientStanding = typeof RecipientStanding.Type;
+
+/** The recorded wake prerequisites of a joined presence, from its runtime alone. */
+export const wakeStanding = (presence: Presence): WakeStanding => {
+  const installation = presence.installation !== undefined;
+  switch (presence.runtime) {
+    case "human":
+    case "other":
+      return "interactive";
+    case "claude":
+      return installation ? "recorded" : "no-installation";
+    case "codex": {
+      const thread = presence.codexThreadId !== undefined;
+      if (installation && thread) return "recorded";
+      if (installation) return "no-codex-thread";
+      return thread ? "no-installation" : "no-installation-or-codex-thread";
+    }
+  }
+};
+
+/**
+ * The direct recipients of a send whose wake prerequisites one presence observation shows
+ * lacking, in first-named order. Topics, `*` and the sender itself are not direct recipients;
+ * an address with no session-bearing presence, or whose latest one is a leave, is not joined in
+ * that observation. An empty result says nothing lacking was observed, never that a wake routes.
+ */
+export const lackingWake = (
+  latest: ReadonlyMap<string, Subscriber>,
+  from: string,
+  to: ReadonlyArray<string>
+): Array<{ readonly address: string; readonly standing: RecipientStanding }> => {
+  const lacking: Array<{ address: string; standing: RecipientStanding }> = [];
+  const seen = new Set<string>();
+  for (const address of to) {
+    if (address === "*" || address.startsWith("#") || address === from || seen.has(address)) {
+      continue;
+    }
+    seen.add(address);
+    const subscriber = latest.get(address);
+    if (subscriber === undefined || subscriber.presence.status !== "joined") {
+      lacking.push({ address, standing: "not-joined" });
+      continue;
+    }
+    const standing = wakeStanding(subscriber.presence);
+    if (standing !== "recorded" && standing !== "interactive") lacking.push({ address, standing });
+  }
+  return lacking;
+};
+
 /** The run a join belongs to: the first join of a run of ordinary rejoins by one session. */
 export const runOf = (subscriber: Subscriber) => subscriber.presence.rejoinOf ?? subscriber.joinId;
 

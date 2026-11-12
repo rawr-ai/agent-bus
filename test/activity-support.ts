@@ -154,7 +154,11 @@ export const say = (
   body: string,
   extra: { readonly pierce?: ReadonlyArray<string> | "all"; readonly confirm?: string } = {}
 ) =>
-  Effect.flatMap(Bus.Bus, (bus) => bus.publish({ from, session: sid(from), to, body, ...extra }));
+  Effect.flatMap(Bus.Bus, (bus) =>
+    Effect.map(bus.publish({ from, session: sid(from), to, body, ...extra }), (sent) =>
+      "status" in sent ? sent : sent.message
+    )
+  );
 
 export const takeAll = (address: string, session = sid(address)) =>
   Effect.flatMap(Bus.Bus, (bus) => bus.take(address, session));

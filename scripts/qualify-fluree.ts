@@ -474,12 +474,12 @@ const qualifyGuardedReplacement = async () => {
       const bus = yield* Bus.Bus;
       yield* bus.join({ address: GUARD_READER, runtime: "codex", session: READER, cwd: dir });
       yield* bus.join({ address: "claude/a", runtime: "claude", session: SENDER, cwd: dir });
-      return yield* bus.publish({
+      return (yield* bus.publish({
         from: "claude/a",
         session: SENDER,
         to: [GUARD_READER],
         body: "ordinary",
-      });
+      })).message;
     }),
     GUARDED
   );

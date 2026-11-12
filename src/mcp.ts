@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Schema, Semaphore } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
-import { Bus, ORIENTATION_JOIN_TOO_LARGE } from "./Bus.ts";
+import { Bus, ORIENTATION_JOIN_TOO_LARGE, WAKE_LISTED_BYTES } from "./Bus.ts";
 import {
   byName,
   type EntryRow,
@@ -25,8 +25,10 @@ import {
   Origin,
   PresenceConflict,
   QueryCapacity,
+  RecipientStanding,
   Runtime,
   validSession,
+  WakeStanding,
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
 import { updateBulletin, updateDirectory } from "./Orientation.ts";
@@ -170,9 +172,44 @@ const CurrentJoined = Schema.Struct({
     description: "Your effective explicit directory and concern associations.",
   }),
 });
+/**
+ * Direct recipients whose registration the sender's own presence read, before the append, showed
+ * not joined or lacking a native wake's prerequisites. Absent when it showed none, which never
+ * promises a wake or delivery.
+ */
+export const WakeNotice = Schema.Struct({
+  ledger: Schema.String.annotate({
+    description: "The ledger incarnation that presence read was taken from.",
+  }),
+  t: Schema.Int.annotate({
+    description: "The commit of that presence read, before the send was appended.",
+  }),
+  lacking: Schema.Array(
+    Schema.Struct({
+      address: Schema.String.annotate({ description: "A directly addressed recipient." }),
+      standing: RecipientStanding.annotate({
+        description:
+          "not-joined: no current join in that read (never joined, left, or an ownerless legacy join); the message is still stored for it. no-installation / no-codex-thread: its join lacks what a native wake needs, so it sees the message only when it reads; the recipient's owner renews the join to fix it.",
+      }),
+    })
+  ).annotate({
+    description: `Each such recipient once, in the order to named them: the first whose JSON array fits ${WAKE_LISTED_BYTES} bytes, possibly none when unlisted is set.`,
+  }),
+  unlisted: Schema.optionalKey(
+    Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
+      description:
+        "How many more lacked beyond those listed. To name them, page bus_run_query peers with this ledger and t until exhausted with damage checked: a direct recipient with no joined row, or whose wake is neither recorded nor interactive, lacked. If the ledger is refused or a page is damaged or cut short, they are not named.",
+    })
+  ),
+}).annotate({
+  description:
+    "Direct recipients whose registration, as observed in ledger at t before the send was appended, was not joined or lacked a native wake's prerequisites. Recipients can renew after t; its absence never means a wake routes or will arrive.",
+});
 export const Published = Schema.Struct({
   id: Schema.String.annotate({ description: "The new message's id, for replies to name." }),
   ts: Schema.String.annotate({ description: "When it was sent (ISO 8601)." }),
+  // Optional so the CLI still decodes older servers, which never report it.
+  wake: Schema.optionalKey(WakeNotice),
 });
 /**
  * What bus_publish answers: the sent message's id and ts, or NOT_SENT for an unconfirmed pierce
@@ -181,6 +218,7 @@ export const Published = Schema.Struct({
 export const PublishResult = Schema.Struct({
   id: Schema.optionalKey(Published.fields.id),
   ts: Schema.optionalKey(Published.fields.ts),
+  wake: Published.fields.wake,
   status: Schema.optionalKey(
     Schema.Literal("NOT_SENT").annotate({
       description: "Nothing was sent: piercing all needs this exact set confirmed.",
@@ -273,6 +311,13 @@ export const Peers = Schema.Struct({
       ),
       note: Schema.optionalKey(
         Schema.String.annotate({ description: "What it said it is working on." })
+      ),
+      // Optional so the CLI still decodes older servers, which never report it.
+      wake: Schema.optionalKey(
+        WakeStanding.annotate({
+          description:
+            "What its join records toward a native wake: recorded (prerequisites present, not a checked wake), interactive (no native wake by design), or no-installation / no-codex-thread / no-installation-or-codex-thread (its owner must renew the join).",
+        })
       ),
       // Optional so the CLI still decodes older servers, which have no activity.
       activity: Schema.optionalKey(Activity),
@@ -382,7 +427,7 @@ const Takeover = Tool.make("bus_takeover", {
 
 const Publish = Tool.make("bus_publish", {
   description:
-    "Send a message. `to` names the audience: peer addresses, #topic for its subscribers, or * for everyone. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond.",
+    "Send a message. `to` names the audience: peer addresses, #topic for its subscribers, or * for everyone. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.",
   parameters: Schema.Struct({
     from: Address,
     session: Session,
@@ -846,6 +891,7 @@ const peersPreset = Effect.gen(function* () {
         topics: row.topics,
         ...(row.host === undefined ? {} : { host: row.host }),
         ...(row.note === undefined ? {} : { note: row.note }),
+        ...(row.wake === undefined ? {} : { wake: row.wake }),
         activity: row.activity,
         ...(row.activeSince === undefined ? {} : { activeSince: row.activeSince }),
         ...(row.activityReason === undefined ? {} : { activityReason: row.activityReason }),
@@ -930,9 +976,17 @@ const BusHandlers = BusToolkit.toLayer(
             )
           ),
       bus_publish: (params) =>
-        bus
-          .publish({ ...params, session: params.session })
-          .pipe(Effect.map((sent) => ("status" in sent ? sent : { id: sent.id, ts: sent.ts }))),
+        bus.publish({ ...params, session: params.session }).pipe(
+          Effect.map((sent) =>
+            "status" in sent
+              ? sent
+              : {
+                  id: sent.message.id,
+                  ts: sent.message.ts,
+                  ...(sent.wake === undefined ? {} : { wake: sent.wake }),
+                }
+          )
+        ),
       bus_activity: (params) => bus.activity({ ...params, session: params.session }),
       bus_directory: (params) => updateDirectory(params).pipe(Effect.provide(environment)),
       bus_bulletin: (params) => updateBulletin(params).pipe(Effect.provide(environment)),

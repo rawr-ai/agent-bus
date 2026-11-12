@@ -97,8 +97,12 @@ const joining = (
   ...(owner.runtime === "codex" ? { codexThreadId: owner.session } : {}),
 });
 
+/** A plain send with its wake notice. */
+const post = (bus: Bus.Bus["Service"], to: ReadonlyArray<string>, body: string) =>
+  bus.publish({ from: sender.address, session: sender.session, to, body, pierce: undefined });
+
 const send = (bus: Bus.Bus["Service"], to: ReadonlyArray<string>, body: string) =>
-  bus.publish({ from: sender.address, session: sender.session, to, body });
+  Effect.map(post(bus, to, body), (posted) => posted.message);
 
 const observeQueue = () => {
   const calls: Array<readonly [string, string]> = [];
@@ -195,9 +199,17 @@ test("native wakes survive a hostname change and restart without selecting a for
           for (const owner of foreign) yield* remote.bus.join(joining(owner, dir));
           const excludedCursors = yield* Effect.forEach(excluded, cursors.get);
           expect(excludedCursors.every(Option.isSome)).toBe(true);
-          yield* send(bus, excluded, "mail for non-targets");
+          // The sender's own read sees the remote joins' recorded prerequisites (another
+          // installation, not this one) and the thread missing here, never a locality check.
+          const forNonTargets = yield* post(bus, excluded, "mail for non-targets");
+          expect(forNonTargets.wake?.lacking).toEqual([
+            { address: withoutThread, standing: "no-codex-thread" },
+          ]);
           const pending = yield* Effect.forEach(owners, ({ address }) =>
-            send(bus, [address], "while renamed")
+            Effect.map(post(bus, [address], "while renamed"), (posted) => {
+              expect(posted).not.toHaveProperty("wake");
+              return posted.message;
+            })
           );
           expect(pending.map((message) => message.origin?.host)).toEqual([wifiHost, wifiHost]);
           yield* wakeAndRead(bus, cursors, pending);
@@ -266,11 +278,16 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
           return entry;
         })
       );
-      const sentinel = yield* send(
+      const { message: sentinel, wake } = yield* post(
         bus,
         owners.map(({ address }) => address),
         "explicit read before renewal"
       );
+      expect(wake).toEqual({
+        ledger: expect.any(String),
+        t: expect.any(Number),
+        lacking: owners.map(({ address }) => ({ address, standing: "no-installation" })),
+      });
       for (const owner of owners) {
         expect((yield* bus.take(owner.address, owner.session)).map(({ id }) => id)).toEqual([
           sentinel.id,
@@ -309,6 +326,85 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
       }
       expect(renewedCursors).toEqual(before);
       yield* wakeAndRead(bus, cursors, unread);
+      const afterRenewal = yield* post(
+        bus,
+        owners.map(({ address }) => address),
+        "after renewal"
+      );
+      expect(afterRenewal).not.toHaveProperty("wake");
+    })
+  ));
+
+test("a send's wake notice comes from its one ownership read, before the append", () =>
+  withStore((dir) =>
+    Effect.gen(function* () {
+      const ledger = yield* Ledger;
+      const cuts: Array<{ readonly head: number; readonly incarnation: string }> = [];
+      const { bus } = yield* openBus(dir, {
+        id: installation,
+        hostOf: () => originalHost,
+        cursorDir: "local",
+        observeLedger: (inner) => ({
+          ...inner,
+          presenceAt: (at) =>
+            Effect.tap(inner.presenceAt(at), (read) => Effect.sync(() => cuts.push(read.cut))),
+        }),
+      });
+      const gone = { ...claude, address: "claude/gone", session: "session-gone" };
+      for (const owner of [sender, codex, gone]) yield* bus.join(joining(owner, dir));
+      yield* bus.leave(gone.address, gone.session);
+      const never = "codex/never";
+      const head = yield* ledger.end;
+      cuts.length = 0;
+      const { message, wake } = yield* post(
+        bus,
+        [sender.address, gone.address, never, "*", "#reviews", never, codex.address],
+        "to a mixed audience"
+      );
+      expect(cuts.map((cut) => cut.head)).toEqual([head]);
+      expect(wake).toEqual({
+        ledger: cuts[0]?.incarnation ?? "",
+        t: head,
+        lacking: [
+          { address: gone.address, standing: "not-joined" },
+          { address: never, standing: "not-joined" },
+        ],
+      });
+      // Stored either way, and read by the recipient that is joined.
+      expect((yield* ledger.read(head)).entries.map((entry) => entry.message.id)).toEqual([
+        message.id,
+      ]);
+      expect((yield* bus.take(codex.address, codex.session)).map(({ id }) => id)).toEqual([
+        message.id,
+      ]);
+      // Topic and programme mail, and mail to oneself, carry no notice.
+      cuts.length = 0;
+      const ambient = yield* post(bus, ["*", "#reviews", sender.address], "ambient");
+      expect(ambient).not.toHaveProperty("wake");
+      expect(cuts).toHaveLength(1);
+      // However many lack and however long their addresses, the notice lists the prefix whose
+      // JSON array fits the budget and counts the rest. The docs say 4 KiB.
+      expect(Bus.WAKE_LISTED_BYTES).toBe(4096);
+      const rowBytes = (rows: ReadonlyArray<unknown>) => Buffer.byteLength(JSON.stringify(rows));
+      const many = Array.from({ length: 200 }, (_, i) => `codex/absent-${i}`);
+      const bounded = yield* post(bus, many, "to many");
+      const listed = bounded.wake?.lacking ?? [];
+      expect(listed).toEqual(
+        many.slice(0, listed.length).map((address) => ({ address, standing: "not-joined" }))
+      );
+      expect(rowBytes(listed)).toBeLessThanOrEqual(Bus.WAKE_LISTED_BYTES);
+      expect(
+        rowBytes([...listed, { address: many[listed.length], standing: "not-joined" }])
+      ).toBeGreaterThan(Bus.WAKE_LISTED_BYTES);
+      expect(bounded.wake?.unlisted).toBe(many.length - listed.length);
+      // One address too long to list, even one quoted twice over, is only counted.
+      const long = `codex/${'"'.repeat(Bus.WAKE_LISTED_BYTES)}`;
+      expect((yield* post(bus, [long, "codex/absent-0"], "long")).wake).toEqual({
+        ledger: cuts[0]?.incarnation ?? "",
+        t: expect.any(Number),
+        lacking: [],
+        unlisted: 2,
+      });
     })
   ));
 

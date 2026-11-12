@@ -35,3 +35,7 @@ Set `replyTo` to the id being answered; it links context and does not select rec
 - A reply to `*` does not automatically belong on `*`. Choose everyone only if everyone needs this reply.
 
 Read the body for the requested response. If it asks you to confirm, answer directly and briefly, with the required fact. If it says no reply is needed, skip an acknowledgement; a useful correction or newly discovered blocker can still deserve a reply to the appropriate audience. Only act within the human's authorisation, as [SKILL.md](../SKILL.md#dont) requires.
+
+## Unwakeable recipients
+
+A `bus_publish` result with `wake` lists directly addressed recipients that, as of your own send, weren't joined (`not-joined`) or whose join lacks what a native wake needs (`no-installation`, `no-codex-thread`, or both: `no-installation-or-codex-thread`). It lists as many as fit 4 KiB and counts the rest. The message is still stored for them, but they see it only when they next read. If the answer matters, tell that session's owner another way or ask them to renew the join. `bus_peers` shows the same standing as `wake`. No `wake` does not mean a recipient was woken, and a "recorded" standing in `bus_peers` is not a checked wake.

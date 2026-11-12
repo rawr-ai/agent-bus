@@ -22,7 +22,7 @@ Use a development worktree with frozen dependencies, the pinned Bun and Fluree o
    bun --no-env-file scripts/qualify-private-peer.ts /absolute/path/to/mcp-openapi-1.0.0.tgz
    ```
 
-   Expected: the script verifies the archive and bundled entry checksums before loading them, then uses synthetic API-key and provider proof with the actual direct host and official HTTP client. Separate conversation metadata reaches the peer, a waiting conversation receives another's publication, wrong subject and grant are refused, and an injected post-publication response loss produces one stored message. The synthetic failure is not a dropped-transport test. Fixture services stop and temporary files are removed. *Rehearsed 2026-11-11.*
+   Expected: the script verifies the archive and bundled entry checksums before loading them, then uses synthetic API-key and provider proof with the actual direct host and official HTTP client. The host's `bus_publish` and `bus_peers` output schemas name the same properties as the serve's, including `wake`. Separate conversation metadata reaches the peer, a waiting conversation receives another's publication, a publication to a never-joined address returns its `wake` notice through the host, wrong subject and grant are refused, and an injected post-publication response loss produces one stored message. The synthetic failure is not a dropped-transport test. Fixture services stop and temporary files are removed. *Rehearsed 2026-11-11.*
 
 3. Build and qualify a private review bundle in an existing private directory:
 

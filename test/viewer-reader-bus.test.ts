@@ -63,26 +63,26 @@ beforeAll(async () => {
         note: "leading the review",
       });
       yield* b.join({ address: "codex/reviewer", runtime: "codex", session: `${marker}-2`, cwd });
-      const root = yield* b.publish({
+      const root = (yield* b.publish({
         from: "claude/lead",
         session: marker,
         to: ["#review"],
         subject: "Review request",
         body: "Please review **the proposal**.",
-      });
-      const reply = yield* b.publish({
+      })).message;
+      const reply = (yield* b.publish({
         from: "codex/reviewer",
         session: `${marker}-2`,
         to: ["claude/lead"],
         body: "Confirmed with one note.",
         replyTo: root.id,
-      });
-      const other = yield* b.publish({
+      })).message;
+      const other = (yield* b.publish({
         from: "claude/lead",
         session: marker,
         to: ["*"],
         body: "Unrelated broadcast",
-      });
+      })).message;
       return { root: root.id, reply: reply.id, other: other.id };
     })
   );
@@ -219,7 +219,11 @@ test("a conversation is the reply tree read at the explicit commit it was opened
   const moved = await read((r) =>
     r.thread({ id: sent.root, ledger: current.snapshot.ledger, t: current.snapshot.t })
   );
-  expect(moved.messages.map((message) => message.id)).toEqual([sent.root, sent.reply, late.id]);
+  expect(moved.messages.map((message) => message.id)).toEqual([
+    sent.root,
+    sent.reply,
+    late.message.id,
+  ]);
   // A tree requested for another ledger incarnation is refused, never answered from this one.
   const elsewhere = await reader.runPromiseExit(
     Effect.flatMap(ObservationReader, (r) =>
