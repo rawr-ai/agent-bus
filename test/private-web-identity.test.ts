@@ -162,7 +162,7 @@ test("provider identity, exact host resource and application grant remain indepe
   const resolve = clerkPeerResolver({
     issuer: provider.issuer,
     key: new Uint8Array(32).fill(1),
-    subject: "owner",
+    principals: [{ subject: "owner", grantFile: "/owner" }],
     resource,
     identify: async () => {
       accepted++;
@@ -175,8 +175,17 @@ test("provider identity, exact host resource and application grant remain indepe
     signal: new AbortController().signal,
   };
   expect(await resolve(invocation)).toEqual({});
+  for (const [permissions, allowed] of [
+    [[PEER_PERMISSION], true],
+    [[PEER_PERMISSION, PEER_PERMISSION], true],
+    [[], false],
+    [[PEER_PERMISSION, "unknown"], false],
+  ] as const) {
+    grant = { subject, resource, permissions };
+    if (allowed) expect(await resolve(invocation)).toEqual({});
+    else await expect(resolve(invocation)).rejects.toThrow("Peer access denied.");
+  }
   for (const denied of [
-    { subject, resource, permissions: [] },
     { subject, resource: "https://other.invalid/mcp", permissions: [PEER_PERMISSION] },
     { subject: "other", resource, permissions: [PEER_PERMISSION] },
     undefined,
@@ -196,14 +205,149 @@ test("provider identity, exact host resource and application grant remain indepe
   expect(accepted).toBe(count);
 });
 
+test("each verified principal reads only its own grant and revokes independently", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "bus-principal-grants-"));
+  const resource = "https://bus.invalid/mcp";
+  const principals = [
+    { subject: "first", grantFile: join(dir, "first.json") },
+    { subject: "second", grantFile: join(dir, "second.json") },
+  ];
+  const [first, second] = principals;
+  if (!first || !second) throw new Error("Missing principal fixture.");
+  const grant = (subject: string) => ({ subject, resource, permissions: [PEER_PERMISSION] });
+  const writeGrant = (path: string, value: unknown) =>
+    writeFileSync(path, JSON.stringify(value), { mode: 0o600 });
+  const reads: string[] = [];
+  let identities = 0;
+  const resolve = clerkPeerResolver({
+    issuer: provider.issuer,
+    key: new Uint8Array(32).fill(1),
+    principals,
+    resource,
+    identify: async (token) => {
+      identities++;
+      return token;
+    },
+    readGrant: async (path) => {
+      reads.push(path);
+      return readPrivateJson(path, 4096);
+    },
+  });
+  const invocation = (subject: string) => ({
+    auth: { authType: "oauth", accessToken: subject },
+    signal: new AbortController().signal,
+    requestMeta: { "openai/session": "same-conversation" },
+  });
+  const selected = async (principal: { subject: string; grantFile: string }) => {
+    const before = reads.length;
+    try {
+      return await resolve(invocation(principal.subject));
+    } finally {
+      expect(reads.slice(before)).toEqual([principal.grantFile]);
+    }
+  };
+  try {
+    writeGrant(first.grantFile, grant(first.subject));
+    writeGrant(second.grantFile, grant(second.subject));
+    const original = await selected(first);
+    const other = await selected(second);
+    expect(original.session).not.toBe(other.session);
+    expect(reads).toEqual([first.grantFile, second.grantFile]);
+    await expect(resolve(invocation("unknown"))).rejects.toThrow("Peer access denied.");
+    expect(reads).toEqual([first.grantFile, second.grantFile]);
+    expect(identities).toBe(3);
+
+    for (const bad of [
+      { ...grant(second.subject), subject: first.subject },
+      { ...grant(second.subject), resource: "https://other.invalid/mcp" },
+      { ...grant(second.subject), permissions: [] },
+      { ...grant(second.subject), extra: true },
+    ]) {
+      writeGrant(second.grantFile, bad);
+      await expect(selected(second)).rejects.toThrow("Peer access denied.");
+      expect(await selected(first)).toEqual(original);
+    }
+    writeFileSync(second.grantFile, "{bad", { mode: 0o600 });
+    await expect(selected(second)).rejects.toThrow("Peer access denied.");
+    chmodSync(second.grantFile, 0o644);
+    await expect(selected(second)).rejects.toThrow("Peer access denied.");
+    rmSync(second.grantFile);
+    await expect(selected(second)).rejects.toThrow("Peer access denied.");
+    expect(await selected(first)).toEqual(original);
+    writeGrant(second.grantFile, grant(second.subject));
+    expect(await selected(second)).toEqual(other);
+
+    rmSync(first.grantFile);
+    await expect(selected(first)).rejects.toThrow("Peer access denied.");
+    expect(await selected(second)).toEqual(other);
+    writeGrant(first.grantFile, grant(first.subject));
+    expect(await selected(first)).toEqual(original);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("overlapping identity and grant reads retain the corresponding principal", async () => {
+  const first = Promise.withResolvers<string>();
+  const second = Promise.withResolvers<string>();
+  const firstGrant = Promise.withResolvers<unknown>();
+  const secondGrant = Promise.withResolvers<unknown>();
+  const bothGrantReadsEntered = Promise.withResolvers<void>();
+  const reads: string[] = [];
+  const resource = "https://bus.invalid/mcp";
+  const principals = [
+    { subject: "first", grantFile: "/first" },
+    { subject: "second", grantFile: "/second" },
+  ];
+  const grant = (subject: string) => ({ subject, resource, permissions: [PEER_PERMISSION] });
+  const key = new Uint8Array(32).fill(1);
+  const resolve = clerkPeerResolver({
+    issuer: provider.issuer,
+    key,
+    principals,
+    resource,
+    identify: (token) => (token === "first-token" ? first.promise : second.promise),
+    readGrant: async (path) => {
+      reads.push(path);
+      if (reads.length === 2) bothGrantReadsEntered.resolve();
+      return path === "/first" ? firstGrant.promise : secondGrant.promise;
+    },
+  });
+  const invocation = (token: string) => ({
+    auth: { authType: "oauth", accessToken: token },
+    signal: new AbortController().signal,
+    requestMeta: { "openai/session": "same-conversation" },
+  });
+  const a = resolve(invocation("first-token"));
+  const b = resolve(invocation("second-token"));
+  second.resolve("second");
+  first.resolve("first");
+  await bothGrantReadsEntered.promise;
+  expect(reads).toEqual(["/second", "/first"]);
+  secondGrant.resolve(grant("second"));
+  const actorB = await b;
+  firstGrant.resolve(grant("first"));
+  const actorA = await a;
+  const sequential = clerkPeerResolver({
+    issuer: provider.issuer,
+    key,
+    principals,
+    resource,
+    identify: async (token) => token,
+    readGrant: async (path) => grant(path.slice(1)),
+  });
+  expect(actorA).toEqual(await sequential(invocation("first")));
+  expect(actorB).toEqual(await sequential(invocation("second")));
+  expect(actorA.session).not.toBe(actorB.session);
+});
+
 const config = {
-  schema: "agent-bus-private-web-v1",
+  schema: "agent-bus-private-web-v2",
   baseUrl: "https://bus.invalid",
   resource: "https://bus.invalid/mcp",
   port: 6027,
-  ownerSubject: "owner",
+  principals: [{ subject: "owner", grantFile: "/private/read-grant.json" }],
   provider,
-  grantFile: "/private/read-grant.json",
   sessionKeyFile: "/private/session-key.json",
   binding: "fixture",
   sources: {
@@ -236,6 +380,42 @@ test("service binding chooses exactly one explicit source and keeps its permanen
     expect(() => decodeServiceConfig(bad)).toThrow();
 });
 
+test("service config accepts only nonempty, distinct explicitly mapped v2 principals", () => {
+  const second = { subject: "second", grantFile: "/private/second-grant.json" };
+  const third = { subject: "third", grantFile: "/private/third-grant.json" };
+  const legacy = {
+    ...config,
+    schema: "agent-bus-private-web-v1",
+    ownerSubject: config.principals[0]?.subject,
+    grantFile: config.principals[0]?.grantFile,
+  };
+  const { principals: _principals, ...legacyWithoutPrincipals } = legacy;
+  const { schema: _legacySchema, ownerSubject, grantFile, ...unchanged } = legacyWithoutPrincipals;
+  const migrated = {
+    ...unchanged,
+    schema: "agent-bus-private-web-v2",
+    principals: [{ subject: ownerSubject, grantFile }, second],
+  };
+  expect(decodeServiceConfig(migrated)).toEqual(
+    decodeServiceConfig({ ...config, principals: [...config.principals, second] })
+  );
+  expect(
+    decodeServiceConfig({ ...migrated, principals: [...migrated.principals, third] }).principals
+  ).toHaveLength(3);
+  for (const bad of [
+    legacyWithoutPrincipals,
+    legacy,
+    { ...config, ownerSubject, grantFile },
+    { ...config, principals: [] },
+    { ...config, principals: [...config.principals, config.principals[0]] },
+    { ...config, principals: [second, { ...second, grantFile: "/private/other" }] },
+    { ...config, principals: [second, { ...third, grantFile: second.grantFile }] },
+    { ...config, principals: [{ ...second, grantFile: "relative" }] },
+    { ...config, principals: [{ ...second, extra: true }] },
+  ])
+    expect(() => decodeServiceConfig(bad)).toThrow();
+});
+
 test("private config and app-grant files refuse symlinks and permissive access", () => {
   const dir = mkdtempSync(join(tmpdir(), "bus-private-config-"));
   try {
@@ -245,6 +425,9 @@ test("private config and app-grant files refuse symlinks and permissive access",
     const link = join(dir, "link.json");
     symlinkSync(path, link);
     expect(() => readPrivateJson(link)).toThrow();
+    expect(() => readPrivateJson(dir)).toThrow();
+    chmodSync(path, 0o400);
+    expect(decodeServiceConfig(readPrivateJson(path)).binding).toBe("fixture");
     chmodSync(path, 0o644);
     expect(() => readPrivateJson(path)).toThrow();
   } finally {

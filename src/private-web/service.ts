@@ -9,13 +9,14 @@ const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048)
 const Port = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
 const Source = Schema.Struct({ port: Port, expectedBusVersion: Text });
 export const ServiceConfig = Schema.Struct({
-  schema: Schema.Literal("agent-bus-private-web-v1"),
+  schema: Schema.Literal("agent-bus-private-web-v2"),
   baseUrl: Text,
   resource: Text,
   port: Port,
-  ownerSubject: Text,
+  principals: Schema.Array(Schema.Struct({ subject: Text, grantFile: Text })).check(
+    Schema.isMinLength(1)
+  ),
   provider: Provider,
-  grantFile: Text,
   sessionKeyFile: Text,
   binding: Schema.Literals(["fixture", "live"]),
   sources: Schema.Struct({ fixture: Source, live: Source }),
@@ -70,7 +71,10 @@ export const decodeServiceConfig = (input: unknown) => {
     resource.password ||
     resource.search ||
     resource.hash ||
-    !isAbsolute(config.grantFile) ||
+    new Set(config.principals.map(({ subject }) => subject)).size !== config.principals.length ||
+    new Set(config.principals.map(({ grantFile }) => grantFile)).size !==
+      config.principals.length ||
+    config.principals.some(({ grantFile }) => !isAbsolute(grantFile)) ||
     !isAbsolute(config.sessionKeyFile) ||
     !isAbsolute(config.oauth.tokenStorageDir) ||
     config.sources.fixture.port === config.sources.live.port
@@ -162,11 +166,11 @@ export const runPrivatePeer = async (options: {
       cwd: process.cwd(),
       resolveContext: clerkPeerResolver({
         issuer: provider.issuer,
-        subject: config.ownerSubject,
+        principals: config.principals,
         resource: config.resource,
         key: decodeSessionKey(readPrivateJson(config.sessionKeyFile, 4096)),
         identify: (token, signal) => runtime.runPromise(identifyOwner(provider, token), { signal }),
-        readGrant: async () => readPrivateJson(config.grantFile, 4096),
+        readGrant: async (grantFile) => readPrivateJson(grantFile, 4096),
       }),
       runHost: (tools, lifecycle) => options.runHost(hostConfig(config), tools, lifecycle),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
