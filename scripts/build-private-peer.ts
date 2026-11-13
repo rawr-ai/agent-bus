@@ -30,7 +30,8 @@ try {
   const manifest = {
     schema: "agent-bus-private-peer-review-v1",
     host: {
-      sourceCommit: "b6598398a4ca16118c9321ed76b19e42db3d2c4e",
+      // The archive was built from b6598398a4ca16118c9321ed76b19e42db3d2c4e, with the same tree.
+      sourceCommit: "ba7941117038b079371a65ea6ca29727382be03c",
       sourceTree: "29e50685664f3cb36d5fc1451cccdf50b113c127",
       archiveSha256: archiveHash,
       entrySha256: entryHash,
