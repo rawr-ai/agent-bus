@@ -1,35 +1,22 @@
 // This fixture is bundled separately and run from a directory with no node_modules ancestors.
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
-import { join } from "node:path";
+import { writeFileSync } from "node:fs";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type * as Identity from "../../src/private-web/identity.ts";
-import type * as Program from "../../src/private-web/program.ts";
 import type * as Service from "../../src/private-web/service.ts";
 
-const [dir, portText] = process.argv.slice(2);
-if (!dir || !portText) throw new Error("Missing isolated fixture inputs.");
+const [dir, configFile] = process.argv.slice(2);
+if (!dir || !configFile) throw new Error("Missing isolated fixture inputs.");
 const bundle: unknown = await import(pathToFileURL(join(dir, "main.js")).href);
-const isBundle = (
-  value: unknown
-): value is {
-  clerkPeerResolver: typeof Identity.clerkPeerResolver;
-  servePeer: typeof Program.servePeer;
-  decodeServiceConfig: typeof Service.decodeServiceConfig;
-  hostConfig: typeof Service.hostConfig;
-} =>
+const isBundle = (value: unknown): value is { runPrivatePeer: typeof Service.runPrivatePeer } =>
   typeof value === "object" &&
   value !== null &&
-  "clerkPeerResolver" in value &&
-  typeof value.clerkPeerResolver === "function" &&
-  "servePeer" in value &&
-  typeof value.servePeer === "function" &&
-  "decodeServiceConfig" in value &&
-  typeof value.decodeServiceConfig === "function" &&
-  "hostConfig" in value &&
-  typeof value.hostConfig === "function";
+  "runPrivatePeer" in value &&
+  typeof value.runPrivatePeer === "function";
 if (!isBundle(bundle)) throw new Error("Invalid peer bundle.");
 const host: unknown = await import(pathToFileURL(join(dir, "mcp-host.mjs")).href);
 if (
@@ -40,74 +27,57 @@ if (
 )
   throw new Error("Invalid host bundle.");
 const serveTools = host.serveTools;
-const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-const hostPort = Number(probe.url.port);
-probe.stop(true);
-const busPort = Number(portText);
 const key = randomBytes(32).toString("hex");
-const issuer = "https://fixture.invalid";
-const resource = `${issuer}/mcp`;
-const subject = "fixture";
-const config = bundle.decodeServiceConfig({
-  schema: "agent-bus-private-web-v1",
-  baseUrl: issuer,
-  resource,
-  port: hostPort,
-  ownerSubject: subject,
-  provider: {
-    issuer,
-    userInfo: `${issuer}/userinfo`,
-    authorizationEndpoint: `${issuer}/authorize`,
-    tokenEndpoint: `${issuer}/token`,
-  },
-  grantFile: join(dir, "grant"),
-  sessionKeyFile: join(dir, "key"),
-  binding: "fixture",
-  sources: {
-    fixture: { port: busPort, expectedBusVersion: "relocated-peer-fixture" },
-    live: { port: hostPort, expectedBusVersion: "unused" },
-  },
-  oauth: {
-    clientId: "fixture",
-    clientSecret: "fixture",
-    jwtSigningKey: "fixture",
-    encryptionKey: "fixture",
-    tokenStorageDir: dir,
-    allowedRedirectUris: [`${issuer}/callback`],
-  },
-});
-const resolve = bundle.clerkPeerResolver({
-  issuer,
-  subject,
-  resource,
-  key: new Uint8Array(32).fill(8),
-  identify: async () => subject,
-  readGrant: async () => ({ subject, resource, permissions: ["agent-bus:peer"] }),
-});
+const resource = "https://fixture.invalid/mcp";
+const secondGrant = join(dirname(configFile), "grant-second.json");
 const abort = new AbortController();
-const running = bundle.servePeer({
-  busPort,
-  expectedBusVersion: "relocated-peer-fixture",
-  cwd: dir,
-  resolveContext: resolve,
+let hostPort = 0;
+const running = bundle.runPrivatePeer({
+  configFile,
   signal: abort.signal,
-  runHost: (tools, lifecycle) =>
-    serveTools({ ...bundle.hostConfig(config), serverAuth: { type: "apiKey", key } }, tools, {
+  runHost: async (config, tools, lifecycle) => {
+    hostPort = config.port;
+    const invocation = (principal: string) => ({
+      auth: { authType: "oauth", accessToken: `synthetic-${principal}` },
+      signal: abort.signal,
+      requestMeta: { "openai/session": "same-conversation" },
+    });
+    const first = await lifecycle.resolveContext(invocation("first"));
+    const second = await lifecycle.resolveContext(invocation("second"));
+    assert(first.session && second.session && first.session !== second.session);
+    writeFileSync(secondGrant, "{bad", { mode: 0o600 });
+    await assert.rejects(lifecycle.resolveContext(invocation("second")), /Peer access denied/);
+    assert.deepEqual(await lifecycle.resolveContext(invocation("first")), first);
+    writeFileSync(
+      secondGrant,
+      JSON.stringify({ subject: "fixture-second", resource, permissions: ["agent-bus:peer"] }),
+      { mode: 0o600 }
+    );
+    assert.deepEqual(await lifecycle.resolveContext(invocation("second")), second);
+    return serveTools({ ...config, serverAuth: { type: "apiKey", key } }, tools, {
       ...lifecycle,
-      resolveContext: (invocation: Identity.PeerInvocation) =>
+      resolveContext: (value: Identity.PeerInvocation) =>
         lifecycle.resolveContext({
-          ...invocation,
+          ...value,
           auth:
-            invocation.auth?.authType === "apiKey"
-              ? { authType: "oauth", accessToken: "synthetic" }
+            value.auth?.authType === "apiKey"
+              ? {
+                  authType: "oauth",
+                  accessToken: `synthetic-${value.requestMeta?.["fixture/principal"]}`,
+                }
               : undefined,
         }),
-    }),
+    });
+  },
 });
 void running.catch(() => undefined);
 let client: Client | undefined;
 try {
   for (let attempt = 0; attempt < 50 && client === undefined; attempt++) {
+    if (hostPort === 0) {
+      await Bun.sleep(100);
+      continue;
+    }
     const candidate = new Client({ name: "relocated-fixture", version: "1.0.0" });
     try {
       await candidate.connect(
@@ -123,24 +93,28 @@ try {
   }
   assert(client);
   const connected = client;
-  const call = async (name: string, args: Record<string, unknown>, chat: string) => {
+  const call = async (name: string, args: Record<string, unknown>, principal: string) => {
     await Bun.sleep(300);
-    const result = await connected.callTool({
+    return connected.callTool({
       name,
       arguments: args,
-      _meta: { "openai/session": chat },
+      _meta: { "openai/session": "same-conversation", "fixture/principal": principal },
     });
+  };
+  const success = async (name: string, args: Record<string, unknown>, principal: string) => {
+    const result = await call(name, args, principal);
     assert.notEqual(result.isError, true);
     return result.structuredContent;
   };
-  await call("bus_join", { address: "chatgpt/bundle-a" }, "a");
-  await call("bus_join", { address: "chatgpt/bundle-b" }, "b");
-  const sent = await call(
+  await success("bus_join", { address: "chatgpt/bundle-a" }, "first");
+  await success("bus_join", { address: "chatgpt/bundle-b" }, "second");
+  const sent = await success(
     "bus_publish",
     { from: "chatgpt/bundle-b", to: ["chatgpt/bundle-a"], body: "relocated body" },
-    "b"
+    "second"
   );
-  const received = await call("bus_read", { address: "chatgpt/bundle-a" }, "a");
+  assert.equal((await call("bus_read", { address: "chatgpt/bundle-a" }, "second")).isError, true);
+  const received = await success("bus_read", { address: "chatgpt/bundle-a" }, "first");
   assert(typeof sent === "object" && sent !== null && "id" in sent);
   assert(
     typeof received === "object" &&
@@ -150,7 +124,7 @@ try {
   );
   assert.equal(received.messages[0]?.id, sent.id);
   assert.equal(received.messages[0]?.body, "relocated body");
-  console.log("Relocated private peer and exact host fixture passed.");
+  console.log("Relocated runPrivatePeer and exact host two-principal fixture passed.");
 } finally {
   await client?.close();
   abort.abort();

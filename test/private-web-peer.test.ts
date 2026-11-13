@@ -1,5 +1,4 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { createHmac } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -18,32 +17,46 @@ import { freshLedger } from "./fluree-server.ts";
 const key = new Uint8Array(32).fill(42);
 const issuer = "https://fixture.invalid";
 const subject = "synthetic-owner";
+const secondSubject = "synthetic-second";
 const resource = "https://fixture.invalid/mcp";
 const signal = new AbortController().signal;
 const grant = { subject, resource, permissions: [PEER_PERMISSION] };
 const resolve = clerkPeerResolver({
   issuer,
-  subject,
+  principals: [
+    { subject, grantFile: "/first" },
+    { subject: secondSubject, grantFile: "/second" },
+  ],
   resource,
   key,
-  identify: async (token) => (["good", "rotated"].includes(token) ? subject : "other"),
-  readGrant: async () => grant,
+  identify: async (token) =>
+    ["good", "rotated"].includes(token) ? subject : token === "second" ? secondSubject : "other",
+  readGrant: async (path) => ({ ...grant, subject: path === "/first" ? subject : secondSubject }),
 });
-const identity = (chat?: string) => ({
-  auth: { authType: "oauth", accessToken: "good" },
+const identity = (chat?: string, token = "good") => ({
+  auth: { authType: "oauth", accessToken: token },
   signal,
   ...(chat === undefined ? {} : { requestMeta: { "openai/session": chat } }),
 });
 
 test("principal and conversation are separated, stable and never raw", async () => {
-  const a = await resolve(identity("a"));
-  const expected = createHmac("sha256", key)
-    .update(JSON.stringify(["agent-bus/hosted-peer/session/v1", issuer, subject, "a"]))
-    .digest("hex");
-  expect(a.session).toBe(`hosted-${expected}`);
+  const original = clerkPeerResolver({
+    issuer,
+    principals: [{ subject, grantFile: "/first" }],
+    resource,
+    key,
+    identify: async () => subject,
+    readGrant: async () => grant,
+  });
+  const a = await original(identity("a"));
+  expect(a.session).toBe("hosted-a45ca60824f2619b325d780fb12037ecf75d08348d5e01bcd1a91e0964579779");
+  expect(await resolve(identity("a"))).toEqual(a);
   const restarted = clerkPeerResolver({
     issuer,
-    subject,
+    principals: [
+      { subject, grantFile: "/first" },
+      { subject: secondSubject, grantFile: "/second" },
+    ],
     resource,
     key,
     identify: async () => subject,
@@ -53,6 +66,7 @@ test("principal and conversation are separated, stable and never raw", async () 
     await restarted({ ...identity("a"), auth: { authType: "oauth", accessToken: "rotated" } })
   ).toEqual(a);
   expect(a.session).not.toBe((await resolve(identity("b"))).session);
+  expect(a.session).not.toBe((await resolve(identity("a", "second"))).session);
   expect(a.session).not.toBe(peerSession(key, `${issuer}/other`, subject, "a"));
   expect(a.session).not.toBe(peerSession(key, issuer, `${subject}/other`, "a"));
   expect(a.session).not.toBe(peerSession(new Uint8Array(32).fill(43), issuer, subject, "a"));
@@ -65,7 +79,7 @@ test("principal and conversation are separated, stable and never raw", async () 
   ).rejects.toThrow();
   const denied = clerkPeerResolver({
     issuer,
-    subject,
+    principals: [{ subject, grantFile: "/first" }],
     resource,
     key,
     identify: async () => subject,
@@ -180,7 +194,7 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
   try {
     let tools = peerTools(peer.exchange, process.cwd());
     const a = await resolve(identity("a"));
-    const b = await resolve(identity("b"));
+    const b = await resolve(identity("a", "second"));
     const call = async (name: string, args: Record<string, unknown>, actor = a) => {
       const tool = tools.find((candidate) => candidate.name === name);
       if (!tool) throw new Error(`missing ${name}`);

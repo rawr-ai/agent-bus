@@ -49,19 +49,20 @@ export const peerSession = (key: Uint8Array, issuer: string, subject: string, ch
 export const clerkPeerResolver =
   (options: {
     readonly issuer: string;
-    readonly subject: string;
+    readonly principals: ReadonlyArray<{ readonly subject: string; readonly grantFile: string }>;
     readonly resource: string;
     readonly key: Uint8Array;
     readonly identify: (accessToken: string, signal: AbortSignal) => Promise<string>;
-    readonly readGrant: () => Promise<unknown>;
+    readonly readGrant: (grantFile: string) => Promise<unknown>;
   }) =>
   async ({ auth, signal, requestMeta }: PeerInvocation): Promise<PeerActor> => {
     try {
       if (signal.aborted || auth?.authType !== "oauth" || !auth.accessToken) throw denied();
       const subject = await options.identify(auth.accessToken, signal);
-      if (signal.aborted || subject !== options.subject) throw denied();
+      const principal = options.principals.find((entry) => entry.subject === subject);
+      if (signal.aborted || principal === undefined) throw denied();
       const grant = Schema.decodeUnknownSync(PeerGrant, { onExcessProperty: "error" })(
-        await options.readGrant()
+        await options.readGrant(principal.grantFile)
       );
       if (
         signal.aborted ||

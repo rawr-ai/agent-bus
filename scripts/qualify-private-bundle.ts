@@ -124,41 +124,60 @@ try {
     throw new Error("Could not make the disposable HTTPS provider certificate.");
   let issuer = "";
   let discoveryRequests = 0;
+  const identityRequests = { first: 0, second: 0 };
   provider = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
     tls: { key: Bun.file(certKey), cert: Bun.file(cert) },
-    fetch: () => {
-      discoveryRequests++;
-      return Response.json({
-        issuer,
-        userinfo_endpoint: `${issuer}/userinfo`,
-        authorization_endpoint: `${issuer}/authorize`,
-        token_endpoint: `${issuer}/token`,
-      });
+    fetch: (request) => {
+      const path = new URL(request.url).pathname;
+      if (path === "/.well-known/openid-configuration") {
+        discoveryRequests++;
+        return Response.json({
+          issuer,
+          userinfo_endpoint: `${issuer}/userinfo`,
+          authorization_endpoint: `${issuer}/authorize`,
+          token_endpoint: `${issuer}/token`,
+        });
+      }
+      if (path === "/userinfo") {
+        const token = request.headers.get("authorization");
+        if (token === "Bearer synthetic-first") {
+          identityRequests.first++;
+          return Response.json({ sub: "fixture-first" });
+        }
+        if (token === "Bearer synthetic-second") {
+          identityRequests.second++;
+          return Response.json({ sub: "fixture-second" });
+        }
+      }
+      return new Response(null, { status: 401 });
     },
   });
   issuer = `https://127.0.0.1:${provider.port}`;
   const serviceProbe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   const servicePort = Number(serviceProbe.url.port);
   serviceProbe.stop(true);
-  const grantFile = join(dir, "grant.json");
+  const firstGrant = join(dir, "grant-first.json");
+  const secondGrant = join(dir, "grant-second.json");
   const keyFile = join(dir, "key.json");
   const tokens = join(dir, "tokens");
   mkdirSync(tokens, { mode: 0o700 });
   const config = {
-    schema: "agent-bus-private-web-v1",
+    schema: "agent-bus-private-web-v2",
     baseUrl: "https://fixture.invalid",
     resource: "https://fixture.invalid/mcp",
     port: servicePort,
-    ownerSubject: "fixture-owner",
+    principals: [
+      { subject: "fixture-first", grantFile: firstGrant },
+      { subject: "fixture-second", grantFile: secondGrant },
+    ],
     provider: {
       issuer,
       userInfo: `${issuer}/userinfo`,
       authorizationEndpoint: `${issuer}/authorize`,
       tokenEndpoint: `${issuer}/token`,
     },
-    grantFile,
     sessionKeyFile: keyFile,
     binding: "fixture",
     sources: {
@@ -176,15 +195,12 @@ try {
   };
   const privateConfig = join(dir, "start-config.json");
   writeFileSync(privateConfig, JSON.stringify(config), { mode: 0o600 });
-  writeFileSync(
-    grantFile,
-    JSON.stringify({
-      subject: "fixture-owner",
-      resource: config.resource,
-      permissions: ["agent-bus:peer"],
-    }),
-    { mode: 0o600 }
-  );
+  for (const { subject, grantFile } of config.principals)
+    writeFileSync(
+      grantFile,
+      JSON.stringify({ subject, resource: config.resource, permissions: ["agent-bus:peer"] }),
+      { mode: 0o600 }
+    );
   writeFileSync(keyFile, JSON.stringify({ key: randomBytes(32).toString("base64url") }), {
     mode: 0o600,
   });
@@ -227,17 +243,20 @@ try {
   launched.kill();
   await launched.exited;
   launched = undefined;
-  provider.stop(true);
-  provider = undefined;
   const child = spawnSupervised(
     [
       process.execPath,
       "--no-env-file",
       join(dir, "private-peer-relocated.js"),
       relocated,
-      String(port),
+      privateConfig,
     ],
-    { cwd: dir, env: { HOME: dir, PATH: "/usr/bin:/bin" }, stdout: "inherit", stderr: "inherit" }
+    {
+      cwd: dir,
+      env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
+      stdout: "inherit",
+      stderr: "inherit",
+    }
   );
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<null>((resolve) => {
@@ -251,6 +270,7 @@ try {
     throw new Error("Relocated fixture timed out.");
   }
   assert.equal(status, 0);
+  assert(identityRequests.first > 0 && identityRequests.second > 0);
 } finally {
   if (launched !== undefined) {
     launched.kill();

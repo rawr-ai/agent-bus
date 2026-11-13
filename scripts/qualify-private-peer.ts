@@ -110,7 +110,7 @@ try {
   let waitEntered = false;
   const resolve = clerkPeerResolver({
     issuer,
-    subject,
+    principals: [{ subject, grantFile: join(dir, "grant") }],
     resource,
     key: new Uint8Array(32).fill(7),
     identify: async () => {
@@ -123,18 +123,17 @@ try {
     },
   });
   const fixtureConfig = decodeServiceConfig({
-    schema: "agent-bus-private-web-v1",
+    schema: "agent-bus-private-web-v2",
     baseUrl: "https://fixture.invalid",
     resource: "https://fixture.invalid/mcp",
     port: hostPort,
-    ownerSubject: subject,
+    principals: [{ subject, grantFile: join(dir, "grant") }],
     provider: {
       issuer,
       userInfo: `${issuer}/userinfo`,
       authorizationEndpoint: `${issuer}/authorize`,
       tokenEndpoint: `${issuer}/token`,
     },
-    grantFile: join(dir, "grant"),
     sessionKeyFile: join(dir, "key"),
     binding: "fixture",
     sources: {
