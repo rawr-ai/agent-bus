@@ -175,8 +175,17 @@ test("provider identity, exact host resource and application grant remain indepe
     signal: new AbortController().signal,
   };
   expect(await resolve(invocation)).toEqual({});
+  for (const [permissions, allowed] of [
+    [[PEER_PERMISSION], true],
+    [[PEER_PERMISSION, PEER_PERMISSION], true],
+    [[], false],
+    [[PEER_PERMISSION, "unknown"], false],
+  ] as const) {
+    grant = { subject, resource, permissions };
+    if (allowed) expect(await resolve(invocation)).toEqual({});
+    else await expect(resolve(invocation)).rejects.toThrow("Peer access denied.");
+  }
   for (const denied of [
-    { subject, resource, permissions: [] },
     { subject, resource: "https://other.invalid/mcp", permissions: [PEER_PERMISSION] },
     { subject: "other", resource, permissions: [PEER_PERMISSION] },
     undefined,
@@ -283,6 +292,7 @@ test("overlapping identity and grant reads retain the corresponding principal", 
   const second = Promise.withResolvers<string>();
   const firstGrant = Promise.withResolvers<unknown>();
   const secondGrant = Promise.withResolvers<unknown>();
+  const bothGrantReadsEntered = Promise.withResolvers<void>();
   const reads: string[] = [];
   const resource = "https://bus.invalid/mcp";
   const principals = [
@@ -299,6 +309,7 @@ test("overlapping identity and grant reads retain the corresponding principal", 
     identify: (token) => (token === "first-token" ? first.promise : second.promise),
     readGrant: async (path) => {
       reads.push(path);
+      if (reads.length === 2) bothGrantReadsEntered.resolve();
       return path === "/first" ? firstGrant.promise : secondGrant.promise;
     },
   });
@@ -311,7 +322,7 @@ test("overlapping identity and grant reads retain the corresponding principal", 
   const b = resolve(invocation("second-token"));
   second.resolve("second");
   first.resolve("first");
-  await Promise.resolve();
+  await bothGrantReadsEntered.promise;
   expect(reads).toEqual(["/second", "/first"]);
   secondGrant.resolve(grant("second"));
   const actorB = await b;
@@ -398,6 +409,7 @@ test("service config accepts only nonempty, distinct explicitly mapped v2 princi
     { ...config, principals: [] },
     { ...config, principals: [...config.principals, config.principals[0]] },
     { ...config, principals: [second, { ...second, grantFile: "/private/other" }] },
+    { ...config, principals: [second, { ...third, grantFile: second.grantFile }] },
     { ...config, principals: [{ ...second, grantFile: "relative" }] },
     { ...config, principals: [{ ...second, extra: true }] },
   ])
@@ -413,6 +425,9 @@ test("private config and app-grant files refuse symlinks and permissive access",
     const link = join(dir, "link.json");
     symlinkSync(path, link);
     expect(() => readPrivateJson(link)).toThrow();
+    expect(() => readPrivateJson(dir)).toThrow();
+    chmodSync(path, 0o400);
+    expect(decodeServiceConfig(readPrivateJson(path)).binding).toBe("fixture");
     chmodSync(path, 0o644);
     expect(() => readPrivateJson(path)).toThrow();
   } finally {

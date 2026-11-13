@@ -14,7 +14,7 @@ Use a development worktree with frozen dependencies, the pinned Bun and Fluree o
    bun --no-env-file test test/private-web-identity.test.ts test/private-web-peer.test.ts
    ```
 
-   Expected: provider and independent per-principal grant checks pass; distinct synthetic principals with the same conversation correlation join and exchange mail, ownership refusals preserve unread mail, reconnect recovers the same holding, and takeover and ambiguous-result checks pass. *Rehearsed 2026-11-13.*
+   Expected: provider and independent per-principal grant checks pass; distinct synthetic principals with the same conversation correlation and one principal with distinct correlations join and exchange mail. Reciprocal foreign inbox refusals preserve each pending message for its rightful reader, and reconnect recovers the same holding. The cross-principal takeover is an intentionally authorized transfer, not an isolation proof; takeover and ambiguous-result checks pass. *Rehearsed 2026-11-13.*
 
 2. Supply the exact privately obtained host artifact to the HTTP fixture:
 

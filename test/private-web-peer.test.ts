@@ -195,6 +195,9 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     let tools = peerTools(peer.exchange, process.cwd());
     const a = await resolve(identity("a"));
     const b = await resolve(identity("a", "second"));
+    const c = await resolve(identity("b"));
+    expect(c.session).not.toBe(a.session);
+    expect(b.session).not.toBe(a.session);
     const call = async (name: string, args: Record<string, unknown>, actor = a) => {
       const tool = tools.find((candidate) => candidate.name === name);
       if (!tool) throw new Error(`missing ${name}`);
@@ -222,6 +225,30 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     expect((await call("bus_peers", {}, {})).isError).not.toBe(true);
     await ok("bus_join", { address: "chatgpt/a", topics: ["fixture"] });
     await ok("bus_join", { address: "chatgpt/b" }, b);
+    await ok("bus_join", { address: "chatgpt/c" }, c);
+    const toC = await ok("bus_publish", {
+      from: "chatgpt/a",
+      to: ["chatgpt/c"],
+      body: "a to c",
+    });
+    const toA = await ok(
+      "bus_publish",
+      { from: "chatgpt/c", to: ["chatgpt/a"], body: "c to a" },
+      c
+    );
+    expect(toC?.id).toBeDefined();
+    expect(toA?.id).toBeDefined();
+    expect(toA?.id).not.toBe(toC?.id);
+    expect((await call("bus_read", { address: "chatgpt/a" }, c)).isError).toBe(true);
+    expect((await call("bus_read", { address: "chatgpt/c" })).isError).toBe(true);
+    expect(await ok("bus_read", { address: "chatgpt/a" })).toMatchObject({
+      messages: [{ id: toA?.id, from: "chatgpt/c", body: "c to a" }],
+    });
+    expect(await ok("bus_read", { address: "chatgpt/c" }, c)).toMatchObject({
+      messages: [{ id: toC?.id, from: "chatgpt/a", body: "a to c" }],
+    });
+    expect(await ok("bus_read", { address: "chatgpt/a" })).toEqual({ messages: [] });
+    expect(await ok("bus_read", { address: "chatgpt/c" }, c)).toEqual({ messages: [] });
     const peers = await ok("bus_peers", {});
     expect(peers).toMatchObject({
       peers: expect.arrayContaining([
@@ -315,10 +342,22 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     expect((await call("bus_takeover", { address: "chatgpt/a", holder: "stale" }, b)).isError).toBe(
       true
     );
+    // This is an intentionally authorized cross-principal transfer, not an isolation proof.
     await ok("bus_takeover", { address: "chatgpt/a", holder }, b);
     expect((await call("bus_read", { address: "chatgpt/a" })).isError).toBe(true);
     expect(await ok("bus_read", { address: "chatgpt/a" }, b)).toMatchObject({
       messages: [{ body: "carry over" }],
+    });
+    expect(
+      (await call("bus_publish", { from: "chatgpt/a", to: ["chatgpt/c"], body: "fenced" })).isError
+    ).toBe(true);
+    const transferred = await ok(
+      "bus_publish",
+      { from: "chatgpt/a", to: ["chatgpt/c"], body: "after transfer" },
+      b
+    );
+    expect(await ok("bus_read", { address: "chatgpt/c" }, c)).toMatchObject({
+      messages: [{ id: transferred?.id, from: "chatgpt/a", body: "after transfer" }],
     });
 
     let writes = 0;

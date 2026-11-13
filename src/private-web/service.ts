@@ -72,6 +72,8 @@ export const decodeServiceConfig = (input: unknown) => {
     resource.search ||
     resource.hash ||
     new Set(config.principals.map(({ subject }) => subject)).size !== config.principals.length ||
+    new Set(config.principals.map(({ grantFile }) => grantFile)).size !==
+      config.principals.length ||
     config.principals.some(({ grantFile }) => !isAbsolute(grantFile)) ||
     !isAbsolute(config.sessionKeyFile) ||
     !isAbsolute(config.oauth.tokenStorageDir) ||
