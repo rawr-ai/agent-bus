@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
-const archiveHash = "4c95d202370fa3af4515a5993a659d733682c22f7f95e8bfc4ad834518ca3f4a";
-const entryHash = "78ac81acc5bb47bd001efd00d504d2adc42857263d21d32ffc3ddfc57b166642";
+const archiveHash = "d16821e6e327dbab807811fd07a0db5884adef41a922d838648ca021e778c0d8";
+const entryHash = "8c3e4aa9c172a1caf107e352aee8e9676c98ff2ff0b27003655cb0508d77b939";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const [archive, parent] = process.argv.slice(2);
 if (!archive || !parent || !isAbsolute(archive) || !isAbsolute(parent) || process.argv.length !== 4)
@@ -30,8 +30,9 @@ try {
   const manifest = {
     schema: "agent-bus-private-peer-review-v1",
     host: {
-      sourceCommit: "da738cbd9e8b0d29a4e2d7dbbb379971b23ae719",
-      sourceTree: "004cafedc6c5bb3996b76a7c41efa59bd32f47c1",
+      // The archive was built from b6598398a4ca16118c9321ed76b19e42db3d2c4e, with the same tree.
+      sourceCommit: "ba7941117038b079371a65ea6ca29727382be03c",
+      sourceTree: "29e50685664f3cb36d5fc1451cccdf50b113c127",
       archiveSha256: archiveHash,
       entrySha256: entryHash,
     },

@@ -22,8 +22,8 @@ import { decodeServiceConfig, hostConfig } from "../src/private-web/service.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 
-const archiveHash = "4c95d202370fa3af4515a5993a659d733682c22f7f95e8bfc4ad834518ca3f4a";
-const entryHash = "78ac81acc5bb47bd001efd00d504d2adc42857263d21d32ffc3ddfc57b166642";
+const archiveHash = "d16821e6e327dbab807811fd07a0db5884adef41a922d838648ca021e778c0d8";
+const entryHash = "8c3e4aa9c172a1caf107e352aee8e9676c98ff2ff0b27003655cb0508d77b939";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** Every property path an output schema names, `[]` for array items, through local references. */
 const propertyPaths = (schema: unknown): ReadonlyArray<string> => {
@@ -260,7 +260,15 @@ try {
     const deniedCall = async (name: string, args: Record<string, unknown>, chat: string) => {
       assert.equal((await call(name, args, chat)).isError, true);
     };
-    assert.equal((await call("bus_join", { address: "chatgpt/missing" })).isError, true);
+    const missingCorrelation = await call("bus_join", { address: "chatgpt/missing" });
+    assert.equal(missingCorrelation.isError, true);
+    assert.deepEqual(missingCorrelation.content, [
+      {
+        type: "text",
+        text: "This call requires supported conversation correlation metadata. No Bus call was sent.",
+      },
+    ]);
+    assert.equal(missingCorrelation.structuredContent, undefined);
     await success("bus_peers", {});
     await success("bus_join", { address: "chatgpt/http-a", topics: ["http-fixture"] }, "chat-a");
     await success("bus_join", { address: "chatgpt/http-b" }, "chat-b");
