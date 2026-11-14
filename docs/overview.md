@@ -13,7 +13,7 @@ agent-bus is an append-only ledger, a read cursor per address, and a wake signal
 
 ## The system at a glance
 
-Every machine runs one `serve`, which its sessions reach over MCP on loopback. Each `serve` reads and writes the one ledger on the bus host (other machines through an SSH tunnel) and wakes only its own machine's sessions. [Topology](architecture/topology.md) shows both machine roles and every process in detail.
+Every machine runs one `serve`, which its sessions reach over MCP on loopback. Each `serve` reads and writes the one ledger on the bus host (other machines through an SSH tunnel) and wakes only its own machine's sessions. An installation may also run the optional hosted peer, a separate process with its own OAuth and identity state, through which authorized ChatGPT conversations become one more MCP client of `serve`. [Topology](architecture/topology.md) shows both machine roles, the hosted peer and every process in detail.
 
 ```mermaid
 flowchart LR
@@ -27,6 +27,9 @@ flowchart LR
     codex["Codex thread<br/>in the desktop app-server or the daemon"]
     queue[("The thread's queue")]
   end
+  peer["Optional hosted peer, on one chosen machine<br/>separate process, own OAuth state"]
+  chat["ChatGPT conversation"] -- "MCP over HTTPS, OAuth" --> peer
+  peer -- "MCP, loopback: participation<br/>and lookup tools" --> serve
   serve -- "append and read" --> ledger
   ledger -.->|"change events"| serve
   claude -- "MCP: join, publish, read" --> serve
@@ -37,7 +40,7 @@ flowchart LR
   queue -.->|"runs as a turn"| codex
 ```
 
-The dotted lines are signals; the mail itself moves only when a session reads it.
+The dotted lines are signals; the mail itself moves only when a session reads it. The hosted peer is not a wake target ([connections](architecture/connections.md#rules), rule 16).
 
 ## The pieces in the code
 
@@ -50,10 +53,11 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `orient`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
 | **Codex deliverer** (`src/codex.ts`, `src/rollout.ts`) | Gives each Codex thread with unread mail one nudge in its own queue, through a short-lived app-server of `serve`'s own. A thread loaded nowhere is borrowed by the machine's Codex daemon to run it, when its stored settings, read from its rollout, allow | Wakes every Codex thread, desktop or daemon, without a second writer |
+| **Hosted peer**, optional (`src/private-web/`, `scripts/build-private-peer.ts`) | A separately started process, built as a private bundle. The shared `mcp-openapi` host library (the MCP SDK and FastMCP) serves its HTTPS-facing MCP endpoint and OAuth; its Effect adapter admits the caller, binds the conversation's session and forwards each call to loopback `serve` through Effect's MCP client | Authorized ChatGPT conversations take part through the one Bus domain implementation, with no second store or Bus logic ([connections](architecture/connections.md#private-hosted-peer)) |
 | **Installer** (`scripts/install-launch-agents.sh`) | The LaunchAgents and the managed `~/.local/bin/agent-bus` launcher | Keeps the bus running across logins |
 | **Optional viewer** (`viewer/`) | A separately started loopback React app observing fixed public history and current peers through the existing MCP server | Read coordination without consuming inboxes or adding a send path; [viewer](architecture/viewer.md) |
 
-agent-bus runs on Bun and is written with Effect; `package.json` pins the versions.
+agent-bus runs on Bun and is written with Effect; `package.json` pins the versions. The one exception is the hosted peer's external MCP server, which is the shared host library rather than Effect.
 
 ## Where to start reading
 
