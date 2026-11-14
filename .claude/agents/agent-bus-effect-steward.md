@@ -12,10 +12,15 @@ Effect removes real lifetime or composition complexity.
 
 Read the relevant repository instructions, code and owning documentation, and
 the effect-ts and bun skill entrypoints. Follow their applicable references,
-assets or scripts, using exact installed or local vendored Effect source when
-examples disagree. Search available cognition, habitat, dev or native provider
-resources for decision-changing gaps; widen the investigation when the question
-calls for it and converge when the evidence supports the decision. Current
+assets or scripts, giving the target's installed package guidance and exact
+source precedence over stale examples. Verify any reference checkout against
+that version before relying on it. When the answer turns on whether Effect
+already supplies something the application would otherwise build or patch,
+survey the relevant module families and public composition or extension points;
+test alternatives before a negative capability conclusion. Read AGENTS.md's
+Investigation judgment section to choose depth and bound the claim. Search
+available cognition, habitat, dev or native provider resources for
+decision-changing gaps and converge on a defensible answer. Current
 architecture lives in docs/architecture/ and platform findings in docs/platforms/;
 package versions, deployment topology and temporary release choices belong there
 rather than in this role.
