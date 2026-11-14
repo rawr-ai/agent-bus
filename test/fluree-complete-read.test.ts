@@ -62,6 +62,8 @@ const fixture = () => {
   let entries: Array<readonly [string, number]> = [];
   let presences: Array<readonly [string, number]> = [];
   let inserts = 0;
+  let incarnation = "instance";
+  let afterWindow: (() => void) | undefined;
   let held: (() => void) | undefined;
   const windows: Array<string> = [];
   const presenceSelects: Array<unknown> = [];
@@ -72,7 +74,7 @@ const fixture = () => {
       const path = new URL(request.url).pathname;
       if (path.includes("/exists/")) return Response.json({ exists: true });
       if (path.includes("/info/")) return Response.json({ ledger: { t: head } });
-      if (path.includes("/show/")) return Response.json({ id: "instance" });
+      if (path.includes("/show/")) return Response.json({ id: incarnation });
       if (path.endsWith("/insert")) {
         inserts += 1;
         return Response.json({});
@@ -98,6 +100,8 @@ const fixture = () => {
         const bounds = [...body.matchAll(/@t:(\d+)/g)].map((m) => Number(m[1]));
         const [start = 0, end = 0] = bounds;
         windows.push(`${start}-${end}`);
+        afterWindow?.();
+        afterWindow = undefined;
         return Response.json(entries.filter(([, t]) => t >= start && t <= end));
       }
       if (path.endsWith("/events"))
@@ -141,6 +145,11 @@ const fixture = () => {
     },
     state: () => ({ cursor, writes, inserts, windows: [...windows] }),
     presenceSelects: () => presenceSelects,
+    replaceAfterWindow: () => {
+      afterWindow = () => {
+        incarnation = "replacement";
+      };
+    },
     holdRead: () =>
       new Promise<void>((resolve) => {
         held = resolve;
@@ -156,6 +165,39 @@ const expectSafe = (error: { readonly _tag: string; readonly message: string }, 
 };
 
 describe("complete Fluree reads", () => {
+  test("pure wake observation refuses late-window message damage, presence damage and same-head replacement without cursor writes", async () => {
+    const f = fixture();
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const observe = bus.observeWake({ address: "codex/a", session: "owner" });
+          f.set({
+            head: 502,
+            entries: [
+              [valid("one"), 2],
+              [malformed, 501],
+            ],
+            presences: [[presence("join", "owner"), 1]],
+          });
+          expectSafe(yield* Effect.flip(observe), 501);
+          expect(f.state()).toMatchObject({ cursor: 0, writes: 0, inserts: 0 });
+          f.set({ head: 502, entries: [[valid("one"), 2]], presences: [[malformed, 1]] });
+          expect((yield* Effect.flip(observe))._tag).toBe("LedgerError");
+          f.set({
+            head: 502,
+            entries: [[valid("one"), 2]],
+            presences: [[presence("join", "owner"), 1]],
+          });
+          f.replaceAfterWindow();
+          expect((yield* Effect.flip(observe))._tag).toBe("LedgerError");
+          expect(f.state()).toMatchObject({ cursor: 0, writes: 0, inserts: 0 });
+        }).pipe(Effect.provide(f.bus))
+      );
+    } finally {
+      f.stop();
+    }
+  });
   test("fails malformed and schema-invalid entries, including a later window; valid rows remain ordered", async () => {
     const f = fixture();
     const logs: Array<string> = [];

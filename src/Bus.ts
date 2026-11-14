@@ -56,6 +56,15 @@ import { type CommandRead, type Entry, Ledger } from "./Ledger.ts";
 import { canonicalJson } from "./orientation-model.ts";
 import { directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
+import {
+  MAX_WAKE_COVERAGE_IDS,
+  MAX_WAKE_OBSERVATION_BYTES,
+  ObserveWakeRequest,
+  sameWakeBinding,
+  type WakeBinding,
+  WakeObservation,
+  wakeObservationCarrierBytes,
+} from "./wake-observation.ts";
 
 export const ORIENTATION_JOIN_TOO_LARGE = "Orientation cannot fit alongside this committed join.";
 
@@ -287,6 +296,10 @@ export class Bus extends Context.Service<
     ) => Effect.Effect<A, E | LedgerError | NotJoined | NotOwner>;
     readonly peers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
     readonly localPeers: Effect.Effect<ReadonlyArray<Subscriber>, LedgerError>;
+    /** Pure ownership-checked wake evidence; the caller alone retains or commits coverage. */
+    readonly observeWake: (
+      input: ObserveWakeRequest
+    ) => Effect.Effect<WakeObservation, LedgerError | NotJoined | NotOwner | InvalidQuery>;
     /**
      * Hands an address's unread messages to `nudge`, and marks none of them
      * read: only the owner's read does. With nothing for the subscriber, it
@@ -1154,6 +1167,155 @@ const make = (installation: string, hostOf: () => string) =>
 
     const ack = (address: string, cursor: number) => cursors.set(address, cursor);
 
+    const observeOnce = (input: ObserveWakeRequest, bind?: (binding: WakeBinding) => void) =>
+      Effect.gen(function* () {
+        const { address, session, expectedBinding, previousCoverage } = input;
+        const refuse = (message: string) => new InvalidQuery({ message });
+        const first = yield* ledger.presenceAt();
+        const initial = yield* ownedIn(latestPresences(first.entries), address, session);
+        const bindingOf = (subscriber: Subscriber, incarnation: string): WakeBinding => ({
+          address,
+          session: subscriber.presence.session ?? "",
+          runtime: subscriber.presence.runtime,
+          installation: subscriber.presence.installation ?? "",
+          incarnation,
+          run: runOf(subscriber),
+        });
+        const binding = bindingOf(initial, first.cut.incarnation);
+        if (!local(initial)) {
+          return yield* refuse(
+            "This holding did not join from this installation; nothing was changed."
+          );
+        }
+        for (const expected of [expectedBinding, previousCoverage?.binding]) {
+          if (expected !== undefined && !sameWakeBinding(expected, binding)) {
+            return yield* refuse(
+              "The wake binding is stale; obtain fresh authority for the current holding. Nothing was changed."
+            );
+          }
+        }
+        // Retain this wait's first authorized holding even if its initial slice times out.
+        bind?.(binding);
+        const position = yield* cursors.get(address);
+        if (Option.isNone(position)) {
+          return yield* new NotJoined({
+            address,
+            message: "This holding has no local read cursor; nothing was changed.",
+          });
+        }
+        const cursor = position.value;
+        if (!Number.isSafeInteger(cursor) || cursor < 0) {
+          return yield* new LedgerError({ message: "The local read cursor is invalid." });
+        }
+        if (previousCoverage !== undefined && previousCoverage.cursor > cursor) {
+          return yield* refuse(
+            "Wake coverage is ahead of this holding's read position; nothing was changed."
+          );
+        }
+        const slice = yield* ledger.read(cursor);
+        // Presence and eligibility belong to the read's cut, not the earlier ownership lookup.
+        const at = yield* ledger.presenceAt(slice.next);
+        const subscriber = yield* ownedIn(latestPresences(at.entries), address, session);
+        if (at.cut.incarnation !== first.cut.incarnation || subscriber.joinId !== initial.joinId) {
+          return yield* refuse(
+            "The holding or ledger changed during observation; retry without advancing coverage."
+          );
+        }
+        const entries = slice.entries.filter((entry) => isFor(entry.message, subscriber));
+        const messages = yield* eligibleOf(subscriber, entries, slice.next);
+        const ready = messages.length > 0;
+        const covered = cover(previousCoverage, {
+          subscriber,
+          cursor,
+          unread: entries.map((entry) => entry.message.id),
+          messages,
+        });
+        const nextCoverage = ready ? { binding, ...covered.coverage } : previousCoverage;
+        const result: WakeObservation = {
+          binding,
+          observationCut: at.cut,
+          ready,
+          news: ready && covered.news,
+          ...(nextCoverage === undefined ? {} : { nextCoverage }),
+        };
+        if (
+          (nextCoverage?.rung.length ?? 0) > MAX_WAKE_COVERAGE_IDS ||
+          wakeObservationCarrierBytes(result) > (input.maxResultBytes ?? MAX_WAKE_OBSERVATION_BYTES)
+        ) {
+          return yield* refuse(
+            "Complete wake coverage exceeds this observer's capacity; no partial evidence was returned and nothing was changed. Read mail or reduce backlog before retrying."
+          );
+        }
+        // A remote writer does not share our lock. Fence changes observed before return admission.
+        const current = yield* ledger.presenceAt();
+        const holder = yield* ownedIn(latestPresences(current.entries), address, session);
+        if (
+          current.cut.incarnation !== at.cut.incarnation ||
+          holder.joinId !== subscriber.joinId ||
+          !local(holder)
+        ) {
+          return yield* refuse(
+            "The holding or ledger changed during observation; retry without advancing coverage."
+          );
+        }
+        return yield* Schema.decodeUnknownEffect(WakeObservation)(result).pipe(
+          Effect.mapError(
+            () => new LedgerError({ message: "The complete wake evidence could not be validated." })
+          )
+        );
+      }).pipe(exclusive(input.address), Effect.withSpan("Bus.observeWake.snapshot"));
+
+    const observeWake = Effect.fn("Bus.observeWake")(function* (input: ObserveWakeRequest) {
+      const checked = yield* Schema.decodeUnknownEffect(ObserveWakeRequest, {
+        onExcessProperty: "error",
+      })(input).pipe(
+        Effect.mapError(
+          () =>
+            new InvalidQuery({
+              message: "Invalid wake observation arguments; nothing was changed.",
+            })
+        )
+      );
+      if (Buffer.byteLength(JSON.stringify(checked), "utf8") > MAX_WAKE_OBSERVATION_BYTES) {
+        return yield* new InvalidQuery({
+          message:
+            "Wake observation arguments exceed the complete input budget; nothing was changed.",
+        });
+      }
+      if (!validSession(checked.session)) return yield* noSession(checked.address);
+      if (
+        checked.previousCoverage !== undefined &&
+        new Set(checked.previousCoverage.rung).size !== checked.previousCoverage.rung.length
+      ) {
+        return yield* new InvalidQuery({
+          message: "Wake coverage ids must be unique; nothing was changed.",
+        });
+      }
+      const timeoutSeconds = checked.timeoutSeconds ?? 0;
+      if (timeoutSeconds === 0) return yield* observeOnce(checked);
+      let binding = checked.expectedBinding;
+      // Subscribe alongside the first look. Each wait keeps its initial run, never rebinds.
+      const watch = Stream.merge(Stream.succeed(undefined), ledger.changes).pipe(
+        Stream.mapEffect(() =>
+          observeOnce(
+            { ...checked, ...(binding === undefined ? {} : { expectedBinding: binding }) },
+            (found) => {
+              binding = found;
+            }
+          )
+        ),
+        Stream.filter((found) => found.ready && found.news),
+        Stream.runHead
+      );
+      const found = Option.flatten(yield* Effect.timeoutOption(watch, `${timeoutSeconds} seconds`));
+      return Option.isSome(found)
+        ? found.value
+        : yield* observeOnce({
+            ...checked,
+            ...(binding === undefined ? {} : { expectedBinding: binding }),
+          });
+    });
+
     const deliver = <A, E, E2 = never>(
       address: string,
       nudge: (pending: Pending) => Effect.Effect<A, E>,
@@ -1385,6 +1547,7 @@ const make = (installation: string, hostOf: () => string) =>
       withOwner,
       peers,
       localPeers,
+      observeWake,
       deliver,
       take,
       wait,

@@ -9,7 +9,7 @@ The contract of every way into the bus: the MCP tools and their parameters, anno
 | Way in | What it is | Who uses it |
 | --- | --- | --- |
 | MCP over Streamable HTTP | The tools below, at `http://127.0.0.1:<port>/mcp` on loopback, served by `serve` | Claude and Codex sessions |
-| Private hosted peer | A separate authenticated bridge forwards the participation and lookup tools except `bus_wake` to loopback `serve` | Authorized interactive ChatGPT conversations; [connections](connections.md#private-hosted-peer) |
+| Private hosted peer | A separate authenticated bridge forwards an allowlist of participation and lookup tools, excluding `bus_wake` and `bus_observe_wake`, to loopback `serve` | Authorized interactive ChatGPT conversations; [connections](connections.md#private-hosted-peer) |
 | `agent-bus` CLI | `join`, `publish` and `peers` from a shell, each an MCP client of the local `serve`; and `serve` itself | People, scripts and shell-only agents |
 | Plugin hook | `agent-bus claude-wake`, a CLI command that calls `bus_wake` and wakes a Claude session | Claude Code, through the agent-bus plugin |
 | Compact hook | `agent-bus compact-context --runtime`, with claude or codex, a synchronous ownership observation and guidance route | Native sessions through their plugin compact hook |
@@ -59,7 +59,7 @@ Unavailable, timeout, cancellation and internal failure have safe public outcome
 
 Every tool is declared in `src/mcp.ts`, and the tables are read from its schemas, where every parameter and every result field has a description; the tool descriptions and these descriptions own each call's contract, and this page is the reference that lists them in one place. "Required" is what the bus needs, which differs from the schema in one case: `session` is optional in every schema that has it, so that a call without it gets the bus's refusal, which says what to pass, instead of a schema error. `test/docs-coverage.test.ts` checks every table below against the registered tools: the parameters, their types, bounds and requirement, and the result fields.
 
-The hosted peer projects these contracts rather than exposing native ownership inputs: it binds `session` to the verified principal and conversation, sets runtime `other` and uses the bridge's actual working directory on joins and takeovers. It accepts only `chatgpt/` addresses for those operations. `bus_orient` still accepts an optional `cwd` filter; the bridge directory is not the conversation's project directory. The peer does not expose `bus_wake` or provide automatic wake or compact recovery. Its bounded consuming read and failure semantics are in [connections](connections.md#rules).
+The hosted peer projects these contracts rather than exposing native ownership inputs: it binds `session` to the verified principal and conversation, sets runtime `other` and uses the bridge's actual working directory on joins and takeovers. It accepts only `chatgpt/` addresses for those operations. `bus_orient` still accepts an optional `cwd` filter; the bridge directory is not the conversation's project directory. The peer exposes neither `bus_wake` nor `bus_observe_wake`, and provides no automatic wake or compact recovery. Its bounded consuming read and failure semantics are in [connections](connections.md#rules).
 
 | Tool | Purpose |
 | --- | --- |
@@ -73,6 +73,7 @@ The hosted peer projects these contracts rather than exposing native ownership i
 | `bus_read` | Return your unread messages now and mark them read |
 | `bus_wait` | Block for your next unread messages, up to 50 seconds, and mark them read |
 | `bus_wake` | For the Claude Code hook only: wait until the session's addresses have mail it hasn't been woken for; reads nothing |
+| `bus_observe_wake` | Internal loopback source observation of eligible unread news for one owner, with caller-retained coverage; changes nothing |
 | `bus_owned_addresses` | Observe all latest joined addresses held by the exact session and runtime, without changing bus state |
 | `bus_peers` | List the joined peers; a preset over `bus_run_query`'s `peers` |
 | `bus_history` | Search past messages by text and participant; a preset over `bus_run_query`'s `history` and `search` |
@@ -217,6 +218,25 @@ Returns `messages` as `bus_read` does, as soon as there are any, or an empty lis
 
 Waits up to 50 seconds, then returns `addresses` (the session's addresses with eligible unread mail; empty on timeout), `owns` (whether the session holds any Claude address joined from this installation) and `superseded` (whether a newer call from the same session ended this one). By default, a previously woken unread span is suppressed; `fresh: true` bypasses that comparison, not ownership, installation eligibility or waiter arbitration. Repeated fresh calls can each ring: the one-response bound belongs to the hook invocation, not to an idempotent API or a durable compaction event. It returns no message bodies and acknowledges no mail; like delivery, it can pass the cursor over entries that aren't the address's mail. Sessions don't call it. How the hook uses it is in [delivery](delivery.md).
 
+#### `bus_observe_wake`
+
+| Parameter | Type | Required | Default | Meaning |
+| --- | --- | --- | --- | --- |
+| `address` | string | yes | none | Exact currently held address, joined from this installation |
+| `session` | string | yes (optional in the schema) | none | Its native owner session, not an external account principal |
+| `expectedBinding` | object | no | none | Refuse unless every native identity field still matches |
+| `previousCoverage` | object | no | none | Complete previously captured evidence, scoped to its binding |
+| `maxResultBytes` | integer, 128 to 65536 | no | 65536 | Complete UTF-8 MCP result-carrier ceiling, including duplicated text and structured content, excluding JSON-RPC framing |
+| `timeoutSeconds` | number, 0 to 50 | no | 0 | Bounded wait for eligible news; expiry makes a fresh observation |
+
+Returns `binding` (`address`, `session`, `runtime`, `installation`, `incarnation`, `run`), `observationCut` (`head`, `incarnation`), `ready`, `news` and optional `nextCoverage`. The run is the first join continued by ordinary same-runtime owner renewal. Leave/rejoin, takeover, replay, runtime change or ledger replacement fences an old binding. Both `expectedBinding` and a supplied coverage's binding must match; a wait pins its first observed binding and never silently adopts a successor. A read at the slice's cut validates ownership/routing, and another current-presence check fences observed ownership or history changes before return. A later cross-machine change remains possible.
+
+Coverage is `{binding, cursor, rung}`: the mailbox read position and every captured eligible message id while it remains unread. `ready` means eligible unread mail existed at the cut; `news` compares it and the read position with supplied coverage, and is false when not ready. Empty or fully suppressed observations preserve prior coverage, including its absence. There are no message bodies, consuming reads, acknowledgements, activity writes, hook observations, waiter replacement or native wake-mark changes. Primary message/presence damage refuses the whole observation; auxiliary activity/directory uncertainty follows the existing [wake law](delivery.md#when-unread-mail-doesnt-wake-inactivity-and-mutes), not a claim that every auxiliary record was readable.
+
+The native observer stores no coverage or subscription. Its caller captures only when `ready` and `news` are both true, atomically with `nextCoverage`, and serializes observation through capture or uses a retained source-revision CAS; a mailbox cursor is not that revision. Receiving this result does not establish capture, callback receipt or owner consumption. Keep coverage unchanged behind an unresolved notice, and re-observe on activation, restart, pending resolution and each bounded-wait expiry: owner reads can move cursors without a ledger change. External sends require their own fresh authority/binding check. Stale-binding refusal needs fresh authorization, not automatic rebinding.
+
+Complete arguments fit 65,536 UTF-8 JSON bytes. Coverage holds at most 1,024 unique nonempty ids; the complete result must fit `maxResultBytes` or the call refuses without partial ids or coverage. Reduce the unread backlog through the rightful owner's normal read, or increase an explicitly smaller result budget and retry. These are application evidence bounds, not MCP catalogue pagination, replay, callback delivery or a full JSON-RPC wire budget. No hosted tool, Events subscription, callback or scheduler is installed by this operation.
+
 #### `bus_owned_addresses`
 
 | Parameter | Type | Required | Default | Meaning |
@@ -299,7 +319,7 @@ Returns the `address` you left. Peers stop seeing you and the bus stops waking y
 
 ### Tool × annotation × approval
 
-Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and non-destructive except `bus_takeover`, and only the seven lookups are read-only. `idempotentHint` is never set, so it is Effect's default, false. Whether a Codex thread is asked for approval follows from the annotations by Codex's rule, which [platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools) owns; what the bus's choice means for what `serve` may do is in [connections](connections.md#approval-in-codex).
+Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and non-destructive except `bus_takeover`, and only the eight lookups/observations are read-only. `idempotentHint` is never set, so it is Effect's default, false. Whether a Codex thread is asked for approval follows from the annotations by Codex's rule, which [platforms: Codex](../platforms/codex.md#approvals-for-mcp-tools) owns; what the bus's choice means for what `serve` may do is in [connections](connections.md#approval-in-codex).
 
 | Tool | `readOnlyHint` | `destructiveHint` | `idempotentHint` | `openWorldHint` | Codex thread in a sandbox is asked? |
 | --- | --- | --- | --- | --- | --- |
@@ -313,6 +333,7 @@ Each tool sets MCP annotations in `src/mcp.ts`. Every tool is closed-world and n
 | `bus_read` | false | false | false | false | No |
 | `bus_wait` | false | false | false | false | No |
 | `bus_wake` | false | false | false | false | No |
+| `bus_observe_wake` | true | false | false | false | No |
 | `bus_owned_addresses` | true | false | false | false | No |
 | `bus_peers` | true | false | false | false | No |
 | `bus_history` | true | false | false | false | No |
@@ -330,6 +351,14 @@ A refusal comes back as the tool's error result, carrying the message as text. I
 | Message | Raised when | The caller should |
 | --- | --- | --- |
 | "Pass your runtime's own usable session id as session." | `bus_owned_addresses` receives a missing, blank or placeholder identity | Pass the native session identity; do not infer no holdings from a refusal |
+| "This holding has no local read cursor; nothing was changed." | A wake observation finds no local cursor | Restore the rightful local holding through the owner-controlled recovery path; do not assume an empty inbox |
+| "Invalid wake observation arguments; nothing was changed." | Observation input is malformed or has unknown fields | Correct the input using the native schema |
+| "Wake coverage ids must be unique; nothing was changed." | Caller-retained coverage repeats an id | Recover the complete captured evidence rather than inventing a prefix |
+| "This holding did not join from this installation; nothing was changed." | The current holding is nonlocal | Use the installation that owns the cursor; do not read cursor files elsewhere |
+| "The wake binding is stale; obtain fresh authority for the current holding. Nothing was changed." | A captured binding no longer matches | Fence the old source and obtain fresh authorization; never silently rebind |
+| "The holding or ledger changed during observation; retry without advancing coverage." | A presence or history fence changes during the read | Retain prior evidence and retry against current authorized state |
+| "Wake coverage is ahead of this holding's read position; nothing was changed." | Coverage carries an impossible future cursor for this run | Recover correct caller-retained coverage; do not reinterpret positions |
+| "Complete wake coverage exceeds this observer's capacity; no partial evidence was returned and nothing was changed. Read mail or reduce backlog before retrying." | Complete observation cannot fit the carrier or id bound | Increase a smaller explicit budget, or have the rightful owner reduce backlog through normal reads |
 | "Pass your runtime's own session id as `session`: $CODEX_THREAD_ID in Codex, $CLAUDE_CODE_SESSION_ID in Claude Code, or a stable id of your own for other clients." | A call that acts for an address (or `bus_wake`) has no `session`, a blank one, or an unexpanded placeholder (it contains `${` or starts with `$`) | Read the id from the shell and repeat the call. Don't invent one |
 | "Each topic must have a non-empty name with at most one leading #. Pass topics such as ["reviews"]; use [] only to clear subscriptions. Nothing was changed." | A supplied topic list includes a blank name, `#` alone, or a name with more than one leading `#` | Correct the list; use `[]` only to clear subscriptions intentionally |
 | "Associations exceed … UTF-8 bytes. Nothing was changed." | The effective association set exceeds its bound | Reduce the explicit associations before retrying |
@@ -518,13 +547,13 @@ Both wake texts carry no text from other sessions: they run as the owner's own i
 
 The rules about who owns an address, takeover and rejoining are [messaging's rules](messaging.md#rules); the rules here are the contract of the calls that carry them.
 
-1. **Every call that acts for an address names its session.** `bus_join`, `bus_takeover`, `bus_publish`, `bus_directory`, `bus_bulletin`, `bus_read`, `bus_wait`, `bus_leave` and `bus_wake` take `session`; read-only `bus_owned_addresses` also names it to select exact holdings; the other six lookups (`bus_orient`, `bus_peers`, `bus_history`, `bus_queries`, `bus_run_query` and `bus_query`) don't. A missing, blank or placeholder value is refused with an actionable identity message under [Refusals](#refusals) (messaging rule 1).
+1. **Every call that acts for an address names its session.** `bus_join`, `bus_takeover`, `bus_publish`, `bus_directory`, `bus_bulletin`, `bus_read`, `bus_wait`, `bus_leave` and `bus_wake` take `session`; read-only `bus_owned_addresses` and `bus_observe_wake` also name it to select exact holdings or observe one owner; the other six lookups (`bus_orient`, `bus_peers`, `bus_history`, `bus_queries`, `bus_run_query` and `bus_query`) don't. A missing, blank or placeholder value is refused with an actionable identity message under [Refusals](#refusals) (messaging rule 1).
 2. **A call from a session that doesn't own the address is refused, and a refusal changes nothing.** `bus_publish`, `bus_directory`, `bus_bulletin`, `bus_read`, `bus_wait` and `bus_leave` get the "belongs to another session" or "has not joined" message; a join of a held address gets "held by another session"; a join, takeover or leave whose address changed before its write gets that change's refusal or "changed while this call was deciding" (messaging rules 2, 3 and 8). An unconfirmed write is not a refusal: it may have committed, so it undoes nothing.
 3. **A Codex join passes its own thread id.** For runtime `codex`, `codexThreadId` equals `session`, or the join is refused (messaging rule 10).
 4. **`bus_takeover` requires `holder`,** the holder's current join id from the refusal. `bus_join` has no `takeover` parameter (messaging rule 4).
 5. **A wait lasts at most 50 seconds.** `bus_wait` returns an empty list on timeout. `bus_wake` is for the hook, not for sessions.
 6. **Every query reads one commit of one ledger and says how complete it is.** `bus_query` and `bus_run_query` pin `t` in Fluree's request path and check the ledger's incarnation before and after; a cursor carries both. Raw SPARQL is validated and regenerated before it is sent, without `FROM`, `GRAPH` or `SERVICE`, and reads only the projected predicates, so session claims stay off every query surface. No result claims `complete` past a cap, past damage it did not check, or for a ranked match ([connections](connections.md#rules)).
-7. **Annotations say what a tool does to the caller's world.** All tools are closed-world. Only `bus_takeover` is destructive. A tool is read-only only if it moves nothing, not even a cursor, so only the seven lookups are. A new tool is annotated the same way, since Codex's approval follows the annotations.
+7. **Annotations say what a tool does to the caller's world.** All tools are closed-world. Only `bus_takeover` is destructive. A tool is read-only only if it moves nothing, not even a cursor, so only the eight lookups/observations are. A new tool is annotated the same way, since Codex's approval follows the annotations.
 8. **Wake texts carry no text from other sessions,** and the Codex nudge's first sentence never changes.
 9. **The tools and parameters named on this page are the tools and parameters in code.** A new tool, a new parameter, a changed bound or a changed refusal updates this page in the same change; `test/docs-coverage.test.ts` fails otherwise.
 10. **Every parameter and every result field has a description in its schema,** and a bounded one (`limit` an integer of at least 1, `t` an integer, `timeoutSeconds` from 0 to 50) says so in its schema, so the schema refuses a bad value (`limit` of 0, for one) with a message that names the bound.
