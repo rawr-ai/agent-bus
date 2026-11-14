@@ -10,14 +10,14 @@ The Events consumer uses the genuine host package's exported types, not copied i
 
 ```sh
 mkdir -p dist/private-artifacts
-gh release download v1.2.0-events.2 --repo rawr-ai/mcp-openapi \
-  --pattern mcp-openapi-1.2.0-events.2.tgz --dir dist/private-artifacts
-HOST_ARCHIVE="$PWD/dist/private-artifacts/mcp-openapi-1.2.0-events.2.tgz"
-printf '%s  %s\n' 6c6091e6a97d0e75ecf0ec9e03fa4901cc985b2e0d76c6aab52ed3ca1ac82c25 "$HOST_ARCHIVE" | shasum -a 256 -c -
+gh release download v1.2.0-events.3 --repo rawr-ai/mcp-openapi \
+  --pattern mcp-openapi-1.2.0-events.3.tgz --dir dist/private-artifacts
+HOST_ARCHIVE="$PWD/dist/private-artifacts/mcp-openapi-1.2.0-events.3.tgz"
+printf '%s  %s\n' c8a868cdd84a5026a572dad95f6fa335d0fd09d52304f77f7526bba485045247 "$HOST_ARCHIVE" | shasum -a 256 -c -
 bun install --frozen-lockfile
 ```
 
-Bun owns package installation and declarations through the relative `file:` dev dependency; no script extracts into `node_modules`. Keep the archive ignored and out of Git. A cold `bun install` cannot acquire the private release by itself, and an anonymous public checkout cannot complete this full developer install without authorized artifact access. CI needs separately authorized private-repository access; the public repository's ordinary token does not imply it. Never put credentials, transient signed URLs or absolute local paths into the manifest or lockfile. The separate runtime bundle still checks both archive and bundled-entry identities before import. These steps do not select a live bundle or change service configuration. *Rehearsed 2026-11-14: clean frozen install with an isolated cache preserved the manifest/lock and installed the released module/declaration bytes; a separate empty-cache install without the archive refused with the manifest/lock unchanged.*
+Bun owns package installation and declarations through the relative `file:` dev dependency; no script extracts into `node_modules`. Keep the archive ignored and out of Git. A cold `bun install` cannot acquire the private release by itself, and an anonymous public checkout cannot complete this full developer install without authorized artifact access. CI needs separately authorized private-repository access; the public repository's ordinary token does not imply it. Never put credentials, transient signed URLs or absolute local paths into the manifest or lockfile. The separate runtime bundle still checks both archive and bundled-entry identities before import. These steps do not select a live bundle or change service configuration. *Rehearsed 2026-11-14: authenticated release readback matched the selected archive and normal frozen install preserved the manifest/lock. Earlier isolated-cache presence/absence controls are recorded in [platform evidence](../platforms/mcp-openapi.md#optional-events); they were not rerun for this artifact.*
 
 ## Run the fixture
 
@@ -44,7 +44,7 @@ Bun owns package installation and declarations through the relative `file:` dev 
    bun --no-env-file scripts/qualify-private-bundle.ts /absolute/path/to/private-output/private-peer-PRINTED-SUFFIX
    ```
 
-   Expected: the builder verifies the exact host and prints a new review directory with its checksum manifest. The qualifier copies it away from the checkout, checks there are no `node_modules` ancestors, starts its entry with a synthetic private config and local HTTPS provider, and checks the unauthenticated OAuth challenge. A separate fixture then invokes the relocated bundle's real `runPrivatePeer` with two provider subjects and protected grants, exercising independent grant failure and recovery, shared-correlation ownership refusal and preserved unread mail through the exact host and a disposable Bus. Its API-key-to-synthetic-token adapter is not actual OAuth evidence. Supervised children and temporary files are removed. The working-tree source is not attested by this review manifest. *Rehearsed 2026-11-14.*
+   Expected: the builder verifies the exact host and prints a new review directory with its checksum manifest. The qualifier copies it away from the checkout, checks there are no `node_modules` ancestors, and starts its entry sequentially with synthetic private configs and a local HTTPS provider. Both omitted and explicit `requestDiagnostics: true` modes complete the same unauthenticated OAuth challenge; only the enabled mode emits a parsed POST admission record. Stderr capture is bounded and evaluated after owned-process shutdown. An admission record is not final HTTP status or authentication evidence. A separate fixture then invokes the relocated bundle's real `runPrivatePeer` with two provider subjects and protected grants, exercising independent grant failure and recovery, shared-correlation ownership refusal and preserved unread mail through the exact host and a disposable Bus. Its API-key-to-synthetic-token adapter is not actual OAuth evidence. Supervised children and temporary files are removed. The working-tree source is not attested by this review manifest. *Rehearsed 2026-11-14.*
 
 4. Exercise the optional Events program through the same exact host archive:
 

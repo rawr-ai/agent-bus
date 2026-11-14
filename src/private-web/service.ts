@@ -14,6 +14,7 @@ export const ServiceConfig = Schema.Struct({
   baseUrl: Text,
   resource: Text,
   port: Port,
+  requestDiagnostics: Schema.optionalKey(Schema.Boolean),
   principals: Schema.Array(Schema.Struct({ subject: Text, grantFile: Text })).check(
     Schema.isMinLength(1)
   ),
@@ -131,6 +132,9 @@ export const hostConfig = (config: typeof ServiceConfig.Type) => ({
   host: "127.0.0.1",
   port: config.port,
   endpoint: "/mcp",
+  ...(config.requestDiagnostics === undefined
+    ? {}
+    : { requestDiagnostics: config.requestDiagnostics }),
   serverAuth: {
     type: "oauth" as const,
     baseUrl: config.baseUrl,
