@@ -7,5 +7,6 @@ dist/
 # Agent skills are installed locally, not published.
 .agents/
 .claude/skills
+/skills-lock.json
 /.fluree/
 /.nx/

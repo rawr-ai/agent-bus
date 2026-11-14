@@ -1,6 +1,6 @@
 # agent-bus
 
-Contributor rules for agent-bus: where documentation goes, the toolkit, Git and Graphite, the invariants, project memory and verification. Users of the bus start at the [README](README.md); agents using it load the `agent-bus` skill.
+Contributor rules for agent-bus: where documentation goes, investigation judgment, the toolkit, Git and Graphite, the invariants, project memory and verification. Users of the bus start at the [README](README.md); agents using it load the `agent-bus` skill.
 
 ## Documentation
 
@@ -39,9 +39,15 @@ Every current page opens with a scope line: what it covers and where its neighbo
 
 A release that designs and qualifies something writes a frame, which ends with a "Moved into current docs" checklist of the five facets above. Routine changes update the owner pages in their own PR. `bun run check` runs `scripts/check-docs.ts`, which checks links and anchors, scope lines, page shapes, the overview's topic table, and that current pages link frames only from their History footer (platform pages may cite a frame inline as a claim's evidence).
 
+## Investigation judgment
+
+Shape the investigation around the decision it must support and the cost of being wrong. A bounded API question needs an exact source check; a claim that a technology cannot support an architecture calls for a wider view of its relevant capabilities, composition and public extension points. Stop when the decision is defensible; routine questions do not need an exhaustive survey, a new artifact or extra reviewers. Use `cognition:investigation-design` for a substantial study, following its applicable references.
+
+Before a missing capability drives a patch, replacement or impossibility conclusion, challenge the claim against official guidance and source for the target version. Look beyond the obvious convenience API to a structurally different public path, including unstable APIs where relevant, and state its stability and source coupling. Distinguish "not found in the checked surface" from "unsupported" or "impossible". When further checks would not change the decision, report the bounded finding and material coverage gaps rather than search indefinitely. An expectation that advanced technology should help is a lead, not evidence; a successful narrow example does not establish the whole architecture.
+
 ## Toolkit
 
-- Effect work follows the `effect-ts` skill where it is installed (`.agents/skills`, local and untracked); research the vendored source in `.repos/effect` (pinned to the installed version by `scripts/prepare-effect.sh`). This repo uses stable Effect 4.1.2, where the skill's beta names have moved: `effect/unstable/ai` and `effect/unstable/cli` are `effect/ai` and `effect/cli`, `Schema.TaggedErrorClass` is `Schema.TaggedError`, and CLI flags are `Flag.String`, `Flag.Boolean`, `Flag.Int`, `Flag.Literals`. Trust the vendored source over the skill when they differ.
+- Effect work follows the `effect-ts` entrypoint where installed, then the target workspace's `node_modules/effect/AGENTS.md` and applicable linked guides. Its setup/install steps do not authorize changing this established repository's pinned packages; dependency upgrades and skill refreshes need their own commission. Resolve the exact installed packages before using API examples; their exports, declarations and `src/` outrank stale skill guidance. Beta advice to install `effect@beta` or clone `effect-smol` is historical here, as are old names such as `effect/unstable/ai` and `Schema.TaggedErrorClass` (now `effect/ai` and `Schema.TaggedError`). The optional `.repos/effect` checkout is prepared by `scripts/prepare-effect.sh`; verify its remote and `effect@<installed-version>` commit before relying on it. Deployment may skip this development-only preparation.
 - Runtime, tests and packaging follow the `bun` skill where installed. Prefer Bun-native APIs (`Bun.file`, `Bun.spawn`, `WebSocket` over `ws+unix://`) at the edges and Effect services everywhere else.
 - The core HTTP API is the MCP endpoint, served by `effect/ai`'s `McpServer.layerHttp`; the CLI reaches it with `McpClient`. The optional separate `viewer/` exposes three fixed native oRPC procedures over `bus_run_query`, backed by an explicit application-owned Effect runtime boundary, not an Effect-oRPC provider package. Its trust and observation rules are in [viewer](docs/architecture/viewer.md). For HTTP API work, follow the `orpc` and `effect-orpc` ownership gates where installed; confirm the exact native lane and any actual provider profile before writing code rather than assuming bridge compatibility.
 
