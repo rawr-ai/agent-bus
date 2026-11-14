@@ -50,6 +50,12 @@ import {
 } from "./RankedSelections.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS, SAVED_QUERY_DEADLINE_SECONDS } from "./timing.ts";
+import {
+  MAX_WAKE_COVERAGE_IDS,
+  MAX_WAKE_OBSERVATION_BYTES,
+  ObserveWakeRequest,
+  WakeObservation,
+} from "./wake-observation.ts";
 
 export { OrientationResult } from "./orientation-model.ts";
 
@@ -565,6 +571,15 @@ const Wait = Tool.make("bus_wait", {
   failure: Failure,
 }).annotateMerge(Local);
 
+const ObserveWake = Tool.make("bus_observe_wake", {
+  description: `Internal loopback wake-source observation, not a subscription or mail read. Returns native binding, cut, ready/news and complete proposed coverage. Capture only when ready && news, atomically with coverage in the caller's store; serialize observation through capture or CAS a retained revision. Preserve coverage behind unresolved notices. Same-run renewals retain binding; leave, takeover, replay/new run or ledger replacement fence it. No cursor, activity, hook, waiter or native wake mark changes. Empty/suppressed observations preserve previous coverage. Arguments fit ${MAX_WAKE_OBSERVATION_BYTES} UTF-8 JSON bytes; complete results fit maxResultBytes (default/max ${MAX_WAKE_OBSERVATION_BYTES}), including duplicated text/structured channels, excluding JSON-RPC framing; at most ${MAX_WAKE_COVERAGE_IDS} rung ids, never truncated. Excess or primary message/presence damage refuses. Auxiliary activity/directory uncertainty follows the unchanged native wake law, not proof every auxiliary record was readable. Freshly observe on activation, restart, pending resolution and bounded-wait expiry, since reads emit no ledger change. Recheck binding/access at external send admission; this cut is not lasting authority. Not exposed by the hosted peer.`,
+  parameters: ObserveWakeRequest,
+  success: WakeObservation,
+  failure: Failure,
+})
+  .annotateMerge(Lookup)
+  .annotate(Tool.Strict, true);
+
 // Not read-only: it moves the mark of what the session was woken for.
 const Wake = Tool.make("bus_wake", {
   description: `For agent-bus's Claude Code hook, which wakes the session; sessions don't call this. Waits up to ${MAX_WAIT_SECONDS} seconds for previously unwoken mail to an address the session joined as Claude from this bus installation, and returns those addresses. A compact hook uses fresh to ring unchanged unread mail again and exits after its first nonempty response. Returns no message bodies and acknowledges no mail; a newer call from the same session ends this one.`,
@@ -802,6 +817,7 @@ const BusToolkit = Toolkit.make(
   Read,
   Wait,
   Wake,
+  ObserveWake,
   Owned,
   ListPeers,
   History,
@@ -1005,6 +1021,7 @@ const BusHandlers = BusToolkit.toLayer(
           )
           .pipe(Effect.map(publicMessages)),
       bus_wake: ({ session, fresh }) => bus.wake(session, MAX_WAIT_SECONDS, fresh),
+      bus_observe_wake: (params) => bus.observeWake(params),
       bus_owned_addresses: ({ session, runtime }) =>
         ownedAddresses(session, runtime).pipe(Effect.provideService(Bus, bus)),
       bus_peers: () => queries(peersPreset),
