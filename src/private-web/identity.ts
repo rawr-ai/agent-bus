@@ -46,39 +46,93 @@ export const peerSession = (key: Uint8Array, issuer: string, subject: string, ch
     .digest("hex")}`;
 };
 
-export const clerkPeerResolver =
-  (options: {
-    readonly issuer: string;
-    readonly principals: ReadonlyArray<{ readonly subject: string; readonly grantFile: string }>;
-    readonly resource: string;
-    readonly key: Uint8Array;
-    readonly identify: (accessToken: string, signal: AbortSignal) => Promise<string>;
-    readonly readGrant: (grantFile: string) => Promise<unknown>;
-  }) =>
-  async ({ auth, signal, requestMeta }: PeerInvocation): Promise<PeerActor> => {
+export const peerAccount = (key: Uint8Array, issuer: string, subject: string) => {
+  if (key.byteLength < 32 || !issuer || !subject) throw new Error("Invalid peer identity.");
+  return `hosted-account-${createHmac("sha256", key)
+    .update(JSON.stringify(["agent-bus/hosted-peer/account/v1", issuer, subject]))
+    .digest("hex")}`;
+};
+
+/** Account admission is deliberately independent of the current grant and conversation. */
+export const clerkPeerIdentity = (options: {
+  readonly issuer: string;
+  readonly principals: ReadonlyArray<{ readonly subject: string; readonly grantFile: string }>;
+  readonly resource: string;
+  readonly key: Uint8Array;
+  readonly identify: (accessToken: string, signal: AbortSignal) => Promise<string>;
+  readonly readGrant: (grantFile: string) => Promise<unknown>;
+}) => {
+  const identify = async ({ auth, signal }: PeerInvocation) => {
+    if (signal.aborted || auth?.authType !== "oauth" || !auth.accessToken) throw denied();
+    const subject = await options.identify(auth.accessToken, signal);
+    const entry = options.principals.find((principal) => principal.subject === subject);
+    if (signal.aborted || entry === undefined) throw denied();
+    return entry;
+  };
+  const checkGrant = async (
+    principal: { readonly subject: string; readonly grantFile: string },
+    signal: AbortSignal
+  ) => {
+    if (signal.aborted) throw denied();
+    const grant = Schema.decodeUnknownSync(PeerGrant, { onExcessProperty: "error" })(
+      await options.readGrant(principal.grantFile)
+    );
+    if (
+      signal.aborted ||
+      grant.subject !== principal.subject ||
+      grant.resource !== options.resource ||
+      !grant.permissions.includes(PEER_PERMISSION)
+    )
+      throw denied();
+  };
+  const resolveAccount = async (invocation: PeerInvocation) => {
     try {
-      if (signal.aborted || auth?.authType !== "oauth" || !auth.accessToken) throw denied();
-      const subject = await options.identify(auth.accessToken, signal);
-      const principal = options.principals.find((entry) => entry.subject === subject);
-      if (signal.aborted || principal === undefined) throw denied();
-      const grant = Schema.decodeUnknownSync(PeerGrant, { onExcessProperty: "error" })(
-        await options.readGrant(principal.grantFile)
-      );
-      if (
-        signal.aborted ||
-        grant.subject !== subject ||
-        grant.resource !== options.resource ||
-        !grant.permissions.includes(PEER_PERMISSION)
-      )
-        throw denied();
-      const chat = requestMeta?.["openai/session"];
-      return validCorrelation(chat)
-        ? { session: peerSession(options.key, options.issuer, subject, chat) }
-        : {};
+      const entry = await identify(invocation);
+      return { principal: peerAccount(options.key, options.issuer, entry.subject) };
     } catch {
       throw denied();
     }
   };
+  const resolveAuthorized = async (invocation: PeerInvocation) => {
+    try {
+      const entry = await identify(invocation);
+      await checkGrant(entry, invocation.signal);
+      const chat = invocation.requestMeta?.["openai/session"];
+      return {
+        principal: peerAccount(options.key, options.issuer, entry.subject),
+        ...(validCorrelation(chat)
+          ? { session: peerSession(options.key, options.issuer, entry.subject, chat) }
+          : {}),
+      };
+    } catch {
+      throw denied();
+    }
+  };
+  const checkAccountGrant = async (account: string, signal: AbortSignal) => {
+    try {
+      const entry = options.principals.find(
+        ({ subject }) => peerAccount(options.key, options.issuer, subject) === account
+      );
+      if (entry === undefined) throw denied();
+      await checkGrant(entry, signal);
+      return true;
+    } catch {
+      return false;
+    }
+  };
+  return {
+    resolveAccount,
+    resolveAuthorized,
+    checkAccountGrant,
+    resolvePeer: async (invocation: PeerInvocation): Promise<PeerActor> => {
+      const { session } = await resolveAuthorized(invocation);
+      return session === undefined ? {} : { session };
+    },
+  };
+};
+
+export const clerkPeerResolver = (options: Parameters<typeof clerkPeerIdentity>[0]) =>
+  clerkPeerIdentity(options).resolvePeer;
 const denied = () => new Error("Peer access denied.");
 const MAX_IDENTITY_BYTES = 16_384;
 const IDENTITY_TIMEOUT = "5 seconds";

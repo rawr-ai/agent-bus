@@ -1,7 +1,9 @@
 import { isAbsolute } from "node:path";
 import { runPrivatePeer } from "./service.ts";
 
-export { clerkPeerResolver } from "./identity.ts";
+export { eventsProgram } from "./events.ts";
+export { clerkPeerIdentity, clerkPeerResolver } from "./identity.ts";
+export { busPeer } from "./peer.ts";
 export { servePeer } from "./program.ts";
 export { decodeServiceConfig, hostConfig, runPrivatePeer } from "./service.ts";
 

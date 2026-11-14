@@ -79,6 +79,8 @@ When a decision, constraint or trap changes, `update` its memory instead of addi
 
 ## Verification
 
+Full developer installs and checks require a private host artifact. Follow the [native bootstrap commands](docs/runbooks/qualify-private-peer.md#before-you-start) before `bun install`. The archive stays ignored and Bun manages its relative `file:` dev dependency. Native release packaging uses a separate production-only frozen install; its independence does not establish anonymous full development.
+
 `bun test` cannot detect type errors or discarded Effects. After each coherent edit batch, run `bun run check:fast` with the Bun pinned in `package.json`, resolve introduced failures, then continue. Put that Bun first on `PATH` in the command's shell: an absolute `bun run` invocation alone does not select it for nested package scripts.
 
 Use the repository's domain stewards when their judgment is relevant, in both Codex and Claude. Canonical definitions live in `.codex/agents/`, with native Claude counterparts in `.claude/agents/`; select the named role and supply the task's outcome and context rather than copying its foundation into a generic agent. [Stewards](docs/runbooks/stewards.md) describes native invocation, available domains and maintenance.

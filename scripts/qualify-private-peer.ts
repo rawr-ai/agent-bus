@@ -22,8 +22,8 @@ import { decodeServiceConfig, hostConfig } from "../src/private-web/service.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 
-const archiveHash = "d16821e6e327dbab807811fd07a0db5884adef41a922d838648ca021e778c0d8";
-const entryHash = "8c3e4aa9c172a1caf107e352aee8e9676c98ff2ff0b27003655cb0508d77b939";
+const archiveHash = "6c6091e6a97d0e75ecf0ec9e03fa4901cc985b2e0d76c6aab52ed3ca1ac82c25";
+const entryHash = "d7fdd22e950dfc1c43a5e756692d4306910711a9f3a6187b56fcbcc2fda7041b";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** Every property path an output schema names, `[]` for array items, through local references. */
 const propertyPaths = (schema: unknown): ReadonlyArray<string> => {

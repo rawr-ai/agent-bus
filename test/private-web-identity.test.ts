@@ -12,6 +12,7 @@ import {
   PEER_PERMISSION,
 } from "../src/private-web/identity.ts";
 import {
+  decodeEventsKey,
   decodeServiceConfig,
   decodeSessionKey,
   readPrivateJson,
@@ -447,4 +448,38 @@ test("private session key has a single canonical 256-bit encoding", () => {
     expect(() => decodeSessionKey({ key: bad })).toThrow();
   }
   expect(() => decodeSessionKey({ key: key.toString("base64url"), extra: true })).toThrow();
+});
+
+test("Events is opt-in with separate bounded private storage and canonical independent key", () => {
+  expect(decodeServiceConfig(config)).not.toHaveProperty("events");
+  const events = {
+    storagePath: "/private/events.db",
+    maxBytes: 1_048_576,
+    encryptionKeyFile: "/private/events-key.json",
+  };
+  expect(decodeServiceConfig({ ...config, events }).events).toEqual(events);
+  for (const bad of [
+    { ...events, storagePath: "relative" },
+    { ...events, storagePath: "/private/tokens/events.db" },
+    { ...events, storagePath: config.sessionKeyFile },
+    { ...events, encryptionKeyFile: events.storagePath },
+    { ...events, maxBytes: 1_048_575 },
+    { ...events, maxBytes: 67_108_865 },
+    { ...events, extra: true },
+  ])
+    expect(() => decodeServiceConfig({ ...config, events: bad })).toThrow();
+  const session = Buffer.alloc(32, 7);
+  const key = Buffer.alloc(32, 8);
+  const canonical = key.toString("base64");
+  expect(decodeEventsKey({ key: canonical }, session, ["oauth"])).toEqual(key);
+  for (const bad of [
+    "",
+    canonical.slice(0, -1),
+    key.toString("base64url"),
+    Buffer.alloc(33).toString("base64"),
+  ])
+    expect(() => decodeEventsKey({ key: bad }, session, [])).toThrow();
+  expect(() => decodeEventsKey({ key: session.toString("base64") }, session, [])).toThrow();
+  expect(() => decodeEventsKey({ key: canonical }, session, [canonical])).toThrow();
+  expect(() => decodeEventsKey({ key: canonical }, session, [key.toString("base64url")])).toThrow();
 });

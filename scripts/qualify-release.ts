@@ -11,6 +11,8 @@
  *   byte, and a relocated copy reports its own path as its executable.
  * - Self-contained: no bundle loads a module from outside itself, and no file
  *   names the build root, this checkout or the home directory.
+ * - Native-only: the production install needs no private-host archive; neither
+ *   release contains its package, metadata, entry or dependency files.
  * - Relocatable: a copy elsewhere, with the original gone, verifies against the
  *   original digest and reports its id under an empty environment from a decoy
  *   directory; the relocated viewer serves every asset byte for byte, and is gone
@@ -41,6 +43,7 @@ import {
   bundle,
   externalImports,
   fileSha256,
+  type Manifest,
   releaseLauncher,
   removeOwned,
   sha256,
@@ -135,12 +138,15 @@ try {
     root,
     cloneEnv
   );
+  const privateArchive = "dist/private-artifacts/mcp-openapi-1.2.0-events.2.tgz";
+  check("cloneHasNoPrivateArchive", !existsSync(join(clone, privateArchive)));
   must(
-    [bun, "install", "--frozen-lockfile", "--ignore-scripts"],
+    [bun, "install", "--production", "--frozen-lockfile", "--ignore-scripts"],
     "the clone's frozen install",
     clone,
     { ...cloneEnv, HOME: homedir() }
   );
+  check("cloneHasNoPrivateHost", !existsSync(join(clone, "node_modules/mcp-openapi")));
   const marker = `agent-bus-qualify-${crypto.randomUUID()}`;
   markInstalled(join(clone, "node_modules/sparqljs/sparql.js"), marker);
   const probe = join(root, "clone-bundle.js");
@@ -162,6 +168,60 @@ try {
     verify(a.dir, { expect: a.manifestSha256, bun }).ok &&
       verify(b.dir, { expect: b.manifestSha256, bun }).ok
   );
+
+  // The private peer is a separate review artifact, not a native release dependency or payload.
+  const privateMarkers = [
+    privateArchive,
+    "mcp-openapi-1.2.0-events.2.tgz",
+    "mcp-openapi",
+    "agent-bus-private-peer-review-v1",
+    "agent-bus-mail-wake-v1",
+    "6c6091e6a97d0e75ecf0ec9e03fa4901cc985b2e0d76c6aab52ed3ca1ac82c25",
+    "d7fdd22e950dfc1c43a5e756692d4306910711a9f3a6187b56fcbcc2fda7041b",
+  ];
+  const privatePath = (path: string) =>
+    path
+      .split("/")
+      .some(
+        (part) =>
+          [
+            "node_modules",
+            "private-artifacts",
+            "package.json",
+            "package-lock.json",
+            "bun.lock",
+            "bun.lockb",
+            "yarn.lock",
+            "mcp-host.mjs",
+            "release-manifest.json",
+          ].includes(part) ||
+          part.includes("mcp-openapi") ||
+          part.endsWith(".tgz")
+      );
+  for (const [label, built] of [
+    ["A", a],
+    ["B", b],
+  ] as const) {
+    const inventory = filesUnder(built.dir);
+    const manifest = JSON.parse(readFileSync(join(built.dir, "manifest.json"), "utf8")) as Manifest;
+    check(
+      `noPrivatePathsInManifest:${label}`,
+      manifest.files.every(({ path }) => !privatePath(path))
+    );
+    check(
+      `noPrivatePathsInInventory:${label}`,
+      inventory.every((path) => !privatePath(path))
+    );
+    check(
+      `noPrivateHostMetadata:${label}`,
+      inventory
+        .filter((path) => path !== "runtime/bun")
+        .every((path) => {
+          const body = readFileSync(join(built.dir, path), "latin1");
+          return privateMarkers.every((marker) => !body.includes(marker));
+        })
+    );
+  }
 
   // 3. Static scans of what a release runs and ships.
   for (const bundled of ["app/cli.js", "app/release.js", "app/dist/viewer/main.js"])
