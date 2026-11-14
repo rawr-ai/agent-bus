@@ -473,7 +473,7 @@ The optional `events` object enables the separate [hosted Events program](#hoste
 
 | Events field | Contract |
 | --- | --- |
-| `storagePath` | Absolute path for the host's independent private Events database; preserve it across restart, separately from OAuth state |
+| `storagePath` | Absolute path to a pre-created service-user-owned regular Events database file (single hard link, no group/other permissions), in an owner-private immediate directory. The host initializes an empty file's schema but never creates the file. Preserve it across restart, separately from OAuth state; [first enablement](../runbooks/deploy.md#when-a-hosted-peer-is-connected) is an exclusive create, never an existing-state reset |
 | `maxBytes` | Integer database bound from 1 MiB through 64 MiB; journal and filesystem overhead are additional |
 | `encryptionKeyFile` | Absolute owner-private regular JSON file containing `{key}` with a canonical-base64 random 32-byte key, independent from the session and OAuth keys |
 
