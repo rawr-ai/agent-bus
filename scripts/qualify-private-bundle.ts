@@ -235,6 +235,10 @@ try {
   writeFileSync(diagnosticConfig, JSON.stringify({ ...startup, requestDiagnostics: true }), {
     mode: 0o600,
   });
+  const toolsDiagnosticConfig = join(dir, "tools-diagnostic-config.json");
+  writeFileSync(toolsDiagnosticConfig, JSON.stringify({ ...config, requestDiagnostics: true }), {
+    mode: 0o600,
+  });
   const within = async <T>(work: Promise<T>, milliseconds: number): Promise<T | undefined> => {
     let timer: ReturnType<typeof setTimeout> | undefined;
     try {
@@ -276,7 +280,10 @@ try {
       reader.releaseLock();
     }
   };
-  const probeStartup = async (configPath: string, enabled: boolean) => {
+  const probeStartup = async (
+    configPath: string,
+    expected: { readonly host: boolean; readonly consumer: boolean }
+  ) => {
     const owned = ownership();
     const launched = owned.supervisor(
       spawnSupervised([process.execPath, "--no-env-file", join(relocated, "main.js"), configPath], {
@@ -421,15 +428,18 @@ try {
       }
     });
     if (
-      enabled
-        ? !hasAdmission || !hasAuthorization
-        : captured.text.includes(diagnosticPrefix) || captured.text.includes(authorizationPrefix)
+      (expected.host ? !hasAdmission : captured.text.includes(diagnosticPrefix)) ||
+      (expected.consumer ? !hasAuthorization : captured.text.includes(authorizationPrefix))
     )
       throw new Error("Relocated production diagnostic setting was not observed.");
   };
-  await probeStartup(startupConfig, false);
-  await probeStartup(falseConfig, false);
-  await probeStartup(diagnosticConfig, true);
+  await probeStartup(startupConfig, { host: false, consumer: false });
+  await probeStartup(falseConfig, { host: false, consumer: false });
+  await probeStartup(diagnosticConfig, { host: true, consumer: true });
+  await probeStartup(toolsDiagnosticConfig, { host: true, consumer: false });
+  writeFileSync(privateConfig, JSON.stringify({ ...startup, requestDiagnostics: true }), {
+    mode: 0o600,
+  });
   const child = spawnSupervised(
     [
       process.execPath,
@@ -442,9 +452,15 @@ try {
       cwd: dir,
       env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
       stdout: "inherit",
-      stderr: "inherit",
+      stderr: "pipe",
     }
   );
+  const fixtureReader = child.stderr.getReader();
+  const fixtureDrain = drainStderr(fixtureReader).catch(() => ({
+    text: "",
+    overflow: false,
+    failed: true,
+  }));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), 30_000);
@@ -454,9 +470,39 @@ try {
   if (status === null) {
     child.kill();
     await child.exited;
-    throw new Error("Relocated fixture timed out.");
   }
+  const captured = await within(fixtureDrain, 2_000);
+  if (captured === undefined) {
+    await within(
+      fixtureReader.cancel().catch(() => undefined),
+      1_000
+    );
+    await within(fixtureDrain, 1_000);
+  }
+  if (status === null) throw new Error("Relocated fixture timed out.");
   assert.equal(status, 0);
+  if (captured === undefined || captured.failed || captured.overflow)
+    throw new Error("Relocated callback diagnostic capture failed.");
+  const hasCallbackOutcome = captured.text.split("\n").some((line) => {
+    if (!line.startsWith(authorizationPrefix)) return false;
+    try {
+      const record: unknown = JSON.parse(line.slice(authorizationPrefix.length));
+      return (
+        typeof record === "object" &&
+        record !== null &&
+        "type" in record &&
+        record.type === "authorization" &&
+        "callback" in record &&
+        record.callback === "subscription" &&
+        "outcome" in record &&
+        record.outcome === "native_observation_failed"
+      );
+    } catch {
+      return false;
+    }
+  });
+  if (!hasCallbackOutcome)
+    throw new Error("Relocated service did not emit a subscription authorization outcome.");
   assert(identityRequests.first > 0 && identityRequests.second > 0);
 } finally {
   provider?.stop(true);

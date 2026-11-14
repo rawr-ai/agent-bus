@@ -604,7 +604,7 @@ try {
     assert(
       authorizations()
         .slice(before)
-        .every((record) => record.type !== "authorization" || record.callback !== "subscription")
+        .every((record) => !("callback" in record) || record.callback !== "subscription")
     );
     assert.equal(verifications, 0);
     grant(firstGrant, "fixture-first", true);

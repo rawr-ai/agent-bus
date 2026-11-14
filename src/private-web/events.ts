@@ -52,7 +52,7 @@ export type AuthorizationDiagnosticObserver = (...outcome: AuthorizationOutcome)
 const diagnosticLimits = { account: 8, subscription: 8, delivery: 32, maxRecords: 52 } as const;
 const diagnosticPrefix = "[agent-bus] authorization-diagnostic ";
 
-/** A fixed, per-callback budget prevents workers from crowding out admission evidence. */
+/** A synchronous writer and per-callback budget keep diagnostics bounded and behavior-inert. */
 export const authorizationDiagnostics = (
   enabled: boolean | undefined,
   writer: (line: string) => void = (line) => console.error(line)

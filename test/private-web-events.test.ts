@@ -457,33 +457,31 @@ test("diagnostics are behavior-inert for admission, delivery and hostile synchro
       let writes = 0;
       const diagnostics = authorizationDiagnostics(true, (line) => {
         writes++;
+        lines.push(line);
         if (mode === "error") throw new Error("https://private.invalid/?token=TOKEN_CANARY");
         if (mode === "primitive") throw "THROWN_CANARY";
         if (mode === "proxy") throw hostile;
-        lines.push(line);
       });
       expect(await run(name, callback, diagnostics)).toEqual(baseline);
-      expect(writes).toBeGreaterThan(0);
-      if (mode === "capture") {
-        const records = diagnosticRecords(lines);
-        expect(records.at(-1)).toMatchObject({
-          type: "authorization",
-          callback,
-          outcome: expected,
-        });
-        for (const canary of [
-          "TOKEN_CANARY",
-          "CHAT_CANARY",
-          "ADDRESS_CANARY",
-          "BINDING_CANARY",
-          "GRANT_CANARY",
-          "OBSERVATION_CANARY",
-          "NATIVE_ERROR_CANARY",
-          "https://private.invalid",
-          "openai/session",
-        ])
-          expect(lines.join("\n")).not.toContain(canary);
-      } else expect(lines).toEqual([]);
+      expect(writes).toBe(3);
+      const records = diagnosticRecords(lines);
+      expect(records.map(({ type, callback, outcome }) => ({ type, callback, outcome }))).toEqual([
+        { type: "enabled", callback: undefined, outcome: undefined },
+        { type: "authorization", callback: "account", outcome: "allowed" },
+        { type: "authorization", callback, outcome: expected },
+      ]);
+      for (const canary of [
+        "TOKEN_CANARY",
+        "CHAT_CANARY",
+        "ADDRESS_CANARY",
+        "BINDING_CANARY",
+        "GRANT_CANARY",
+        "OBSERVATION_CANARY",
+        "NATIVE_ERROR_CANARY",
+        "https://private.invalid",
+        "openai/session",
+      ])
+        expect(lines.join("\n")).not.toContain(canary);
     }
   }
 });
@@ -529,11 +527,13 @@ test("metadata classification is value-free, disabled when absent and tolerates 
     expect(metadataReads).toBe(enabled ? 2 : 1);
     expect(presenceChecks).toBe(enabled ? 1 : 0);
     if (enabled)
-      expect(diagnosticRecords(lines).at(-1)).toMatchObject({
-        type: "authorization",
-        callback: "subscription",
-        outcome: "correlation_unusable",
-      });
+      expect(
+        diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+      ).toEqual([
+        { type: "enabled", callback: undefined, outcome: undefined },
+        { type: "authorization", callback: "account", outcome: "allowed" },
+        { type: "authorization", callback: "subscription", outcome: "correlation_unusable" },
+      ]);
     else expect(lines).toEqual([]);
   }
 });
@@ -625,17 +625,23 @@ test("overlapping authorizations report completion order without attribution", a
   first.reject(new Error("PRIVATE_FAILURE_CANARY"));
   expect(await a).toBeUndefined();
   expect(
-    diagnosticRecords(lines)
-      .filter(({ type }) => type === "authorization")
-      .map(({ outcome }) => outcome)
-  ).toEqual(["scope_returned", "context_refused"]);
+    diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+  ).toEqual([
+    { type: "enabled", callback: undefined, outcome: undefined },
+    { type: "authorization", callback: "subscription", outcome: "scope_returned" },
+    { type: "authorization", callback: "subscription", outcome: "context_refused" },
+  ]);
   expect(lines.join("\n")).not.toContain("PRIVATE_FAILURE_CANARY");
 });
 
 test("the Events public program and schemas stay fixed and samples never emit diagnostics", async () => {
   const lines: string[] = [];
   const off = await fixture();
+  const disabled = await fixture(authorizationDiagnostics(false));
   const on = await fixture(authorizationDiagnostics(true, (line) => lines.push(line)));
+  expect(off.program.resolvePrincipal).toBe(off.identity.resolveAccount);
+  expect(disabled.program.resolvePrincipal).toBe(disabled.identity.resolveAccount);
+  expect(on.program.resolvePrincipal).not.toBe(on.identity.resolveAccount);
   expect(Object.keys(on.program).sort()).toEqual(Object.keys(off.program).sort());
   expect(on.program.definitions.map(({ name }) => name)).toEqual(
     off.program.definitions.map(({ name }) => name)
@@ -660,7 +666,12 @@ test("the Events public program and schemas stay fixed and samples never emit di
     signal,
   });
   expect(lines).toHaveLength(before);
-  diagnosticRecords(lines);
+  expect(
+    diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+  ).toEqual([
+    { type: "enabled", callback: undefined, outcome: undefined },
+    { type: "authorization", callback: "account", outcome: "allowed" },
+  ]);
 });
 
 test("account control is independent of correlation and grant while subscription is freshly authorized", async () => {
