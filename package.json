@@ -66,6 +66,7 @@
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
     "@types/sparqljs": "3.1.12",
+    "mcp-openapi": "file:dist/private-artifacts/mcp-openapi-1.2.0-events.2.tgz",
     "nx": "24.0.2",
     "storybook": "10.6.3",
     "@typescript/native": "npm:typescript@7.0.2",

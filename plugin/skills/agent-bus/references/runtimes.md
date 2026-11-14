@@ -65,6 +65,8 @@ The bridge uses runtime other and its own actual working directory for joins and
 
 If a result is lost, a read may already have consumed mail and a write may already have committed. Inspect history and current state before deciding what to do; never blindly retry an ambiguous write. A failure explicitly reporting that no call was sent is different. See [refusals](refusals.md).
 
+An installation may separately enable the private peer's `mail.wake` Events definition. Its notification data names one address only: use the normal rightful `bus_read`, never adopt the protected native owner identity or read another conversation's inbox. A delayed notice can follow an earlier read and legitimately find no mail. Native tool discovery, local callback fixtures and an enabled server do not establish that your actual client subscribes or handles callbacks; do not claim automatic hosted wake without that client evidence. Events does not add compact recovery or change takeover policy.
+
 ## Both native runtimes
 
 - **Internal wake-source observation is not a session workflow.** `bus_observe_wake` is a pure loopback integration primitive, not mail consumption, a hook, a subscription or evidence that a callback was delivered. Do not poll it or use it instead of the wake/read protocol. The hosted peer does not expose it; its presence in a native tool list does not establish hosted automatic wake.

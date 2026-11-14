@@ -57,6 +57,7 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
     beforeRead?: () => Effect.Effect<void>;
     afterRead?: () => Effect.Effect<void>;
     failRead?: boolean;
+    failLog?: boolean;
     replacement?: string;
     failPresence?: boolean;
     afterPresence?: () => Effect.Effect<void>;
@@ -78,6 +79,12 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
         state.ledgerWrites++;
         return base.appendCommand(operation, command);
       }),
+    log: (t) =>
+      Effect.suspend(() =>
+        state.failLog
+          ? Effect.fail(new LedgerError({ message: "Synthetic standing unavailable." }))
+          : base.log(t)
+      ),
     read: (from) =>
       Effect.gen(function* () {
         state.reads++;
@@ -237,6 +244,201 @@ const bindingOnly = async (fixture: Awaited<ReturnType<typeof open>>) => {
       ),
   };
 };
+
+test("wake timestamp follows eligible message time, not ledger order or observation time", async () => {
+  const f = await open();
+  await f.joinAs(address, session, "other", { topics: ["a", "b"] });
+  const append = (id: string, to: string, ts: string) =>
+    f.store.runPromise(
+      f.base.append(
+        new Message({ id, from: sender, to: [to], body: "private", kind: "message", ts })
+      )
+    );
+  expect((await f.observe()).latestEligibleAt).toBeUndefined();
+  await append("newer-first", "#b", "2026-12-01T01:00:00.123456+01:00");
+  await append("equal-time", "#b", "2026-12-01T00:00:00.123456000Z");
+  await append("slightly-older", "#b", "2026-12-01T00:00:00.123455Z");
+  await append("older-last", "#a", "2026-01-01T00:00:00Z");
+  const first = await f.observe();
+  expect(first.latestEligibleAt).toBe("2026-12-01T00:00:00.123456Z");
+  if (first.nextCoverage === undefined) throw new Error("Missing coverage.");
+  await f.say(["fixture/unrelated"]);
+  const repeated = await f.observe({ previousCoverage: first.nextCoverage });
+  expect(repeated.latestEligibleAt).toBe(first.latestEligibleAt);
+  expect(repeated.nextCoverage).toEqual(first.nextCoverage);
+  await f.run(
+    f.bus.activity({
+      address,
+      session,
+      operation: Bun.randomUUIDv7(),
+      mutes: [{ scope: "topic", topic: "b" }],
+    })
+  );
+  const muted = await f.observe({ previousCoverage: first.nextCoverage });
+  expect(muted).toMatchObject({
+    ready: true,
+    news: false,
+    latestEligibleAt: "2026-01-01T00:00:00.000Z",
+  });
+  expect(muted.nextCoverage).toEqual(first.nextCoverage);
+  await f.run(f.bus.activity({ address, session, operation: Bun.randomUUIDv7(), mutes: [] }));
+  expect((await f.observe({ previousCoverage: first.nextCoverage })).latestEligibleAt).toBe(
+    first.latestEligibleAt
+  );
+  await append("broken", "#a", "2026-02-30T00:00:00Z");
+  const before = await f.durable();
+  expect((await f.run(Effect.flip(f.bus.observeWake({ address, session }))))._tag).toBe(
+    "LedgerError"
+  );
+  expect(await f.durable()).toEqual(before);
+});
+
+test("wake timestamp updates on later maxima and canonicalizes equal instants in either order", async () => {
+  const timestamps = [
+    "2026-01-01T00:00:00Z",
+    "2026-12-01T00:00:00.123455Z",
+    "2026-12-01T00:00:00.123456Z",
+    "2026-12-01T01:00:00.123456000+01:00",
+  ];
+  const maximum = "2026-12-01T00:00:00.123456Z";
+  for (const [ordered, expected] of [
+    [timestamps, ["2026-01-01T00:00:00.000Z", "2026-12-01T00:00:00.123455Z", maximum, maximum]],
+    [[...timestamps].reverse(), [maximum, maximum, maximum, maximum]],
+  ] as const) {
+    const f = await open();
+    for (const [index, ts] of ordered.entries()) {
+      await f.store.runPromise(
+        f.base.append(
+          new Message({
+            id: `timestamp-order-${index}`,
+            from: sender,
+            to: [address],
+            body: "private",
+            kind: "message",
+            ts,
+          })
+        )
+      );
+      expect((await f.observe()).latestEligibleAt).toBe(expected[index]);
+    }
+  }
+});
+
+test("masked invalid timestamps never enter eligible wake time or retained coverage", async () => {
+  const f = await open();
+  await f.joinAs(address, session, "other", { topics: ["a", "b"] });
+  const activity = (mutes: ReadonlyArray<{ readonly scope: "topic"; readonly topic: string }>) =>
+    f.run(f.bus.activity({ address, session, operation: Bun.randomUUIDv7(), mutes }));
+  await activity([{ scope: "topic", topic: "b" }]);
+  await f.store.runPromise(
+    f.base.append(
+      new Message({
+        id: "valid-a",
+        from: sender,
+        to: ["#a"],
+        body: "valid",
+        kind: "message",
+        ts: "2026-01-01T00:00:00Z",
+      })
+    )
+  );
+  await f.store.runPromise(
+    f.base.append(
+      new Message({
+        id: "invalid-b",
+        from: sender,
+        to: ["#b"],
+        body: "invalid",
+        kind: "message",
+        ts: "not-an-iso-time",
+      })
+    )
+  );
+  let before = await f.durable();
+  const first = await f.observe();
+  expect(first).toMatchObject({
+    ready: true,
+    news: true,
+    latestEligibleAt: "2026-01-01T00:00:00.000Z",
+    nextCoverage: { rung: ["valid-a"] },
+  });
+  if (first.nextCoverage === undefined) throw new Error("Missing coverage.");
+  expect(await f.durable()).toEqual(before);
+
+  await activity([
+    { scope: "topic", topic: "a" },
+    { scope: "topic", topic: "b" },
+  ]);
+  before = await f.durable();
+  const suppressed = await f.observe({ previousCoverage: first.nextCoverage });
+  expect(suppressed).toMatchObject({ ready: false, news: false, nextCoverage: first.nextCoverage });
+  expect(suppressed).not.toHaveProperty("latestEligibleAt");
+  expect(await f.durable()).toEqual(before);
+
+  await activity([{ scope: "topic", topic: "a" }]);
+  before = await f.durable();
+  expect(
+    (
+      await f.run(
+        Effect.flip(f.bus.observeWake({ address, session, previousCoverage: first.nextCoverage }))
+      )
+    )._tag
+  ).toBe("LedgerError");
+  expect(await f.durable()).toEqual(before);
+});
+
+test("unavailable standing preserves direct-only capture but refuses ambient-only observation", async () => {
+  const f = await open();
+  await f.joinAs(address, session, "other", { topics: ["ambient"] });
+  await f.store.runPromise(
+    f.base.append(
+      new Message({
+        id: "direct-valid",
+        from: sender,
+        to: [address],
+        body: "direct",
+        kind: "message",
+        ts: "2026-01-01T00:00:00Z",
+      })
+    )
+  );
+  await f.store.runPromise(
+    f.base.append(
+      new Message({
+        id: "ambient-invalid",
+        from: sender,
+        to: ["#ambient"],
+        body: "ambient",
+        kind: "message",
+        ts: "not-an-iso-time",
+      })
+    )
+  );
+  f.state.failLog = true;
+  let before = await f.durable();
+  const captured = await f.observe();
+  expect(captured).toMatchObject({
+    ready: true,
+    news: true,
+    latestEligibleAt: "2026-01-01T00:00:00.000Z",
+    nextCoverage: { rung: ["direct-valid"] },
+  });
+  expect(await f.durable()).toEqual(before);
+  const only = await bindingOnly(f);
+  expect((await only.check(captured.binding)).binding).toEqual(captured.binding);
+  expect(await f.durable()).toEqual(before);
+
+  expect((await f.run(f.bus.take(address, session, 1))).map(({ id }) => id)).toEqual([
+    "direct-valid",
+  ]);
+  before = await f.durable();
+  const error = await f.run(Effect.flip(f.bus.observeWake({ address, session })));
+  expect(error._tag).toBe("LedgerError");
+  expect(error.message).toBe("Synthetic standing unavailable.");
+  expect(await f.durable()).toEqual(before);
+  expect((await only.check(captured.binding)).binding).toEqual(captured.binding);
+  expect(await f.durable()).toEqual(before);
+});
 
 for (const kind of ["jsonl", "fluree"])
   describe(`pure wake observation (${kind})`, () => {

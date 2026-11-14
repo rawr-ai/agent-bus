@@ -27,6 +27,8 @@ As surveyed on 2026-10-26, from the research's [field survey](docs/research/mcp-
 
 agent-bus runs on macOS as LaunchAgents, with Bun and a Fluree server. For a first source installation, on the machine that will host the bus, from the root of a clone of this repo:
 
+The full developer install and checks require the [private host artifact bootstrap](docs/runbooks/qualify-private-peer.md#before-you-start) before `bun install`; a cold anonymous full install cannot acquire that dependency. This is separate from the native release's production-only package build.
+
 1. Install the dependencies, then the Fluree server and this machine's `serve`:
    ```sh
    bun install && bun run install:launch-agents

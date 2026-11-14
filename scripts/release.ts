@@ -512,10 +512,14 @@ export function build(options: {
     if (existsSync(final)) throw new Error(`release ${id} already exists; it is never replaced`);
     // Dependencies come from the lockfile, not the developer's node_modules.
     const env = { ...cleanEnv(homedir()), PATH: `${dirname(bun)}:/usr/bin:/bin:/usr/sbin:/sbin` };
-    must([bun, "install", "--frozen-lockfile", "--ignore-scripts"], "the frozen install", {
-      cwd: src,
-      env,
-    });
+    must(
+      [bun, "install", "--production", "--frozen-lockfile", "--ignore-scripts"],
+      "the frozen install",
+      {
+        cwd: src,
+        env,
+      }
+    );
     must([bun, "--no-env-file", "scripts/build-viewer.ts"], "the viewer build", { cwd: src, env });
     // Stage beside the final path, so the last step is one rename within one directory.
     mkdirSync(options.out, { recursive: true });

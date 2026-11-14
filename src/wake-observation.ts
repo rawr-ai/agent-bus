@@ -118,6 +118,10 @@ export const WakeObservation = Schema.Struct({
     description:
       "Eligible mail or the read position differs from the supplied coverage. Capture only when ready and news are both true.",
   }),
+  latestEligibleAt: Schema.optionalKey(Schema.String).annotate({
+    description:
+      "Latest eligible message timestamp at this cut, normalized to UTC; absent when not ready.",
+  }),
   nextCoverage: Schema.optionalKey(WakeCoverage).annotate({
     description:
       "Complete proposed coverage, not committed by this call. Empty or suppressed observations preserve previousCoverage, including its absence.",

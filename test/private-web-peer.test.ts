@@ -7,9 +7,17 @@ import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
+import { Message } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
+import { Ledger } from "../src/Ledger.ts";
 import { Messages } from "../src/mcp.ts";
-import { clerkPeerResolver, PEER_PERMISSION, peerSession } from "../src/private-web/identity.ts";
+import { eventsProgram } from "../src/private-web/events.ts";
+import {
+  clerkPeerIdentity,
+  clerkPeerResolver,
+  PEER_PERMISSION,
+  peerSession,
+} from "../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger } from "./fluree-server.ts";
@@ -466,3 +474,162 @@ test("hosted reads drain a carrier larger than the loopback ceiling without losi
     await peer.dispose();
   }
 }, 60_000);
+
+test("real Fluree wake capture and continuing authority survive reads but fence a new run", async () => {
+  const peer = await busPeer({ busPort: port, expectedBusVersion: "hosted-fixture" });
+  try {
+    const name = "chatgpt/events-native";
+    const sender = "fixture/events-sender";
+    const identityService = clerkPeerIdentity({
+      issuer,
+      resource,
+      key,
+      principals: [
+        { subject, grantFile: "/first" },
+        { subject: secondSubject, grantFile: "/second" },
+      ],
+      identify: async (token) => (token === "second" ? secondSubject : subject),
+      readGrant: async (path) => ({
+        ...grant,
+        subject: path === "/first" ? subject : secondSubject,
+      }),
+    });
+    const invocation = {
+      ...identity("events-native"),
+      auth: { authType: "oauth" as const, accessToken: "good" },
+      client: { version: undefined },
+    };
+    const actor = await identityService.resolvePeer(invocation);
+    const tools = peerTools(peer.exchange, process.cwd());
+    const call = async (toolName: string, args: Record<string, unknown>) => {
+      const tool = tools.find(({ name: candidate }) => candidate === toolName);
+      if (tool === undefined) throw new Error("Missing hosted tool.");
+      const result = await tool.execute(args, { actor, signal });
+      expect(result.isError).not.toBe(true);
+      return result;
+    };
+    await call("bus_join", { address: name });
+    await server.runPromise(
+      Effect.flatMap(Bus.Bus, (bus) =>
+        bus.join({ address: sender, session: sender, runtime: "other", cwd: process.cwd() })
+      )
+    );
+    const program = eventsProgram({
+      identity: identityService,
+      wake: peer.wake,
+      resource,
+      storage: {
+        path: "/fixture/events.db",
+        maxBytes: 1_048_576,
+        encryptionKey: Buffer.alloc(32, 1).toString("base64"),
+      },
+    });
+    const account = await program.resolvePrincipal(invocation);
+    const foreignConversation = { ...invocation, requestMeta: { "openai/session": "other-chat" } };
+    const foreignAccount = {
+      ...invocation,
+      auth: { authType: "oauth" as const, accessToken: "second" },
+    };
+    for (const other of [foreignConversation, foreignAccount]) {
+      const otherAccount = await program.resolvePrincipal(other);
+      expect(
+        await program.authorizeSubscription({
+          account: otherAccount,
+          event: "mail.wake",
+          arguments: { address: name },
+          invocation: other,
+          signal,
+        })
+      ).toBeUndefined();
+    }
+    const event = program.definitions[0];
+    if (event === undefined) throw new Error("Missing event.");
+    const scope = await program.authorizeSubscription({
+      account,
+      event: "mail.wake",
+      arguments: { address: name },
+      invocation,
+      signal,
+    });
+    if (scope === undefined) throw new Error("Subscription was refused.");
+    await server.runPromise(
+      Effect.flatMap(Bus.Bus, (bus) =>
+        bus.publish({ from: sender, session: sender, to: [name], body: "body-not-in-event" })
+      )
+    );
+    const captured = await event.source.sample({
+      principal: scope,
+      filter: { address: name },
+      checkpoint: undefined,
+      reason: "activation",
+      revision: 7,
+      generation: 11,
+      waitMs: 0,
+      signal,
+    });
+    expect(captured.kind).toBe("occurrence");
+    expect(JSON.stringify(captured)).not.toContain("body-not-in-event");
+    const delivery = { event: "mail.wake", arguments: { address: name }, signal };
+    await call("bus_read", { address: name });
+    await call("bus_activity", {
+      address: name,
+      operation: Bun.randomUUIDv7(),
+      activity: "inactive",
+      mutes: [{ scope: "programme" }],
+    });
+    expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: true });
+    await server.runPromise(
+      Effect.gen(function* () {
+        const ledger = yield* Ledger;
+        for (let i = 0; i < 1025; i++) {
+          yield* ledger.append(
+            new Message({
+              id: `events-capacity-${i}`,
+              from: sender,
+              to: [name],
+              body: "unread",
+              kind: "message",
+              ts: "2026-01-01T00:00:00Z",
+            })
+          );
+        }
+      })
+    );
+    expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: true });
+    await call("bus_activity", {
+      address: name,
+      operation: Bun.randomUUIDv7(),
+      activity: "active",
+      mutes: [],
+    });
+    await expect(
+      event.source.sample({
+        principal: scope,
+        filter: { address: name },
+        checkpoint: undefined,
+        reason: "restart",
+        revision: 8,
+        generation: 11,
+        waitMs: 0,
+        signal,
+      })
+    ).rejects.toThrow();
+    expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: true });
+    await call("bus_leave", { address: name });
+    await call("bus_join", { address: name });
+    expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: false });
+    const restarted = eventsProgram({
+      identity: identityService,
+      wake: peer.wake,
+      resource,
+      storage: {
+        path: "/fixture/events.db",
+        maxBytes: 1_048_576,
+        encryptionKey: Buffer.alloc(32, 1).toString("base64"),
+      },
+    });
+    expect(await restarted.authorizeDelivery(scope, delivery)).toEqual({ allowed: false });
+  } finally {
+    await peer.dispose();
+  }
+}, 120_000);

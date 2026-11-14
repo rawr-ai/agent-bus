@@ -2,7 +2,17 @@ import { Effect, JsonSchema, ManagedRuntime, Result, Schema } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import type { StandardJSONSchemaV1 } from "effect/StandardSchema";
+import type { DirectToolResult } from "mcp-openapi";
 import { HostedNativeTools as native } from "../mcp.ts";
+import {
+  CheckWakeBindingRequest,
+  MAX_WAKE_OBSERVATION_BYTES,
+  ObserveWakeRequest,
+  sameWakeBinding,
+  WakeBindingCheck,
+  WakeObservation,
+  wakeObservationCarrierBytes,
+} from "../wake-observation.ts";
 import type { PeerActor } from "./identity.ts";
 
 const specs = [
@@ -27,7 +37,7 @@ const specs = [
 const object = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
-const wire = (schema: Schema.ConstraintDecoder<unknown>, hidden: ReadonlyArray<string>) => {
+export const wire = (schema: Schema.ConstraintDecoder<unknown>, hidden: ReadonlyArray<string>) => {
   const document = Schema.toJsonSchemaDocument(schema, { onExcessProperty: "error" });
   const shape = document.schema;
   if (object(shape.properties)) {
@@ -85,16 +95,11 @@ const wire = (schema: Schema.ConstraintDecoder<unknown>, hidden: ReadonlyArray<s
   };
 };
 
-type Exchange = (
+export type Exchange = (
   name: string,
   args: Record<string, unknown>,
   signal?: AbortSignal
-) => Promise<{
-  readonly content: ReadonlyArray<Readonly<Record<string, unknown>>>;
-  readonly structuredContent?: Record<string, unknown> | undefined;
-  readonly isError?: boolean | undefined;
-  readonly _meta?: Record<string, unknown> | undefined;
-}>;
+) => Promise<DirectToolResult>;
 
 const failure = (message: string) => ({
   isError: true,
@@ -103,6 +108,119 @@ const failure = (message: string) => ({
 
 const HOSTED_READ_BYTES = 4 * 1024 * 1024;
 class BeforeDispatch extends Error {}
+
+const canonicalTimestamp = (value: string) => {
+  const parts = /^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3})(\d*)Z$/.exec(value);
+  const millis = Date.parse(value);
+  return (
+    parts !== null &&
+    !parts[2]?.endsWith("0") &&
+    Number.isFinite(millis) &&
+    new Date(millis).toISOString() === `${parts[1]}Z`
+  );
+};
+
+/** Internal wake calls are never added to the hosted tools catalogue. */
+export const wakePort = (exchange: Exchange) => ({
+  observe: async (request: ObserveWakeRequest, signal: AbortSignal): Promise<WakeObservation> => {
+    const input = Schema.decodeUnknownSync(ObserveWakeRequest, { onExcessProperty: "error" })(
+      request
+    );
+    const result = await exchange("bus_observe_wake", { ...input }, signal);
+    if (signal.aborted || result.isError || result.structuredContent === undefined)
+      throw new Error("Wake observation unavailable.");
+    const observation = Schema.decodeUnknownSync(WakeObservation, { onExcessProperty: "error" })(
+      result.structuredContent
+    );
+    const coverage = observation.nextCoverage;
+    if (
+      observation.binding.address !== input.address ||
+      observation.binding.session !== input.session ||
+      observation.binding.runtime !== "other" ||
+      observation.observationCut.incarnation !== observation.binding.incarnation ||
+      !Number.isSafeInteger(observation.observationCut.head) ||
+      (input.expectedBinding !== undefined &&
+        !sameWakeBinding(input.expectedBinding, observation.binding)) ||
+      (coverage !== undefined &&
+        (!sameWakeBinding(coverage.binding, observation.binding) ||
+          !Number.isSafeInteger(coverage.cursor) ||
+          new Set(coverage.rung).size !== coverage.rung.length)) ||
+      observation.ready !== (observation.latestEligibleAt !== undefined) ||
+      (observation.latestEligibleAt !== undefined &&
+        !canonicalTimestamp(observation.latestEligibleAt)) ||
+      (observation.news && (!observation.ready || coverage === undefined)) ||
+      (input.previousCoverage !== undefined &&
+        coverage !== undefined &&
+        coverage.cursor < input.previousCoverage.cursor) ||
+      wakeObservationCarrierBytes(observation) > MAX_WAKE_OBSERVATION_BYTES
+    )
+      throw new Error("Invalid wake observation.");
+    return observation;
+  },
+  check: async (
+    request: CheckWakeBindingRequest,
+    signal: AbortSignal
+  ): Promise<WakeBindingCheck> => {
+    const input = Schema.decodeUnknownSync(CheckWakeBindingRequest, { onExcessProperty: "error" })(
+      request
+    );
+    const result = await exchange("bus_check_wake_binding", { ...input }, signal);
+    if (signal.aborted || result.isError || result.structuredContent === undefined)
+      throw new Error("Wake binding unavailable.");
+    const checked = Schema.decodeUnknownSync(WakeBindingCheck, { onExcessProperty: "error" })(
+      result.structuredContent
+    );
+    if (
+      !sameWakeBinding(checked.binding, input.expectedBinding) ||
+      checked.binding.address !== input.address ||
+      checked.binding.session !== input.session ||
+      checked.binding.runtime !== "other" ||
+      checked.observationCut.incarnation !== checked.binding.incarnation ||
+      !Number.isSafeInteger(checked.observationCut.head) ||
+      wakeObservationCarrierBytes(checked) > MAX_WAKE_OBSERVATION_BYTES
+    )
+      throw new Error("Invalid wake binding.");
+    return checked;
+  },
+});
+
+const wakeCapability = (tool: {
+  readonly name: string;
+  readonly inputSchema: unknown;
+  readonly outputSchema?: unknown;
+  readonly annotations?: unknown;
+}) => {
+  const input = tool.inputSchema;
+  const output = tool.outputSchema;
+  const annotations = tool.annotations;
+  if (!object(input) || !object(input.properties) || !object(output) || !object(annotations))
+    return false;
+  const required = output.required;
+  if (
+    annotations.readOnlyHint !== true ||
+    annotations.destructiveHint !== false ||
+    annotations.openWorldHint !== false ||
+    !Array.isArray(required) ||
+    !["binding", "observationCut"].every((name) => required.includes(name))
+  )
+    return false;
+  if (tool.name === "bus_check_wake_binding")
+    return Array.isArray(input.required) && input.required.includes("expectedBinding");
+  const budget = input.properties.maxResultBytes;
+  const timeout = input.properties.timeoutSeconds;
+  return (
+    "expectedBinding" in input.properties &&
+    "previousCoverage" in input.properties &&
+    object(output.properties) &&
+    "latestEligibleAt" in output.properties &&
+    object(budget) &&
+    budget.type === "integer" &&
+    budget.maximum === MAX_WAKE_OBSERVATION_BYTES &&
+    object(timeout) &&
+    timeout.maximum === 50 &&
+    ["ready", "news"].every((name) => required.includes(name))
+  );
+};
 
 /** Ownership parameters are never accepted from a caller, even as excess input. */
 export const peerTools = (exchange: Exchange, cwd: string) =>
@@ -217,6 +335,11 @@ export const busPeer = async (options: {
             return yield* Effect.fail(new Error("Unexpected Bus version."));
           const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
           if (!tool) return yield* Effect.fail(new Error("Bus tool unavailable."));
+          if (
+            (name === "bus_observe_wake" || name === "bus_check_wake_binding") &&
+            !wakeCapability(tool)
+          )
+            return yield* Effect.fail(new Error("Bus wake observation unavailable."));
           if (name === "bus_read" || name === "bus_wait") {
             const properties = tool.inputSchema.properties;
             const budget = object(properties) ? properties.maxResultBytes : undefined;
@@ -235,13 +358,14 @@ export const busPeer = async (options: {
         { signal }
       )
       .then((result) => {
-        const { structuredContent, ...rest } = result;
+        const { structuredContent, isError, _meta } = result;
         if (structuredContent !== undefined && !object(structuredContent))
           throw new Error("Invalid Bus result.");
         return {
-          ...rest,
           content: result.content.map((item) => ({ ...item })),
           ...(structuredContent === undefined ? {} : { structuredContent }),
+          ...(isError === undefined ? {} : { isError }),
+          ...(_meta === undefined ? {} : { _meta }),
         };
       })
       .catch((error: unknown) => {
@@ -249,5 +373,5 @@ export const busPeer = async (options: {
         throw error;
       });
   };
-  return { exchange, dispose: () => runtime.dispose() };
+  return { exchange, wake: wakePort(exchange), dispose: () => runtime.dispose() };
 };

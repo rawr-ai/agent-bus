@@ -1302,6 +1302,38 @@ const make = (installation: string, hostOf: () => string) =>
         const entries = slice.entries.filter((entry) => isFor(entry.message, subscriber));
         const messages = yield* eligibleOf(subscriber, entries, slice.next);
         const ready = messages.length > 0;
+        let latestEligibleAt: { readonly millis: number; readonly tail: string } | undefined;
+        for (const message of messages) {
+          // Native messages are ISO timestamps. Refuse damaged primary evidence instead
+          // of manufacturing an occurrence time from the observer's clock.
+          const parts =
+            /^(\d{4})-(\d{2})-(\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.(\d+))?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/.exec(
+              message.ts
+            );
+          const year = Number(parts?.[1]);
+          const month = Number(parts?.[2]);
+          const day = Number(parts?.[3]);
+          const calendar = new Date(0);
+          calendar.setUTCFullYear(year, month - 1, day);
+          const timestamp = parts === null ? Number.NaN : Date.parse(message.ts);
+          if (
+            !Number.isFinite(timestamp) ||
+            calendar.getUTCFullYear() !== year ||
+            calendar.getUTCMonth() !== month - 1 ||
+            calendar.getUTCDate() !== day
+          ) {
+            return yield* new LedgerError({ message: "An eligible message timestamp is invalid." });
+          }
+          const tail = (parts?.[4] ?? "").slice(3).replace(/0+$/, "");
+          const tailLength = Math.max(tail.length, latestEligibleAt?.tail.length ?? 0);
+          if (
+            latestEligibleAt === undefined ||
+            timestamp > latestEligibleAt.millis ||
+            (timestamp === latestEligibleAt.millis &&
+              tail.padEnd(tailLength, "0") > latestEligibleAt.tail.padEnd(tailLength, "0"))
+          )
+            latestEligibleAt = { millis: timestamp, tail };
+        }
         const covered = cover(previousCoverage, {
           subscriber,
           cursor,
@@ -1314,6 +1346,13 @@ const make = (installation: string, hostOf: () => string) =>
           observationCut: at.cut,
           ready,
           news: ready && covered.news,
+          ...(latestEligibleAt === undefined
+            ? {}
+            : {
+                latestEligibleAt: new Date(latestEligibleAt.millis)
+                  .toISOString()
+                  .replace(/Z$/, `${latestEligibleAt.tail}Z`),
+              }),
           ...(nextCoverage === undefined ? {} : { nextCoverage }),
         };
         if (

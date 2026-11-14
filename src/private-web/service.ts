@@ -1,8 +1,9 @@
 import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Effect, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { clerkPeerResolver, discoverProvider, identifyOwner, Provider } from "./identity.ts";
+import { eventsProgram } from "./events.ts";
+import { clerkPeerIdentity, discoverProvider, identifyOwner, Provider } from "./identity.ts";
 import { servePeer } from "./program.ts";
 
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048));
@@ -18,6 +19,13 @@ export const ServiceConfig = Schema.Struct({
   ),
   provider: Provider,
   sessionKeyFile: Text,
+  events: Schema.optionalKey(
+    Schema.Struct({
+      storagePath: Text,
+      maxBytes: Schema.Int.check(Schema.isBetween({ minimum: 1_048_576, maximum: 67_108_864 })),
+      encryptionKeyFile: Text,
+    })
+  ),
   binding: Schema.Literals(["fixture", "live"]),
   sources: Schema.Struct({ fixture: Source, live: Source }),
   oauth: Schema.Struct({
@@ -35,6 +43,10 @@ export const ServiceConfig = Schema.Struct({
 });
 
 const invalid = () => new Error("Invalid private peer configuration.");
+const within = (parent: string, child: string) => {
+  const path = relative(parent, child);
+  return path === "" || (path !== ".." && !path.startsWith(`..${sep}`) && !isAbsolute(path));
+};
 
 /** Private runtime files are explicit, bounded regular files of this OS user, never dotenv. */
 export const readPrivateJson = (path: string, maximum = 32_768): unknown => {
@@ -89,6 +101,23 @@ export const decodeServiceConfig = (input: unknown) => {
       callback.password ||
       callback.hash ||
       callback.href !== value
+    )
+      throw invalid();
+  }
+  if (config.events !== undefined) {
+    const { storagePath, encryptionKeyFile } = config.events;
+    if (
+      !isAbsolute(storagePath) ||
+      !isAbsolute(encryptionKeyFile) ||
+      resolve(storagePath) !== storagePath ||
+      resolve(encryptionKeyFile) !== encryptionKeyFile ||
+      storagePath === encryptionKeyFile ||
+      [storagePath, encryptionKeyFile].some(
+        (path) =>
+          path === resolve(config.sessionKeyFile) ||
+          config.principals.some(({ grantFile }) => path === resolve(grantFile)) ||
+          within(resolve(config.oauth.tokenStorageDir), path)
+      )
     )
       throw invalid();
   }
@@ -147,6 +176,26 @@ export const decodeSessionKey = (value: unknown) => {
   return bytes;
 };
 
+export const decodeEventsKey = (
+  value: unknown,
+  sessionKey: Uint8Array,
+  oauthSecrets: ReadonlyArray<string>
+) => {
+  const { key } = Schema.decodeUnknownSync(Schema.Struct({ key: Text }), {
+    onExcessProperty: "error",
+  })(value);
+  if (!/^[A-Za-z0-9+/]{43}=$/.test(key)) throw invalid();
+  const bytes = Buffer.from(key, "base64");
+  if (
+    bytes.length !== 32 ||
+    bytes.toString("base64") !== key ||
+    bytes.equals(sessionKey) ||
+    oauthSecrets.some((secret) => secret === key || secret === bytes.toString("base64url"))
+  )
+    throw invalid();
+  return bytes;
+};
+
 /** Entry of the private consumer bundle. Its adapter imports only the checksum-pinned direct host. */
 export const runPrivatePeer = async (options: {
   readonly configFile: string;
@@ -156,22 +205,55 @@ export const runPrivatePeer = async (options: {
   const runtime = ManagedRuntime.make(FetchHttpClient.layer);
   try {
     const config = decodeServiceConfig(readPrivateJson(options.configFile));
+    const sessionKey = decodeSessionKey(readPrivateJson(config.sessionKeyFile, 4096));
+    const eventsKey =
+      config.events === undefined
+        ? undefined
+        : decodeEventsKey(readPrivateJson(config.events.encryptionKeyFile, 4096), sessionKey, [
+            config.oauth.encryptionKey,
+            config.oauth.jwtSigningKey,
+            config.oauth.clientSecret,
+          ]);
+    if (
+      config.events !== undefined &&
+      (config.events.storagePath === resolve(options.configFile) ||
+        config.events.encryptionKeyFile === resolve(options.configFile) ||
+        eventsKey === undefined)
+    )
+      throw invalid();
     const provider = await runtime.runPromise(discoverProvider(config.provider), {
       signal: options.signal,
     });
     const selected = config.sources[config.binding];
+    const identity = clerkPeerIdentity({
+      issuer: provider.issuer,
+      principals: config.principals,
+      resource: config.resource,
+      key: sessionKey,
+      identify: (token, signal) => runtime.runPromise(identifyOwner(provider, token), { signal }),
+      readGrant: async (grantFile) => readPrivateJson(grantFile, 4096),
+    });
+    const events = config.events;
     await servePeer({
       busPort: selected.port,
       expectedBusVersion: selected.expectedBusVersion,
       cwd: process.cwd(),
-      resolveContext: clerkPeerResolver({
-        issuer: provider.issuer,
-        principals: config.principals,
-        resource: config.resource,
-        key: decodeSessionKey(readPrivateJson(config.sessionKeyFile, 4096)),
-        identify: (token, signal) => runtime.runPromise(identifyOwner(provider, token), { signal }),
-        readGrant: async (grantFile) => readPrivateJson(grantFile, 4096),
-      }),
+      resolveContext: identity.resolvePeer,
+      ...(events === undefined || eventsKey === undefined
+        ? {}
+        : {
+            events: (wake: Parameters<typeof eventsProgram>[0]["wake"]) =>
+              eventsProgram({
+                identity,
+                wake,
+                resource: config.resource,
+                storage: {
+                  path: events.storagePath,
+                  maxBytes: events.maxBytes,
+                  encryptionKey: eventsKey.toString("base64"),
+                },
+              }),
+          }),
       runHost: (tools, lifecycle) => options.runHost(hostConfig(config), tools, lifecycle),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
