@@ -15,6 +15,7 @@ import {
   decodeEventsKey,
   decodeServiceConfig,
   decodeSessionKey,
+  hostConfig,
   readPrivateJson,
 } from "../src/private-web/service.ts";
 
@@ -381,6 +382,70 @@ test("service binding chooses exactly one explicit source and keeps its permanen
     expect(() => decodeServiceConfig(bad)).toThrow();
 });
 
+test("request diagnostics preserve omission and forward only an explicit Boolean to the host", () => {
+  const omitted = decodeServiceConfig(config);
+  const baseline = hostConfig(omitted);
+  expect(Object.hasOwn(omitted, "requestDiagnostics")).toBe(false);
+  expect(Object.hasOwn(baseline, "requestDiagnostics")).toBe(false);
+  expect(baseline.host).toBe("127.0.0.1");
+  expect(baseline.endpoint).toBe("/mcp");
+  expect(baseline.serverAuth.resource).toBe(config.resource);
+  expect(baseline.serverAuth.allowedRedirectUris).toEqual(config.oauth.allowedRedirectUris);
+  expect(baseline.httpLimits.maxConcurrentWork).toBe(8);
+  expect(baseline.httpLimits.oauth.maxConcurrentWork).toBe(2);
+  for (const value of [false, true]) {
+    const decoded = decodeServiceConfig({ ...config, requestDiagnostics: value });
+    expect(Object.hasOwn(decoded, "requestDiagnostics")).toBe(true);
+    expect(decoded.requestDiagnostics).toBe(value);
+    const forwarded = hostConfig(decoded);
+    expect(Object.hasOwn(forwarded, "requestDiagnostics")).toBe(true);
+    const { requestDiagnostics, ...unchanged } = forwarded;
+    expect(requestDiagnostics).toBe(value);
+    expect(unchanged).toEqual(baseline);
+  }
+  const events = {
+    storagePath: "/private/events.db",
+    maxBytes: 1_048_576,
+    encryptionKeyFile: "/private/events-key.json",
+  };
+  const decoded = decodeServiceConfig({ ...config, events, requestDiagnostics: true });
+  expect(decoded.events).toEqual(events);
+  expect(hostConfig(decoded)).toEqual({ ...baseline, requestDiagnostics: true });
+});
+
+test("request diagnostics do not coerce values or relax strict configuration and security", () => {
+  for (const requestDiagnostics of ["true", "false", 0, 1, null, undefined, {}, []])
+    expect(() => decodeServiceConfig({ ...config, requestDiagnostics })).toThrow();
+  const enabled = { ...config, requestDiagnostics: true };
+  for (const bad of [
+    { ...enabled, requestDiagnostic: true },
+    { ...enabled, oauth: { ...config.oauth, requestDiagnostics: true } },
+    { ...enabled, resource: "https://other.invalid/mcp" },
+    {
+      ...enabled,
+      oauth: { ...config.oauth, allowedRedirectUris: ["https://*.invalid/callback"] },
+    },
+    {
+      ...enabled,
+      events: {
+        storagePath: "/private/events.db",
+        maxBytes: 1_048_576,
+        encryptionKeyFile: "/private/events-key.json",
+        requestDiagnostics: true,
+      },
+    },
+    {
+      ...enabled,
+      events: {
+        storagePath: config.sessionKeyFile,
+        maxBytes: 1_048_576,
+        encryptionKeyFile: "/private/events-key.json",
+      },
+    },
+  ])
+    expect(() => decodeServiceConfig(bad)).toThrow();
+});
+
 test("service config accepts only nonempty, distinct explicitly mapped v2 principals", () => {
   const second = { subject: "second", grantFile: "/private/second-grant.json" };
   const third = { subject: "third", grantFile: "/private/third-grant.json" };
@@ -421,8 +486,9 @@ test("private config and app-grant files refuse symlinks and permissive access",
   const dir = mkdtempSync(join(tmpdir(), "bus-private-config-"));
   try {
     const path = join(dir, "config.json");
-    writeFileSync(path, JSON.stringify(config), { mode: 0o600 });
+    writeFileSync(path, JSON.stringify({ ...config, requestDiagnostics: true }), { mode: 0o600 });
     expect(decodeServiceConfig(readPrivateJson(path)).binding).toBe("fixture");
+    expect(decodeServiceConfig(readPrivateJson(path)).requestDiagnostics).toBe(true);
     const link = join(dir, "link.json");
     symlinkSync(path, link);
     expect(() => readPrivateJson(link)).toThrow();

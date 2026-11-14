@@ -21,6 +21,14 @@ import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
+import {
+  alive,
+  childrenOf,
+  exitsWithin,
+  type Identity,
+  identify,
+  ownership,
+} from "../test/processes.ts";
 import { spawnSupervised } from "../test/supervised.ts";
 
 const input = process.argv[2];
@@ -43,18 +51,17 @@ const manifest = Schema.decodeUnknownSync(Manifest, { onExcessProperty: "error" 
 const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 assert.equal(
   manifest.host.archiveSha256,
-  "6c6091e6a97d0e75ecf0ec9e03fa4901cc985b2e0d76c6aab52ed3ca1ac82c25"
+  "c8a868cdd84a5026a572dad95f6fa335d0fd09d52304f77f7526bba485045247"
 );
 assert.equal(
   manifest.host.entrySha256,
-  "d7fdd22e950dfc1c43a5e756692d4306910711a9f3a6187b56fcbcc2fda7041b"
+  "c076ea2a9d1396bc45cd5b5d2c767268991bc41ba12392eb78b30a409c381b91"
 );
 assert.equal(digest(join(input, "main.js")), manifest.peerSha256);
 assert.equal(digest(join(input, "mcp-host.mjs")), manifest.host.entrySha256);
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-relocated-")));
 let disposeBus: (() => Promise<void>) | undefined;
 let provider: ReturnType<typeof Bun.serve> | undefined;
-let launched: ReturnType<typeof spawnSupervised> | undefined;
 try {
   for (let path = dir; ; path = dirname(path)) {
     assert(!existsSync(join(path, "node_modules")), `Node modules ancestor at ${path}`);
@@ -204,45 +211,183 @@ try {
   writeFileSync(keyFile, JSON.stringify({ key: randomBytes(32).toString("base64url") }), {
     mode: 0o600,
   });
-  launched = spawnSupervised(
-    [process.execPath, "--no-env-file", join(relocated, "main.js"), privateConfig],
-    {
-      cwd: dir,
-      env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
-      stdout: "inherit",
-      stderr: "inherit",
-    }
-  );
-  let challenged = false;
-  let lastStatus = 0;
-  const statuses = new Set<number>();
-  for (let attempt = 0; attempt < 15 && launched.exitCode === null && !challenged; attempt++) {
+  const diagnosticConfig = join(dir, "diagnostic-config.json");
+  writeFileSync(diagnosticConfig, JSON.stringify({ ...config, requestDiagnostics: true }), {
+    mode: 0o600,
+  });
+  const within = async <T>(work: Promise<T>, milliseconds: number): Promise<T | undefined> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
     try {
-      lastStatus = (
-        await fetch(`http://127.0.0.1:${servicePort}/mcp`, {
-          method: "POST",
-          headers: {
-            "content-type": "application/json",
-            accept: "application/json, text/event-stream",
-            host: "fixture.invalid",
-          },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
-        })
-      ).status;
-      challenged = lastStatus === 401;
-      statuses.add(lastStatus);
-    } catch {
-      await Bun.sleep(100);
+      return await Promise.race([
+        work,
+        new Promise<undefined>((resolve) => {
+          timer = setTimeout(() => resolve(undefined), milliseconds);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
     }
-    if (!challenged) await Bun.sleep(300);
-  }
-  assert(
-    challenged,
-    `Relocated production entry did not start and require OAuth (discovery requests: ${discoveryRequests}, HTTP statuses: ${[...statuses].join(",")}).`
-  );
-  launched.kill();
-  await launched.exited;
-  launched = undefined;
+  };
+  const diagnosticPrefix = "[mcp-openapi] request-diagnostic ";
+  type StderrReader = {
+    read(): Promise<{ readonly done: boolean; readonly value?: Uint8Array | undefined }>;
+    cancel(): Promise<void>;
+    releaseLock(): void;
+  };
+  const drainStderr = async (reader: StderrReader) => {
+    const bytes = new Uint8Array(65_536);
+    let size = 0;
+    let overflow = false;
+    try {
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        if (value === undefined) throw new Error("Diagnostic stream returned no data.");
+        const count = Math.min(value.byteLength, bytes.byteLength - size);
+        bytes.set(value.subarray(0, count), size);
+        size += count;
+        if (count < value.byteLength) overflow = true;
+      }
+      return { text: new TextDecoder().decode(bytes.subarray(0, size)), overflow, failed: false };
+    } catch {
+      return { text: "", overflow, failed: true };
+    } finally {
+      reader.releaseLock();
+    }
+  };
+  const probeStartup = async (configPath: string, enabled: boolean) => {
+    const owned = ownership();
+    const launched = owned.supervisor(
+      spawnSupervised([process.execPath, "--no-env-file", join(relocated, "main.js"), configPath], {
+        cwd: dir,
+        env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
+        stdout: "ignore",
+        stderr: "pipe",
+      })
+    );
+    const children = new Map<string, Identity>();
+    let supervisorIdentity: Identity | undefined;
+    const registerChildren = () => {
+      if (supervisorIdentity === undefined || !alive(supervisorIdentity)) return;
+      for (const child of childrenOf(launched.pid)) {
+        const key = `${child.pid}:${child.started}`;
+        if (!children.has(key)) {
+          children.set(key, child);
+          owned.process(child);
+        }
+      }
+    };
+    const discoveryBefore = discoveryRequests;
+    let challenged = false;
+    let failed = false;
+    let reader: StderrReader | undefined;
+    let drain: ReturnType<typeof drainStderr> | undefined;
+    let captured: Awaited<ReturnType<typeof drainStderr>> | undefined;
+    try {
+      const streamReader = launched.stderr.getReader();
+      reader = streamReader;
+      drain = drainStderr(streamReader).catch(() => ({ text: "", overflow: false, failed: true }));
+      supervisorIdentity = identify(launched.pid);
+      if (supervisorIdentity === undefined) throw new Error("Relocated supervisor did not start.");
+      const deadline = Date.now() + 10_000;
+      while (children.size === 0 && launched.exitCode === null && Date.now() < deadline) {
+        registerChildren();
+        if (children.size === 0) await Bun.sleep(20);
+      }
+      if (children.size === 0) throw new Error("Relocated production child did not start.");
+      let ready = false;
+      while (!ready && launched.exitCode === null && Date.now() < deadline) {
+        try {
+          const response = await fetch(
+            `http://127.0.0.1:${servicePort}/.well-known/oauth-protected-resource`,
+            {
+              headers: { host: "fixture.invalid" },
+              signal: AbortSignal.timeout(Math.max(1, Math.min(1_000, deadline - Date.now()))),
+            }
+          );
+          await response.arrayBuffer();
+          ready = response.status === 200;
+        } catch {
+          // A listener still starting may refuse the connection.
+        }
+        if (!ready) await Bun.sleep(100);
+      }
+      if (!ready) throw new Error("Relocated production listener did not start.");
+      const response = await fetch(`http://127.0.0.1:${servicePort}/mcp`, {
+        method: "POST",
+        signal: AbortSignal.timeout(Math.max(1, Math.min(1_000, deadline - Date.now()))),
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          host: "fixture.invalid",
+        },
+        body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" }),
+      });
+      await response.arrayBuffer();
+      challenged = response.status === 401;
+      if (!challenged || discoveryRequests <= discoveryBefore)
+        throw new Error("Relocated production startup did not require OAuth.");
+    } catch {
+      failed = true;
+    } finally {
+      const attempt = async (step: () => Promise<void> | void) => {
+        try {
+          await step();
+        } catch {
+          failed = true;
+        }
+      };
+      await attempt(registerChildren);
+      await attempt(() => owned.stop());
+      await attempt(async () => {
+        if ((await within(launched.exited, 2_000)) === undefined) failed = true;
+      });
+      await attempt(async () => {
+        for (const child of children.values())
+          if (!(await exitsWithin(child, 2_000))) failed = true;
+      });
+      await attempt(async () => {
+        if (drain === undefined || reader === undefined) {
+          failed = true;
+          return;
+        }
+        captured = await within(drain, 2_000);
+        if (captured === undefined) {
+          failed = true;
+          await within(
+            reader
+              .cancel()
+              .catch(() => undefined)
+              .then(() => true),
+            1_000
+          );
+          await within(drain, 1_000);
+        }
+      });
+    }
+    if (failed || captured === undefined || captured.failed || captured.overflow)
+      throw new Error("Relocated production startup or diagnostic capture failed.");
+    const hasAdmission = captured.text.split("\n").some((line) => {
+      if (!line.startsWith(diagnosticPrefix)) return false;
+      try {
+        const record: unknown = JSON.parse(line.slice(diagnosticPrefix.length));
+        return (
+          typeof record === "object" &&
+          record !== null &&
+          "type" in record &&
+          record.type === "admission" &&
+          "method" in record &&
+          record.method === "POST"
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (enabled ? !hasAdmission : captured.text.includes(diagnosticPrefix))
+      throw new Error("Relocated production diagnostic setting was not observed.");
+  };
+  await probeStartup(privateConfig, false);
+  await probeStartup(diagnosticConfig, true);
   const child = spawnSupervised(
     [
       process.execPath,
@@ -272,10 +417,6 @@ try {
   assert.equal(status, 0);
   assert(identityRequests.first > 0 && identityRequests.second > 0);
 } finally {
-  if (launched !== undefined) {
-    launched.kill();
-    await launched.exited;
-  }
   provider?.stop(true);
   await disposeBus?.();
   await stopFlureeServer();
