@@ -2,7 +2,7 @@ import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Effect, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { eventsProgram } from "./events.ts";
+import { authorizationDiagnostics, eventsProgram } from "./events.ts";
 import { clerkPeerIdentity, discoverProvider, identifyOwner, Provider } from "./identity.ts";
 import { servePeer } from "./program.ts";
 
@@ -238,6 +238,8 @@ export const runPrivatePeer = async (options: {
       readGrant: async (grantFile) => readPrivateJson(grantFile, 4096),
     });
     const events = config.events;
+    const diagnostics =
+      events === undefined ? undefined : authorizationDiagnostics(config.requestDiagnostics);
     await servePeer({
       busPort: selected.port,
       expectedBusVersion: selected.expectedBusVersion,
@@ -251,6 +253,7 @@ export const runPrivatePeer = async (options: {
                 identity,
                 wake,
                 resource: config.resource,
+                ...(diagnostics === undefined ? {} : { diagnostics }),
                 storage: {
                   path: events.storagePath,
                   maxBytes: events.maxBytes,

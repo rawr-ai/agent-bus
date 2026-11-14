@@ -211,8 +211,28 @@ try {
   writeFileSync(keyFile, JSON.stringify({ key: randomBytes(32).toString("base64url") }), {
     mode: 0o600,
   });
+  const eventsKeyFile = join(dir, "events-key.json");
+  const eventsPath = join(dir, "events.db");
+  writeFileSync(eventsKeyFile, JSON.stringify({ key: randomBytes(32).toString("base64") }), {
+    mode: 0o600,
+  });
+  writeFileSync(eventsPath, "", { mode: 0o600, flag: "wx" });
+  const startup = {
+    ...config,
+    events: {
+      storagePath: eventsPath,
+      maxBytes: 1_048_576,
+      encryptionKeyFile: eventsKeyFile,
+    },
+  };
+  const startupConfig = join(dir, "startup-config.json");
+  writeFileSync(startupConfig, JSON.stringify(startup), { mode: 0o600 });
+  const falseConfig = join(dir, "false-config.json");
+  writeFileSync(falseConfig, JSON.stringify({ ...startup, requestDiagnostics: false }), {
+    mode: 0o600,
+  });
   const diagnosticConfig = join(dir, "diagnostic-config.json");
-  writeFileSync(diagnosticConfig, JSON.stringify({ ...config, requestDiagnostics: true }), {
+  writeFileSync(diagnosticConfig, JSON.stringify({ ...startup, requestDiagnostics: true }), {
     mode: 0o600,
   });
   const within = async <T>(work: Promise<T>, milliseconds: number): Promise<T | undefined> => {
@@ -229,6 +249,7 @@ try {
     }
   };
   const diagnosticPrefix = "[mcp-openapi] request-diagnostic ";
+  const authorizationPrefix = "[agent-bus] authorization-diagnostic ";
   type StderrReader = {
     read(): Promise<{ readonly done: boolean; readonly value?: Uint8Array | undefined }>;
     cancel(): Promise<void>;
@@ -383,10 +404,31 @@ try {
         return false;
       }
     });
-    if (enabled ? !hasAdmission : captured.text.includes(diagnosticPrefix))
+    const hasAuthorization = captured.text.split("\n").some((line) => {
+      if (!line.startsWith(authorizationPrefix)) return false;
+      try {
+        const record: unknown = JSON.parse(line.slice(authorizationPrefix.length));
+        return (
+          typeof record === "object" &&
+          record !== null &&
+          "type" in record &&
+          record.type === "enabled" &&
+          "maxRecords" in record &&
+          record.maxRecords === 52
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (
+      enabled
+        ? !hasAdmission || !hasAuthorization
+        : captured.text.includes(diagnosticPrefix) || captured.text.includes(authorizationPrefix)
+    )
       throw new Error("Relocated production diagnostic setting was not observed.");
   };
-  await probeStartup(privateConfig, false);
+  await probeStartup(startupConfig, false);
+  await probeStartup(falseConfig, false);
   await probeStartup(diagnosticConfig, true);
   const child = spawnSupervised(
     [

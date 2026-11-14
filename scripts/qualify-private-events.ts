@@ -55,6 +55,42 @@ const subscription = Schema.decodeUnknownSync(
   { onExcessProperty: "error" }
 );
 const empty = Schema.decodeUnknownSync(Schema.Struct({}), { onExcessProperty: "error" });
+const authorizationRecord = Schema.decodeUnknownSync(
+  Schema.Union([
+    Schema.Struct({
+      type: Schema.Literal("enabled"),
+      timestamp: Schema.String,
+      maxRecords: Schema.Literal(52),
+    }),
+    Schema.Struct({
+      type: Schema.Literal("exhausted"),
+      timestamp: Schema.String,
+      callback: Schema.Literals(["account", "subscription", "delivery"]),
+    }),
+    Schema.Struct({
+      type: Schema.Literal("authorization"),
+      timestamp: Schema.String,
+      callback: Schema.Literals(["account", "subscription", "delivery"]),
+      outcome: Schema.Literals([
+        "allowed",
+        "refused",
+        "input_refused",
+        "context_refused",
+        "correlation_metadata_absent",
+        "correlation_key_absent",
+        "correlation_unusable",
+        "account_mismatch",
+        "native_observation_failed",
+        "scope_returned",
+        "cancelled",
+        "scope_refused",
+        "grant_refused",
+        "native_binding_failed",
+      ]),
+    }),
+  ]),
+  { onExcessProperty: "error" }
+);
 const notice = Schema.decodeUnknownSync(
   Schema.Struct({
     eventId: Schema.String,
@@ -136,12 +172,17 @@ const location = (response: Response) => {
   if (value === null) throw new Error(`Expected OAuth redirect, received ${response.status}.`);
   return new URL(value, response.url);
 };
-const refused = async (work: Promise<unknown>, code: number) => {
+const refused = async (work: Promise<unknown>, code: number, reason?: string) => {
   try {
     await work;
   } catch (error) {
     assert(error && typeof error === "object" && "code" in error);
     assert.equal(error.code, code);
+    if (reason !== undefined) {
+      assert("data" in error && error.data && typeof error.data === "object");
+      assert("reason" in error.data);
+      assert.equal(error.data.reason, reason);
+    }
     return;
   }
   throw new Error("Expected Events refusal.");
@@ -331,8 +372,29 @@ try {
   grant(secondGrant, "fixture-second", true);
   const tracePath = join(dir, "dial-trace");
   const coverageTrace = join(dir, "coverage-trace");
+  const authorizationTrace = join(dir, "authorization-trace");
   writeFileSync(tracePath, "");
   writeFileSync(coverageTrace, "");
+  writeFileSync(authorizationTrace, "", { mode: 0o600 });
+  const authorizations = () =>
+    readFileSync(authorizationTrace, "utf8")
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        const prefix = "[agent-bus] authorization-diagnostic ";
+        assert(Buffer.byteLength(line, "utf8") <= 256);
+        assert(line.startsWith(prefix));
+        return authorizationRecord(JSON.parse(line.slice(prefix.length)));
+      });
+  const observedOutcome = (from: number, callback: string, outcomes: ReadonlyArray<string>) =>
+    authorizations()
+      .slice(from)
+      .some(
+        (record) =>
+          record.type === "authorization" &&
+          record.callback === callback &&
+          outcomes.includes(record.outcome)
+      );
   const fixture = join(dir, "host-fixture.json");
   writeFileSync(
     fixture,
@@ -350,6 +412,7 @@ try {
       caPath: cert,
       tracePath,
       coverageTrace,
+      authorizationTrace,
     }),
     { mode: 0o600 }
   );
@@ -517,13 +580,38 @@ try {
       )
     );
   if (selectedCase === "all") {
-    await refused(subscribe(first, request, "foreign-conversation"), -32010);
-    await refused(subscribe(second, request, "chat-second"), -32010);
+    let before = authorizations().length;
+    await refused(
+      first.request({ method: "events/subscribe", params: request }, ResultSchema),
+      -32010,
+      "forbidden"
+    );
+    assert(
+      observedOutcome(before, "subscription", [
+        "correlation_metadata_absent",
+        "correlation_key_absent",
+      ])
+    );
+    before = authorizations().length;
+    await refused(subscribe(first, request, "foreign-conversation"), -32010, "forbidden");
+    assert(observedOutcome(before, "subscription", ["native_observation_failed"]));
+    before = authorizations().length;
+    await refused(subscribe(second, request, "chat-second"), -32010, "forbidden");
+    assert(observedOutcome(before, "subscription", ["native_observation_failed"]));
     grant(firstGrant, "fixture-first", false);
-    await refused(subscribe(first, request, "chat-first"), -32010);
+    before = authorizations().length;
+    await refused(subscribe(first, request, "chat-first"), -32010, "not_found");
+    assert(
+      authorizations()
+        .slice(before)
+        .every((record) => record.type !== "authorization" || record.callback !== "subscription")
+    );
     assert.equal(verifications, 0);
     grant(firstGrant, "fixture-first", true);
+    before = authorizations().length;
     const admitted = await subscribe(first, request, "chat-first");
+    assert(observedOutcome(before, "subscription", ["scope_returned"]));
+    assert(observedOutcome(before, "delivery", ["allowed"]));
     assert(admitted.id.startsWith("sub_"));
     assert(Date.parse(admitted.refreshBefore) > Date.now());
     assert(Date.parse(admitted.refreshBefore) <= Date.now() + request.ttlMs);
