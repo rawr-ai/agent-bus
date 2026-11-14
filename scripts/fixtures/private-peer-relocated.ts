@@ -6,6 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import type { InvocationIdentity } from "mcp-openapi";
 import type * as Identity from "../../src/private-web/identity.ts";
 import type * as Service from "../../src/private-web/service.ts";
 
@@ -54,8 +55,26 @@ const running = bundle.runPrivatePeer({
       { mode: 0o600 }
     );
     assert.deepEqual(await lifecycle.resolveContext(invocation("second")), second);
+    const { events, ...ordinaryLifecycle } = lifecycle;
+    if (events === undefined) throw new Error("Missing production Events program.");
+    const eventInvocation: InvocationIdentity = {
+      ...invocation("first"),
+      auth: { authType: "oauth", accessToken: "synthetic-first" },
+      client: { version: undefined },
+    };
+    const account = await events.resolvePrincipal(eventInvocation);
+    assert.equal(
+      await events.authorizeSubscription({
+        account,
+        event: "mail.wake",
+        arguments: { address: "chatgpt/relocated-unjoined" },
+        invocation: eventInvocation,
+        signal: abort.signal,
+      }),
+      undefined
+    );
     return serveTools({ ...config, serverAuth: { type: "apiKey", key } }, tools, {
-      ...lifecycle,
+      ...ordinaryLifecycle,
       resolveContext: (value: Identity.PeerInvocation) =>
         lifecycle.resolveContext({
           ...value,

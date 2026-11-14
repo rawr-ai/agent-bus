@@ -1,7 +1,7 @@
 // This child runs the real Events adapter and packed public host against the disposable Bus.
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
-import { eventsProgram } from "../../src/private-web/events.ts";
+import { authorizationDiagnostics, eventsProgram } from "../../src/private-web/events.ts";
 import { clerkPeerIdentity } from "../../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../../src/private-web/peer.ts";
 import { readPrivateJson } from "../../src/private-web/service.ts";
@@ -17,6 +17,7 @@ const config = JSON.parse(readFileSync(process.argv.at(-1) ?? "", "utf8")) as {
   readonly firstGrant: string;
   readonly secondGrant: string;
   readonly coverageTrace: string;
+  readonly authorizationTrace: string;
 };
 const host: typeof import("mcp-openapi") = await import(config.entry);
 const base = `http://127.0.0.1:${config.hostPort}`;
@@ -123,6 +124,9 @@ try {
         identity,
         wake,
         resource,
+        diagnostics: authorizationDiagnostics(true, (line) =>
+          appendFileSync(config.authorizationTrace, `${line}\n`)
+        ),
         storage: {
           path: config.eventsPath,
           maxBytes: 16 * 1024 * 1024,

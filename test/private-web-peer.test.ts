@@ -11,7 +11,7 @@ import { Message } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { Messages } from "../src/mcp.ts";
-import { eventsProgram } from "../src/private-web/events.ts";
+import { authorizationDiagnostics, eventsProgram } from "../src/private-web/events.ts";
 import {
   clerkPeerIdentity,
   clerkPeerResolver,
@@ -20,6 +20,7 @@ import {
 } from "../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 import * as Serve from "../src/serve.ts";
+import { WakeBinding } from "../src/wake-observation.ts";
 import { freshLedger } from "./fluree-server.ts";
 
 const key = new Uint8Array(32).fill(42);
@@ -514,10 +515,19 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
         bus.join({ address: sender, session: sender, runtime: "other", cwd: process.cwd() })
       )
     );
+    const lines: string[] = [];
+    const diagnostics = authorizationDiagnostics(true, (line) => lines.push(line));
+    const lastDiagnostic = (): unknown => {
+      const line = lines.at(-1);
+      const prefix = "[agent-bus] authorization-diagnostic ";
+      if (line === undefined || !line.startsWith(prefix)) throw new Error("Missing diagnostic.");
+      return JSON.parse(line.slice(prefix.length));
+    };
     const program = eventsProgram({
       identity: identityService,
       wake: peer.wake,
       resource,
+      diagnostics,
       storage: {
         path: "/fixture/events.db",
         maxBytes: 1_048_576,
@@ -541,6 +551,11 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
           signal,
         })
       ).toBeUndefined();
+      expect(lastDiagnostic()).toMatchObject({
+        type: "authorization",
+        callback: "subscription",
+        outcome: "native_observation_failed",
+      });
     }
     const event = program.definitions[0];
     if (event === undefined) throw new Error("Missing event.");
@@ -552,6 +567,11 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
       signal,
     });
     if (scope === undefined) throw new Error("Subscription was refused.");
+    expect(lastDiagnostic()).toMatchObject({
+      type: "authorization",
+      callback: "subscription",
+      outcome: "scope_returned",
+    });
     await server.runPromise(
       Effect.flatMap(Bus.Bus, (bus) =>
         bus.publish({ from: sender, session: sender, to: [name], body: "body-not-in-event" })
@@ -570,6 +590,23 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     expect(captured.kind).toBe("occurrence");
     expect(JSON.stringify(captured)).not.toContain("body-not-in-event");
     const delivery = { event: "mail.wake", arguments: { address: name }, signal };
+    const foreign = await identityService.resolveAuthorized(foreignConversation);
+    if (foreign.session === undefined) throw new Error("Missing foreign session.");
+    const binding = Schema.decodeUnknownSync(WakeBinding)(scope.binding);
+    expect(
+      await program.authorizeDelivery(
+        {
+          ...scope,
+          binding: { ...binding, session: foreign.session },
+        },
+        delivery
+      )
+    ).toEqual({ allowed: false });
+    expect(lastDiagnostic()).toMatchObject({
+      type: "authorization",
+      callback: "delivery",
+      outcome: "native_binding_failed",
+    });
     await call("bus_read", { address: name });
     await call("bus_activity", {
       address: name,
@@ -618,10 +655,16 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     await call("bus_leave", { address: name });
     await call("bus_join", { address: name });
     expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: false });
+    expect(lastDiagnostic()).toMatchObject({
+      type: "authorization",
+      callback: "delivery",
+      outcome: "native_binding_failed",
+    });
     const restarted = eventsProgram({
       identity: identityService,
       wake: peer.wake,
       resource,
+      diagnostics,
       storage: {
         path: "/fixture/events.db",
         maxBytes: 1_048_576,

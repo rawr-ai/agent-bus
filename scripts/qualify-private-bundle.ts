@@ -211,8 +211,32 @@ try {
   writeFileSync(keyFile, JSON.stringify({ key: randomBytes(32).toString("base64url") }), {
     mode: 0o600,
   });
+  const eventsKeyFile = join(dir, "events-key.json");
+  const eventsPath = join(dir, "events.db");
+  writeFileSync(eventsKeyFile, JSON.stringify({ key: randomBytes(32).toString("base64") }), {
+    mode: 0o600,
+  });
+  writeFileSync(eventsPath, "", { mode: 0o600, flag: "wx" });
+  const startup = {
+    ...config,
+    events: {
+      storagePath: eventsPath,
+      maxBytes: 1_048_576,
+      encryptionKeyFile: eventsKeyFile,
+    },
+  };
+  const startupConfig = join(dir, "startup-config.json");
+  writeFileSync(startupConfig, JSON.stringify(startup), { mode: 0o600 });
+  const falseConfig = join(dir, "false-config.json");
+  writeFileSync(falseConfig, JSON.stringify({ ...startup, requestDiagnostics: false }), {
+    mode: 0o600,
+  });
   const diagnosticConfig = join(dir, "diagnostic-config.json");
-  writeFileSync(diagnosticConfig, JSON.stringify({ ...config, requestDiagnostics: true }), {
+  writeFileSync(diagnosticConfig, JSON.stringify({ ...startup, requestDiagnostics: true }), {
+    mode: 0o600,
+  });
+  const toolsDiagnosticConfig = join(dir, "tools-diagnostic-config.json");
+  writeFileSync(toolsDiagnosticConfig, JSON.stringify({ ...config, requestDiagnostics: true }), {
     mode: 0o600,
   });
   const within = async <T>(work: Promise<T>, milliseconds: number): Promise<T | undefined> => {
@@ -229,6 +253,7 @@ try {
     }
   };
   const diagnosticPrefix = "[mcp-openapi] request-diagnostic ";
+  const authorizationPrefix = "[agent-bus] authorization-diagnostic ";
   type StderrReader = {
     read(): Promise<{ readonly done: boolean; readonly value?: Uint8Array | undefined }>;
     cancel(): Promise<void>;
@@ -255,7 +280,10 @@ try {
       reader.releaseLock();
     }
   };
-  const probeStartup = async (configPath: string, enabled: boolean) => {
+  const probeStartup = async (
+    configPath: string,
+    expected: { readonly host: boolean; readonly consumer: boolean }
+  ) => {
     const owned = ownership();
     const launched = owned.supervisor(
       spawnSupervised([process.execPath, "--no-env-file", join(relocated, "main.js"), configPath], {
@@ -383,11 +411,35 @@ try {
         return false;
       }
     });
-    if (enabled ? !hasAdmission : captured.text.includes(diagnosticPrefix))
+    const hasAuthorization = captured.text.split("\n").some((line) => {
+      if (!line.startsWith(authorizationPrefix)) return false;
+      try {
+        const record: unknown = JSON.parse(line.slice(authorizationPrefix.length));
+        return (
+          typeof record === "object" &&
+          record !== null &&
+          "type" in record &&
+          record.type === "enabled" &&
+          "maxRecords" in record &&
+          record.maxRecords === 52
+        );
+      } catch {
+        return false;
+      }
+    });
+    if (
+      (expected.host ? !hasAdmission : captured.text.includes(diagnosticPrefix)) ||
+      (expected.consumer ? !hasAuthorization : captured.text.includes(authorizationPrefix))
+    )
       throw new Error("Relocated production diagnostic setting was not observed.");
   };
-  await probeStartup(privateConfig, false);
-  await probeStartup(diagnosticConfig, true);
+  await probeStartup(startupConfig, { host: false, consumer: false });
+  await probeStartup(falseConfig, { host: false, consumer: false });
+  await probeStartup(diagnosticConfig, { host: true, consumer: true });
+  await probeStartup(toolsDiagnosticConfig, { host: true, consumer: false });
+  writeFileSync(privateConfig, JSON.stringify({ ...startup, requestDiagnostics: true }), {
+    mode: 0o600,
+  });
   const child = spawnSupervised(
     [
       process.execPath,
@@ -400,9 +452,15 @@ try {
       cwd: dir,
       env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
       stdout: "inherit",
-      stderr: "inherit",
+      stderr: "pipe",
     }
   );
+  const fixtureReader = child.stderr.getReader();
+  const fixtureDrain = drainStderr(fixtureReader).catch(() => ({
+    text: "",
+    overflow: false,
+    failed: true,
+  }));
   let timer: ReturnType<typeof setTimeout> | undefined;
   const deadline = new Promise<null>((resolve) => {
     timer = setTimeout(() => resolve(null), 30_000);
@@ -412,9 +470,39 @@ try {
   if (status === null) {
     child.kill();
     await child.exited;
-    throw new Error("Relocated fixture timed out.");
   }
+  const captured = await within(fixtureDrain, 2_000);
+  if (captured === undefined) {
+    await within(
+      fixtureReader.cancel().catch(() => undefined),
+      1_000
+    );
+    await within(fixtureDrain, 1_000);
+  }
+  if (status === null) throw new Error("Relocated fixture timed out.");
   assert.equal(status, 0);
+  if (captured === undefined || captured.failed || captured.overflow)
+    throw new Error("Relocated callback diagnostic capture failed.");
+  const hasCallbackOutcome = captured.text.split("\n").some((line) => {
+    if (!line.startsWith(authorizationPrefix)) return false;
+    try {
+      const record: unknown = JSON.parse(line.slice(authorizationPrefix.length));
+      return (
+        typeof record === "object" &&
+        record !== null &&
+        "type" in record &&
+        record.type === "authorization" &&
+        "callback" in record &&
+        record.callback === "subscription" &&
+        "outcome" in record &&
+        record.outcome === "native_observation_failed"
+      );
+    } catch {
+      return false;
+    }
+  });
+  if (!hasCallbackOutcome)
+    throw new Error("Relocated service did not emit a subscription authorization outcome.");
   assert(identityRequests.first > 0 && identityRequests.second > 0);
 } finally {
   provider?.stop(true);

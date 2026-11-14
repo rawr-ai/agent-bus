@@ -1,6 +1,10 @@
 import { expect, test } from "bun:test";
 import type { EventsValue, InvocationIdentity } from "mcp-openapi";
-import { eventsProgram } from "../src/private-web/events.ts";
+import {
+  type AuthorizationDiagnosticObserver,
+  authorizationDiagnostics,
+  eventsProgram,
+} from "../src/private-web/events.ts";
 import { clerkPeerIdentity, PEER_PERMISSION } from "../src/private-web/identity.ts";
 import { wakePort } from "../src/private-web/peer.ts";
 import type { WakeBinding } from "../src/wake-observation.ts";
@@ -16,7 +20,7 @@ const invocation = (token = "first", chat?: string): InvocationIdentity => ({
   ...(chat === undefined ? {} : { requestMeta: { "openai/session": chat } }),
 });
 
-const fixture = async () => {
+const fixture = async (diagnostics?: AuthorizationDiagnosticObserver) => {
   const reads: string[] = [];
   const calls: Array<{ name: string; args: Record<string, unknown>; signal?: AbortSignal }> = [];
   const grants = new Map<string, unknown>([
@@ -31,7 +35,7 @@ const fixture = async () => {
       { subject: "first", grantFile: "/first" },
       { subject: "second", grantFile: "/second" },
     ],
-    identify: async (token) => (token === "rotated" ? "first" : token),
+    identify: async (token) => (["rotated", "TOKEN_CANARY"].includes(token) ? "first" : token),
     readGrant: async (path) => {
       reads.push(path);
       return grants.get(path);
@@ -52,6 +56,9 @@ const fixture = async () => {
     observation: Record<string, unknown>;
     check: Record<string, unknown>;
     fail: boolean;
+    isError: boolean;
+    thrown: unknown;
+    beforeReturn?: () => void;
   } = {
     observation: {
       binding,
@@ -63,10 +70,15 @@ const fixture = async () => {
     },
     check: { binding, observationCut: { head: 19, incarnation: binding.incarnation } },
     fail: false,
+    isError: false,
+    thrown: new Error("native failure"),
   };
   const wake = wakePort(async (name, args, callSignal) => {
     calls.push({ name, args, ...(callSignal === undefined ? {} : { signal: callSignal }) });
-    if (state.fail) throw new Error("native failure");
+    if (state.fail) throw state.thrown;
+    state.beforeReturn?.();
+    if (state.isError)
+      return { isError: true, content: [{ type: "text", text: "NATIVE_ERROR_CANARY" }] };
     return {
       content: [],
       structuredContent: name === "bus_observe_wake" ? state.observation : state.check,
@@ -76,6 +88,7 @@ const fixture = async () => {
     identity,
     wake,
     resource,
+    diagnostics,
     storage: {
       path: "/private/events.db",
       maxBytes: 1_048_576,
@@ -88,6 +101,7 @@ const fixture = async () => {
   return {
     actor,
     identity,
+    wake,
     account,
     definition,
     program,
@@ -99,6 +113,566 @@ const fixture = async () => {
     state,
   };
 };
+
+const diagnosticPrefix = "[agent-bus] authorization-diagnostic ";
+const outcomes = {
+  account: ["allowed", "refused"],
+  subscription: [
+    "input_refused",
+    "context_refused",
+    "correlation_metadata_absent",
+    "correlation_key_absent",
+    "correlation_unusable",
+    "account_mismatch",
+    "native_observation_failed",
+    "scope_returned",
+    "cancelled",
+  ],
+  delivery: ["scope_refused", "grant_refused", "native_binding_failed", "allowed", "cancelled"],
+};
+const object = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+const diagnosticRecords = (lines: string[]) =>
+  lines.map((line) => {
+    expect(Buffer.byteLength(line, "utf8")).toBeLessThanOrEqual(256);
+    expect(line.startsWith(diagnosticPrefix)).toBe(true);
+    const value: unknown = JSON.parse(line.slice(diagnosticPrefix.length));
+    if (!object(value)) throw new Error("Non-object diagnostic.");
+    expect(value.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/);
+    if (value.type === "enabled") {
+      expect(Object.keys(value).sort()).toEqual(["maxRecords", "timestamp", "type"]);
+      expect(value.maxRecords).toBe(52);
+    } else if (value.type === "exhausted") {
+      expect(Object.keys(value).sort()).toEqual(["callback", "timestamp", "type"]);
+      if (typeof value.callback !== "string") throw new Error("Unknown callback.");
+      expect(["account", "subscription", "delivery"]).toContain(value.callback);
+    } else {
+      expect(value.type).toBe("authorization");
+      expect(Object.keys(value).sort()).toEqual(["callback", "outcome", "timestamp", "type"]);
+      if (
+        value.callback !== "account" &&
+        value.callback !== "subscription" &&
+        value.callback !== "delivery"
+      )
+        throw new Error("Unknown callback.");
+      if (typeof value.outcome !== "string") throw new Error("Unknown outcome.");
+      expect(outcomes[value.callback]).toContain(value.outcome);
+    }
+    return value;
+  });
+
+test("diagnostics reserve independent callback budgets and cap all controls and outcomes at 52", async () => {
+  const lines: string[] = [];
+  expect(authorizationDiagnostics(undefined, (line) => lines.push(line))).toBeUndefined();
+  expect(authorizationDiagnostics(false, (line) => lines.push(line))).toBeUndefined();
+  expect(lines).toEqual([]);
+  const observe = authorizationDiagnostics(true, (line) => lines.push(line));
+  if (observe === undefined) throw new Error("Missing diagnostic observer.");
+  for (let i = 0; i < 40; i++) observe("delivery", "allowed");
+  observe("subscription", "scope_returned");
+  expect(diagnosticRecords(lines).at(-1)).toMatchObject({
+    type: "authorization",
+    callback: "subscription",
+    outcome: "scope_returned",
+  });
+  for (let i = 0; i < 10; i++) observe("subscription", "context_refused");
+  for (let i = 0; i < 10; i++) observe("account", "refused");
+  const records = diagnosticRecords(lines);
+  expect(records).toHaveLength(52);
+  for (const [callback, count] of [
+    ["account", 8],
+    ["subscription", 8],
+    ["delivery", 32],
+  ] as const) {
+    expect(
+      records.filter((record) => record.type === "authorization" && record.callback === callback)
+    ).toHaveLength(count);
+    expect(
+      records.filter((record) => record.type === "exhausted" && record.callback === callback)
+    ).toHaveLength(1);
+  }
+  for (let i = 0; i < 10; i++) {
+    observe("account", "allowed");
+    observe("subscription", "scope_returned");
+    observe("delivery", "allowed");
+  }
+  expect(lines).toHaveLength(52);
+});
+
+test("a throwing diagnostic writer consumes its own budget but never the others", () => {
+  const hostile = new Proxy(
+    {},
+    {
+      get: () => {
+        throw new Error("must not inspect");
+      },
+    }
+  );
+  const lines: string[] = [];
+  let fail = true;
+  let attempts = 0;
+  const observe = authorizationDiagnostics(true, (line) => {
+    attempts++;
+    if (fail) throw hostile;
+    lines.push(line);
+  });
+  if (observe === undefined) throw new Error("Missing diagnostic observer.");
+  for (let i = 0; i < 8; i++) observe("account", "allowed");
+  fail = false;
+  for (let i = 0; i < 10; i++) observe("account", "allowed");
+  observe("subscription", "scope_returned");
+  expect(attempts).toBe(11);
+  expect(diagnosticRecords(lines)).toMatchObject([
+    { type: "exhausted", callback: "account" },
+    { type: "authorization", callback: "subscription", outcome: "scope_returned" },
+  ]);
+});
+
+test("delivery worker exhaustion still leaves a fresh subscription's evidence", async () => {
+  const lines: string[] = [];
+  const f = await fixture(authorizationDiagnostics(true, (line) => lines.push(line)));
+  const scope = { principal: f.account.principal, resource, binding: f.binding };
+  const context = { event: "mail.wake", arguments: { address }, signal };
+  for (let i = 0; i < 40; i++)
+    expect(await f.program.authorizeDelivery(scope, context)).toEqual({ allowed: true });
+  expect(diagnosticRecords(lines).at(-1)).toMatchObject({
+    type: "exhausted",
+    callback: "delivery",
+  });
+  expect(
+    await f.program.authorizeSubscription({
+      account: f.account,
+      event: "mail.wake",
+      arguments: { address },
+      invocation: invocation("first", "chat"),
+      signal,
+    })
+  ).toEqual(scope);
+  expect(diagnosticRecords(lines).at(-1)).toMatchObject({
+    type: "authorization",
+    callback: "subscription",
+    outcome: "scope_returned",
+  });
+});
+
+test("diagnostics are behavior-inert for admission, delivery and hostile synchronous writers", async () => {
+  const cases = [
+    ["account_allowed", "account", "allowed"],
+    ["account_bad_token", "account", "refused"],
+    ["active", "subscription", "scope_returned"],
+    ["inactive", "subscription", "scope_returned"],
+    ["empty", "subscription", "scope_returned"],
+    ["no_chat", "subscription", "correlation_metadata_absent"],
+    ["no_chat_key", "subscription", "correlation_key_absent"],
+    ["blank_chat", "subscription", "correlation_unusable"],
+    ["empty_chat", "subscription", "correlation_unusable"],
+    ["nul_chat", "subscription", "correlation_unusable"],
+    ["long_chat", "subscription", "correlation_unusable"],
+    ["numeric_chat", "subscription", "correlation_unusable"],
+    ["chat_canary", "subscription", "native_observation_failed"],
+    ["bad_token", "subscription", "context_refused"],
+    ["deleted_grant", "subscription", "context_refused"],
+    ["bad_grant", "subscription", "context_refused"],
+    ["mismatch", "subscription", "account_mismatch"],
+    ["wrong_event", "subscription", "input_refused"],
+    ["wrong_filter", "subscription", "input_refused"],
+    ["native_error", "subscription", "native_observation_failed"],
+    ["native_throw", "subscription", "native_observation_failed"],
+    ["native_malformed", "subscription", "native_observation_failed"],
+    ["cancelled", "subscription", "cancelled"],
+    ["cancelled_invocation", "subscription", "cancelled"],
+    ["cancelled_native", "subscription", "cancelled"],
+    ["delivery_allowed", "delivery", "allowed"],
+    ["delivery_wrong_event", "delivery", "scope_refused"],
+    ["delivery_wrong_filter", "delivery", "scope_refused"],
+    ["delivery_bad_binding", "delivery", "scope_refused"],
+    ["delivery_bad_resource", "delivery", "scope_refused"],
+    ["delivery_deleted_grant", "delivery", "grant_refused"],
+    ["delivery_native_error", "delivery", "native_binding_failed"],
+    ["delivery_native_throw", "delivery", "native_binding_failed"],
+    ["delivery_native_malformed", "delivery", "native_binding_failed"],
+    ["delivery_cancelled", "delivery", "cancelled"],
+    ["delivery_cancelled_native", "delivery", "cancelled"],
+  ] as const;
+  const hostile = new Proxy(
+    {},
+    {
+      get: () => {
+        throw new Error("must not inspect a thrown value");
+      },
+      getPrototypeOf: () => {
+        throw new Error("must not inspect a thrown value");
+      },
+    }
+  );
+  const run = async (
+    name: (typeof cases)[number][0],
+    callback: (typeof cases)[number][1],
+    diagnostics: AuthorizationDiagnosticObserver | undefined
+  ) => {
+    const f = await fixture(diagnostics);
+    f.reads.length = 0;
+    f.calls.length = 0;
+    const abort = new AbortController();
+    let sub: Parameters<typeof f.program.authorizeSubscription>[0] = {
+      account: f.account,
+      event: "mail.wake",
+      arguments: { address },
+      invocation: invocation("TOKEN_CANARY", "chat"),
+      signal: abort.signal,
+    };
+    let scope: Parameters<typeof f.program.authorizeDelivery>[0] = {
+      principal: f.account.principal,
+      resource,
+      binding: f.binding,
+    };
+    let context: Parameters<typeof f.program.authorizeDelivery>[1] = {
+      event: "mail.wake",
+      arguments: { address },
+      signal: abort.signal,
+    };
+    switch (name) {
+      case "inactive":
+        f.state.observation = { ...f.state.observation, ready: false, news: false };
+        delete f.state.observation.latestEligibleAt;
+        break;
+      case "empty":
+        f.state.observation = { ...f.state.observation, news: false };
+        break;
+      case "no_chat":
+        sub = { ...sub, invocation: invocation("first") };
+        break;
+      case "no_chat_key":
+        sub = { ...sub, invocation: { ...invocation("first"), requestMeta: {} } };
+        break;
+      case "blank_chat":
+        sub = { ...sub, invocation: invocation("first", " \t") };
+        break;
+      case "empty_chat":
+        sub = { ...sub, invocation: invocation("first", "") };
+        break;
+      case "nul_chat":
+        sub = { ...sub, invocation: invocation("first", "chat\u0000CANARY") };
+        break;
+      case "long_chat":
+        sub = { ...sub, invocation: invocation("first", "x".repeat(1025)) };
+        break;
+      case "numeric_chat":
+        sub = {
+          ...sub,
+          invocation: { ...invocation("first"), requestMeta: { "openai/session": 9 } },
+        };
+        break;
+      case "chat_canary":
+        sub = { ...sub, invocation: invocation("first", "CHAT_CANARY") };
+        break;
+      case "bad_token":
+        sub = { ...sub, invocation: invocation("UNKNOWN_TOKEN_CANARY", "chat") };
+        break;
+      case "deleted_grant":
+      case "delivery_deleted_grant":
+        f.grants.delete("/first");
+        break;
+      case "bad_grant":
+        f.grants.set("/first", {
+          subject: "first",
+          resource,
+          permissions: [PEER_PERMISSION],
+          extra: "GRANT_CANARY",
+        });
+        break;
+      case "mismatch":
+        sub = { ...sub, invocation: invocation("second", "chat") };
+        break;
+      case "wrong_event":
+        sub = { ...sub, event: "mail.other" };
+        break;
+      case "wrong_filter":
+        sub = { ...sub, arguments: { address: "codex/ADDRESS_CANARY" } };
+        break;
+      case "delivery_wrong_event":
+        context = { ...context, event: "mail.other" };
+        break;
+      case "delivery_wrong_filter":
+        context = { ...context, arguments: { address: "codex/ADDRESS_CANARY" } };
+        break;
+      case "delivery_bad_binding":
+        scope = { ...scope, binding: { ...f.binding, address: "chatgpt/BINDING_CANARY" } };
+        break;
+      case "delivery_bad_resource":
+        scope = { ...scope, resource: "https://private.invalid/mcp" };
+        break;
+      case "native_error":
+      case "delivery_native_error":
+        f.state.isError = true;
+        break;
+      case "native_throw":
+      case "delivery_native_throw":
+        f.state.fail = true;
+        f.state.thrown = hostile;
+        break;
+      case "native_malformed":
+        f.state.observation = { ...f.state.observation, extra: "OBSERVATION_CANARY" };
+        break;
+      case "delivery_native_malformed":
+        f.state.check = { ...f.state.check, extra: "BINDING_CANARY" };
+        break;
+      case "cancelled":
+      case "delivery_cancelled":
+        abort.abort();
+        break;
+      case "cancelled_invocation":
+        abort.abort();
+        sub = { ...sub, signal, invocation: { ...sub.invocation, signal: abort.signal } };
+        break;
+      case "cancelled_native":
+      case "delivery_cancelled_native":
+        f.state.beforeReturn = () => abort.abort();
+        break;
+    }
+    const result =
+      callback === "account"
+        ? await Promise.resolve(
+            f.program.resolvePrincipal(
+              invocation(name === "account_bad_token" ? "UNKNOWN_TOKEN_CANARY" : "first")
+            )
+          ).then(
+            (value) => ({ value }),
+            () => ({ rejected: true })
+          )
+        : callback === "subscription"
+          ? await f.program.authorizeSubscription(sub)
+          : await f.program.authorizeDelivery(scope, context);
+    return {
+      result,
+      reads: f.reads,
+      calls: f.calls.map(({ name: call, args }) => ({ name: call, args })),
+    };
+  };
+  for (const [name, callback, expected] of cases) {
+    const baseline = await run(name, callback, authorizationDiagnostics(false));
+    for (const mode of ["capture", "error", "primitive", "proxy"] as const) {
+      const lines: string[] = [];
+      let writes = 0;
+      const diagnostics = authorizationDiagnostics(true, (line) => {
+        writes++;
+        lines.push(line);
+        if (mode === "error") throw new Error("https://private.invalid/?token=TOKEN_CANARY");
+        if (mode === "primitive") throw "THROWN_CANARY";
+        if (mode === "proxy") throw hostile;
+      });
+      expect(await run(name, callback, diagnostics)).toEqual(baseline);
+      expect(writes).toBe(3);
+      const records = diagnosticRecords(lines);
+      expect(records.map(({ type, callback, outcome }) => ({ type, callback, outcome }))).toEqual([
+        { type: "enabled", callback: undefined, outcome: undefined },
+        { type: "authorization", callback: "account", outcome: "allowed" },
+        { type: "authorization", callback, outcome: expected },
+      ]);
+      for (const canary of [
+        "TOKEN_CANARY",
+        "CHAT_CANARY",
+        "ADDRESS_CANARY",
+        "BINDING_CANARY",
+        "GRANT_CANARY",
+        "OBSERVATION_CANARY",
+        "NATIVE_ERROR_CANARY",
+        "https://private.invalid",
+        "openai/session",
+      ])
+        expect(lines.join("\n")).not.toContain(canary);
+    }
+  }
+});
+
+test("metadata classification is value-free, disabled when absent and tolerates hostile proxies", async () => {
+  for (const enabled of [false, true]) {
+    const lines: string[] = [];
+    const f = await fixture(authorizationDiagnostics(enabled, (line) => lines.push(line)));
+    let metadataReads = 0;
+    let valueReads = 0;
+    let presenceChecks = 0;
+    const metadata = new Proxy<Record<string, unknown>>(
+      {},
+      {
+        get: () => {
+          valueReads++;
+          return undefined;
+        },
+        has: () => {
+          presenceChecks++;
+          throw new Error("PROXY_CANARY");
+        },
+      }
+    );
+    const request = {
+      ...invocation("first"),
+      get requestMeta() {
+        metadataReads++;
+        return metadata;
+      },
+    };
+    expect(
+      await f.program.authorizeSubscription({
+        account: f.account,
+        event: "mail.wake",
+        arguments: { address },
+        invocation: request,
+        signal,
+      })
+    ).toBeUndefined();
+    expect(f.calls).toHaveLength(0);
+    expect(valueReads).toBe(1);
+    expect(metadataReads).toBe(enabled ? 2 : 1);
+    expect(presenceChecks).toBe(enabled ? 1 : 0);
+    if (enabled)
+      expect(
+        diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+      ).toEqual([
+        { type: "enabled", callback: undefined, outcome: undefined },
+        { type: "authorization", callback: "account", outcome: "allowed" },
+        { type: "authorization", callback: "subscription", outcome: "correlation_unusable" },
+      ]);
+    else expect(lines).toEqual([]);
+  }
+});
+
+test("account exceptions and observer exceptions preserve the exact original decision", async () => {
+  const f = await fixture();
+  const hostile = new Proxy(
+    {},
+    {
+      get: () => {
+        throw new Error("must not inspect");
+      },
+    }
+  );
+  const storage = { path: "/private/events.db", maxBytes: 1_048_576, encryptionKey: "fixture" };
+  const lines: string[] = [];
+  for (const diagnostics of [
+    undefined,
+    authorizationDiagnostics(true, (line) => lines.push(line)),
+    () => {
+      throw hostile;
+    },
+  ]) {
+    const program = eventsProgram({
+      identity: {
+        ...f.identity,
+        resolveAccount: async () => {
+          throw hostile;
+        },
+      },
+      wake: f.wake,
+      resource,
+      storage,
+      diagnostics,
+    });
+    expect(
+      await Promise.resolve(program.resolvePrincipal(invocation())).then(
+        () => false,
+        (error: unknown) => error === hostile
+      )
+    ).toBe(true);
+    expect(
+      await program.authorizeSubscription({
+        account: f.account,
+        event: "mail.wake",
+        arguments: { address },
+        invocation: invocation("first", "chat"),
+        signal,
+      })
+    ).toEqual({ principal: f.account.principal, resource, binding: f.binding });
+  }
+  expect(
+    diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+  ).toEqual([
+    { type: "enabled", callback: undefined, outcome: undefined },
+    { type: "authorization", callback: "account", outcome: "refused" },
+    { type: "authorization", callback: "subscription", outcome: "scope_returned" },
+  ]);
+});
+
+test("overlapping authorizations report completion order without attribution", async () => {
+  const f = await fixture();
+  const first = Promise.withResolvers<typeof f.actor>();
+  const second = Promise.withResolvers<typeof f.actor>();
+  const lines: string[] = [];
+  const program = eventsProgram({
+    identity: {
+      ...f.identity,
+      resolveAuthorized: (request) =>
+        request.auth?.accessToken === "first" ? first.promise : second.promise,
+    },
+    wake: f.wake,
+    resource,
+    diagnostics: authorizationDiagnostics(true, (line) => lines.push(line)),
+    storage: { path: "/private/events.db", maxBytes: 1_048_576, encryptionKey: "fixture" },
+  });
+  const authorize = (token: string) =>
+    program.authorizeSubscription({
+      account: f.account,
+      event: "mail.wake",
+      arguments: { address },
+      invocation: invocation(token, "chat"),
+      signal,
+    });
+  const a = authorize("first");
+  const b = authorize("second");
+  second.resolve(f.actor);
+  expect(await b).toBeDefined();
+  first.reject(new Error("PRIVATE_FAILURE_CANARY"));
+  expect(await a).toBeUndefined();
+  expect(
+    diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+  ).toEqual([
+    { type: "enabled", callback: undefined, outcome: undefined },
+    { type: "authorization", callback: "subscription", outcome: "scope_returned" },
+    { type: "authorization", callback: "subscription", outcome: "context_refused" },
+  ]);
+  expect(lines.join("\n")).not.toContain("PRIVATE_FAILURE_CANARY");
+});
+
+test("the Events public program and schemas stay fixed and samples never emit diagnostics", async () => {
+  const lines: string[] = [];
+  const off = await fixture();
+  const disabled = await fixture(authorizationDiagnostics(false));
+  const on = await fixture(authorizationDiagnostics(true, (line) => lines.push(line)));
+  expect(off.program.resolvePrincipal).toBe(off.identity.resolveAccount);
+  expect(disabled.program.resolvePrincipal).toBe(disabled.identity.resolveAccount);
+  expect(on.program.resolvePrincipal).not.toBe(on.identity.resolveAccount);
+  expect(Object.keys(on.program).sort()).toEqual(Object.keys(off.program).sort());
+  expect(on.program.definitions.map(({ name }) => name)).toEqual(
+    off.program.definitions.map(({ name }) => name)
+  );
+  expect(
+    on.definition.inputSchema["~standard"].jsonSchema.input({ target: "draft-2020-12" })
+  ).toEqual(off.definition.inputSchema["~standard"].jsonSchema.input({ target: "draft-2020-12" }));
+  expect(
+    on.definition.payloadSchema["~standard"].jsonSchema.input({ target: "draft-2020-12" })
+  ).toEqual(
+    off.definition.payloadSchema["~standard"].jsonSchema.input({ target: "draft-2020-12" })
+  );
+  const before = lines.length;
+  await on.definition.source.sample({
+    principal: { principal: on.account.principal, resource, binding: on.binding },
+    filter: { address },
+    checkpoint: undefined,
+    reason: "activation",
+    revision: 1,
+    generation: 1,
+    waitMs: 0,
+    signal,
+  });
+  expect(lines).toHaveLength(before);
+  expect(
+    diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
+  ).toEqual([
+    { type: "enabled", callback: undefined, outcome: undefined },
+    { type: "authorization", callback: "account", outcome: "allowed" },
+  ]);
+});
 
 test("account control is independent of correlation and grant while subscription is freshly authorized", async () => {
   const f = await fixture();
