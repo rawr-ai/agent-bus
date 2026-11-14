@@ -138,7 +138,7 @@ try {
     root,
     cloneEnv
   );
-  const privateArchive = "dist/private-artifacts/mcp-openapi-1.2.0-events.3.tgz";
+  const privateArchive = "dist/private-artifacts/mcp-openapi-1.2.0-events.4.tgz";
   check("cloneHasNoPrivateArchive", !existsSync(join(clone, privateArchive)));
   must(
     [bun, "install", "--production", "--frozen-lockfile", "--ignore-scripts"],
@@ -172,12 +172,15 @@ try {
   // The private peer is a separate review artifact, not a native release dependency or payload.
   const privateMarkers = [
     privateArchive,
+    "mcp-openapi-1.2.0-events.4.tgz",
     "mcp-openapi-1.2.0-events.3.tgz",
     "mcp-openapi",
     "agent-bus-private-peer-review-v1",
     "agent-bus-mail-wake-v1",
     "c8a868cdd84a5026a572dad95f6fa335d0fd09d52304f77f7526bba485045247",
     "c076ea2a9d1396bc45cd5b5d2c767268991bc41ba12392eb78b30a409c381b91",
+    "72962e508686badfb36358b43b3bc14bc87721364c20c4a505ed88e2faa3ec73",
+    "ea4cf91888e84422a3216b5d549f40cb5c918e55e25da3699dc8241e521bc69a",
   ];
   const privatePath = (path: string) =>
     path

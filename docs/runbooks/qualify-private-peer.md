@@ -4,16 +4,16 @@ Exercise the hosted peer projection and its pinned direct host against a disposa
 
 ## Before you start
 
-Use a development worktree, the pinned Bun and Fluree on `PATH`, `gh` with access to the private host repository, and `openssl` for a disposable local certificate. The tests start a supervised disposable Fluree instance and never load live provider credentials or a live ledger.
+Use a development worktree, the pinned Bun and Fluree on `PATH`, `gh` with access to the private host repository, and `openssl` for a disposable local certificate. Put the pinned Bun first on `PATH` for nested commands too, and check `bun --revision` against the [selected host cohort](../platforms/mcp-openapi.md#direct-host-and-http-admission); an absolute parent executable alone does not select nested bare `bun` commands. Older host runtimes are not a supported fallback. The tests start a supervised disposable Fluree instance and never load live provider credentials or a live ledger.
 
 The Events consumer uses the genuine host package's exported types, not copied interfaces. The full developer installation has an explicit private-artifact prerequisite. Authenticate the GitHub CLI through the normal external credential mechanism, download the released archive into its ignored relative location, and verify the externally anchored SHA-256 before the normal frozen Bun install. From the checkout root:
 
 ```sh
 mkdir -p dist/private-artifacts
-gh release download v1.2.0-events.3 --repo rawr-ai/mcp-openapi \
-  --pattern mcp-openapi-1.2.0-events.3.tgz --dir dist/private-artifacts
-HOST_ARCHIVE="$PWD/dist/private-artifacts/mcp-openapi-1.2.0-events.3.tgz"
-printf '%s  %s\n' c8a868cdd84a5026a572dad95f6fa335d0fd09d52304f77f7526bba485045247 "$HOST_ARCHIVE" | shasum -a 256 -c -
+gh release download v1.2.0-events.4 --repo rawr-ai/mcp-openapi \
+  --pattern mcp-openapi-1.2.0-events.4.tgz --dir dist/private-artifacts
+HOST_ARCHIVE="$PWD/dist/private-artifacts/mcp-openapi-1.2.0-events.4.tgz"
+printf '%s  %s\n' 72962e508686badfb36358b43b3bc14bc87721364c20c4a505ed88e2faa3ec73 "$HOST_ARCHIVE" | shasum -a 256 -c -
 bun install --frozen-lockfile
 ```
 
