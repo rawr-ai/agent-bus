@@ -179,6 +179,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_wait: changes,
       bus_wake: changes,
       bus_observe_wake: lookup,
+      bus_check_wake_binding: lookup,
       bus_owned_addresses: lookup,
       bus_peers: lookup,
       bus_history: lookup,
@@ -253,6 +254,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_wait: ["messages"],
       bus_wake: ["addresses", "owns", "superseded"],
       bus_observe_wake: ["binding", "observationCut", "ready", "news"],
+      bus_check_wake_binding: ["binding", "observationCut"],
       bus_owned_addresses: ["addresses"],
       bus_peers: ["peers"],
       bus_history: ["messages"],
@@ -306,11 +308,19 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     const body = `over ${version}`;
     const published = await succeed("bus_publish", { from: b, session: sid(b), to: [a], body });
     expect(published).toEqual({ id: expect.any(String), ts: expect.any(String) });
-    expect(await succeed("bus_observe_wake", { address: a, session: sid(a) })).toMatchObject({
+    const observed = await succeed("bus_observe_wake", { address: a, session: sid(a) });
+    expect(observed).toMatchObject({
       ready: true,
       news: true,
       nextCoverage: { rung: [published.id] },
     });
+    expect(
+      await succeed("bus_check_wake_binding", {
+        address: a,
+        session: sid(a),
+        expectedBinding: observed.binding,
+      })
+    ).toMatchObject({ binding: observed.binding });
     expect(await succeed("bus_read", { address: a, session: sid(a) })).toMatchObject({
       messages: [{ id: published.id, from: b, to: [a], body }],
     });

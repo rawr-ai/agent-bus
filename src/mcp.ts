@@ -51,9 +51,11 @@ import {
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS, SAVED_QUERY_DEADLINE_SECONDS } from "./timing.ts";
 import {
+  CheckWakeBindingRequest,
   MAX_WAKE_COVERAGE_IDS,
   MAX_WAKE_OBSERVATION_BYTES,
   ObserveWakeRequest,
+  WakeBindingCheck,
   WakeObservation,
 } from "./wake-observation.ts";
 
@@ -580,6 +582,15 @@ const ObserveWake = Tool.make("bus_observe_wake", {
   .annotateMerge(Lookup)
   .annotate(Tool.Strict, true);
 
+const CheckWakeBinding = Tool.make("bus_check_wake_binding", {
+  description: `Internal loopback check of a complete captured native holding, not mail observation or subscription authority by itself. Returns binding and observationCut only after current session/runtime/local-installation/history/run checks. Ordinary renewal preserves the run; leave/rejoin, takeover, replay, runtime or history change refuses the captured binding. No mail, cursor, activity or mute eligibility is read; no state, native marks, hooks or waiters change. Already captured notices are not invalidated by later read, mute, inactivity or oversized unread backlog. Primary presence damage or unavailable authority refuses, never substitutes a new binding. Complete arguments and duplicated text/structured result carrier each fit ${MAX_WAKE_OBSERVATION_BYTES} UTF-8 JSON bytes, excluding JSON-RPC framing. A later cross-machine change can race this cut; external sends must also pass current grants, finite lease and callback checks. Not exposed by the hosted peer.`,
+  parameters: CheckWakeBindingRequest,
+  success: WakeBindingCheck,
+  failure: Failure,
+})
+  .annotateMerge(Lookup)
+  .annotate(Tool.Strict, true);
+
 // Not read-only: it moves the mark of what the session was woken for.
 const Wake = Tool.make("bus_wake", {
   description: `For agent-bus's Claude Code hook, which wakes the session; sessions don't call this. Waits up to ${MAX_WAIT_SECONDS} seconds for previously unwoken mail to an address the session joined as Claude from this bus installation, and returns those addresses. A compact hook uses fresh to ring unchanged unread mail again and exits after its first nonempty response. Returns no message bodies and acknowledges no mail; a newer call from the same session ends this one.`,
@@ -818,6 +829,7 @@ const BusToolkit = Toolkit.make(
   Wait,
   Wake,
   ObserveWake,
+  CheckWakeBinding,
   Owned,
   ListPeers,
   History,
@@ -1022,6 +1034,7 @@ const BusHandlers = BusToolkit.toLayer(
           .pipe(Effect.map(publicMessages)),
       bus_wake: ({ session, fresh }) => bus.wake(session, MAX_WAIT_SECONDS, fresh),
       bus_observe_wake: (params) => bus.observeWake(params),
+      bus_check_wake_binding: (params) => bus.checkWakeBinding(params),
       bus_owned_addresses: ({ session, runtime }) =>
         ownedAddresses(session, runtime).pipe(Effect.provideService(Bus, bus)),
       bus_peers: () => queries(peersPreset),

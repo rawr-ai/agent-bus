@@ -64,6 +64,7 @@ const fixture = () => {
   let inserts = 0;
   let incarnation = "instance";
   let afterWindow: (() => void) | undefined;
+  let afterPresence: (() => void) | undefined;
   let held: (() => void) | undefined;
   const windows: Array<string> = [];
   const presenceSelects: Array<unknown> = [];
@@ -87,7 +88,10 @@ const fixture = () => {
           presenceSelects.push(
             typeof query === "object" && query !== null && "select" in query ? query.select : null
           );
-          return Response.json(presences.map(presenceRow));
+          const rows = presences.map(presenceRow);
+          afterPresence?.();
+          afterPresence = undefined;
+          return Response.json(rows);
         }
         if (held !== undefined) {
           held();
@@ -115,10 +119,15 @@ const fixture = () => {
   );
   let cursor = 0;
   let writes = 0;
+  let cursorReads = 0;
   const cursors = Layer.succeed(
     Cursors,
     Cursors.of({
-      get: () => Effect.sync(() => Option.some(cursor)),
+      get: () =>
+        Effect.sync(() => {
+          cursorReads++;
+          return Option.some(cursor);
+        }),
       set: (_address, next) =>
         Effect.sync(() => {
           cursor = next;
@@ -145,6 +154,12 @@ const fixture = () => {
     },
     state: () => ({ cursor, writes, inserts, windows: [...windows] }),
     presenceSelects: () => presenceSelects,
+    cursorReads: () => cursorReads,
+    replaceAfterPresence: () => {
+      afterPresence = () => {
+        incarnation = "replacement";
+      };
+    },
     replaceAfterWindow: () => {
       afterWindow = () => {
         incarnation = "replacement";
@@ -192,6 +207,53 @@ describe("complete Fluree reads", () => {
           f.replaceAfterWindow();
           expect((yield* Effect.flip(observe))._tag).toBe("LedgerError");
           expect(f.state()).toMatchObject({ cursor: 0, writes: 0, inserts: 0 });
+        }).pipe(Effect.provide(f.bus))
+      );
+    } finally {
+      f.stop();
+    }
+  });
+
+  test("binding-only authority refuses malformed presence and same-head replacement without mail or cursor access", async () => {
+    const f = fixture();
+    const expectedBinding: Parameters<
+      Bus.Bus["Service"]["checkWakeBinding"]
+    >[0]["expectedBinding"] = {
+      address: "codex/a",
+      session: "owner",
+      runtime: "codex",
+      installation: "test-installation",
+      incarnation: "instance",
+      run: "join",
+    };
+    try {
+      await Effect.runPromise(
+        Effect.gen(function* () {
+          const bus = yield* Bus.Bus;
+          const check = bus.checkWakeBinding({
+            address: "codex/a",
+            session: "owner",
+            expectedBinding,
+          });
+          // Deliberately malformed mail is irrelevant to binding authority.
+          f.set({
+            head: 502,
+            entries: [[malformed, 501]],
+            presences: [[presence("join", "owner"), 1]],
+          });
+          expect((yield* check).binding).toEqual(expectedBinding);
+          expect(f.state()).toMatchObject({ cursor: 0, writes: 0, inserts: 0, windows: [] });
+          f.set({ head: 502, entries: [], presences: [[malformed, 1]] });
+          expect((yield* Effect.flip(check))._tag).toBe("LedgerError");
+          f.set({
+            head: 502,
+            entries: [[malformed, 501]],
+            presences: [[presence("join", "owner"), 1]],
+          });
+          f.replaceAfterPresence();
+          expect((yield* Effect.flip(check))._tag).toBe("LedgerError");
+          expect(f.cursorReads()).toBe(0);
+          expect(f.state()).toMatchObject({ cursor: 0, writes: 0, inserts: 0, windows: [] });
         }).pipe(Effect.provide(f.bus))
       );
     } finally {

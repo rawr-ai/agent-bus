@@ -40,6 +40,22 @@ export const WakeCoverage = Schema.Struct({
 });
 export type WakeCoverage = typeof WakeCoverage.Type;
 
+export const CheckWakeBindingRequest = Schema.Struct({
+  address: Identity.annotate({
+    description: "The exact address whose captured holding is being checked.",
+  }),
+  session: Schema.optionalKey(
+    Schema.String.annotate({
+      description: "Its native owner session; missing, blank or placeholder values refuse.",
+    })
+  ),
+  expectedBinding: WakeBinding.annotate({
+    description:
+      "The complete captured holding to validate, never permission to adopt a successor.",
+  }),
+});
+export type CheckWakeBindingRequest = typeof CheckWakeBindingRequest.Type;
+
 export const ObserveWakeRequest = Schema.Struct({
   address: Identity.annotate({
     description:
@@ -77,14 +93,23 @@ export const ObserveWakeRequest = Schema.Struct({
 });
 export type ObserveWakeRequest = typeof ObserveWakeRequest.Type;
 
-export const WakeObservation = Schema.Struct({
+export const WakeBindingCheck = Schema.Struct({
   binding: WakeBinding.annotate({
-    description: "The validated native holding at this observation.",
+    description: "The validated native holding at this cut.",
   }),
   observationCut: Schema.Struct({
-    head: Position.annotate({ description: "The complete message slice and presence cut." }),
+    head: Position.annotate({ description: "The head of the complete presence observation." }),
     incarnation: Identity.annotate({ description: "The ledger history observed." }),
   }).annotate({
+    description:
+      "The complete presence cut establishing this holding; not a lease or lasting delivery authority.",
+  }),
+});
+export type WakeBindingCheck = typeof WakeBindingCheck.Type;
+
+export const WakeObservation = Schema.Struct({
+  ...WakeBindingCheck.fields,
+  observationCut: WakeBindingCheck.fields.observationCut.annotate({
     description:
       "One cut for routing, unread messages and wake eligibility; not lasting delivery authority.",
   }),
@@ -109,7 +134,9 @@ export const sameWakeBinding = (a: WakeBinding, b: WakeBinding) =>
   a.run === b.run;
 
 /** Includes escaping and both structured and compatibility text channels; not JSON-RPC framing. */
-export const wakeObservationCarrierBytes = (structuredContent: WakeObservation) =>
+export const wakeObservationCarrierBytes = (
+  structuredContent: WakeObservation | WakeBindingCheck
+) =>
   Buffer.byteLength(
     JSON.stringify({
       content: [{ type: "text", text: JSON.stringify(structuredContent) }],
