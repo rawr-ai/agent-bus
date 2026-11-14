@@ -1,6 +1,6 @@
 # Topology: machines, processes and stores
 
-Where agent-bus runs: which processes run on which machine, how they reach each other, and where every piece of state lives. What protects each connection is in [connections and trust boundaries](connections.md); how mail reaches a session is in [delivery](delivery.md); what the ledger holds and how cursors read it is in [messaging](messaging.md); installing, restarting and reading the logs of these processes is in the [runbooks](../runbooks/operate.md).
+Where agent-bus runs: which processes run on which machine, how they reach each other, and where every piece of state lives, including the optional hosted peer. What protects each connection is in [connections and trust boundaries](connections.md); how mail reaches a session is in [delivery](delivery.md); what the ledger holds and how cursors read it is in [messaging](messaging.md); installing, restarting and reading the logs of these processes is in the [runbooks](../runbooks/operate.md).
 
 ## What it does
 
@@ -66,6 +66,36 @@ The transports, in short:
 - **Unix socket:** the `codex` TUI and `codex app-server proxy` to the Codex daemon's control socket, `~/.codex/app-server-control/app-server-control.sock`. `serve` also connects to it, briefly, to borrow a thread ([delivery](delivery.md#codex-threads)).
 - **SSH tunnel:** another machine's `serve` to the bus host's Fluree (`ssh -N -L 127.0.0.1:8095:127.0.0.1:8095`).
 - **SSH proxy:** the desktop app's SSH project, which runs `codex app-server proxy` on the SSH host and so reaches that host's daemon. It is Codex's own connection, not the bus's; the bus only sees the thread as a daemon thread on the SSH host.
+- **Hosted peer:** where one is connected, MCP over HTTPS from the client to an HTTPS front its installation owns, then loopback HTTP to the peer, and from the peer one more loopback MCP exchange with `serve` (next section).
+
+### The optional hosted peer
+
+An installation may run one more process beside `serve`: the private hosted peer, which lets authorized interactive ChatGPT conversations take part in the bus. It is a separate process with its own authentication and state, not part of `serve`, and the public installer neither installs nor starts it. Who may use it, what it exposes and how it binds a conversation to an address are in [connections](connections.md#private-hosted-peer); the tools it projects are in [interfaces](interfaces.md); what has been observed of its host is in [platforms](../platforms/mcp-openapi.md).
+
+```mermaid
+flowchart LR
+  chat["ChatGPT conversation"] -- "MCP over HTTPS,<br/>OAuth bearer token" --> front["HTTPS front<br/>owned by the installation"]
+  subgraph machine["The machine that runs the peer"]
+    subgraph peerproc["Hosted peer process (src/private-web/)"]
+      host["Shared mcp-openapi host library<br/>MCP SDK and FastMCP, OAuth"]
+      adapter["Peer adapter, written with Effect<br/>identity, grants, projected tools"]
+      client["Effect MCP client<br/>fresh per call, checks the Bus version"]
+      host --> adapter --> client
+    end
+    pstate[("Private files named by its configuration<br/>configuration, principal grants,<br/>session key, OAuth token storage")]
+    serve["agent-bus serve<br/>Effect MCP server, loopback, no OAuth"]
+  end
+  front -- "loopback HTTP" --> host
+  client -- "MCP, loopback HTTP" --> serve
+  peerproc -. "HTTPS: OAuth flow and<br/>token holder lookup" .-> idp["Identity provider"]
+  peerproc --- pstate
+  serve -- "append and read" --> ledger[("The ledger")]
+```
+
+- **One Bus domain implementation.** The peer holds no Bus logic and no store access. Each admitted call becomes an ordinary MCP exchange with the machine's `serve`, which applies the same ownership, cursors and locks as for a local session.
+- **The external MCP server is the host library, not Effect.** The shared `mcp-openapi` library, built on the MCP SDK and FastMCP, owns the public MCP endpoint, HTTP admission and the OAuth flow. The peer's own adapter is written with Effect: it admits the caller and binds the conversation's session ([connections](connections.md#rules)), then calls `serve` through Effect's MCP client. `serve` itself is Effect's MCP server on loopback, with no OAuth.
+- **A shared library, not a shared process.** Other products build their own hosts from the same library; each runs in its own process with its own configuration and OAuth state. Nothing the peer holds is shared with them or with `serve`.
+- **Separate identity state.** The peer's configuration, principal grants, conversation session key and OAuth token storage are private files that its configuration names. They are not part of `~/.agent-bus`'s own state, `serve` never reads them, and a Bus release or rollback does not carry them ([deploy](../runbooks/deploy.md#when-a-hosted-peer-is-connected)).
 
 ### Processes
 
@@ -79,6 +109,7 @@ The transports, in short:
 | `agent-bus join`, `publish`, `peers` | Any machine | A shell | Calls `serve` over HTTP | — |
 | Codex desktop app-server | Every machine with the desktop app | The ChatGPT desktop app | stdio, from the app | The app's logs |
 | Codex daemon | Any machine with Codex | Codex itself ([how](../platforms/codex.md#the-daemon)), or `serve` when it borrows a thread and finds none; nothing starts it at boot | The control socket | Codex's own log ([platforms: Codex](../platforms/codex.md#the-daemon)) |
+| Hosted peer (optional) | The machine its installation chooses, beside that machine's `serve` | The installation's own service, from a private bundle (`scripts/build-private-peer.ts`); not the public installer | HTTP on a configured loopback port; reachable from outside only by whatever HTTPS front the installation puts before it | Its service's own log |
 
 Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 10 s) and sets `AGENT_BUS_DIR` and `AGENT_BUS_PORT`. `scripts/install-launch-agents.sh` writes them ([install](../runbooks/install.md)). The managed `~/.local/bin/agent-bus` launcher binds either an exact Bun and the canonical checkout's entry point, or an immutable release's own Bun, bundled CLI and sealed Bun configuration. Both the hook and the `serve` LaunchAgent invoke it; [deploy](../runbooks/deploy.md) changes that binding without moving the store. How to restart a process and read its log is in [operate](../runbooks/operate.md).
 
@@ -98,15 +129,16 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | Release marketplace | Each machine: `~/.local/share/agent-bus/marketplace/` | The release tool | A real directory with a `plugin` symlink to the selected release; native clients refresh separately |
 | The plugin | Each machine: Claude Code's and Codex's plugin caches | Each client's native plugin command | Hook manifests and the agent skill, copied from source or the selected release; installed equality does not prove adoption by a running session |
 | `serve`'s memory | Each machine | `serve` | Two locks per address (one for reads and deliveries, one for ownership and sends); which sessions' hooks have called (`hooked`); each address's last call and open waits; the marks of what each session was last woken for, and each session's current wake wait; for Codex peers, the back-off, refused joins, covered mail, logged reason and recorded nudge; and the rankings that searches hold for their later pages (each entry's commit, id, score and node names, never message text), each until its 10-minute expiry. Lost on restart, which costs at most one extra wake per address and ends every held search: its cursor is then refused, and the search starts again ([interfaces](interfaces.md#limits)) |
+| Hosted peer state | The machine that runs the peer: private absolute paths named by its configuration | The operator, and the host library for its OAuth token storage | The peer's configuration, principal grants, conversation session key and OAuth token storage. Not part of `~/.agent-bus`'s own state; [connections](connections.md#private-hosted-peer) says how it is used |
 | Codex state | Each machine: `~/.codex` | The Codex app-servers; `serve`'s app-server only lists, adds to and deletes its own nudges from the queue, and reads a thread's record | Rollouts, the thread index, the queue and the writer locks. [Platforms: Codex](../platforms/codex.md#what-codex-keeps-where) describes them |
 
 `~/.agent-bus` is `AGENT_BUS_DIR` when that is set, and `serve`'s port is `AGENT_BUS_PORT` (8096 by default).
 
 ## Rules
 
-1. **One `serve` per machine.** It is the only process that reads or writes the store for that machine's sessions, and it keeps their cursors and locks. Sessions, the CLI and the Claude hook are MCP clients of it and never open the store.
+1. **One `serve` per machine.** It is the only process that reads or writes the store for that machine's sessions, and it keeps their cursors and locks. Sessions, the CLI, the Claude hook and any hosted peer are MCP clients of it and never open the store.
 2. **One ledger, on one Fluree transaction server on the bus host.** Every machine's `serve` writes to it over HTTP. Other machines run no Fluree.
-3. **Servers listen on loopback only.** Fluree is on `127.0.0.1:8095` and `serve` on `127.0.0.1:8096`. Nothing listens on a network address.
+3. **Servers listen on loopback only.** Fluree is on `127.0.0.1:8095` and `serve` on `127.0.0.1:8096`. Nothing listens on a network address. A hosted peer also binds loopback only; any external HTTPS front is the installation's own, not installed by the bus.
 4. **Another machine reaches Fluree only through an SSH tunnel,** on the same local port, so its `config.json` names the same URL as the bus host's.
 5. **Native queues and hooks stay local to their installation.** The wake-selection rule is in [delivery](delivery.md#rules).
 6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail; a held search ranking holds entry ids, scores and node names, and every page reads its messages from the ledger.
@@ -138,6 +170,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 - [Codex: the app-servers on a machine](../platforms/codex.md#the-app-servers-on-a-machine), [what Codex keeps where](../platforms/codex.md#what-codex-keeps-where), [the daemon](../platforms/codex.md#the-daemon) and [SSH projects](../platforms/codex.md#across-machines-ssh-projects).
 - [Bun: runtime and TOML](../platforms/bun.md) (runtime selection and parsing behavior).
 - [Claude Code: hooks](../platforms/claude-code.md#hooks) and [plugins](../platforms/claude-code.md#plugins) (where the hook runs and what a plugin copies).
+- [Owned direct-tool MCP host](../platforms/mcp-openapi.md#direct-host-and-http-admission) (the hosted peer's host library, as observed).
 
 ## History
 
@@ -150,3 +183,4 @@ The frames that made these choices are indexed in [frames](../frames/README.md):
 - [codex-wake](../frames/codex-wake.md): the two Codex app-servers on a machine, and SSH projects.
 - [agent-bus-toolchain-upgrade](../frames/agent-bus-toolchain-upgrade.md): the managed runtime binding and its qualification.
 - [search-retained-selection](../frames/search-retained-selection.md): search rankings held in `serve`'s memory for a traversal's later pages.
+- [private-chatgpt-web-mcp](../frames/private-chatgpt-web-mcp.md) and [hosted-chatgpt-peer](../frames/hosted-chatgpt-peer.md): the hosted peer as a separate process that forwards to loopback `serve`.
