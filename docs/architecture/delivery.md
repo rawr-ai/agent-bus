@@ -16,6 +16,8 @@ A wake is a doorbell. It tells a session that an address it holds has unread mai
 
 An external source owns its authorization, persisted pending notices and atomic capture/coverage transition. It captures only eligible news, never empty or suppressed observations, and must serialize observation through capture or CAS a retained revision. Reads can move cursors without a ledger change, so activation, restart, pending resolution and bounded-wait expiry require fresh observation. This native primitive provides no hosted subscription, callback, replay or scheduler. A snapshot is evidence at its cut, not lasting permission to send.
 
+An already captured notice has a separate holding check: `Bus.checkWakeBinding`, through native-only [bus_check_wake_binding](interfaces.md#bus_check_wake_binding), validates the complete captured binding without mailbox, cursor, activity or mute reads. A later owner read, mute, inactivity or oversized unread backlog does not invalidate the captured notice while its holding remains valid; fresh capture still uses current wake eligibility. External grant, finite lease and callback checks remain separate. Address-only ownership observations cannot establish this complete binding, and mail observation can fail capacity while holding authority remains valid.
+
 ### Will a session be woken?
 
 Mail is acted on by the `serve` of the machine the address was joined from (rule 4). Addresses and topics decide what is a session's to read; how the session runs decides whether it is woken. The diagram gives the decisions; the table after it, the outcome for each kind of session.

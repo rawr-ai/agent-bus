@@ -20,6 +20,7 @@ import {
   MAX_WAKE_COVERAGE_IDS,
   MAX_WAKE_OBSERVATION_BYTES,
   type ObserveWakeRequest,
+  WakeBindingCheck,
   WakeObservation,
 } from "../src/wake-observation.ts";
 import { freshLedger } from "./fluree-server.ts";
@@ -57,6 +58,8 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
     afterRead?: () => Effect.Effect<void>;
     failRead?: boolean;
     replacement?: string;
+    failPresence?: boolean;
+    afterPresence?: () => Effect.Effect<void>;
   } = { cursorWrites: 0, cursorReads: 0, ledgerWrites: 0, reads: 0 };
   const ledger = Ledger.of({
     ...base,
@@ -90,10 +93,19 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
         return slice;
       }),
     presenceAt: (at) =>
-      Effect.map(base.presenceAt(at), (read) => ({
-        ...read,
-        cut: { ...read.cut, incarnation: state.replacement ?? read.cut.incarnation },
-      })),
+      Effect.gen(function* () {
+        if (state.failPresence)
+          return yield* new LedgerError({ message: "Synthetic incomplete presence." });
+        const read = yield* base.presenceAt(at);
+        const result = {
+          ...read,
+          cut: { ...read.cut, incarnation: state.replacement ?? read.cut.incarnation },
+        };
+        const after = state.afterPresence;
+        delete state.afterPresence;
+        if (after !== undefined) yield* after();
+        return result;
+      }),
     changes: silent ? Stream.never : base.changes,
   });
   const cursors = Cursors.of({
@@ -166,6 +178,7 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
   return {
     dir,
     base,
+    ledger,
     gateway,
     bus,
     run,
@@ -180,8 +193,131 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
   };
 };
 
+const bindingOnly = async (fixture: Awaited<ReturnType<typeof open>>) => {
+  const forbidden = () =>
+    Effect.die(new Error("Binding checks must not access mailbox, activity, queries or writes."));
+  const ledger = Ledger.of({
+    ...fixture.ledger,
+    read: forbidden,
+    log: forbidden,
+    direct: forbidden,
+    end: forbidden(),
+    append: forbidden,
+    admit: forbidden,
+    appendCommand: forbidden,
+    readCommand: forbidden,
+    designate: forbidden,
+    readWitness: forbidden,
+    changes: Stream.never,
+  });
+  const services = Layer.mergeAll(
+    Layer.succeed(Ledger, ledger),
+    Layer.succeed(Cursors, Cursors.of({ get: forbidden, set: forbidden, clear: forbidden })),
+    Layer.succeed(
+      QueryGateway,
+      QueryGateway.of({
+        ...fixture.gateway,
+        pin: forbidden(),
+        jsonld: forbidden,
+        sparql: forbidden,
+      })
+    )
+  );
+  const runtime = ManagedRuntime.make(
+    Bus.layer("fixture-installation").pipe(Layer.provide(services))
+  );
+  cleanups.push(() => runtime.dispose());
+  const bus = await runtime.runPromise(Bus.Bus);
+  return {
+    check: (expectedBinding: (typeof WakeBindingCheck.Type)["binding"], owner = session) =>
+      runtime.runPromise(bus.checkWakeBinding({ address, session: owner, expectedBinding })),
+    refused: (expectedBinding: (typeof WakeBindingCheck.Type)["binding"], owner = session) =>
+      runtime.runPromise(
+        Effect.flip(bus.checkWakeBinding({ address, session: owner, expectedBinding }))
+      ),
+  };
+};
+
 for (const kind of ["jsonl", "fluree"])
   describe(`pure wake observation (${kind})`, () => {
+    test("binding checks use complete presence only, remain valid without cursors and fence lifecycle changes", async () => {
+      const f = await open(kind);
+      const presence = await f.store.runPromise(f.base.presenceAt());
+      const holder = presence.entries.find((entry) => entry.from === address);
+      if (!holder) throw new Error("Missing fixture holding.");
+      const binding = Schema.decodeUnknownSync(WakeBindingCheck.fields.binding)({
+        address,
+        session,
+        runtime: "other",
+        installation: "fixture-installation",
+        incarnation: presence.cut.incarnation,
+        run: holder.id,
+      });
+      const only = await bindingOnly(f);
+      const before = await f.durable();
+      expect(await only.check(binding)).toEqual({ binding, observationCut: presence.cut });
+      f.positions.delete(address);
+      expect((await only.check(binding)).binding).toEqual(binding);
+      f.positions.set(address, Number.NaN);
+      expect((await only.check(binding)).binding).toEqual(binding);
+      f.positions.set(address, before.cursor ?? 0);
+      expect(await f.durable()).toEqual(before);
+      await f.joinAs(address, session, "other", { topics: ["renewed"] });
+      expect((await only.check(binding)).binding).toEqual(binding);
+      for (const field of [
+        "address",
+        "session",
+        "runtime",
+        "installation",
+        "incarnation",
+        "run",
+      ] as const) {
+        const bad = Schema.decodeUnknownSync(WakeBindingCheck.fields.binding)({
+          ...binding,
+          [field]: field === "runtime" ? "claude" : "wrong",
+        });
+        expect((await only.refused(bad))._tag).toBe("InvalidQuery");
+      }
+      f.state.failPresence = true;
+      expect((await only.refused(binding))._tag).toBe("LedgerError");
+      delete f.state.failPresence;
+      expect((await only.refused(binding, "intruder"))._tag).toBe("NotOwner");
+      await f.joinAs(address, session, "other", { replay: true });
+      expect((await only.refused(binding))._tag).toBe("InvalidQuery");
+      const replay = (await f.observe()).binding;
+      await f.run(f.bus.leave(address, session));
+      expect((await only.refused(replay))._tag).toBe("NotJoined");
+      await f.joinAs();
+      expect((await only.refused(replay))._tag).toBe("InvalidQuery");
+      const current = (await f.observe()).binding;
+      f.state.afterPresence = () =>
+        Effect.promise(async () => {
+          const read = await f.store.runPromise(f.base.presenceAt());
+          const peer = read.entries.filter((entry) => entry.from === address).at(-1);
+          if (!peer?.presence) throw new Error("Missing current fixture holding.");
+          await f.store.runPromise(
+            f.base.append(
+              new Message({
+                ...peer,
+                id: Bun.randomUUIDv7(),
+                presence: new Presence({ ...peer.presence, session: "successor" }),
+              })
+            )
+          );
+        });
+      expect((await only.refused(current))._tag).toBe("NotOwner");
+      await f.joinAs(address, session, "other", {
+        takeover: (await f.run(f.bus.peers)).find((peer) => peer.address === address)?.joinId,
+      });
+      expect((await only.refused(current))._tag).toBe("InvalidQuery");
+      const replacement = (await f.observe()).binding;
+      f.state.afterPresence = () =>
+        Effect.sync(() => {
+          f.state.replacement = "same-head-replacement";
+        });
+      expect((await only.refused(replacement))._tag).toBe("InvalidQuery");
+    });
+
     test("empty unrelated scans, successful observations and refusals never write, and coverage is caller-retained", async () => {
       const f = await open(kind);
       await f.say(["somebody/else"]);
@@ -448,10 +584,13 @@ test("observation changes neither holder activity diagnostics nor native hooks, 
   const diagnostic = await refused();
   await new Promise((resolve) => setTimeout(resolve, 10));
   await f.observe();
+  const captured = await f.observe();
+  await f.run(f.bus.checkWakeBinding({ address, session, expectedBinding: captured.binding }));
   expect(await refused()).toEqual(diagnostic);
   expect((await f.joinAs(address, session, "claude")).hooked).toBeUndefined();
   await f.say([address]);
   await f.observe();
+  await f.run(f.bus.checkWakeBinding({ address, session, expectedBinding: captured.binding }));
   expect((await f.run(f.bus.wake(session, 1))).addresses).toEqual([address]);
   await f.observe();
   expect((await f.run(f.bus.wake(session, 0.01))).addresses).toEqual([]);
@@ -461,6 +600,7 @@ test("observation changes neither holder activity diagnostics nor native hooks, 
         const pending = yield* Effect.forkChild(f.bus.wake(session, 3));
         yield* Effect.sleep("20 millis");
         yield* f.bus.observeWake({ address, session });
+        yield* f.bus.checkWakeBinding({ address, session, expectedBinding: captured.binding });
         yield* f.bus.publish({
           from: sender,
           session: "fixture-sender",
@@ -519,9 +659,8 @@ test("bounded expiry freshly observes cursor-only progress and cancellation rele
 
 test("foreign-installation holdings refuse before accessing their cursor", async () => {
   const f = await open();
-  const peer = (await f.store.runPromise(f.base.presenceAt())).entries.find(
-    (entry) => entry.from === address
-  );
+  const read = await f.store.runPromise(f.base.presenceAt());
+  const peer = read.entries.find((entry) => entry.from === address);
   if (!peer?.presence) throw new Error("Missing join.");
   await f.store.runPromise(
     f.base.append(
@@ -533,12 +672,46 @@ test("foreign-installation holdings refuse before accessing their cursor", async
     )
   );
   const before = await f.durable();
+  const only = await bindingOnly(f);
+  const binding = Schema.decodeUnknownSync(WakeBindingCheck.fields.binding)({
+    address,
+    session,
+    runtime: "other",
+    installation: "fixture-installation",
+    incarnation: read.cut.incarnation,
+    run: peer.id,
+  });
+  expect((await only.refused(binding))._tag).toBe("InvalidQuery");
   const cursorReads = f.state.cursorReads;
   expect((await f.run(Effect.flip(f.bus.observeWake({ address, session }))))._tag).toBe(
     "InvalidQuery"
   );
   expect(f.state.reads).toBe(0);
   expect(f.state.cursorReads).toBe(cursorReads);
+  expect(await f.durable()).toEqual(before);
+});
+
+test("binding request and complete duplicated result budgets refuse rather than shorten authority", async () => {
+  const f = await open();
+  const read = await f.store.runPromise(f.base.presenceAt());
+  const peer = read.entries.find((entry) => entry.from === address);
+  if (!peer?.presence) throw new Error("Missing fixture holding.");
+  const run = "r".repeat(40_000);
+  await f.store.runPromise(f.base.append(new Message({ ...peer, id: run })));
+  const expected = Schema.decodeUnknownSync(WakeBindingCheck.fields.binding)({
+    address,
+    session,
+    runtime: "other",
+    installation: "fixture-installation",
+    incarnation: read.cut.incarnation,
+    run,
+  });
+  const only = await bindingOnly(f);
+  const before = await f.durable();
+  expect((await only.refused(expected))._tag).toBe("InvalidQuery");
+  expect(
+    (await only.refused({ ...expected, run: "r".repeat(MAX_WAKE_OBSERVATION_BYTES) }))._tag
+  ).toBe("InvalidQuery");
   expect(await f.durable()).toEqual(before);
 });
 
@@ -681,6 +854,48 @@ test("output coverage admits every id at the cardinality bound and refuses one m
   expect(await f.durable()).toEqual(before);
 });
 
+test("captured authority survives reads, mutes, inactivity and oversized new capture evidence", async () => {
+  const f = await open();
+  await f.say([address], "E1 source mail");
+  const captured = await f.observe();
+  const checkpoint = JSON.stringify(captured.nextCoverage);
+  const only = await bindingOnly(f);
+  await f.run(f.bus.take(address, session));
+  expect((await only.check(captured.binding)).binding).toEqual(captured.binding);
+  await f.run(
+    f.bus.activity({
+      address,
+      session,
+      operation: Bun.randomUUIDv7(),
+      activity: "inactive",
+      mutes: [{ scope: "programme" }],
+    })
+  );
+  expect((await only.check(captured.binding)).binding).toEqual(captured.binding);
+  expect(await f.observe()).toMatchObject({ ready: false, news: false });
+  for (let index = 0; index <= MAX_WAKE_COVERAGE_IDS; index++) {
+    await f.store.runPromise(
+      f.base.append(
+        new Message({
+          id: `new-${index}`,
+          from: sender,
+          to: [address],
+          body: "new mail",
+          kind: "message",
+          ts: "2026-01-01T00:00:00Z",
+        })
+      )
+    );
+  }
+  const before = await f.durable();
+  expect((await f.run(Effect.flip(f.bus.observeWake({ address, session }))))._tag).toBe(
+    "InvalidQuery"
+  );
+  expect((await only.check(captured.binding)).binding).toEqual(captured.binding);
+  expect(JSON.stringify(captured.nextCoverage)).toBe(checkpoint);
+  expect(await f.durable()).toEqual(before);
+});
+
 test("official SDK sees a pure native-only tool, complete duplicated content and typed refusals", async () => {
   const f = await open();
   const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
@@ -705,6 +920,7 @@ test("official SDK sees a pure native-only tool, complete duplicated content and
   expect(tool?.inputSchema.properties).toHaveProperty("expectedBinding");
   expect(tool?.outputSchema?.required).toContain("observationCut");
   expect(HostedNativeTools).not.toHaveProperty("ObserveWake");
+  expect(HostedNativeTools).not.toHaveProperty("CheckWakeBinding");
   expect(
     peerTools(async () => {
       throw new Error("Must not forward.");
@@ -717,6 +933,34 @@ test("official SDK sees a pure native-only tool, complete duplicated content and
   });
   expect(response.isError).toBe(false);
   const decoded = Schema.decodeUnknownSync(WakeObservation)(response.structuredContent);
+  const checkTool = tools.find((entry) => entry.name === "bus_check_wake_binding");
+  expect(checkTool?.annotations).toMatchObject({
+    readOnlyHint: true,
+    openWorldHint: false,
+    destructiveHint: false,
+  });
+  expect(checkTool?.inputSchema.required).toContain("expectedBinding");
+  const checked = await client.callTool({
+    name: "bus_check_wake_binding",
+    arguments: { address, session, expectedBinding: decoded.binding },
+  });
+  expect(checked.isError).toBe(false);
+  const bindingResult = Schema.decodeUnknownSync(WakeBindingCheck)(checked.structuredContent);
+  expect(bindingResult.binding).toEqual(decoded.binding);
+  expect(checked.content).toEqual([{ type: "text", text: JSON.stringify(bindingResult) }]);
+  for (const extra of [
+    { previousCoverage: decoded.nextCoverage },
+    { timeoutSeconds: 1 },
+    { ready: true },
+    { bindingOnly: true },
+  ]) {
+    const refused = await client.callTool({
+      name: "bus_check_wake_binding",
+      arguments: { address, session, expectedBinding: decoded.binding, ...extra },
+    });
+    expect(refused.isError).toBe(true);
+    expect(refused.structuredContent).toBeUndefined();
+  }
   expect(response.content).toEqual([{ type: "text", text: JSON.stringify(decoded) }]);
   expect(JSON.stringify(response)).not.toContain("body-not-returned");
   expect(Buffer.byteLength(JSON.stringify(response), "utf8")).toBeLessThanOrEqual(
