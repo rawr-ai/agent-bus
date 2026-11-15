@@ -166,7 +166,7 @@ Expected: `Status: ✔ Connected` and the URL for Claude Code; `enabled: true` a
 
 ## Select the plugin marketplace
 
-MCP registration supplies tools, not the skill or hooks. Choose the marketplace for the installed binding before installing either native plugin. For a source bootstrap, from the approved checkout:
+MCP registration exposes tools and the skill resources to supporting clients; it does not install the native hooks or establish that a client loads the skill. Choose the marketplace for the installed binding before installing either native plugin. For a source bootstrap, from the approved checkout:
 
 ```sh
 MARKETPLACE_ROOT="$PWD"
@@ -280,7 +280,7 @@ diff -r "$BUS_PLUGIN_ROOT" "$installed"
 "$CODEX_BIN" debug prompt-input | grep -o 'agent-bus:agent-bus'
 ```
 
-Expected: the installed manifest and skill, all four references, no output from `diff`, then `agent-bus:agent-bus`, whose listing in the full prompt output points into that installed skill directory. A successful MCP connection or an enabled manifest alone does not verify skill discovery. *Checked read-only 2026-11-01:* both machines' installed plugin directories matched the source, and fresh prompt rendering listed the skill after it had been absent before installation. This checks discovery, not a model's use of the skill.
+Expected: the installed manifest and skill, all six references, no output from `diff`, then `agent-bus:agent-bus`, whose listing in the full prompt output points into that installed skill directory. A successful MCP connection or an enabled manifest alone does not verify skill discovery. *Checked read-only 2026-11-01:* both machines' installed plugin directories matched the source, and fresh prompt rendering listed the skill after it had been absent before installation. This checks discovery, not a model's use of the skill.
 
 A shell installation does not refresh the plugin set of an already-loaded desktop or daemon thread ([platforms: Codex](../platforms/codex.md#how-codex-finds-skills-and-shows-them-to-the-model)). Do not restart another owner's session to force it. Tell active participants where to read the updated skill and references now; normal later loads pick up the installed plugin.
 

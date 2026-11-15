@@ -15,15 +15,22 @@ import {
   readFileSync,
   realpathSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { Effect, Layer } from "effect";
+import { McpClient, McpProtocol } from "effect/ai";
+import { FetchHttpClient } from "effect/http";
+import { modernHttp, modernRequest } from "../scripts/private-modern-http.ts";
 import { bundle, externalImports, removeOwned } from "../scripts/release.ts";
+import { authoredSkill, verifySkillWire } from "../scripts/skill-wire.ts";
 import { VERSION } from "../src/version.ts";
 import { flureeServer, ledgerOn } from "./fluree-server.ts";
+import { sourceIsolated, sourceIsolationRefusesRead } from "./source-isolation.ts";
 import { type Supervised, spawnSupervised } from "./supervised.ts";
 
 const repo = resolve(import.meta.dir, "..");
@@ -96,10 +103,20 @@ async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledger
   if (init.exitCode !== 0) throw new Error(`${kind} could not initialize its installation`);
   initialized[kind] = `${init.stdout}${init.stderr}`;
   // A Codex that always fails, so no real Codex delivery is attempted.
-  server.process = spawnSupervised(
-    [process.execPath, "--no-env-file", entryOf(kind), "serve", "--codex", "/usr/bin/false"],
-    { cwd: decoy, env: cleanEnv(server), stdout: "ignore", stderr: "ignore" }
-  );
+  const serve = [
+    process.execPath,
+    "--no-env-file",
+    entryOf(kind),
+    "serve",
+    "--codex",
+    "/usr/bin/false",
+  ];
+  server.process = spawnSupervised(kind === "bundle" ? sourceIsolated(serve, repo) : serve, {
+    cwd: decoy,
+    env: cleanEnv(server),
+    stdout: "ignore",
+    stderr: "ignore",
+  });
   servers[kind] = server;
   for (let attempt = 0; ; attempt++) {
     const healthy = await fetch(`http://127.0.0.1:${port}/health`).then(
@@ -118,11 +135,17 @@ async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledger
 
 beforeAll(async () => {
   root = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-release-bundle-")));
-  // Bundle into a staging directory, relocate, then remove the stage.
+  // Build from a disposable source copy, then remove the source and stage before running.
+  const sourceCopy = join(root, "source");
+  mkdirSync(sourceCopy);
+  cpSync(join(repo, "src"), join(sourceCopy, "src"), { recursive: true });
+  cpSync(join(repo, "plugin"), join(sourceCopy, "plugin"), { recursive: true });
+  cpSync(join(repo, "package.json"), join(sourceCopy, "package.json"));
+  symlinkSync(join(repo, "node_modules"), join(sourceCopy, "node_modules"), "dir");
   const stage = join(root, "stage");
   mkdirSync(stage);
   bundle({
-    src: repo,
+    src: sourceCopy,
     entry: "src/bin.ts",
     outfile: join(stage, "cli.js"),
     bun: process.execPath,
@@ -132,6 +155,9 @@ beforeAll(async () => {
   cliJs = join(root, "relocated/app/cli.js");
   cpSync(join(stage, "cli.js"), cliJs);
   removeOwned(stage);
+  removeOwned(sourceCopy);
+  if (process.platform === "darwin" && !sourceIsolationRefusesRead(repo))
+    throw new Error("The relocated bundle's source-isolation control failed.");
   // A decoy working directory: a dotenv that would break the run, and a poisoned module
   // that marks the disk if anything resolves it.
   decoy = join(root, "decoy");
@@ -242,6 +268,74 @@ test("bundled and source serve present the same MCP surface", async () => {
   expect(bundledTools.tools.length).toBeGreaterThan(10);
   expect(bundledTools).toEqual(sourceTools);
 });
+
+test("source and relocated bundle serve the authored skill over modern MCP", async () => {
+  const expected = authoredSkill(repo);
+  for (const kind of ["source", "bundle"] as const) {
+    const version = kind === "source" ? `${VERSION}+source` : ID;
+    const client = modernHttp(
+      `http://127.0.0.1:${servers[kind]!.port}/mcp`,
+      `skill-${kind}`,
+      {},
+      { name: "agent-bus", version }
+    );
+    await verifySkillWire(client, expected);
+    for (const headers of [{ host: "other.invalid" }, { origin: "https://other.invalid" }]) {
+      for (const uri of [
+        "skill://agent-bus/SKILL.md",
+        "skill://agent-bus/references/runtimes.md",
+      ]) {
+        const response = await modernRequest(
+          `http://127.0.0.1:${servers[kind]!.port}/mcp`,
+          "skill-admission",
+          1,
+          "resources/read",
+          { uri },
+          headers
+        );
+        expect(response.status).toBe(403);
+        expect((await response.text()) === "").toBe(true);
+      }
+    }
+  }
+}, 30_000);
+
+test("an opted-in Effect client discovers and verifies the bundled skill", async () => {
+  const expected = authoredSkill(repo);
+  for (const protocol of [McpProtocol.v2026_07_28, McpProtocol.v2025_11_25]) {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const client = yield* McpClient.McpClient;
+        const skills = yield* client.listSkills();
+        expect(skills.map((skill) => skill.uri)).toEqual(["skill://agent-bus/SKILL.md"]);
+        const skill = yield* client.getSkill({ uri: "skill://agent-bus/SKILL.md" });
+        const children = yield* client.readResourceDirectory({
+          uri: "skill://agent-bus/references",
+        });
+        expect(children).toHaveLength(6);
+        for (const [relative, text] of Object.entries(expected)) {
+          const uri = `skill://agent-bus/${relative}`;
+          const result = yield* client.readSkillResource({ skill, uri });
+          expect(result.contents).toHaveLength(1);
+          const content = result.contents[0];
+          expect(content?.uri).toBe(uri);
+          expect(content?.mimeType).toBe("text/markdown");
+          expect(content !== undefined && "text" in content && content.text === text).toBe(true);
+        }
+      }).pipe(
+        Effect.provide(
+          McpClient.layerHttp({
+            name: "skill-client",
+            version: "1",
+            url: `http://127.0.0.1:${servers.bundle!.port}/mcp`,
+            protocol,
+            extensions: { skills: true },
+          }).pipe(Layer.provide(FetchHttpClient.layer))
+        )
+      )
+    );
+  }
+}, 30_000);
 
 test("bundled and source serve refuse alike, and the bundle answers a pinned query", async () => {
   const both = async (name: string, args: Record<string, unknown>) =>

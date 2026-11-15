@@ -37,7 +37,10 @@ import {
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
+import { sourceIsolated, sourceIsolationRefusesRead } from "../test/source-isolation.ts";
 import { spawnSupervised } from "../test/supervised.ts";
+import { modernHttp } from "./private-modern-http.ts";
 import {
   build,
   bundle,
@@ -49,6 +52,7 @@ import {
   sha256,
   verify,
 } from "./release.ts";
+import { authoredSkill, verifySkillWire } from "./skill-wire.ts";
 
 const repo = resolve(import.meta.dir, "..");
 const bun = realpathSync(process.execPath);
@@ -120,6 +124,7 @@ const realBefore = {
 const root = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-qualify-release-")));
 let viewer: ReturnType<typeof spawnSupervised<"ignore", "ignore">> | null = null;
 let viewerBase: string | null = null;
+let releaseServer: ReturnType<typeof spawnSupervised<"ignore", "ignore">> | null = null;
 try {
   // 1. A disposable clone of the commit, with its own frozen install, whose installed
   //    sparqljs carries a marker. Build A from that clone.
@@ -138,7 +143,7 @@ try {
     root,
     cloneEnv
   );
-  const privateArchive = "dist/private-artifacts/mcp-openapi-2.0.0.tgz";
+  const privateArchive = "dist/private-artifacts/mcp-openapi-2.1.0-a1ca308.tgz";
   check("cloneHasNoPrivateArchive", !existsSync(join(clone, privateArchive)));
   must(
     [bun, "install", "--production", "--frozen-lockfile", "--ignore-scripts"],
@@ -189,6 +194,10 @@ try {
     "d262e777cac0ee6bf7cf6d5f22719c87c6713396de0cdaee8be878da1c4244a2",
     "e26644a170ea32a4ce7b97a0105a5c93bab43f7dc1145cd9aaf96c7181dfba77",
     "12cc12d7df1441b2926c4664a60376afa9fdaf2738ea90e91b7585d703d9c3cf",
+    "440a54c91fd51ca1f60363c1d4015c476606baa32f3bb733b7760babc3227eac",
+    "0d34d216281d75e8504563739757984e0100fffbf7e7719fe6035ddfd6b91fd4",
+    "90ac182ec316eaff54b787573ca076aea5bd98e346d2f6290945f05a4c244cce",
+    "e8b43e25a64d0bf5e70cc4efc358c0d3e4bc7e901706933fe1d026db6d38f8d5",
   ];
   const privatePath = (path: string) =>
     path
@@ -214,6 +223,15 @@ try {
     ["B", b],
   ] as const) {
     const inventory = filesUnder(built.dir);
+    const authored = authoredSkill(clone);
+    const packagedSkill = join(built.dir, "plugin/skills/agent-bus");
+    check(
+      `pluginSkillMatchesAuthored:${label}`,
+      JSON.stringify(filesUnder(packagedSkill)) === JSON.stringify(Object.keys(authored).sort()) &&
+        Object.entries(authored).every(([relative, contents]) =>
+          readFileSync(join(packagedSkill, relative)).equals(Buffer.from(contents, "utf8"))
+        )
+    );
     const manifest = JSON.parse(readFileSync(join(built.dir, "manifest.json"), "utf8")) as Manifest;
     check(
       `noPrivatePathsInManifest:${label}`,
@@ -331,7 +349,71 @@ try {
       readFileSync(identity, "utf8") === created
   );
 
-  // 5. The relocated viewer, from its own app directory, serves every asset as shipped.
+  // 5. Serve the actual relocated sealed CLI, with its build tree unavailable.
+  const ledger = await freshLedger("release-skill");
+  writeFileSync(
+    join(state, "config.json"),
+    JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
+  );
+  writeFileSync(join(state, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
+  const deniedSources = [clone, join(rel, "plugin")];
+  if (process.platform === "darwin") {
+    check(
+      "relocatedSkillSourceDenied",
+      sourceIsolationRefusesRead(repo, deniedSources, [
+        join(clone, "src/skill.ts"),
+        join(rel, "plugin/skills/agent-bus/SKILL.md"),
+      ])
+    );
+    if (!checks.relocatedSkillSourceDenied) throw new Error("Source-isolation control failed.");
+  }
+  facts.skillSourceIsolation = process.platform === "darwin" ? "verified" : "not established";
+  const serverPort = freePort();
+  releaseServer = spawnSupervised(
+    sourceIsolated(
+      [
+        join(rel, "runtime/bun"),
+        "--no-env-file",
+        "--config=/dev/null",
+        join(rel, "app/cli.js"),
+        "serve",
+        "--codex",
+        "/usr/bin/false",
+      ],
+      repo,
+      deniedSources
+    ),
+    {
+      cwd: decoy,
+      env: { ...empty, AGENT_BUS_DIR: state, AGENT_BUS_PORT: String(serverPort) },
+      stdout: "ignore",
+      stderr: "ignore",
+    }
+  );
+  let healthy = false;
+  for (let attempt = 0; attempt < 100 && !healthy; attempt++) {
+    healthy = await fetch(`http://127.0.0.1:${serverPort}/health`).then(
+      (response) => response.ok,
+      () => false
+    );
+    if (!healthy) await Bun.sleep(100);
+  }
+  if (!healthy) throw new Error("Relocated release serve did not become healthy.");
+  await verifySkillWire(
+    modernHttp(
+      `http://127.0.0.1:${serverPort}/mcp`,
+      "release-skill-qualifier",
+      {},
+      { name: "agent-bus", version: a.id }
+    ),
+    authoredSkill(clone)
+  );
+  check("relocatedReleaseServesAuthoredSkill", true);
+  releaseServer.kill();
+  await releaseServer.exited;
+  releaseServer = null;
+
+  // 6. The relocated viewer, from its own app directory, serves every asset as shipped.
   const viewerPort = freePort();
   viewer = spawnSupervised(
     [join(rel, "runtime/bun"), "--no-env-file", join(rel, "app/dist/viewer/main.js")],
@@ -386,6 +468,11 @@ try {
     message = message.replaceAll(path, name);
   facts.error = message;
 } finally {
+  if (releaseServer !== null) {
+    releaseServer.kill();
+    await releaseServer.exited;
+  }
+  await stopFlureeServer();
   if (viewer !== null) {
     viewer.kill();
     await viewer.exited;

@@ -6,8 +6,8 @@ import { isAbsolute, join } from "node:path";
 import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Schema } from "effect";
 
-export const archiveHash = "e26644a170ea32a4ce7b97a0105a5c93bab43f7dc1145cd9aaf96c7181dfba77";
-export const entryHash = "12cc12d7df1441b2926c4664a60376afa9fdaf2738ea90e91b7585d703d9c3cf";
+export const archiveHash = "90ac182ec316eaff54b787573ca076aea5bd98e346d2f6290945f05a4c244cce";
+export const entryHash = "e8b43e25a64d0bf5e70cc4efc358c0d3e4bc7e901706933fe1d026db6d38f8d5";
 export const digest = (file: string) =>
   createHash("sha256").update(readFileSync(file)).digest("hex");
 const manifestSchema = Schema.Struct({
@@ -15,8 +15,8 @@ const manifestSchema = Schema.Struct({
   peerSha256: Schema.String,
   source: Schema.String,
   host: Schema.Struct({
-    sourceCommit: Schema.Literal("7d19ed341e4c18ef6523770dac8df1fe49cb9afc"),
-    sourceTree: Schema.Literal("fe37466b3ef1d4d8860c780016745957b943aa24"),
+    sourceCommit: Schema.Literal("a1ca3083913b9d9cc0794c1acdf6c682678de1d1"),
+    sourceTree: Schema.Literal("074ff06aeea433776af79040f368c9cf2b3377f4"),
     archiveSha256: Schema.Literal(archiveHash),
     entrySha256: Schema.Literal(entryHash),
     bundleSha256: Schema.String,
@@ -58,6 +58,10 @@ export const hostForQualification = (archive: string, parent: string, selectedBu
 };
 
 export const protocolVersion = "2026-07-28";
+const routingHeader = (value: string) =>
+  /^[\t\x20-\x7e]*$/.test(value) && !value.startsWith("=?base64?")
+    ? value
+    : `=?base64?${Buffer.from(value, "utf8").toString("base64")}?=`;
 export const modernRequest = (
   endpoint: string | URL,
   clientName: string,
@@ -74,7 +78,11 @@ export const modernRequest = (
       accept: "application/json, text/event-stream",
       "mcp-protocol-version": protocolVersion,
       "mcp-method": method,
-      ...(typeof params.name === "string" ? { "mcp-name": params.name } : {}),
+      ...(typeof params.name === "string"
+        ? { "mcp-name": routingHeader(params.name) }
+        : method === "resources/read" && typeof params.uri === "string"
+          ? { "mcp-name": routingHeader(params.uri) }
+          : {}),
       ...headers,
     },
     body: JSON.stringify({

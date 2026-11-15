@@ -1,16 +1,21 @@
 // This fixture is bundled separately and run from a directory with no node_modules ancestors.
 import { strict as assert } from "node:assert";
 import { createHash, randomBytes } from "node:crypto";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { Schema } from "effect";
 import type { InvocationIdentity, ToolInvocation } from "mcp-openapi";
 import type * as Identity from "../../src/private-web/identity.ts";
 import type * as Service from "../../src/private-web/service.ts";
 import { type ModernHttp, modernHttp } from "../private-modern-http.ts";
+import { verifySkillWire } from "../skill-wire.ts";
 
-const [dir, configFile] = process.argv.slice(2);
-if (!dir || !configFile) throw new Error("Missing isolated fixture inputs.");
+const [dir, configFile, oracleFile] = process.argv.slice(2);
+if (!dir || !configFile || !oracleFile) throw new Error("Missing isolated fixture inputs.");
+const expectedSkill = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.String))(
+  JSON.parse(readFileSync(oracleFile, "utf8"))
+);
 const bundle: unknown = await import(pathToFileURL(join(dir, "main.js")).href);
 const isBundle = (value: unknown): value is { runPrivatePeer: typeof Service.runPrivatePeer } =>
   typeof value === "object" &&
@@ -129,6 +134,38 @@ try {
     }
   }
   assert(client);
+  // Static guidance needs transport admission, but neither a Bus grant nor correlation.
+  await verifySkillWire(client, expectedSkill, 300);
+  const withoutCorrelation = await client.callTool({
+    name: "bus_peers",
+    arguments: {},
+    _meta: { "fixture/principal": "first" },
+  });
+  assert.notEqual(withoutCorrelation.isError, true);
+  await Bun.sleep(300);
+  const ownedWithoutCorrelation = await client.callTool({
+    name: "bus_join",
+    arguments: { address: "chatgpt/no-correlation" },
+    _meta: { "fixture/principal": "first" },
+  });
+  assert.equal(ownedWithoutCorrelation.isError, true);
+  assert(
+    JSON.stringify(ownedWithoutCorrelation.content) ===
+      JSON.stringify([
+        {
+          type: "text",
+          text: "This call requires supported conversation correlation metadata. No Bus call was sent.",
+        },
+      ]),
+    "The ownership call did not report the pre-dispatch correlation refusal."
+  );
+  await Bun.sleep(300);
+  const unmapped = await client.callTool({
+    name: "bus_peers",
+    arguments: {},
+    _meta: { "fixture/principal": "unknown" },
+  });
+  assert.equal(unmapped.isError, true);
   const instructions = discovered?.instructions;
   assert(typeof instructions === "string", "Hosted discovery instructions are missing.");
   const prefix = instructions.slice(0, 512);

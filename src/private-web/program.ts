@@ -1,4 +1,5 @@
-import type { DirectTool, EventsProgram } from "mcp-openapi";
+import type { DirectTool, EventsProgram, StaticSkill } from "mcp-openapi";
+import { busSkill } from "../skill.ts";
 import type { PeerActor, PeerInvocation } from "./identity.ts";
 import { busPeer, peerTools, type wakePort } from "./peer.ts";
 export type ResolvePeer = (identity: PeerInvocation) => Promise<PeerActor>;
@@ -6,6 +7,7 @@ type PeerHost = (
   tools: ReadonlyArray<DirectTool<PeerActor>>,
   options: {
     readonly resolveContext: ResolvePeer;
+    readonly skills: ReadonlyArray<StaticSkill>;
     readonly events?: EventsProgram;
     readonly signal?: AbortSignal;
   }
@@ -27,6 +29,7 @@ export const servePeer = async (options: {
     if (options.prepareWatch !== undefined) tools.push(options.prepareWatch(peer.wake));
     await options.runHost(tools, {
       resolveContext: options.resolveContext,
+      skills: [busSkill],
       ...(options.events === undefined ? {} : { events: options.events(peer.wake) }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
     });
