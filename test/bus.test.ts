@@ -3939,8 +3939,11 @@ describe("claude wake hook", () => {
         "Don't use bus_join to recover the read; deliberate updates to an address you hold may use it."
       );
       expect(text).toContain(`No mail, not joined, or another owner: ${end} quietly.`);
-      // A retry that succeeds is not reported.
-      expect(text).toContain(`Retry other failures once; if still failing, report and ${end}.`);
+      const failure = text.slice(text.indexOf("If the read was definitely not sent"));
+      expect(failure).toBe(
+        `If the read was definitely not sent, retry once. Any lost or uncertain result may have consumed mail: inspect bus_history before another read. If unresolved, report and ${end}.`
+      );
+      expect(text).not.toContain("Retry other failures once");
       // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
       expect(text).not.toMatch(/already joined|don't (call )?bus_join[.;]/i);
     }

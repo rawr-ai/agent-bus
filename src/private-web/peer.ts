@@ -229,17 +229,19 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
     const name = tool.name;
     const description =
       name === "bus_join"
-        ? "Join a chatgpt/ address for this conversation as runtime other. Rejoin your own address to update topics, associations or note. Another conversation's holding is refused. This interactive peer is not automatically woken."
+        ? "Join a chatgpt/ address for this conversation. Rejoin your own address deliberately to update topics, associations or note; a read does not need a rejoin. Another conversation's holding is refused. Without an accepted optional Events watch, read interactively or wait for an expected reply."
         : name === "bus_owned_addresses"
           ? "List addresses held by this conversation as runtime other. This read does not change mail, activity or ownership."
-          : (tool.description ?? "");
+          : name === "bus_activity"
+            ? "Set your address's activity, mutes or both. Inactive holds back ambient wake eligibility; direct mail reactivates the address and is eligible to wake it. A hosted wake requires an accepted optional Events watch; otherwise read interactively. mutes replaces your muted scopes, whatever your activity. Supply a UUIDv7 operation; a retry with it returns the original receipt. Retry an UNKNOWN only with the identical intent and the same operation."
+            : (tool.description ?? "");
     const readLimit =
       name === "bus_read" || name === "bus_wait"
         ? " The oldest whole messages fitting a 4 MiB result carrier are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor."
         : "";
     return {
       name,
-      description: `${description}${readLimit} Hosted calls bind conversation identity automatically; joins use the bridge directory. Join and takeover only chatgpt/ addresses; take over only on explicit human instruction.`,
+      description: `${description}${readLimit} Address-owned calls bind conversation identity automatically; joins and takeovers use the bridge directory. Join and takeover only chatgpt/ addresses; take over only on explicit human instruction.`,
       annotations: {
         openWorldHint: false,
         readOnlyHint: [

@@ -10,7 +10,7 @@ The join result echoes the effective topics. `"#project"` is accepted too and be
 
 ## Delivery and response expectations are separate
 
-These are argument fragments for `bus_publish`; each call also supplies your `from` and `session`.
+These are argument fragments for `bus_publish`; each call also supplies your `from`. Native callers pass `session`; hosted callers omit it because the peer supplies identity.
 
 | Situation | Audience and body |
 | --- | --- |
@@ -38,4 +38,4 @@ Read the body for the requested response. If it asks you to confirm, answer dire
 
 ## Unwakeable recipients
 
-A `bus_publish` result with `wake` lists directly addressed recipients that, as of your own send, weren't joined (`not-joined`) or whose join lacks what a native wake needs (`no-installation`, `no-codex-thread`, or both: `no-installation-or-codex-thread`). It lists as many as fit 4 KiB and counts the rest. The message is still stored for them, but they see it only when they next read. If the answer matters, tell that session's owner another way or ask them to renew the join. `bus_peers` shows the same standing as `wake`. No `wake` does not mean a recipient was woken, and a "recorded" standing in `bus_peers` is not a checked wake.
+A `bus_publish` result with `wake` lists directly addressed recipients that, as of your own send, weren't joined (`not-joined`) or whose join lacks what a native wake needs (`no-installation`, `no-codex-thread`, or both: `no-installation-or-codex-thread`). It lists as many as fit 4 KiB and counts the rest. The message is still stored in history. A hosted conversation may read interactively or receive an optional accepted Events wake; this native diagnostic does not describe that watch. If a native wake is needed, tell that session's owner another way or ask them to renew the join. `bus_peers` shows the same standing as `wake`. No `wake` does not mean a recipient was woken, and a "recorded" standing in `bus_peers` is not a checked wake.
