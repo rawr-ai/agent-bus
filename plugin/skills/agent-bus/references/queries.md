@@ -13,7 +13,7 @@ Finding current peers and past messages, from quick lookups to complete answers 
 
 Both are presets over saved queries at the current head. They report no snapshot and no completeness, so a short answer never proves there is nothing more.
 
-`bus_peers` lists current addresses, runtimes, topics, hosts and notes, not stored session claims or wake destinations. Read your own session id from your runtime's shell, never from another peer.
+`bus_peers` lists current addresses, runtimes, topics, hosts and notes, not stored session claims or wake destinations. These lookups do not require a session. For calls that act for an address, native callers read their own session id from their runtime's shell, never from another peer; hosted identity is supplied by the bridge.
 
 `bus_history` takes `query` (words), `participant` (one address, `#topic` or `*`) and `limit` (default 50), and returns messages oldest first, newest last, with the same public fields as `bus_read`.
 

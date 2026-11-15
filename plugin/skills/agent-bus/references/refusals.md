@@ -4,15 +4,15 @@ Recovering from a refused or failed call. The normal protocol is in [SKILL.md](.
 
 ## Refusals
 
-A refusal changes nothing. Match its wording:
+An ownership or validation refusal changes nothing. Match its wording:
 
 | Refusal starts | Do |
 | --- | --- |
-| "Pass your runtime's own session id as `session`" | Read the id from your shell and repeat the call |
+| "Pass your runtime's own session id as `session`" | Native caller: read the id from your shell and repeat the call. Hosted caller: use the client recovery below; never supply an invented id |
 | "Each topic must have a non-empty name with at most one leading #." | Correct the topic list and rejoin: use names such as `topics: ["project"]`. Blank names, `#` alone and repeated `#` are refused; use `[]` only if you mean to clear all subscriptions |
-| "codexThreadId must be your own thread id, the same as session." | Pass `$CODEX_THREAD_ID` as both |
+| "codexThreadId must be your own thread id, the same as session." | Native Codex: pass `$CODEX_THREAD_ID` as both |
 | "`<address>` is held by another session" | Join another address of your own. Only if the human says that session has ended: `bus_takeover` with `holder` set to the join id in the latest refusal |
-| "`<address>` belongs to another session; nothing was changed." | Your id changed (`/clear`, a fork) or the address was taken over: join a new address. If a wake's read brought you here, carry on quietly, or end the turn if the wake started it |
+| "`<address>` belongs to another session; nothing was changed." | A native id may have changed (`/clear`, a fork), hosted correlation may identify another conversation, or the address was taken over: join a new address. If a wake's read brought you here, carry on quietly, or end the turn if the wake started it |
 | "`<address>` changed while this call was deciding, so nothing was written." | Another call changed the address first. Call again once; the bus decides against the current state. Don't loop |
 | "The bus could not confirm whether this `<join\|leave>` of `<address>` was recorded" | It may or may not have committed. Call again if you still need the change: that call's result or refusal is what counts. Don't treat `bus_peers` as proof either way: it doesn't show sessions |
 | "`<address>` has not joined the bus; join first." | `bus_join`, unless this was a wake's read: then carry on, or end the turn if the wake started it, without joining |
@@ -22,5 +22,7 @@ A refusal changes nothing. Match its wording:
 
 The query tools' own errors are in [queries.md](queries.md#errors).
 
-A lost answer to `bus_publish`, `bus_read` or `bus_wait` may follow a committed send or consuming read. Inspect history and tell the human; do not automatically repeat a publish or assume mail is still unread. For another store error or no answer, retry once only when the operation's contract permits, then tell the human. Don't start a bus of your own.
+If a hosted call reports missing conversation correlation, no Bus call was sent. Tell the human and use the client's supported connection or conversation recovery; do not invent or pass an identity. Authorized session-free lookups remain available. See [hosted runtimes](runtimes.md#hosted-chatgpt).
+
+A lost answer to `bus_publish`, `bus_read` or `bus_wait` may follow a committed send or consuming read. Inspect history and tell the human; do not blindly retry an ambiguous publish, read or wait. If the call was definitely not sent, retry once; a lost retry result is still uncertain. A guarded `UNKNOWN` may be retried only with the same operation id and identical intent; see [activity](activity.md#read-the-result) and [guidance](orientation.md). For another store error, retry once only when the operation's contract permits, then tell the human. Don't start a bus of your own.
 

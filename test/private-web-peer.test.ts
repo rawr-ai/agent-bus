@@ -137,7 +137,51 @@ test("hosted catalogue excludes hook and caller-controlled identity fields", () 
     if (["bus_read", "bus_wait"].includes(tool.name))
       expect(properties).not.toHaveProperty("maxResultBytes");
     expect(properties).not.toHaveProperty("codexThreadId");
+    const nativeOnly =
+      /\$CLAUDE_CODE_SESSION_ID|\$CODEX_THREAD_ID|codexThreadId|\bhooked\b|\bshell\b|bus_wake/i;
+    expect(tool.description).not.toMatch(nativeOnly);
+    expect(tool.description).toContain("Calls that act for an address bind conversation identity");
+    expect(JSON.stringify(schema)).not.toMatch(nativeOnly);
   }
+});
+
+test("hosted descriptions qualify wake and the injected join directory", () => {
+  const tools = peerTools(async () => ({ content: [] }), "/bridge");
+  const join = tools.find((tool) => tool.name === "bus_join");
+  const takeover = tools.find((tool) => tool.name === "bus_takeover");
+  const activity = tools.find((tool) => tool.name === "bus_activity");
+  if (join === undefined || takeover === undefined || activity === undefined)
+    throw new Error("Missing hosted participation tool.");
+
+  expect(join.description).toContain("Without an accepted optional Events watch");
+  expect(join.description).toContain("a read does not need a rejoin");
+  expect(join.description).not.toContain("not automatically woken");
+  expect(activity.description).toContain(
+    "direct mail from another peer reactivates the address and is eligible to wake"
+  );
+  expect(activity.description).toContain("requires an accepted optional Events watch");
+  expect(activity.description).toContain("identical intent and the same operation");
+  expect(activity.description).not.toContain("direct mail still wakes you");
+
+  for (const name of ["bus_activity", "bus_directory", "bus_bulletin"]) {
+    const description = tools.find((tool) => tool.name === name)?.description ?? "";
+    expect(description).toContain("UNKNOWN");
+    expect(description).toContain("identical intent");
+    expect(description).toContain("same operation");
+  }
+
+  for (const tool of [join, takeover]) {
+    const schema = tool.parameters["~standard"].jsonSchema.input({ target: "draft-2020-12" });
+    expect(schema).toHaveProperty(
+      "properties.orient.description",
+      "After joining, independently read orientation for the join's cwd (the bridge directory for hosted calls). A failed read does not undo the join."
+    );
+  }
+  const schema = activity.parameters["~standard"].jsonSchema.input({ target: "draft-2020-12" });
+  expect(schema).toHaveProperty(
+    "properties.activity.description",
+    "inactive for do-not-disturb; active makes ambient mail eligible for wake when available."
+  );
 });
 
 test("hosted orientation forwards only an explicitly supplied lexical cwd and reads bind the budget", async () => {
