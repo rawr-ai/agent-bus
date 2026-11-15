@@ -6,7 +6,7 @@ import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import type { InvocationIdentity } from "mcp-openapi";
+import type { InvocationIdentity, ToolInvocation } from "mcp-openapi";
 import type * as Identity from "../../src/private-web/identity.ts";
 import type * as Service from "../../src/private-web/service.ts";
 
@@ -33,6 +33,7 @@ const resource = "https://fixture.invalid/mcp";
 const secondGrant = join(dirname(configFile), "grant-second.json");
 const abort = new AbortController();
 let hostPort = 0;
+let checkWatch: ((ticket: string, allowed: boolean) => Promise<void>) | undefined;
 const running = bundle.runPrivatePeer({
   configFile,
   signal: abort.signal,
@@ -58,22 +59,38 @@ const running = bundle.runPrivatePeer({
     const { events, ...ordinaryLifecycle } = lifecycle;
     if (events === undefined) throw new Error("Missing production Events program.");
     const eventInvocation: InvocationIdentity = {
-      ...invocation("first"),
       auth: { authType: "oauth", accessToken: "synthetic-first" },
+      signal: abort.signal,
       client: { version: undefined },
     };
     const account = await events.resolvePrincipal(eventInvocation);
-    assert.equal(
-      await events.authorizeSubscription({
+    checkWatch = async (ticket, allowed) => {
+      const scope = await events.authorizeSubscription({
         account,
         event: "mail.wake",
-        arguments: { address: "chatgpt/relocated-unjoined" },
+        arguments: { address: "chatgpt/bundle-a", ticket },
         invocation: eventInvocation,
         signal: abort.signal,
-      }),
-      undefined
-    );
-    return serveTools({ ...config, serverAuth: { type: "apiKey", key } }, tools, {
+      });
+      assert.equal(scope !== undefined, allowed);
+    };
+    // The isolated host uses an API key instead of OAuth; carry its synthetic account to
+    // the production tool invocation just as resolveContext does for ordinary tools.
+    const fixtureTools = tools.map((tool) => ({
+      ...tool,
+      execute: (input: unknown, context: ToolInvocation<Identity.PeerActor>) =>
+        tool.execute(input, {
+          ...context,
+          auth:
+            context.auth?.authType === "apiKey"
+              ? {
+                  authType: "oauth",
+                  accessToken: `synthetic-${context.requestMeta?.["fixture/principal"]}`,
+                }
+              : context.auth,
+        }),
+    }));
+    return serveTools({ ...config, serverAuth: { type: "apiKey", key } }, fixtureTools, {
       ...ordinaryLifecycle,
       resolveContext: (value: Identity.PeerInvocation) =>
         lifecycle.resolveContext({
@@ -127,6 +144,25 @@ try {
   };
   await success("bus_join", { address: "chatgpt/bundle-a" }, "first");
   await success("bus_join", { address: "chatgpt/bundle-b" }, "second");
+  const prepared = await call("bus_prepare_watch", { address: "chatgpt/bundle-a" }, "first");
+  assert.notEqual(prepared.isError, true);
+  const value = prepared.structuredContent;
+  assert(value && typeof value === "object" && !Array.isArray(value));
+  assert(Object.keys(value).sort().join(",") === "arguments,event");
+  assert("event" in value && "arguments" in value && value.event === "mail.wake");
+  const args = value.arguments;
+  assert(args && typeof args === "object" && !Array.isArray(args));
+  assert(Object.keys(args).sort().join(",") === "address,ticket");
+  assert("address" in args && args.address === "chatgpt/bundle-a");
+  assert(
+    "ticket" in args && typeof args.ticket === "string" && /^[A-Za-z0-9_-]{22}$/.test(args.ticket)
+  );
+  assert(Array.isArray(prepared.content));
+  const text = prepared.content[0];
+  assert(text && typeof text === "object" && "text" in text && typeof text.text === "string");
+  assert(JSON.stringify(JSON.parse(text.text)) === JSON.stringify(value));
+  assert(checkWatch);
+  await checkWatch(args.ticket, true);
   const sent = await success(
     "bus_publish",
     { from: "chatgpt/bundle-b", to: ["chatgpt/bundle-a"], body: "relocated body" },
@@ -143,6 +179,8 @@ try {
   );
   assert.equal(received.messages[0]?.id, sent.id);
   assert.equal(received.messages[0]?.body, "relocated body");
+  await success("bus_leave", { address: "chatgpt/bundle-a" }, "first");
+  await checkWatch(args.ticket, false);
   console.log("Relocated runPrivatePeer and exact host two-principal fixture passed.");
 } finally {
   await client?.close();

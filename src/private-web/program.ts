@@ -1,9 +1,9 @@
-import type { EventsProgram } from "mcp-openapi";
+import type { DirectTool, EventsProgram } from "mcp-openapi";
 import type { PeerActor, PeerInvocation } from "./identity.ts";
 import { busPeer, peerTools, type wakePort } from "./peer.ts";
 export type ResolvePeer = (identity: PeerInvocation) => Promise<PeerActor>;
 type PeerHost = (
-  tools: ReturnType<typeof peerTools>,
+  tools: ReadonlyArray<DirectTool<PeerActor>>,
   options: {
     readonly resolveContext: ResolvePeer;
     readonly events?: EventsProgram;
@@ -17,12 +17,15 @@ export const servePeer = async (options: {
   readonly cwd: string;
   readonly resolveContext: ResolvePeer;
   readonly events?: (wake: ReturnType<typeof wakePort>) => EventsProgram;
+  readonly prepareWatch?: (wake: ReturnType<typeof wakePort>) => DirectTool<PeerActor>;
   readonly runHost: PeerHost;
   readonly signal?: AbortSignal;
 }) => {
   const peer = await busPeer(options);
   try {
-    await options.runHost(peerTools(peer.exchange, options.cwd), {
+    const tools: DirectTool<PeerActor>[] = [...peerTools(peer.exchange, options.cwd)];
+    if (options.prepareWatch !== undefined) tools.push(options.prepareWatch(peer.wake));
+    await options.runHost(tools, {
       resolveContext: options.resolveContext,
       ...(options.events === undefined ? {} : { events: options.events(peer.wake) }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),

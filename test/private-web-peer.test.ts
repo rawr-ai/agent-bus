@@ -1,5 +1,5 @@
 import { afterAll, beforeAll, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
@@ -11,7 +11,11 @@ import { Message } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { Messages } from "../src/mcp.ts";
-import { authorizationDiagnostics, eventsProgram } from "../src/private-web/events.ts";
+import {
+  authorizationDiagnostics,
+  eventsProgram,
+  prepareWatchTool,
+} from "../src/private-web/events.ts";
 import {
   clerkPeerIdentity,
   clerkPeerResolver,
@@ -19,6 +23,7 @@ import {
   peerSession,
 } from "../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
+import { initializeWatchAuthority, WatchAuthority } from "../src/private-web/watch-authority.ts";
 import * as Serve from "../src/serve.ts";
 import { WakeBinding } from "../src/wake-observation.ts";
 import { freshLedger } from "./fluree-server.ts";
@@ -478,6 +483,7 @@ test("hosted reads drain a carrier larger than the loopback ceiling without losi
 
 test("real Fluree wake capture and continuing authority survive reads but fence a new run", async () => {
   const peer = await busPeer({ busPort: port, expectedBusVersion: "hosted-fixture" });
+  let authority: WatchAuthority | undefined;
   try {
     const name = "chatgpt/events-native";
     const sender = "fixture/events-sender";
@@ -510,6 +516,22 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
       return result;
     };
     await call("bus_join", { address: name });
+    const eventsPath = join(dir, "native-events.sqlite");
+    writeFileSync(eventsPath, "", { mode: 0o600, flag: "wx" });
+    initializeWatchAuthority({ eventsPath, resource });
+    authority = new WatchAuthority({ eventsPath, resource });
+    const prepare = prepareWatchTool({ identity: identityService, wake: peer.wake, authority });
+    const prepared = await prepare.execute({ address: name }, { ...invocation, actor });
+    expect(prepared.isError).not.toBe(true);
+    const preparedArgs = prepared.structuredContent?.arguments;
+    if (
+      typeof preparedArgs !== "object" ||
+      preparedArgs === null ||
+      !("ticket" in preparedArgs) ||
+      typeof preparedArgs.ticket !== "string"
+    )
+      throw new Error("Missing watch ticket.");
+    const ticket = preparedArgs.ticket;
     await server.runPromise(
       Effect.flatMap(Bus.Bus, (bus) =>
         bus.join({ address: sender, session: sender, runtime: "other", cwd: process.cwd() })
@@ -526,10 +548,11 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     const program = eventsProgram({
       identity: identityService,
       wake: peer.wake,
+      authority,
       resource,
       diagnostics,
       storage: {
-        path: "/fixture/events.db",
+        path: eventsPath,
         maxBytes: 1_048_576,
         encryptionKey: Buffer.alloc(32, 1).toString("base64"),
       },
@@ -546,7 +569,7 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
         await program.authorizeSubscription({
           account: otherAccount,
           event: "mail.wake",
-          arguments: { address: name },
+          arguments: { address: name, ticket },
           invocation: other,
           signal,
         })
@@ -554,7 +577,7 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
       expect(lastDiagnostic()).toMatchObject({
         type: "authorization",
         callback: "subscription",
-        outcome: "native_observation_failed",
+        outcome: other === foreignConversation ? "correlation_mismatch" : "watch_authority_refused",
       });
     }
     const event = program.definitions[0];
@@ -562,8 +585,8 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     const scope = await program.authorizeSubscription({
       account,
       event: "mail.wake",
-      arguments: { address: name },
-      invocation,
+      arguments: { address: name, ticket },
+      invocation: { ...identity(), auth: invocation.auth, client: invocation.client },
       signal,
     });
     if (scope === undefined) throw new Error("Subscription was refused.");
@@ -579,7 +602,7 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     );
     const captured = await event.source.sample({
       principal: scope,
-      filter: { address: name },
+      filter: { address: name, ticket },
       checkpoint: undefined,
       reason: "activation",
       revision: 7,
@@ -589,10 +612,12 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     });
     expect(captured.kind).toBe("occurrence");
     expect(JSON.stringify(captured)).not.toContain("body-not-in-event");
-    const delivery = { event: "mail.wake", arguments: { address: name }, signal };
+    const delivery = { event: "mail.wake", arguments: { address: name, ticket }, signal };
     const foreign = await identityService.resolveAuthorized(foreignConversation);
     if (foreign.session === undefined) throw new Error("Missing foreign session.");
     const binding = Schema.decodeUnknownSync(WakeBinding)(scope.binding);
+    for (const secret of [ticket, ...Object.values(binding)])
+      expect(lines.join("\n").includes(secret)).toBe(false);
     expect(
       await program.authorizeDelivery(
         {
@@ -607,7 +632,10 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
       callback: "delivery",
       outcome: "native_binding_failed",
     });
-    await call("bus_read", { address: name });
+    const read = await call("bus_read", { address: name });
+    expect("structuredContent" in read ? read.structuredContent : undefined).toMatchObject({
+      messages: [{ body: "body-not-in-event" }],
+    });
     await call("bus_activity", {
       address: name,
       operation: Bun.randomUUIDv7(),
@@ -642,7 +670,7 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     await expect(
       event.source.sample({
         principal: scope,
-        filter: { address: name },
+        filter: { address: name, ticket },
         checkpoint: undefined,
         reason: "restart",
         revision: 8,
@@ -652,6 +680,7 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
       })
     ).rejects.toThrow();
     expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: true });
+    await call("bus_read", { address: name });
     await call("bus_leave", { address: name });
     await call("bus_join", { address: name });
     expect(await program.authorizeDelivery(scope, delivery)).toEqual({ allowed: false });
@@ -660,19 +689,56 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
       callback: "delivery",
       outcome: "native_binding_failed",
     });
+    const refresh = (ticket: string) =>
+      program.authorizeSubscription({
+        account,
+        event: "mail.wake",
+        arguments: { address: name, ticket },
+        invocation: { ...identity(), auth: invocation.auth, client: invocation.client },
+        signal,
+      });
+    expect(await refresh(ticket)).toBeUndefined();
+    expect(lastDiagnostic()).toMatchObject({
+      type: "authorization",
+      callback: "subscription",
+      outcome: "native_observation_failed",
+    });
+    const newPrepared = await prepare.execute({ address: name }, { ...invocation, actor });
+    expect(newPrepared.isError).not.toBe(true);
+    const newArgs = newPrepared.structuredContent?.arguments;
+    if (
+      typeof newArgs !== "object" ||
+      newArgs === null ||
+      !("ticket" in newArgs) ||
+      typeof newArgs.ticket !== "string"
+    )
+      throw new Error("Missing replacement watch ticket.");
+    expect(newArgs.ticket !== ticket).toBe(true);
+    expect(await refresh(ticket)).toBeUndefined();
+    expect(lastDiagnostic()).toMatchObject({
+      type: "authorization",
+      callback: "subscription",
+      outcome: "watch_authority_refused",
+    });
+    expect(await refresh(newArgs.ticket)).toBeDefined();
     const restarted = eventsProgram({
       identity: identityService,
       wake: peer.wake,
+      authority,
       resource,
       diagnostics,
       storage: {
-        path: "/fixture/events.db",
+        path: eventsPath,
         maxBytes: 1_048_576,
         encryptionKey: Buffer.alloc(32, 1).toString("base64"),
       },
     });
     expect(await restarted.authorizeDelivery(scope, delivery)).toEqual({ allowed: false });
   } finally {
-    await peer.dispose();
+    try {
+      await authority?.close();
+    } finally {
+      await peer.dispose();
+    }
   }
 }, 120_000);

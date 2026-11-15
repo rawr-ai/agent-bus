@@ -1,12 +1,21 @@
-import { expect, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { EventsValue, InvocationIdentity } from "mcp-openapi";
 import {
   type AuthorizationDiagnosticObserver,
   authorizationDiagnostics,
   eventsProgram,
+  prepareWatchTool,
 } from "../src/private-web/events.ts";
 import { clerkPeerIdentity, PEER_PERMISSION } from "../src/private-web/identity.ts";
 import { wakePort } from "../src/private-web/peer.ts";
+import {
+  initializeWatchAuthority,
+  WatchAuthority,
+  watchAuthorityPath,
+} from "../src/private-web/watch-authority.ts";
 import type { WakeBinding } from "../src/wake-observation.ts";
 
 const signal = new AbortController().signal;
@@ -18,6 +27,24 @@ const invocation = (token = "first", chat?: string): InvocationIdentity => ({
   signal,
   client: { version: undefined },
   ...(chat === undefined ? {} : { requestMeta: { "openai/session": chat } }),
+});
+
+const fixtures: Array<{ dir: string; authority?: WatchAuthority }> = [];
+afterEach(async () => {
+  let failed = false;
+  for (const { dir, authority } of fixtures.splice(0)) {
+    try {
+      await authority?.close();
+    } catch {
+      failed = true;
+    }
+    try {
+      rmSync(dir, { recursive: true, force: true });
+    } catch {
+      failed = true;
+    }
+  }
+  if (failed) throw new Error("Could not clean watch fixture.");
 });
 
 const fixture = async (diagnostics?: AuthorizationDiagnosticObserver) => {
@@ -84,9 +111,26 @@ const fixture = async (diagnostics?: AuthorizationDiagnosticObserver) => {
       structuredContent: name === "bus_observe_wake" ? state.observation : state.check,
     };
   });
+  const dir = mkdtempSync(join(tmpdir(), "agent-bus-watch-events-"));
+  const owned: { dir: string; authority?: WatchAuthority } = { dir };
+  fixtures.push(owned);
+  const eventsPath = join(dir, "events.sqlite");
+  writeFileSync(eventsPath, "", { mode: 0o600, flag: "wx" });
+  initializeWatchAuthority({ eventsPath, resource });
+  const authority = new WatchAuthority({ eventsPath, resource });
+  owned.authority = authority;
+  const prepare = prepareWatchTool({ identity, wake, authority });
+  const prepared = await prepare.execute({ address }, { ...invocation("first", "chat"), actor });
+  if (prepared.isError || !object(prepared.structuredContent))
+    throw new Error("Watch preparation failed.");
+  const args = prepared.structuredContent.arguments;
+  if (!object(args) || typeof args.ticket !== "string") throw new Error("Missing watch ticket.");
+  const ticket = args.ticket;
+  calls.length = 0;
   const program = eventsProgram({
     identity,
     wake,
+    authority,
     resource,
     diagnostics,
     storage: {
@@ -111,6 +155,10 @@ const fixture = async (diagnostics?: AuthorizationDiagnosticObserver) => {
     grants,
     reads,
     state,
+    authority,
+    prepare,
+    ticket,
+    eventsPath,
   };
 };
 
@@ -120,10 +168,9 @@ const outcomes = {
   subscription: [
     "input_refused",
     "context_refused",
-    "correlation_metadata_absent",
-    "correlation_key_absent",
-    "correlation_unusable",
     "account_mismatch",
+    "watch_authority_refused",
+    "correlation_mismatch",
     "native_observation_failed",
     "scope_returned",
     "cancelled",
@@ -233,7 +280,7 @@ test("delivery worker exhaustion still leaves a fresh subscription's evidence", 
   const lines: string[] = [];
   const f = await fixture(authorizationDiagnostics(true, (line) => lines.push(line)));
   const scope = { principal: f.account.principal, resource, binding: f.binding };
-  const context = { event: "mail.wake", arguments: { address }, signal };
+  const context = { event: "mail.wake", arguments: { address, ticket: f.ticket }, signal };
   for (let i = 0; i < 40; i++)
     expect(await f.program.authorizeDelivery(scope, context)).toEqual({ allowed: true });
   expect(diagnosticRecords(lines).at(-1)).toMatchObject({
@@ -244,7 +291,7 @@ test("delivery worker exhaustion still leaves a fresh subscription's evidence", 
     await f.program.authorizeSubscription({
       account: f.account,
       event: "mail.wake",
-      arguments: { address },
+      arguments: { address, ticket: f.ticket },
       invocation: invocation("first", "chat"),
       signal,
     })
@@ -263,14 +310,14 @@ test("diagnostics are behavior-inert for admission, delivery and hostile synchro
     ["active", "subscription", "scope_returned"],
     ["inactive", "subscription", "scope_returned"],
     ["empty", "subscription", "scope_returned"],
-    ["no_chat", "subscription", "correlation_metadata_absent"],
-    ["no_chat_key", "subscription", "correlation_key_absent"],
-    ["blank_chat", "subscription", "correlation_unusable"],
-    ["empty_chat", "subscription", "correlation_unusable"],
-    ["nul_chat", "subscription", "correlation_unusable"],
-    ["long_chat", "subscription", "correlation_unusable"],
-    ["numeric_chat", "subscription", "correlation_unusable"],
-    ["chat_canary", "subscription", "native_observation_failed"],
+    ["no_chat", "subscription", "scope_returned"],
+    ["no_chat_key", "subscription", "scope_returned"],
+    ["blank_chat", "subscription", "scope_returned"],
+    ["empty_chat", "subscription", "scope_returned"],
+    ["nul_chat", "subscription", "scope_returned"],
+    ["long_chat", "subscription", "scope_returned"],
+    ["numeric_chat", "subscription", "scope_returned"],
+    ["chat_canary", "subscription", "correlation_mismatch"],
     ["bad_token", "subscription", "context_refused"],
     ["deleted_grant", "subscription", "context_refused"],
     ["bad_grant", "subscription", "context_refused"],
@@ -318,7 +365,7 @@ test("diagnostics are behavior-inert for admission, delivery and hostile synchro
     let sub: Parameters<typeof f.program.authorizeSubscription>[0] = {
       account: f.account,
       event: "mail.wake",
-      arguments: { address },
+      arguments: { address, ticket: f.ticket },
       invocation: invocation("TOKEN_CANARY", "chat"),
       signal: abort.signal,
     };
@@ -329,7 +376,7 @@ test("diagnostics are behavior-inert for admission, delivery and hostile synchro
     };
     let context: Parameters<typeof f.program.authorizeDelivery>[1] = {
       event: "mail.wake",
-      arguments: { address },
+      arguments: { address, ticket: f.ticket },
       signal: abort.signal,
     };
     switch (name) {
@@ -486,7 +533,7 @@ test("diagnostics are behavior-inert for admission, delivery and hostile synchro
   }
 });
 
-test("metadata classification is value-free, disabled when absent and tolerates hostile proxies", async () => {
+test("unusable metadata cannot override explicit authority or leak through diagnostics", async () => {
   for (const enabled of [false, true]) {
     const lines: string[] = [];
     const f = await fixture(authorizationDiagnostics(enabled, (line) => lines.push(line)));
@@ -517,24 +564,26 @@ test("metadata classification is value-free, disabled when absent and tolerates 
       await f.program.authorizeSubscription({
         account: f.account,
         event: "mail.wake",
-        arguments: { address },
+        arguments: { address, ticket: f.ticket },
         invocation: request,
         signal,
       })
-    ).toBeUndefined();
-    expect(f.calls).toHaveLength(0);
+    ).toEqual({ principal: f.account.principal, resource, binding: f.binding });
+    expect(f.calls).toHaveLength(1);
     expect(valueReads).toBe(1);
-    expect(metadataReads).toBe(enabled ? 2 : 1);
-    expect(presenceChecks).toBe(enabled ? 1 : 0);
+    expect(metadataReads).toBe(1);
+    expect(presenceChecks).toBe(0);
     if (enabled)
       expect(
         diagnosticRecords(lines).map(({ type, callback, outcome }) => ({ type, callback, outcome }))
       ).toEqual([
         { type: "enabled", callback: undefined, outcome: undefined },
         { type: "authorization", callback: "account", outcome: "allowed" },
-        { type: "authorization", callback: "subscription", outcome: "correlation_unusable" },
+        { type: "authorization", callback: "subscription", outcome: "scope_returned" },
       ]);
     else expect(lines).toEqual([]);
+    expect(lines.join("\n")).not.toContain(f.ticket);
+    expect(lines.join("\n")).not.toContain(f.binding.session);
   }
 });
 
@@ -565,6 +614,7 @@ test("account exceptions and observer exceptions preserve the exact original dec
         },
       },
       wake: f.wake,
+      authority: f.authority,
       resource,
       storage,
       diagnostics,
@@ -579,7 +629,7 @@ test("account exceptions and observer exceptions preserve the exact original dec
       await program.authorizeSubscription({
         account: f.account,
         event: "mail.wake",
-        arguments: { address },
+        arguments: { address, ticket: f.ticket },
         invocation: invocation("first", "chat"),
         signal,
       })
@@ -606,6 +656,7 @@ test("overlapping authorizations report completion order without attribution", a
         request.auth?.accessToken === "first" ? first.promise : second.promise,
     },
     wake: f.wake,
+    authority: f.authority,
     resource,
     diagnostics: authorizationDiagnostics(true, (line) => lines.push(line)),
     storage: { path: "/private/events.db", maxBytes: 1_048_576, encryptionKey: "fixture" },
@@ -614,7 +665,7 @@ test("overlapping authorizations report completion order without attribution", a
     program.authorizeSubscription({
       account: f.account,
       event: "mail.wake",
-      arguments: { address },
+      arguments: { address, ticket: f.ticket },
       invocation: invocation(token, "chat"),
       signal,
     });
@@ -654,10 +705,16 @@ test("the Events public program and schemas stay fixed and samples never emit di
   ).toEqual(
     off.definition.payloadSchema["~standard"].jsonSchema.input({ target: "draft-2020-12" })
   );
+  expect(await on.definition.payloadSchema["~standard"].validate({ address })).toHaveProperty(
+    "value"
+  );
+  expect(
+    await on.definition.payloadSchema["~standard"].validate({ address, ticket: on.ticket })
+  ).toHaveProperty("issues");
   const before = lines.length;
   await on.definition.source.sample({
     principal: { principal: on.account.principal, resource, binding: on.binding },
-    filter: { address },
+    filter: { address, ticket: on.ticket },
     checkpoint: undefined,
     reason: "activation",
     revision: 1,
@@ -685,7 +742,7 @@ test("account control is independent of correlation and grant while subscription
     f.program.authorizeSubscription({
       account: f.account,
       event: "mail.wake",
-      arguments: { address },
+      arguments: { address, ticket: f.ticket },
       invocation: invocation("first", "chat"),
       signal,
       ...overrides,
@@ -696,16 +753,21 @@ test("account control is independent of correlation and grant while subscription
   const before = f.calls.length;
   for (const overrides of [
     { event: "mail.other" },
-    { arguments: { address: "codex/foreign" } },
-    { arguments: { address, extra: true } },
-    { invocation: invocation("first") },
+    { arguments: { address: "codex/foreign", ticket: f.ticket } },
+    { arguments: { address, ticket: f.ticket, extra: true } },
     { invocation: invocation("second", "chat") },
   ])
     expect(await authorize(overrides)).toBeUndefined();
   expect(f.calls).toHaveLength(before);
-  expect(await f.definition.inputSchema["~standard"].validate({ address })).toHaveProperty("value");
+  expect(await authorize({ invocation: invocation("first") })).toEqual(scope);
   expect(
-    await f.definition.inputSchema["~standard"].validate({ address, secret: "x" })
+    await f.definition.inputSchema["~standard"].validate({ address, ticket: f.ticket })
+  ).toHaveProperty("value");
+  expect(await f.definition.inputSchema["~standard"].validate({ address })).toHaveProperty(
+    "issues"
+  );
+  expect(
+    await f.definition.inputSchema["~standard"].validate({ address, ticket: f.ticket, secret: "x" })
   ).toHaveProperty("issues");
   f.grants.delete("/first");
   expect(await f.program.resolvePrincipal(invocation("first"))).toEqual(f.account);
@@ -716,10 +778,85 @@ test("account control is independent of correlation and grant while subscription
   await expect(f.program.resolvePrincipal(invocation("unknown"))).rejects.toThrow();
 });
 
+test("watch preparation requires the owning tool context and admission needs its exact ticket", async () => {
+  const lines: string[] = [];
+  const f = await fixture(authorizationDiagnostics(true, (line) => lines.push(line)));
+  const callPrepare = (request: InvocationIdentity, input: unknown = { address }) =>
+    f.prepare.execute(input, { ...request, actor: f.actor });
+  const prepare = await callPrepare(invocation("rotated", "chat"));
+  expect(prepare.isError).not.toBe(true);
+  expect(
+    JSON.stringify(prepare.structuredContent) ===
+      JSON.stringify({
+        event: "mail.wake",
+        arguments: { address, ticket: f.ticket },
+      })
+  ).toBe(true);
+  const text = prepare.content[0]?.text;
+  expect(typeof text).toBe("string");
+  if (typeof text !== "string") throw new Error("Missing preparation text carrier.");
+  expect(JSON.stringify(JSON.parse(text)) === JSON.stringify(prepare.structuredContent)).toBe(true);
+  const observe = f.calls.at(-1);
+  expect(observe?.name).toBe("bus_observe_wake");
+  expect(observe?.args).not.toHaveProperty("previousCoverage");
+  expect(observe?.args).not.toHaveProperty("expectedBinding");
+  const foreignRequest = invocation("first", "other-chat");
+  const foreignActor = await f.identity.resolvePeer(foreignRequest);
+  expect(typeof foreignActor.session).toBe("string");
+  expect(foreignActor.session !== f.actor.session).toBe(true);
+  const foreignPrepare = await f.prepare.execute(
+    { address },
+    { ...foreignRequest, actor: foreignActor }
+  );
+  expect(foreignPrepare.isError).toBe(true);
+  expect(f.calls.at(-1)?.args.session === foreignActor.session).toBe(true);
+  const originalPrepare = await callPrepare(invocation("first", "chat"));
+  const originalArgs = originalPrepare.structuredContent?.arguments;
+  expect(
+    originalPrepare.isError !== true && object(originalArgs) && originalArgs.ticket === f.ticket
+  ).toBe(true);
+  expect((await callPrepare(invocation("first"))).isError).toBe(true);
+  expect(
+    (await callPrepare(invocation("first", "chat"), { address, ticket: f.ticket })).isError
+  ).toBe(true);
+  f.grants.delete("/first");
+  expect((await callPrepare(invocation("first", "chat"))).isError).toBe(true);
+  f.grants.set("/first", { subject: "first", resource, permissions: [PEER_PERMISSION] });
+
+  const authorize = (input: unknown, request: InvocationIdentity, account = f.account) =>
+    f.program.authorizeSubscription({
+      account,
+      event: "mail.wake",
+      arguments: input,
+      invocation: request,
+      signal,
+    });
+  const altered = `${f.ticket[0] === "A" ? "B" : "A"}${f.ticket.slice(1)}`;
+  const foreign = await f.program.resolvePrincipal(invocation("second"));
+  const before = f.calls.length;
+  for (const [input, request, account] of [
+    [{ address }, invocation("first"), f.account],
+    [{ address, ticket: altered }, invocation("first"), f.account],
+    [{ address: "chatgpt/foreign", ticket: f.ticket }, invocation("first"), f.account],
+    [{ address, ticket: f.ticket }, invocation("second"), foreign],
+    [{ address, ticket: f.ticket }, invocation("first", "other-chat"), f.account],
+  ] as const)
+    expect(await authorize(input, request, account)).toBeUndefined();
+  expect(f.calls).toHaveLength(before);
+  expect(await authorize({ address, ticket: f.ticket }, invocation("first"))).toEqual({
+    principal: f.account.principal,
+    resource,
+    binding: f.binding,
+  });
+  const trace = lines.join("\n");
+  for (const secret of [f.ticket, ...Object.values(f.binding)])
+    expect(trace.includes(secret)).toBe(false);
+});
+
 test("delivery checks only the original binding and current principal grant", async () => {
   const f = await fixture();
   const scope = { principal: f.account.principal, resource, binding: f.binding };
-  const context = { event: "mail.wake", arguments: { address }, signal };
+  const context = { event: "mail.wake", arguments: { address, ticket: f.ticket }, signal };
   expect(await f.program.authorizeDelivery(scope, context)).toEqual({ allowed: true });
   expect(f.calls.map(({ name }) => name)).toEqual(["bus_check_wake_binding"]);
   for (const bad of [
@@ -738,13 +875,50 @@ test("delivery checks only the original binding and current principal grant", as
   expect(await f.program.authorizeDelivery(scope, context)).toEqual({ allowed: false });
 });
 
+test("an accepted scope continues through map removal until its next refresh", async () => {
+  const f = await fixture();
+  const input = { address, ticket: f.ticket };
+  const subscribe = () =>
+    f.program.authorizeSubscription({
+      account: f.account,
+      event: "mail.wake",
+      arguments: input,
+      invocation: invocation("first"),
+      signal,
+    });
+  const scope = await subscribe();
+  if (scope === undefined) throw new Error("Subscription was refused.");
+  const path = watchAuthorityPath(f.eventsPath);
+  await f.authority.close();
+  rmSync(path);
+  expect(
+    await f.program.authorizeDelivery(scope, { event: "mail.wake", arguments: input, signal })
+  ).toEqual({
+    allowed: true,
+  });
+  const observed = await f.definition.source.sample({
+    principal: scope,
+    filter: input,
+    checkpoint: undefined,
+    reason: "activation",
+    revision: 1,
+    generation: 1,
+    waitMs: 0,
+    signal,
+  });
+  expect(observed).toMatchObject({ kind: "occurrence" });
+  if (observed.kind !== "occurrence") throw new Error("Missing occurrence.");
+  expect(observed.occurrence.data).toEqual({ address });
+  expect(await subscribe()).toBeUndefined();
+});
+
 test("rung ordering does not change occurrence identity and checkpoints retain native order", async () => {
   const f = await fixture();
   const principal = { principal: f.account.principal, resource, binding: f.binding };
   const sample = () =>
     f.definition.source.sample({
       principal,
-      filter: { address },
+      filter: { address, ticket: f.ticket },
       checkpoint: undefined,
       reason: "activation",
       revision: 7,
@@ -775,7 +949,7 @@ test("samples preserve complete coverage and pass fresh observation revision, ge
   ) =>
     f.definition.source.sample({
       principal,
-      filter: { address },
+      filter: { address, ticket: f.ticket },
       checkpoint,
       reason,
       revision: 7,
@@ -787,11 +961,13 @@ test("samples preserve complete coverage and pass fresh observation revision, ge
     const observed = await sample(reason);
     expect(observed).toMatchObject({
       kind: "occurrence",
-      occurrence: { timestamp: "2026-01-01T00:00:00.000Z", data: { address } },
+      occurrence: { timestamp: "2026-01-01T00:00:00.000Z" },
       nextCheckpoint: f.coverage,
       expectedRevision: 7,
       expectedGeneration: 11,
     });
+    if (observed.kind !== "occurrence") throw new Error("Missing occurrence.");
+    expect(observed.occurrence.data).toEqual({ address });
     expect(JSON.stringify(observed)).not.toContain("private");
     expect(f.calls.at(-1)?.args).toMatchObject({
       timeoutSeconds: 50,
@@ -856,7 +1032,7 @@ test("samples preserve complete coverage and pass fresh observation revision, ge
   await expect(
     f.definition.source.sample({
       principal,
-      filter: { address },
+      filter: { address, ticket: f.ticket },
       checkpoint: undefined,
       reason: "activation",
       revision: 7,

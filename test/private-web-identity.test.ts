@@ -1,5 +1,14 @@
 import { expect, test } from "bun:test";
-import { chmodSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect, Layer, ManagedRuntime } from "effect";
@@ -16,8 +25,10 @@ import {
   decodeServiceConfig,
   decodeSessionKey,
   hostConfig,
+  initializeWatchAuthority,
   readPrivateJson,
 } from "../src/private-web/service.ts";
+import { WatchAuthority, watchAuthorityPath } from "../src/private-web/watch-authority.ts";
 
 const provider = {
   issuer: "https://identity.invalid",
@@ -548,4 +559,79 @@ test("Events is opt-in with separate bounded private storage and canonical indep
   expect(() => decodeEventsKey({ key: session.toString("base64") }, session, [])).toThrow();
   expect(() => decodeEventsKey({ key: canonical }, session, [canonical])).toThrow();
   expect(() => decodeEventsKey({ key: canonical }, session, [key.toString("base64url")])).toThrow();
+});
+
+test("watch state cannot alias keys, grants, journals or OAuth configuration", () => {
+  const storagePath = "/private/events.db";
+  const watchPath = `${storagePath}.watch.sqlite`;
+  const events = {
+    storagePath,
+    maxBytes: 1_048_576,
+    encryptionKeyFile: "/private/events-key.json",
+  };
+  for (const path of [watchPath, `${watchPath}-journal`]) {
+    expect(() => decodeServiceConfig({ ...config, events, sessionKeyFile: path })).toThrow();
+    expect(() =>
+      decodeServiceConfig({
+        ...config,
+        events,
+        principals: [{ subject: "first", grantFile: path }],
+      })
+    ).toThrow();
+    expect(() =>
+      decodeServiceConfig({ ...config, events: { ...events, encryptionKeyFile: path } })
+    ).toThrow();
+    expect(() =>
+      decodeServiceConfig({ ...config, events, oauth: { ...config.oauth, tokenStorageDir: path } })
+    ).toThrow();
+  }
+});
+
+test("offline bundle initializer exclusively creates watch schema and refuses existing config or state", async () => {
+  const dir = mkdtempSync(join(realpathSync(tmpdir()), "bus-watch-bootstrap-"));
+  const configFile = join(dir, "config.json");
+  const storagePath = join(dir, "events.db");
+  const events = {
+    storagePath,
+    maxBytes: 1_048_576,
+    encryptionKeyFile: join(dir, "events-key.json"),
+  };
+  const configured = {
+    ...config,
+    sessionKeyFile: join(dir, "session-key.json"),
+    principals: [{ subject: "first", grantFile: join(dir, "grant.json") }],
+    oauth: { ...config.oauth, tokenStorageDir: join(dir, "oauth") },
+    events,
+  };
+  try {
+    writeFileSync(storagePath, "", { mode: 0o600, flag: "wx" });
+    writeFileSync(configFile, JSON.stringify(configured), { mode: 0o600, flag: "wx" });
+    initializeWatchAuthority(configFile);
+    const watchPath = watchAuthorityPath(storagePath);
+    expect(statSync(watchPath).mode & 0o777).toBe(0o600);
+    const owner = new WatchAuthority({ eventsPath: storagePath, resource: config.resource });
+    await owner.close();
+    const previous = readFileSync(watchPath);
+    expect(() => initializeWatchAuthority(configFile)).toThrow(
+      "Watch authority initialization refused."
+    );
+    expect(readFileSync(watchPath)).toEqual(previous);
+    writeFileSync(configFile, JSON.stringify({ ...configured, events: undefined }));
+    expect(() => initializeWatchAuthority(configFile)).toThrow(
+      "Watch authority initialization refused."
+    );
+    expect(readFileSync(watchPath)).toEqual(previous);
+    writeFileSync(configFile, JSON.stringify(configured));
+    const collision = {
+      ...configured,
+      events: { ...events, encryptionKeyFile: `${watchPath}-journal` },
+    };
+    writeFileSync(configFile, JSON.stringify(collision));
+    expect(() => initializeWatchAuthority(configFile)).toThrow(
+      "Watch authority initialization refused."
+    );
+    expect(readFileSync(watchPath)).toEqual(previous);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
