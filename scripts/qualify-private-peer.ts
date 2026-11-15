@@ -1,7 +1,7 @@
 // Exact-artifact HTTP qualification against disposable services and synthetic identities only.
 import { strict as assert } from "node:assert";
-import { createHash, randomBytes } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
@@ -16,15 +16,20 @@ import {
   clerkPeerResolver,
   PEER_PERMISSION,
   type PeerInvocation,
+  peerSession,
 } from "../src/private-web/identity.ts";
 import { servePeer } from "../src/private-web/program.ts";
 import { decodeServiceConfig, hostConfig } from "../src/private-web/service.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
+import {
+  archiveHash,
+  buildSelectedHost,
+  digest,
+  modernHttp,
+  modernRequest,
+} from "./private-modern-http.ts";
 
-const archiveHash = "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2";
-const entryHash = "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236";
-const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 /** Every property path an output schema names, `[]` for array items, through local references. */
 const propertyPaths = (schema: unknown): ReadonlyArray<string> => {
   const record = (value: unknown): Record<string, unknown> =>
@@ -51,18 +56,14 @@ const propertyPaths = (schema: unknown): ReadonlyArray<string> => {
   return [...paths].sort();
 };
 const artifact = process.argv[2];
-if (!artifact || hash(readFileSync(artifact)) !== archiveHash)
-  throw new Error("Wrong host artifact.");
+if (!artifact || digest(artifact) !== archiveHash) throw new Error("Wrong host artifact.");
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-peer-qualification-"));
 const shutdown = new AbortController();
 let disposeBus: (() => Promise<void>) | undefined;
 let host: Promise<void> | undefined;
 const clients: Client[] = [];
 try {
-  const extract = Bun.spawnSync(["tar", "-xzf", artifact, "-C", dir, "package/dist/index.js"]);
-  if (!extract.success) throw new Error("Could not extract the host entry.");
-  const entry = join(dir, "package/dist/index.js");
-  if (hash(readFileSync(entry)) !== entryHash) throw new Error("Wrong host entry.");
+  const entry = buildSelectedHost(artifact, dir);
   const module: unknown = await import(entry);
   if (
     typeof module !== "object" ||
@@ -108,11 +109,24 @@ try {
   let losePublishResult = false;
   let publishExecutions = 0;
   let waitEntered = false;
+  const identityKey = new Uint8Array(32).fill(7);
+  const resolved: Array<{ correlation: unknown; session: string | undefined; marker: unknown }> =
+    [];
+  const executed: Array<{ correlation: unknown; session: string | undefined; marker: unknown }> =
+    [];
+  let releaseSlow = () => {};
+  let reportSlow = () => {};
+  const slowGate = new Promise<void>((resolve) => {
+    releaseSlow = resolve;
+  });
+  const slowEntered = new Promise<void>((resolve) => {
+    reportSlow = resolve;
+  });
   const resolve = clerkPeerResolver({
     issuer,
     principals: [{ subject, grantFile: join(dir, "grant") }],
     resource,
-    key: new Uint8Array(32).fill(7),
+    key: identityKey,
     identify: async () => {
       identityChecks++;
       return identified;
@@ -165,6 +179,11 @@ try {
               input: Parameters<typeof tool.execute>[0],
               context: Parameters<typeof tool.execute>[1]
             ) => {
+              executed.push({
+                correlation: context.requestMeta?.["openai/session"],
+                session: context.actor.session,
+                marker: context.requestMeta?.["fixture/resolver"],
+              });
               if (tool.name === "bus_wait") waitEntered = true;
               const result = await tool.execute(input, context);
               if (tool.name === "bus_publish" && losePublishResult) {
@@ -176,14 +195,25 @@ try {
           })),
           {
             ...lifecycle,
-            resolveContext: (invocation: PeerInvocation) =>
-              lifecycle.resolveContext({
+            resolveContext: async (invocation: PeerInvocation) => {
+              if (invocation.requestMeta?.["fixture/resolver"] === "slow") {
+                reportSlow();
+                await slowGate;
+              }
+              const actor = await lifecycle.resolveContext({
                 ...invocation,
                 auth:
                   invocation.auth?.authType === "apiKey"
                     ? { authType: "oauth", accessToken: "synthetic" }
                     : undefined,
-              }),
+              });
+              resolved.push({
+                correlation: invocation.requestMeta?.["openai/session"],
+                session: actor.session,
+                marker: invocation.requestMeta?.["fixture/resolver"],
+              });
+              return actor;
+            },
           }
         ),
     });
@@ -191,18 +221,17 @@ try {
     const connect = async () => {
       let last: unknown;
       for (let attempt = 0; attempt < 50; attempt++) {
-        const client = new Client({ name: "peer-http-qualifier", version: "1" });
+        const client = modernHttp(
+          `http://127.0.0.1:${hostPort}/mcp`,
+          "peer-http-qualifier",
+          { "x-api-key": apiKey },
+          { name: "Agent Bus", version: "1.0.0" }
+        );
         try {
-          await client.connect(
-            new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${hostPort}/mcp`), {
-              requestInit: { headers: { "x-api-key": apiKey } },
-            })
-          );
-          clients.push(client);
+          await client.discover();
           return client;
         } catch (error) {
           last = error;
-          await client.close();
           await Bun.sleep(100);
         }
       }
@@ -219,7 +248,7 @@ try {
       new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${busPort}/mcp`))
     );
     clients.push(native);
-    const outputs = async (from: Client) =>
+    const outputs = async (from: Pick<Client, "listTools">) =>
       new Map(
         (await from.listTools()).tools.map((tool) => [tool.name, propertyPaths(tool.outputSchema)])
       );
@@ -272,6 +301,62 @@ try {
     await success("bus_peers", {});
     await success("bus_join", { address: "chatgpt/http-a", topics: ["http-fixture"] }, "chat-a");
     await success("bus_join", { address: "chatgpt/http-b" }, "chat-b");
+    const sessionA = peerSession(identityKey, issuer, subject, "chat-a");
+    const sessionB = peerSession(identityKey, issuer, subject, "chat-b");
+    assert.notEqual(sessionA, sessionB);
+    for (const observations of [resolved, executed]) {
+      assert(
+        observations.some((value) => value.correlation === "chat-a" && value.session === sessionA)
+      );
+      assert(
+        observations.some((value) => value.correlation === "chat-b" && value.session === sessionB)
+      );
+    }
+    // Neither omission nor an authored empty correlation may inherit the preceding actor.
+    const beforeMissing = executed.length;
+    for (const meta of [{}, { "openai/session": "" }]) {
+      const denied = await client.callTool({
+        name: "bus_read",
+        arguments: { address: "chatgpt/http-a" },
+        _meta: meta,
+      });
+      assert.equal(denied.isError, true);
+    }
+    assert.equal(executed.length, beforeMissing + 2);
+    assert(executed.slice(beforeMissing).every((value) => value.session === undefined));
+    // Force the first resolver to finish last, then prove each request kept its own actor.
+    const slow = client.callTool({
+      name: "bus_owned_addresses",
+      arguments: {},
+      _meta: { "openai/session": "chat-a", "fixture/resolver": "slow" },
+    });
+    try {
+      await Promise.race([
+        slowEntered,
+        Bun.sleep(5_000).then(() => {
+          throw new Error("Slow resolver did not start.");
+        }),
+      ]);
+      const fast = await client.callTool({
+        name: "bus_owned_addresses",
+        arguments: {},
+        _meta: { "openai/session": "chat-b", "fixture/resolver": "fast" },
+      });
+      assert.deepEqual(fast.structuredContent, { addresses: ["chatgpt/http-b"] });
+    } finally {
+      releaseSlow();
+    }
+    assert.deepEqual((await slow).structuredContent, { addresses: ["chatgpt/http-a"] });
+    for (const observations of [resolved, executed])
+      assert.deepEqual(
+        observations
+          .filter((value) => value.marker !== undefined)
+          .map(({ marker, session, correlation }) => ({ marker, session, correlation })),
+        [
+          { marker: "fast", session: sessionB, correlation: "chat-b" },
+          { marker: "slow", session: sessionA, correlation: "chat-a" },
+        ]
+      );
     assert.equal((await call("bus_read", { address: "chatgpt/http-a" }, "chat-b")).isError, true);
     let waitSettled = false;
     const waiting = success(
@@ -320,6 +405,7 @@ try {
       { from: "chatgpt/http-b", to: ["chatgpt/http-a"], body: largeBody },
       "chat-b"
     );
+    assert.equal((await call("bus_read", { address: "chatgpt/http-a" }, "chat-b")).isError, true);
     const largeRead = await success("bus_read", { address: "chatgpt/http-a" }, "chat-a");
     assert(typeof large === "object" && large !== null && "id" in large);
     assert(
@@ -331,6 +417,23 @@ try {
     assert.equal(largeRead.messages.length, 1);
     assert.equal(largeRead.messages[0].id, large.id);
     assert.equal(largeRead.messages[0].body, largeBody);
+    const beforePrivateArguments = executed.length;
+    const privateArguments = await client.callTool({
+      name: "bus_read",
+      arguments: { address: "chatgpt/http-a", session: sessionA },
+      _meta: { "openai/session": "chat-a" },
+    });
+    assert.equal(
+      privateArguments.isError,
+      true,
+      "Hidden native arguments must fail host validation."
+    );
+    assert.deepEqual(privateArguments.content, [{ type: "text", text: "Invalid tool input" }]);
+    assert.equal(
+      executed.length,
+      beforePrivateArguments,
+      "Forbidden arguments reached tool execution."
+    );
     // A direct recipient that never joined is reported through the host's closed output schema.
     const unwoken = await success(
       "bus_publish",
@@ -350,34 +453,30 @@ try {
     assert.deepEqual(observed, {
       lacking: [{ address: "chatgpt/never-joined", standing: "not-joined" }],
     });
-    const oversized = JSON.stringify({
-      jsonrpc: "2.0",
-      id: 999,
-      method: "tools/call",
-      params: {
-        name: "bus_publish",
-        arguments: {
-          from: "chatgpt/http-b",
-          to: ["chatgpt/http-a"],
-          body: `oversize-canary${"x".repeat(1_048_576)}`,
-        },
-        _meta: { "openai/session": "chat-b" },
+    const oversized = {
+      name: "bus_publish",
+      arguments: {
+        from: "chatgpt/http-b",
+        to: ["chatgpt/http-a"],
+        body: `oversize-canary${"x".repeat(1_048_576)}`,
       },
-    });
+      _meta: { "openai/session": "chat-b" },
+    };
     assert(
-      Buffer.byteLength(oversized, "utf8") > hostConfig(fixtureConfig).httpLimits.maxBodyBytes
+      Buffer.byteLength(JSON.stringify(oversized), "utf8") >
+        hostConfig(fixtureConfig).httpLimits.maxBodyBytes
     );
     const beforeOversized = identityChecks;
-    const rejected = await fetch(`http://127.0.0.1:${hostPort}/mcp`, {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        accept: "application/json, text/event-stream",
-        "x-api-key": apiKey,
-      },
-      body: oversized,
-    });
+    const rejected = await modernRequest(
+      `http://127.0.0.1:${hostPort}/mcp`,
+      "oversize-fixture",
+      999,
+      "tools/call",
+      oversized,
+      { "x-api-key": apiKey }
+    );
     assert.equal(rejected.status, 413);
+    await rejected.body?.cancel();
     assert.equal(identityChecks, beforeOversized);
     identified = "wrong-subject";
     const beforeWrongSubject = { identityChecks, grantChecks };
@@ -387,7 +486,8 @@ try {
     identified = subject;
     permitted = false;
     const beforeRevocation = { identityChecks, grantChecks };
-    await deniedCall("bus_join", { address: "chatgpt/ungranted" }, "chat-c");
+    // A previously authorized correlation must not reuse cached grant authority.
+    await deniedCall("bus_join", { address: "chatgpt/ungranted" }, "chat-a");
     assert.equal(identityChecks, beforeRevocation.identityChecks + 1);
     assert.equal(grantChecks, beforeRevocation.grantChecks + 1);
     permitted = true;

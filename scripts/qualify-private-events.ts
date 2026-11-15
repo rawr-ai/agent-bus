@@ -6,9 +6,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { auth as authorizeOAuth } from "@modelcontextprotocol/sdk/client/auth.js";
 import type {
   OAuthClientInformationMixed,
   OAuthClientMetadata,
@@ -23,11 +21,17 @@ import { layerFluree } from "../src/Fluree.ts";
 import { initializeWatchAuthority } from "../src/private-web/watch-authority.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
+import { childrenOf, ownership } from "../test/processes.ts";
 import { spawnSupervised } from "../test/supervised.ts";
+import {
+  archiveHash,
+  buildSelectedHost,
+  digest,
+  type ModernHttp,
+  modernHttp,
+  modernRequest,
+} from "./private-modern-http.ts";
 
-const archiveHash = "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2";
-const entryHash = "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236";
-const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const [archive, caseFlag, requestedCase] = process.argv.slice(2);
 const selectedCase = caseFlag === undefined ? "all" : requestedCase;
 if (
@@ -46,8 +50,27 @@ if (
 const catalog = Schema.decodeUnknownSync(
   Schema.Struct({ events: Schema.Array(Schema.Struct({ name: Schema.String })) })
 );
+const resultEnvelope = {
+  resultType: Schema.Literal("complete"),
+  _meta: Schema.Struct({
+    "io.modelcontextprotocol/serverInfo": Schema.Struct({
+      name: Schema.Literal("Agent Bus Events qualification"),
+      version: Schema.Literal("1.0.0"),
+    }),
+  }),
+};
+const emptyResult = {
+  resultType: "complete",
+  _meta: {
+    "io.modelcontextprotocol/serverInfo": {
+      name: "Agent Bus Events qualification",
+      version: "1.0.0",
+    },
+  },
+};
 const subscription = Schema.decodeUnknownSync(
   Schema.Struct({
+    ...resultEnvelope,
     id: Schema.String,
     refreshBefore: Schema.String,
     cursor: Schema.Null,
@@ -55,7 +78,9 @@ const subscription = Schema.decodeUnknownSync(
   }),
   { onExcessProperty: "error" }
 );
-const empty = Schema.decodeUnknownSync(Schema.Struct({}), { onExcessProperty: "error" });
+const empty = Schema.decodeUnknownSync(Schema.Struct(resultEnvelope), {
+  onExcessProperty: "error",
+});
 const authorizationRecord = Schema.decodeUnknownSync(
   Schema.Union([
     Schema.Struct({
@@ -102,9 +127,7 @@ const notice = Schema.decodeUnknownSync(
   { onExcessProperty: "error" }
 );
 const capability = Schema.decodeUnknownSync(
-  Schema.Struct({
-    result: Schema.Struct({ capabilities: Schema.Record(Schema.String, Schema.Unknown) }),
-  })
+  Schema.Struct({ capabilities: Schema.Record(Schema.String, Schema.Unknown) })
 );
 const redirect = "http://127.0.0.1:49171/callback";
 
@@ -195,12 +218,9 @@ let disposeBus: (() => Promise<void>) | undefined;
 let host: ReturnType<typeof spawnSupervised> | undefined;
 let provider: ReturnType<typeof Bun.serve> | undefined;
 let receiver: ReturnType<typeof Bun.serve> | undefined;
-const clients: Client[] = [];
+const owned = ownership();
 try {
-  const extracted = Bun.spawnSync(["tar", "-xzf", archive, "-C", dir, "package/dist/index.js"]);
-  if (!extracted.success) throw new Error("Could not extract the packed host.");
-  const entry = join(dir, "package/dist/index.js");
-  if (digest(entry) !== entryHash) throw new Error("Wrong packed host entry.");
+  const entry = buildSelectedHost(archive, dir);
   const busPort = reservePort();
   let hostPort = reservePort();
   while (hostPort === busPort) hostPort = reservePort();
@@ -424,16 +444,18 @@ try {
   );
   const endpoint = new URL(resource);
   const start = async () => {
-    host = spawnSupervised(
-      [
-        process.execPath,
-        "--no-env-file",
-        "--preload",
-        "./test/fixtures/private-events-preload.ts",
-        "./test/fixtures/private-events-host.ts",
-        fixture,
-      ],
-      { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" }
+    host = owned.supervisor(
+      spawnSupervised(
+        [
+          process.execPath,
+          "--no-env-file",
+          "--preload",
+          "./test/fixtures/private-events-preload.ts",
+          "./test/fixtures/private-events-host.ts",
+          fixture,
+        ],
+        { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" }
+      )
     );
     let ready = false;
     for (let attempt = 0; attempt < 200 && host.exitCode === null; attempt++) {
@@ -444,7 +466,10 @@ try {
         });
         ready = response.status === 401;
         await response.body?.cancel();
-        if (ready) break;
+        if (ready) {
+          for (const child of childrenOf(host.pid)) owned.process(child);
+          break;
+        }
       } catch {
         /* listener is not ready */
       }
@@ -459,23 +484,31 @@ try {
     host = undefined;
   };
   const connect = async (auth: SyntheticOAuthClient) => {
-    const client = new Client({ name: "events-qualifier", version: "1" });
-    await client.connect(new StreamableHTTPClientTransport(endpoint, { authProvider: auth }));
-    clients.push(client);
+    const token = auth.tokens()?.access_token;
+    assert(token, "Synthetic OAuth bearer missing.");
+    const client = modernHttp(
+      endpoint,
+      "events-qualifier",
+      { authorization: `Bearer ${token}` },
+      { name: "Agent Bus Events qualification", version: "1.0.0" }
+    );
+    assert(Object.hasOwn(capability(await client.discover()).capabilities, "events"));
     return client;
   };
   const authorize = async (subject: string, expiresIn = 3600) => {
     nextSubject = subject;
     nextLifetime = expiresIn;
     const auth = new SyntheticOAuthClient();
-    const pending = new Client({ name: "events-qualifier", version: "1" });
-    const transport = new StreamableHTTPClientTransport(endpoint, { authProvider: auth });
-    try {
-      await pending.connect(transport);
-      throw new Error("Unauthenticated client connected.");
-    } catch (error) {
-      if (!(error instanceof UnauthorizedError)) throw error;
-    }
+    const unauthenticated = await modernRequest(
+      endpoint,
+      "unauthenticated-events-qualifier",
+      1,
+      "server/discover",
+      {}
+    );
+    assert.equal(unauthenticated.status, 401);
+    await unauthenticated.body?.cancel();
+    assert.equal(await authorizeOAuth(auth, { serverUrl: endpoint }), "REDIRECT");
     const authUrl = auth.authorizationUrl();
     assert.equal(authUrl.searchParams.get("code_challenge_method"), "S256");
     const consentPage = await fetch(authUrl, { redirect: "manual" });
@@ -500,36 +533,16 @@ try {
     assert.equal(returned.searchParams.get("state"), "synthetic-client-state");
     const code = returned.searchParams.get("code");
     assert(code);
-    await transport.finishAuth(code);
-    await transport.close();
+    assert.equal(
+      await authorizeOAuth(auth, { serverUrl: endpoint, authorizationCode: code }),
+      "AUTHORIZED"
+    );
     return auth;
   };
   await start();
   const firstAuth = await authorize("fixture-first");
   const secondAuth = await authorize("fixture-second");
   assert.equal(upstreamExchanges, 2);
-  const token = firstAuth.tokens()?.access_token;
-  assert(token);
-  const initialized = await fetch(endpoint, {
-    method: "POST",
-    headers: {
-      accept: "application/json, text/event-stream",
-      "content-type": "application/json",
-      authorization: `Bearer ${token}`,
-    },
-    body: JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      method: "initialize",
-      params: {
-        protocolVersion: "2025-11-25",
-        capabilities: {},
-        clientInfo: { name: "raw-events-qualifier", version: "1" },
-      },
-    }),
-  });
-  assert.equal(initialized.status, 200);
-  assert(Object.hasOwn(capability(await initialized.json()).result.capabilities, "events"));
   let first = await connect(firstAuth);
   let second = await connect(secondAuth);
   assert.deepEqual(
@@ -539,7 +552,7 @@ try {
     ["mail.wake"]
   );
   const call = async (
-    client: Client,
+    client: ModernHttp,
     name: string,
     args: Record<string, unknown>,
     chat: string
@@ -554,7 +567,7 @@ try {
   };
   await call(first, "bus_join", { address: "chatgpt/events-first" }, "chat-first");
   await call(second, "bus_join", { address: "chatgpt/events-second" }, "chat-second");
-  const prepareWatch = async (client: Client) => {
+  const prepareWatch = async (client: ModernHttp) => {
     const result = await client.callTool({
       name: "bus_prepare_watch",
       arguments: { address: "chatgpt/events-first" },
@@ -593,7 +606,7 @@ try {
     },
     ttlMs: 60_000,
   };
-  const subscribe = async (client: Client, input: typeof request, chat?: string) =>
+  const subscribe = async (client: ModernHttp, input: typeof request, chat?: string) =>
     subscription(
       await client.request(
         {
@@ -606,7 +619,7 @@ try {
         ResultSchema
       )
     );
-  const unsubscribe = async (client: Client, input: typeof request) =>
+  const unsubscribe = async (client: ModernHttp, input: typeof request) =>
     empty(
       await client.request(
         {
@@ -639,7 +652,13 @@ try {
       const denied = await first.callTool({ name, arguments: args });
       assert.equal(denied.isError, true);
       refusalBodies.push(JSON.stringify(denied));
-      await refused(first.callTool({ name, arguments: { ...args, ticket: watch.ticket } }), -32602);
+      const forbidden = await first.callTool({
+        name,
+        arguments: { ...args, ticket: watch.ticket },
+      });
+      assert.equal(forbidden.isError, true);
+      assert.deepEqual(forbidden.content, [{ type: "text", text: "Invalid tool input" }]);
+      refusalBodies.push(JSON.stringify(forbidden));
     }
     let before = authorizations().length;
     await refused(
@@ -698,7 +717,7 @@ try {
     assert.equal(verifications, 1);
     const refreshed = await subscribe(first, request);
     assert.equal(refreshed.id, admitted.id);
-    assert.deepEqual(await unsubscribe(second, request), {});
+    assert.deepEqual(await unsubscribe(second, request), emptyResult);
     await call(
       second,
       "bus_publish",
@@ -722,7 +741,6 @@ try {
         Array.isArray(read.messages) &&
         read.messages.length === 1
     );
-    await Promise.all([first.close(), second.close()]);
     await stop();
     acceptDeliveries = true;
     await start();
@@ -752,8 +770,8 @@ try {
         emptyRead.messages.length === 0
     );
     grant(firstGrant, "fixture-first", false);
-    assert.deepEqual(await unsubscribe(first, request), {});
-    assert.deepEqual(await unsubscribe(first, request), {});
+    assert.deepEqual(await unsubscribe(first, request), emptyResult);
+    assert.deepEqual(await unsubscribe(first, request), emptyResult);
     grant(firstGrant, "fixture-first", true);
     const short = { ...request, ttlMs: 350 };
     const expires = await subscribe(first, short, "chat-first");
@@ -814,24 +832,14 @@ try {
     });
     await call(first, "bus_read", { address: "chatgpt/events-first" }, "chat-first");
     await Bun.sleep(Math.max(0, nativeDeadline - Date.now()) + 1200);
-    const expired = await fetch(endpoint, {
-      method: "POST",
-      headers: {
-        accept: "application/json, text/event-stream",
-        "content-type": "application/json",
-        authorization: `Bearer ${shortBearer}`,
-      },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "initialize",
-        params: {
-          protocolVersion: "2025-11-25",
-          capabilities: {},
-          clientInfo: { name: "expired-native-fixture", version: "1" },
-        },
-      }),
-    });
+    const expired = await modernRequest(
+      endpoint,
+      "expired-native-fixture",
+      1,
+      "server/discover",
+      {},
+      { authorization: `Bearer ${shortBearer}` }
+    );
     assert.equal(expired.status, 401);
     await expired.body?.cancel();
     const afterExpiry = deliveries.length;
@@ -860,7 +868,6 @@ try {
     });
     await call(recovered, "bus_read", { address: "chatgpt/events-first" }, "chat-first");
     await unsubscribe(recovered, request);
-    await Promise.all([shortClient.close(), recovered.close()]);
     console.log(
       `Native-bound lease: access deadline ${nativeDeadline}, refreshBefore ${refreshBefore}, requested TTL ${request.ttlMs} ms; raw expired bearer returned 401 and fresh authorization restored delivery.`
     );
@@ -940,7 +947,6 @@ try {
       (record) => record.count === 120 && record.idsDigest === expectedDigest && record.bytes > 4096
     );
     assert(checkpoint);
-    await Promise.all([first.close(), second.close()]);
     await stop();
     const beforeRestartCount = observations().length;
     await start();
@@ -959,18 +965,13 @@ try {
       "full checkpoint after restart",
       30_000
     );
-    assert.deepEqual(await unsubscribe(first, request), {});
+    assert.deepEqual(await unsubscribe(first, request), emptyResult);
     console.log(
       `Checkpoint: ${checkpoint.count} unique published IDs, ${checkpoint.bytes} bytes, IDs SHA-256 ${expectedDigest}, canonical full coverage SHA-256 ${checkpoint.canonicalFullCoverageDigest}; matched before and after joined host restart.`
     );
   }
   const history = await call(first, "bus_history", { participant: watch.address }, "chat-first");
-  const closed = await Promise.allSettled(clients.map((client) => client.close()));
   await stop();
-  assert(
-    closed.every((result) => result.status === "fulfilled"),
-    "Client cleanup failed."
-  );
   const trace = readFileSync(tracePath, "utf8");
   assert(
     trace.includes("lookup\n") &&
@@ -1023,11 +1024,11 @@ try {
     "Callback admission was tested with a fixture-only DNS/TLS dial redirect, not a public destination."
   );
 } finally {
-  await Promise.allSettled(clients.map((client) => client.close()));
   if (host !== undefined) {
     host.kill();
     await host.exited;
   }
+  await owned.stop();
   receiver?.stop(true);
   provider?.stop(true);
   await disposeBus?.();

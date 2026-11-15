@@ -138,7 +138,7 @@ try {
     root,
     cloneEnv
   );
-  const privateArchive = "dist/private-artifacts/mcp-openapi-1.2.0-events.5.tgz";
+  const privateArchive = "dist/private-artifacts/mcp-openapi-2.0.0.tgz";
   check("cloneHasNoPrivateArchive", !existsSync(join(clone, privateArchive)));
   must(
     [bun, "install", "--production", "--frozen-lockfile", "--ignore-scripts"],
@@ -177,6 +177,7 @@ try {
     "mcp-openapi-1.2.0-events.3.tgz",
     "mcp-openapi",
     "agent-bus-private-peer-review-v1",
+    "agent-bus-private-peer-review-v2",
     "agent-bus-mail-wake-v1",
     "c8a868cdd84a5026a572dad95f6fa335d0fd09d52304f77f7526bba485045247",
     "c076ea2a9d1396bc45cd5b5d2c767268991bc41ba12392eb78b30a409c381b91",
@@ -184,6 +185,8 @@ try {
     "ea4cf91888e84422a3216b5d549f40cb5c918e55e25da3699dc8241e521bc69a",
     "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2",
     "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236",
+    "a89ea13eea6eea52950ffedfdf381672f8aa69448185cfdc474f337431de574a",
+    "d262e777cac0ee6bf7cf6d5f22719c87c6713396de0cdaee8be878da1c4244a2",
   ];
   const privatePath = (path: string) =>
     path

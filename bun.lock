@@ -28,7 +28,7 @@
         "@types/react-dom": "19.3.0",
         "@types/sparqljs": "3.1.12",
         "@typescript/native": "npm:typescript@7.0.2",
-        "mcp-openapi": "file:dist/private-artifacts/mcp-openapi-1.2.0-events.5.tgz",
+        "mcp-openapi": "file:dist/private-artifacts/mcp-openapi-2.0.0.tgz",
         "nx": "24.0.2",
         "storybook": "10.6.3",
         "typescript": "npm:@typescript/typescript6@6.0.2",
@@ -852,7 +852,7 @@
 
     "math-intrinsics": ["math-intrinsics@1.1.0", "", {}, "sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g=="],
 
-    "mcp-openapi": ["mcp-openapi@dist/private-artifacts/mcp-openapi-1.2.0-events.5.tgz", { "dependencies": { "@standard-schema/spec": "1.1.0", "openapi-types": "12.1.3", "typebox": "1.3.6", "undici": "7.25.0" }, "bin": { "mcp-openapi": "./dist/index.js" } }, "sha512-u/wA9zW4M1aH+yw3A5fgn4tuB1fP0n8xuzW/ZFi+b0K31fPJjm+FYFpUv8CdaQw8JoAjmVgvkT7ncqhDk6RgAw=="],
+    "mcp-openapi": ["mcp-openapi@dist/private-artifacts/mcp-openapi-2.0.0.tgz", { "dependencies": { "@standard-schema/spec": "1.1.0", "effect": "4.1.4", "openapi-types": "12.1.3", "typebox": "1.3.6", "undici": "7.25.0" }, "bin": { "mcp-openapi": "./dist/index.js" } }, "sha512-6RqpLVej83PKV1RfJs1XCZ0EIiKMAJf99ogn9pmQYqEd9NhwSBYF0XIMeWRHK+E5q6xMODalYlmuJX0Da9BbNQ=="],
 
     "mdast-util-find-and-replace": ["mdast-util-find-and-replace@3.0.4", "", { "dependencies": { "@types/mdast": "^4.0.0", "escape-string-regexp": "^5.0.0", "unist-util-is": "^6.0.0", "unist-util-visit-parents": "^6.1.0" } }, "sha512-z4B5c6jrnJ1ltOQemhWYPBSAo6y42Z8Gt2yEgfgNTMcLSU59B8bfj8Z8AnAlJrBGLnqkdAUZ7jdDEqQw3KuipQ=="],
 
@@ -1297,6 +1297,8 @@
     "form-data/mime-types": ["mime-types@2.1.35", "", { "dependencies": { "mime-db": "1.52.0" } }, "sha512-ZDY+bPm5zTTF+YpCrAU9nK0UgICYPT0QtT1NZWFv4s++TNkcgVaT0g6+4R2uI4MjQjzysHB1zxuWL50hzaeXiw=="],
 
     "glob/minimatch": ["minimatch@10.2.6", "", { "dependencies": { "brace-expansion": "^5.0.8" } }, "sha512-vpLQEs+VLCr1nU0BXS07maYoFwlDAH0gngQuuttxIwutDFEMHq2blX+8vpgxDdK3J1PwjCJiep77OitTZ4Ll1A=="],
+
+    "mcp-openapi/effect": ["effect@4.1.4", "", {}, "sha512-Tgrv/9FN+TZYyOn8XSli+fVqAfwDrDAkiX5Uu9vztINb675VTQdhD0gWI5Kzvhlh9QqzjZvw72iugqw5pwoghQ=="],
 
     "mdast-util-find-and-replace/escape-string-regexp": ["escape-string-regexp@5.0.0", "", {}, "sha512-/veY75JbMK4j1yjvuUxuVsiS/hr/4iHs9FTT6cgTexxdE0Ly/glccBAkloH/DofkjRbZU3bnoj38mOmhkZ0lHw=="],
 
