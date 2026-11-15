@@ -3,7 +3,8 @@ import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join } from "node:path";
+import { parseArgs } from "node:util";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -24,8 +25,8 @@ import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 import {
   archiveHash,
-  buildSelectedHost,
   digest,
+  hostForQualification,
   modernHttp,
   modernRequest,
 } from "./private-modern-http.ts";
@@ -55,15 +56,26 @@ const propertyPaths = (schema: unknown): ReadonlyArray<string> => {
   walk(schema, "", new Set());
   return [...paths].sort();
 };
-const artifact = process.argv[2];
-if (!artifact || digest(artifact) !== archiveHash) throw new Error("Wrong host artifact.");
+const { positionals, values } = parseArgs({
+  args: process.argv.slice(2),
+  allowPositionals: true,
+  options: { bundle: { type: "string" } },
+});
+const [artifact] = positionals;
+if (
+  positionals.length !== 1 ||
+  !artifact ||
+  !isAbsolute(artifact) ||
+  digest(artifact) !== archiveHash
+)
+  throw new Error("Supply the absolute host archive and optional --bundle absolute-directory.");
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-peer-qualification-"));
 const shutdown = new AbortController();
 let disposeBus: (() => Promise<void>) | undefined;
 let host: Promise<void> | undefined;
 const clients: Client[] = [];
 try {
-  const entry = buildSelectedHost(artifact, dir);
+  const entry = hostForQualification(artifact, dir, values.bundle);
   const module: unknown = await import(entry);
   if (
     typeof module !== "object" ||

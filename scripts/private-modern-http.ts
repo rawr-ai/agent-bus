@@ -37,8 +37,14 @@ export const verifyPrivateBundle = (directory: string) => {
   return manifest;
 };
 
-export const buildSelectedHost = (archive: string, parent: string) => {
+export const hostForQualification = (archive: string, parent: string, selectedBundle?: string) => {
   assert.equal(digest(archive), archiveHash, "Wrong host artifact.");
+  if (selectedBundle !== undefined) {
+    assert(isAbsolute(selectedBundle), "Supply the absolute selected private bundle directory.");
+    const manifest = verifyPrivateBundle(selectedBundle);
+    console.log(`Selected private host SHA-256: ${manifest.host.bundleSha256}`);
+    return join(selectedBundle, "mcp-host.mjs");
+  }
   const built = Bun.spawnSync(
     [process.execPath, "--no-env-file", "scripts/build-private-peer.ts", archive, parent],
     { stdout: "pipe", stderr: "inherit" }
@@ -46,7 +52,8 @@ export const buildSelectedHost = (archive: string, parent: string) => {
   assert(built.success, "Could not build the selected private host.");
   const directory = built.stdout.toString().trim();
   assert(isAbsolute(directory) && directory.startsWith(`${parent}/private-peer-`));
-  verifyPrivateBundle(directory);
+  const manifest = verifyPrivateBundle(directory);
+  console.log(`Built private host SHA-256: ${manifest.host.bundleSha256}`);
   return join(directory, "mcp-host.mjs");
 };
 

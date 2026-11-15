@@ -12,7 +12,8 @@ if (!archive || !parent || !isAbsolute(archive) || !isAbsolute(parent) || proces
   throw new Error("Supply the absolute host archive and existing private output directory.");
 if (hash(readFileSync(archive)) !== archiveHash) throw new Error("Wrong host artifact.");
 const entry = realpathSync(Bun.resolveSync("mcp-openapi", import.meta.dir));
-if (hash(readFileSync(entry)) !== entryHash) throw new Error("Wrong installed host entry.");
+const entryBytes = readFileSync(entry);
+if (hash(entryBytes) !== entryHash) throw new Error("Wrong installed host entry.");
 const effectPackage = realpathSync(createRequire(entry).resolve("effect/package.json"));
 const effectRoot = dirname(effectPackage);
 const effectManifest: unknown = JSON.parse(readFileSync(effectPackage, "utf8"));
@@ -23,10 +24,20 @@ if (
   effectManifest.version !== "4.1.4"
 )
   throw new Error("Wrong isolated host runtime.");
+const entrySource = entryBytes.toString("utf8");
+const imports = new Bun.Transpiler({ loader: "js" }).scan(
+  entrySource.startsWith("#!") ? entrySource.slice(entrySource.indexOf("\n") + 1) : entrySource
+).imports;
+const runtimeImports = imports.filter(({ path }) => /^effect(?:\/|$)/u.test(path));
+if (runtimeImports.length === 0) throw new Error("Host runtime imports are missing.");
+for (const { path } of runtimeImports) {
+  const resolved = realpathSync(Bun.resolveSync(path, dirname(entry)));
+  if (!resolved.startsWith(`${effectRoot}${sep}`))
+    throw new Error("Host runtime escaped its isolated package.");
+}
 const out = mkdtempSync(join(parent, "private-peer-"));
 let complete = false;
 try {
-  let runtimeImports = 0;
   // The host owns a different Effect version from the native peer; seal it into its module.
   const hostBuild = await Bun.build({
     entrypoints: [entry],
@@ -35,24 +46,17 @@ try {
     target: "bun",
     format: "esm",
     external: ["@valibot/to-json-schema", "arktype", "sury"],
-    plugins: [
-      {
-        name: "isolated-host-effect",
-        setup(build) {
-          build.onResolve({ filter: /^effect(?:\/|$)/ }, (args) => {
-            const resolved = realpathSync(Bun.resolveSync(args.path, args.resolveDir));
-            if (!resolved.startsWith(`${effectRoot}${sep}`))
-              throw new Error("Host runtime escaped its isolated package.");
-            runtimeImports++;
-            return { path: resolved };
-          });
-        },
-      },
-    ],
   });
-  if (!hostBuild.success || runtimeImports === 0) throw new Error("Host runtime bundle failed.");
+  if (!hostBuild.success) throw new Error("Host runtime bundle failed.");
   const host = join(out, "mcp-host.mjs");
-  if (/["'`]\/(?:Users|home)\/|["'`][A-Za-z]:\\+Users\\+/u.test(readFileSync(host, "utf8")))
+  const hostSource = readFileSync(host, "utf8");
+  if (
+    new Bun.Transpiler({ loader: "js" })
+      .scan(hostSource)
+      .imports.some(({ path }) => /^effect(?:\/|$)/u.test(path))
+  )
+    throw new Error("Host runtime was not bundled.");
+  if (/["'`]\/(?:Users|home)\/|["'`][A-Za-z]:\\+Users\\+/u.test(hostSource))
     throw new Error("Host bundle contains a private build locator.");
   const result = await Bun.build({
     entrypoints: ["./src/private-web/main.ts"],

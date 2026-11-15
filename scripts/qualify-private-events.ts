@@ -4,6 +4,7 @@ import { createHash, createHmac, randomBytes } from "node:crypto";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
+import { parseArgs } from "node:util";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
 import { auth as authorizeOAuth } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -25,27 +26,30 @@ import { childrenOf, ownership } from "../test/processes.ts";
 import { spawnSupervised } from "../test/supervised.ts";
 import {
   archiveHash,
-  buildSelectedHost,
   digest,
+  hostForQualification,
   type ModernHttp,
   modernHttp,
   modernRequest,
 } from "./private-modern-http.ts";
 
-const [archive, caseFlag, requestedCase] = process.argv.slice(2);
-const selectedCase = caseFlag === undefined ? "all" : requestedCase;
+const { positionals, values } = parseArgs({
+  args: process.argv.slice(2),
+  allowPositionals: true,
+  options: { bundle: { type: "string" }, case: { type: "string" } },
+});
+const [archive] = positionals;
+const selectedCase = values.case ?? "all";
 if (
+  positionals.length !== 1 ||
   !archive ||
   !isAbsolute(archive) ||
-  !(
-    (process.argv.length === 3 && caseFlag === undefined) ||
-    (process.argv.length === 5 &&
-      caseFlag === "--case" &&
-      (requestedCase === "checkpoint" || requestedCase === "native-expiry"))
-  ) ||
+  !["all", "checkpoint", "native-expiry"].includes(selectedCase) ||
   digest(archive) !== archiveHash
 )
-  throw new Error("Supply the absolute host archive and optional --case checkpoint|native-expiry.");
+  throw new Error(
+    "Supply the absolute host archive, optional --bundle absolute-directory and --case checkpoint|native-expiry."
+  );
 
 const catalog = Schema.decodeUnknownSync(
   Schema.Struct({ events: Schema.Array(Schema.Struct({ name: Schema.String })) })
@@ -220,7 +224,7 @@ let provider: ReturnType<typeof Bun.serve> | undefined;
 let receiver: ReturnType<typeof Bun.serve> | undefined;
 const owned = ownership();
 try {
-  const entry = buildSelectedHost(archive, dir);
+  const entry = hostForQualification(archive, dir, values.bundle);
   const busPort = reservePort();
   let hostPort = reservePort();
   while (hostPort === busPort) hostPort = reservePort();

@@ -19,6 +19,14 @@ raw producer entry and transformed host checksum. It does not attest an otherwis
 dirty working-tree source; committed-source attribution remains an operator
 receipt. Native runtime pins and production state are unchanged.
 
+An initial custom resolver plugin produced differing host bytes on repeated
+builds. Those outputs remain historical evidence, not one qualified artifact.
+The builder now preflights the pinned flat entry's structured runtime imports,
+uses normal Bun resolution and rejects a remaining bare runtime import. Two
+equal observed builds are not a general determinism guarantee. Final consumer
+qualification selects one manifest-verified bundle explicitly for all three
+lanes; standalone fixture builds identify their own checksum instead.
+
 The selected host's modern contract is intentional. Existing legacy SDK
 initialization is not a supported new-host client and is not hidden behind a
 fallback. A small qualification-only raw HTTP helper sends modern discovery,
@@ -51,9 +59,13 @@ OAuth, actual preparation, metadata-free ticket subscription, contradictory and
 foreign refusal, signed address-only callback, rightful read, account unsubscribe
 after grant loss, native expiry and fresh authorization. Restart restores the
 exact 120-ID checkpoint, exceeding four KiB, after the old host has joined.
-All three qualifiers passed on the selected runtime cohort with disposable
-services and supervised children. The mandatory full source check and committed
-native-package independence remain separate from these fixture results.
+All three qualifiers passed on the initial runtime cohort with disposable
+services and supervised children, but did not all exercise one built host
+checksum. That producer candidate is held for its separately observed
+authenticated declared-size admission regression. The successor requires fresh
+exact-bundle qualification; prior green results do not override that hold.
+The mandatory full source check and committed native-package independence
+remain separate from these fixture results.
 
 ## Limits And Deployment
 
