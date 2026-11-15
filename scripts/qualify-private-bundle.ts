@@ -53,11 +53,11 @@ const manifest = Schema.decodeUnknownSync(Manifest, { onExcessProperty: "error" 
 const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 assert.equal(
   manifest.host.archiveSha256,
-  "72962e508686badfb36358b43b3bc14bc87721364c20c4a505ed88e2faa3ec73"
+  "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2"
 );
 assert.equal(
   manifest.host.entrySha256,
-  "ea4cf91888e84422a3216b5d549f40cb5c918e55e25da3699dc8241e521bc69a"
+  "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236"
 );
 assert.equal(digest(join(input, "main.js")), manifest.peerSha256);
 assert.equal(digest(join(input, "mcp-host.mjs")), manifest.host.entrySha256);

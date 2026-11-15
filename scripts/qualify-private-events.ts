@@ -25,8 +25,8 @@ import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 import { spawnSupervised } from "../test/supervised.ts";
 
-const archiveHash = "72962e508686badfb36358b43b3bc14bc87721364c20c4a505ed88e2faa3ec73";
-const entryHash = "ea4cf91888e84422a3216b5d549f40cb5c918e55e25da3699dc8241e521bc69a";
+const archiveHash = "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2";
+const entryHash = "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236";
 const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
 const [archive, caseFlag, requestedCase] = process.argv.slice(2);
 const selectedCase = caseFlag === undefined ? "all" : requestedCase;
@@ -972,7 +972,11 @@ try {
     "Client cleanup failed."
   );
   const trace = readFileSync(tracePath, "utf8");
-  assert(trace.includes("lookup\n") && trace.includes("admitted-tls-dial\n"));
+  assert(
+    trace.includes("lookup\n") &&
+      trace.includes("admitted-tls-dial\n") &&
+      trace.includes("pinned-lookup\n")
+  );
   const bindingLine = readFileSync(bindingTrace, "utf8").split("\n").find(Boolean);
   assert(bindingLine, "Synthetic native binding was not captured.");
   const binding: unknown = JSON.parse(bindingLine);
