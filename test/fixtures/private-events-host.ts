@@ -1,10 +1,15 @@
 // This child runs the real Events adapter and packed public host against the disposable Bus.
 import { createHash } from "node:crypto";
 import { appendFileSync, readFileSync } from "node:fs";
-import { authorizationDiagnostics, eventsProgram } from "../../src/private-web/events.ts";
+import {
+  authorizationDiagnostics,
+  eventsProgram,
+  prepareWatchTool,
+} from "../../src/private-web/events.ts";
 import { clerkPeerIdentity } from "../../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../../src/private-web/peer.ts";
 import { readPrivateJson } from "../../src/private-web/service.ts";
+import { WatchAuthority } from "../../src/private-web/watch-authority.ts";
 
 const config = JSON.parse(readFileSync(process.argv.at(-1) ?? "", "utf8")) as {
   readonly entry: string;
@@ -18,6 +23,7 @@ const config = JSON.parse(readFileSync(process.argv.at(-1) ?? "", "utf8")) as {
   readonly secondGrant: string;
   readonly coverageTrace: string;
   readonly authorizationTrace: string;
+  readonly bindingTrace: string;
 };
 const host: typeof import("mcp-openapi") = await import(config.entry);
 const base = `http://127.0.0.1:${config.hostPort}`;
@@ -39,6 +45,7 @@ const identity = clerkPeerIdentity({
   readGrant: async (file) => readPrivateJson(file, 4096),
 });
 const peer = await busPeer({ busPort: config.busPort, expectedBusVersion: "events-fixture" });
+let capturedBinding = false;
 const wake = {
   ...peer.wake,
   observe: async (...args: Parameters<typeof peer.wake.observe>) => {
@@ -67,13 +74,20 @@ const wake = {
         })}\n`
       );
     }
-    return peer.wake.observe(...args);
+    const observed = await peer.wake.observe(...args);
+    if (!capturedBinding) {
+      appendFileSync(config.bindingTrace, `${JSON.stringify(observed.binding)}\n`, { mode: 0o600 });
+      capturedBinding = true;
+    }
+    return observed;
   },
 };
 const shutdown = new AbortController();
 process.once("SIGTERM", () => shutdown.abort());
 process.once("SIGINT", () => shutdown.abort());
+let authority: WatchAuthority | undefined;
 try {
+  authority = new WatchAuthority({ eventsPath: config.eventsPath, resource });
   await host.serveTools(
     {
       name: "Agent Bus Events qualification",
@@ -116,13 +130,14 @@ try {
         },
       },
     },
-    peerTools(peer.exchange, process.cwd()),
+    [...peerTools(peer.exchange, process.cwd()), prepareWatchTool({ identity, wake, authority })],
     {
       resolveContext: identity.resolvePeer,
       signal: shutdown.signal,
       events: eventsProgram({
         identity,
         wake,
+        authority,
         resource,
         diagnostics: authorizationDiagnostics(true, (line) =>
           appendFileSync(config.authorizationTrace, `${line}\n`)
@@ -136,5 +151,9 @@ try {
     }
   );
 } finally {
-  await peer.dispose();
+  try {
+    await authority?.close();
+  } finally {
+    await peer.dispose();
+  }
 }

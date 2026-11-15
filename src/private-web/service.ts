@@ -1,10 +1,15 @@
-import { closeSync, constants, fstatSync, openSync, readFileSync } from "node:fs";
+import { closeSync, constants, fstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Effect, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { authorizationDiagnostics, eventsProgram } from "./events.ts";
+import { authorizationDiagnostics, eventsProgram, prepareWatchTool } from "./events.ts";
 import { clerkPeerIdentity, discoverProvider, identifyOwner, Provider } from "./identity.ts";
 import { servePeer } from "./program.ts";
+import {
+  initializeWatchAuthority as initializeAuthority,
+  WatchAuthority,
+  watchAuthorityPath,
+} from "./watch-authority.ts";
 
 const Text = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(2048));
 const Port = Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 65535 }));
@@ -107,22 +112,67 @@ export const decodeServiceConfig = (input: unknown) => {
   }
   if (config.events !== undefined) {
     const { storagePath, encryptionKeyFile } = config.events;
+    const watchPath = `${storagePath}.watch.sqlite`;
     if (
       !isAbsolute(storagePath) ||
       !isAbsolute(encryptionKeyFile) ||
       resolve(storagePath) !== storagePath ||
       resolve(encryptionKeyFile) !== encryptionKeyFile ||
       storagePath === encryptionKeyFile ||
-      [storagePath, encryptionKeyFile].some(
+      [storagePath, encryptionKeyFile, watchPath, `${watchPath}-journal`].some(
         (path) =>
           path === resolve(config.sessionKeyFile) ||
           config.principals.some(({ grantFile }) => path === resolve(grantFile)) ||
           within(resolve(config.oauth.tokenStorageDir), path)
+      ) ||
+      [watchPath, `${watchPath}-journal`].some((path) =>
+        [storagePath, `${storagePath}-journal`, encryptionKeyFile].includes(path)
       )
     )
       throw invalid();
   }
   return config;
+};
+
+const watchOptions = (config: typeof ServiceConfig.Type, configFile: string) => {
+  const events = config.events;
+  if (events === undefined) throw invalid();
+  const canonical = (path: string) => {
+    try {
+      return realpathSync(path);
+    } catch {
+      return resolve(path);
+    }
+  };
+  const path = watchAuthorityPath(events.storagePath);
+  const protectedFiles = [
+    configFile,
+    config.sessionKeyFile,
+    events.encryptionKeyFile,
+    ...config.principals.map(({ grantFile }) => grantFile),
+  ].map(canonical);
+  const oauth = canonical(config.oauth.tokenStorageDir);
+  for (const file of [
+    events.storagePath,
+    `${events.storagePath}-journal`,
+    path,
+    `${path}-journal`,
+    `${path}-wal`,
+    `${path}-shm`,
+  ].map(canonical)) {
+    if (protectedFiles.includes(file) || within(oauth, file)) throw invalid();
+  }
+  return { eventsPath: events.storagePath, resource: config.resource };
+};
+
+/** Offline, exclusive first creation only. Existing or damaged watch state is never reset. */
+export const initializeWatchAuthority = (configFile: string): void => {
+  try {
+    const config = decodeServiceConfig(readPrivateJson(configFile));
+    initializeAuthority(watchOptions(config, configFile));
+  } catch {
+    throw new Error("Watch authority initialization refused.");
+  }
 };
 
 export const hostConfig = (config: typeof ServiceConfig.Type) => ({
@@ -207,6 +257,7 @@ export const runPrivatePeer = async (options: {
   readonly signal?: AbortSignal;
 }) => {
   const runtime = ManagedRuntime.make(FetchHttpClient.layer);
+  let authority: WatchAuthority | undefined;
   try {
     const config = decodeServiceConfig(readPrivateJson(options.configFile));
     const sessionKey = decodeSessionKey(readPrivateJson(config.sessionKeyFile, 4096));
@@ -225,6 +276,9 @@ export const runPrivatePeer = async (options: {
         eventsKey === undefined)
     )
       throw invalid();
+    if (config.events !== undefined) {
+      authority = new WatchAuthority(watchOptions(config, options.configFile));
+    }
     const provider = await runtime.runPromise(discoverProvider(config.provider), {
       signal: options.signal,
     });
@@ -238,6 +292,7 @@ export const runPrivatePeer = async (options: {
       readGrant: async (grantFile) => readPrivateJson(grantFile, 4096),
     });
     const events = config.events;
+    const watch = authority;
     const diagnostics =
       events === undefined ? undefined : authorizationDiagnostics(config.requestDiagnostics);
     await servePeer({
@@ -245,14 +300,17 @@ export const runPrivatePeer = async (options: {
       expectedBusVersion: selected.expectedBusVersion,
       cwd: process.cwd(),
       resolveContext: identity.resolvePeer,
-      ...(events === undefined || eventsKey === undefined
+      ...(events === undefined || eventsKey === undefined || watch === undefined
         ? {}
         : {
+            prepareWatch: (wake: Parameters<typeof eventsProgram>[0]["wake"]) =>
+              prepareWatchTool({ identity, wake, authority: watch }),
             events: (wake: Parameters<typeof eventsProgram>[0]["wake"]) =>
               eventsProgram({
                 identity,
                 wake,
                 resource: config.resource,
+                authority: watch,
                 ...(diagnostics === undefined ? {} : { diagnostics }),
                 storage: {
                   path: events.storagePath,
@@ -267,6 +325,10 @@ export const runPrivatePeer = async (options: {
   } catch {
     throw new Error("Private peer service could not start or complete.");
   } finally {
-    await runtime.dispose();
+    try {
+      await authority?.close();
+    } finally {
+      await runtime.dispose();
+    }
   }
 };

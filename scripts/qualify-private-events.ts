@@ -1,7 +1,7 @@
 // Packed-host Events qualification against disposable services and synthetic principals only.
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
@@ -20,6 +20,7 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
+import { initializeWatchAuthority } from "../src/private-web/watch-authority.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 import { spawnSupervised } from "../test/supervised.ts";
@@ -76,10 +77,9 @@ const authorizationRecord = Schema.decodeUnknownSync(
         "refused",
         "input_refused",
         "context_refused",
-        "correlation_metadata_absent",
-        "correlation_key_absent",
-        "correlation_unusable",
         "account_mismatch",
+        "watch_authority_refused",
+        "correlation_mismatch",
         "native_observation_failed",
         "scope_returned",
         "cancelled",
@@ -172,11 +172,13 @@ const location = (response: Response) => {
   if (value === null) throw new Error(`Expected OAuth redirect, received ${response.status}.`);
   return new URL(value, response.url);
 };
+const refusalBodies: string[] = [];
 const refused = async (work: Promise<unknown>, code: number, reason?: string) => {
   try {
     await work;
   } catch (error) {
     assert(error && typeof error === "object" && "code" in error);
+    refusalBodies.push(`${String(error)} ${JSON.stringify(error)}`);
     assert.equal(error.code, code);
     if (reason !== undefined) {
       assert("data" in error && error.data && typeof error.data === "object");
@@ -349,8 +351,8 @@ try {
         notice(value);
         deliveries.push({ id, body });
         return new Response(null, { status: acceptDeliveries ? 204 : 503 });
-      } catch (error) {
-        callbackError = error;
+      } catch {
+        callbackError = new Error("Synthetic callback validation failed.");
         return new Response(null, { status: 500 });
       }
     },
@@ -362,6 +364,7 @@ try {
   const firstGrant = join(dir, "first-grant.json");
   const secondGrant = join(dir, "second-grant.json");
   const resource = `http://127.0.0.1:${hostPort}/mcp`;
+  initializeWatchAuthority({ eventsPath, resource });
   const grant = (file: string, subject: string, permitted: boolean) =>
     writeFileSync(
       file,
@@ -373,9 +376,11 @@ try {
   const tracePath = join(dir, "dial-trace");
   const coverageTrace = join(dir, "coverage-trace");
   const authorizationTrace = join(dir, "authorization-trace");
+  const bindingTrace = join(dir, "binding-trace");
   writeFileSync(tracePath, "");
   writeFileSync(coverageTrace, "");
   writeFileSync(authorizationTrace, "", { mode: 0o600 });
+  writeFileSync(bindingTrace, "", { mode: 0o600 });
   const authorizations = () =>
     readFileSync(authorizationTrace, "utf8")
       .split("\n")
@@ -413,6 +418,7 @@ try {
       tracePath,
       coverageTrace,
       authorizationTrace,
+      bindingTrace,
     }),
     { mode: 0o600 }
   );
@@ -548,9 +554,38 @@ try {
   };
   await call(first, "bus_join", { address: "chatgpt/events-first" }, "chat-first");
   await call(second, "bus_join", { address: "chatgpt/events-second" }, "chat-second");
+  const prepareWatch = async (client: Client) => {
+    const result = await client.callTool({
+      name: "bus_prepare_watch",
+      arguments: { address: "chatgpt/events-first" },
+      _meta: { "openai/session": "chat-first" },
+    });
+    assert.notEqual(result.isError, true, "Preparation failed.");
+    const value = result.structuredContent;
+    assert(value && typeof value === "object" && !Array.isArray(value));
+    assert(Object.keys(value).sort().join(",") === "arguments,event");
+    assert("event" in value && "arguments" in value);
+    assert(value.event === "mail.wake");
+    const args = value.arguments;
+    assert(args && typeof args === "object" && !Array.isArray(args));
+    assert(Object.keys(args).sort().join(",") === "address,ticket");
+    assert("address" in args && args.address === "chatgpt/events-first");
+    assert(
+      "ticket" in args && typeof args.ticket === "string" && /^[A-Za-z0-9_-]{22}$/.test(args.ticket)
+    );
+    assert(Array.isArray(result.content));
+    const text = result.content[0];
+    assert(text && typeof text === "object" && "text" in text && typeof text.text === "string");
+    assert(
+      JSON.stringify(JSON.parse(text.text)) === JSON.stringify(value),
+      "Preparation carriers differ."
+    );
+    return { address: args.address, ticket: args.ticket };
+  };
+  const watch = await prepareWatch(first);
   const request = {
     name: "mail.wake",
-    arguments: { address: "chatgpt/events-first" },
+    arguments: watch,
     delivery: {
       mode: "webhook",
       url: `https://receiver.example.test:${receiver.port}/callback`,
@@ -558,10 +593,16 @@ try {
     },
     ttlMs: 60_000,
   };
-  const subscribe = async (client: Client, input: typeof request, chat: string) =>
+  const subscribe = async (client: Client, input: typeof request, chat?: string) =>
     subscription(
       await client.request(
-        { method: "events/subscribe", params: { ...input, _meta: { "openai/session": chat } } },
+        {
+          method: "events/subscribe",
+          params: {
+            ...input,
+            ...(chat === undefined ? {} : { _meta: { "openai/session": chat } }),
+          },
+        },
         ResultSchema
       )
     );
@@ -580,24 +621,63 @@ try {
       )
     );
   if (selectedCase === "all") {
+    const repeated = await prepareWatch(first);
+    assert(repeated.ticket === watch.ticket, "Repreparation changed the same holding's ticket.");
+    const noMetadataPrepare = await first.callTool({
+      name: "bus_prepare_watch",
+      arguments: { address: watch.address },
+    });
+    assert.equal(noMetadataPrepare.isError, true);
+    refusalBodies.push(JSON.stringify(noMetadataPrepare));
+    for (const [name, args] of [
+      ["bus_read", { address: watch.address }],
+      [
+        "bus_publish",
+        { from: watch.address, to: ["chatgpt/events-second"], body: "must not send" },
+      ],
+    ] as const) {
+      const denied = await first.callTool({ name, arguments: args });
+      assert.equal(denied.isError, true);
+      refusalBodies.push(JSON.stringify(denied));
+      await refused(first.callTool({ name, arguments: { ...args, ticket: watch.ticket } }), -32602);
+    }
     let before = authorizations().length;
     await refused(
-      first.request({ method: "events/subscribe", params: request }, ResultSchema),
+      first.request(
+        {
+          method: "events/subscribe",
+          params: {
+            ...request,
+            arguments: { address: watch.address },
+            _meta: { "openai/session": "chat-first" },
+          },
+        },
+        ResultSchema
+      ),
+      -32602
+    );
+    assert(!observedOutcome(before, "subscription", ["scope_returned", "input_refused"]));
+    const altered = `${watch.ticket[0] === "A" ? "B" : "A"}${watch.ticket.slice(1)}`;
+    before = authorizations().length;
+    await refused(
+      subscribe(first, { ...request, arguments: { ...watch, ticket: altered } }),
       -32010,
       "forbidden"
     );
-    assert(
-      observedOutcome(before, "subscription", [
-        "correlation_metadata_absent",
-        "correlation_key_absent",
-      ])
+    assert(observedOutcome(before, "subscription", ["watch_authority_refused"]));
+    before = authorizations().length;
+    await refused(
+      subscribe(first, { ...request, arguments: { ...watch, address: "chatgpt/foreign" } }),
+      -32010,
+      "forbidden"
     );
+    assert(observedOutcome(before, "subscription", ["watch_authority_refused"]));
     before = authorizations().length;
     await refused(subscribe(first, request, "foreign-conversation"), -32010, "forbidden");
-    assert(observedOutcome(before, "subscription", ["native_observation_failed"]));
+    assert(observedOutcome(before, "subscription", ["correlation_mismatch"]));
     before = authorizations().length;
     await refused(subscribe(second, request, "chat-second"), -32010, "forbidden");
-    assert(observedOutcome(before, "subscription", ["native_observation_failed"]));
+    assert(observedOutcome(before, "subscription", ["watch_authority_refused"]));
     grant(firstGrant, "fixture-first", false);
     before = authorizations().length;
     await refused(subscribe(first, request, "chat-first"), -32010, "not_found");
@@ -609,13 +689,15 @@ try {
     assert.equal(verifications, 0);
     grant(firstGrant, "fixture-first", true);
     before = authorizations().length;
-    const admitted = await subscribe(first, request, "chat-first");
+    const admitted = await subscribe(first, request);
     assert(observedOutcome(before, "subscription", ["scope_returned"]));
     assert(observedOutcome(before, "delivery", ["allowed"]));
     assert(admitted.id.startsWith("sub_"));
     assert(Date.parse(admitted.refreshBefore) > Date.now());
     assert(Date.parse(admitted.refreshBefore) <= Date.now() + request.ttlMs);
     assert.equal(verifications, 1);
+    const refreshed = await subscribe(first, request);
+    assert.equal(refreshed.id, admitted.id);
     assert.deepEqual(await unsubscribe(second, request), {});
     await call(
       second,
@@ -652,6 +734,10 @@ try {
     );
     if (callbackError !== undefined) throw callbackError;
     assert.deepEqual(deliveries[1], deliveries[0]);
+    const restartedWatch = await prepareWatch(first);
+    assert(restartedWatch.ticket === watch.ticket, "Restart changed the same holding's ticket.");
+    const restartedRefresh = await subscribe(first, request);
+    assert.equal(restartedRefresh.id, admitted.id);
     const emptyRead = await call(
       first,
       "bus_read",
@@ -878,8 +964,54 @@ try {
       `Checkpoint: ${checkpoint.count} unique published IDs, ${checkpoint.bytes} bytes, IDs SHA-256 ${expectedDigest}, canonical full coverage SHA-256 ${checkpoint.canonicalFullCoverageDigest}; matched before and after joined host restart.`
     );
   }
+  const history = await call(first, "bus_history", { participant: watch.address }, "chat-first");
+  const closed = await Promise.allSettled(clients.map((client) => client.close()));
+  await stop();
+  assert(
+    closed.every((result) => result.status === "fulfilled"),
+    "Client cleanup failed."
+  );
   const trace = readFileSync(tracePath, "utf8");
   assert(trace.includes("lookup\n") && trace.includes("admitted-tls-dial\n"));
+  const bindingLine = readFileSync(bindingTrace, "utf8").split("\n").find(Boolean);
+  assert(bindingLine, "Synthetic native binding was not captured.");
+  const binding: unknown = JSON.parse(bindingLine);
+  assert(binding && typeof binding === "object" && !Array.isArray(binding));
+  assert("session" in binding && typeof binding.session === "string");
+  assert("installation" in binding && typeof binding.installation === "string");
+  assert("incarnation" in binding && typeof binding.incarnation === "string");
+  assert("run" in binding && typeof binding.run === "string");
+  const publicSurfaces = [
+    ...deliveries.map(({ body }) => body),
+    readFileSync(authorizationTrace, "utf8"),
+    JSON.stringify(history),
+    ...refusalBodies,
+  ];
+  const secrets = [
+    watch.ticket,
+    bindingLine,
+    binding.session,
+    binding.installation,
+    binding.incarnation,
+    binding.run,
+  ];
+  for (const surface of publicSurfaces)
+    for (const secret of secrets)
+      assert(!surface.includes(secret), "Private watch authority reached a public surface.");
+  for (const file of [
+    eventsPath,
+    `${eventsPath}-journal`,
+    `${eventsPath}-wal`,
+    `${eventsPath}-shm`,
+  ]) {
+    if (!existsSync(file)) continue;
+    const bytes = readFileSync(file);
+    for (const secret of secrets)
+      assert(
+        !bytes.includes(Buffer.from(secret)),
+        "Private watch authority appeared in host storage bytes."
+      );
+  }
   console.log(
     `Packed public Events ${selectedCase} case passed with synthetic native OAuth and disposable Bus and Fluree.`
   );

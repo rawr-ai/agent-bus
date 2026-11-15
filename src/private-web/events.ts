@@ -1,20 +1,29 @@
 import { createHash } from "node:crypto";
 import { Schema } from "effect";
-import type { EventsProgram } from "mcp-openapi";
+import type { DirectTool, EventsProgram } from "mcp-openapi";
 import {
   MAX_WAKE_OBSERVATION_BYTES,
   sameWakeBinding,
   WakeBinding,
   WakeCoverage,
 } from "../wake-observation.ts";
-import type { clerkPeerIdentity } from "./identity.ts";
+import type { clerkPeerIdentity, PeerActor } from "./identity.ts";
 import { type wakePort, wire } from "./peer.ts";
+import type { WatchAuthority } from "./watch-authority.ts";
 
 const EVENT = "mail.wake";
 const Filter = Schema.Struct({
   address: Schema.String.check(Schema.isStartingWith("chatgpt/"), Schema.isMinLength(9)),
 });
+const SubscriptionInput = Schema.Struct({
+  ...Filter.fields,
+  ticket: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{22}$/)).annotate({
+    description:
+      "Private watch ticket returned by bus_prepare_watch. Copy it unchanged; never publish or log it. It authorizes this watch only, never inbox reads or other tools.",
+  }),
+});
 const decodeFilter = Schema.decodeUnknownSync(Filter, { onExcessProperty: "error" });
+const decodeInput = Schema.decodeUnknownSync(SubscriptionInput, { onExcessProperty: "error" });
 const decodeBinding = Schema.decodeUnknownSync(WakeBinding, { onExcessProperty: "error" });
 const decodeCoverage = Schema.decodeUnknownSync(WakeCoverage, { onExcessProperty: "error" });
 const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -34,10 +43,9 @@ type AuthorizationOutcome =
       (
         | "input_refused"
         | "context_refused"
-        | "correlation_metadata_absent"
-        | "correlation_key_absent"
-        | "correlation_unusable"
         | "account_mismatch"
+        | "watch_authority_refused"
+        | "correlation_mismatch"
         | "native_observation_failed"
         | "scope_returned"
         | "cancelled"
@@ -76,24 +84,67 @@ export const authorizationDiagnostics = (
   };
 };
 
-const correlationFailure = (invocation: {
-  readonly requestMeta?: Readonly<Record<string, unknown>>;
-}) => {
-  try {
-    const metadata = invocation.requestMeta;
-    if (metadata === undefined || metadata === null) return "correlation_metadata_absent";
-    if (typeof metadata !== "object") return "correlation_unusable";
-    return "openai/session" in metadata ? "correlation_unusable" : "correlation_key_absent";
-  } catch {
-    return "correlation_unusable";
-  }
-};
+/** Only a normal owning tool invocation can mint or replace explicit watch authority. */
+export const prepareWatchTool = (options: {
+  readonly identity: ReturnType<typeof clerkPeerIdentity>;
+  readonly wake: ReturnType<typeof wakePort>;
+  readonly authority: Pick<WatchAuthority, "prepare">;
+}): DirectTool<PeerActor> => ({
+  name: "bus_prepare_watch",
+  description:
+    "Prepare mail.wake for an address this conversation already owns. Uses normal conversation metadata and a fresh nonconsuming ownership observation. Returns private Events arguments containing a stable ticket for this exact holding; use them unchanged for subscription and refresh. Never send the ticket in Bus messages or use it as tool identity. It cannot read, publish, join or take over. An accepted subscription and actual idle wake are separate outcomes.",
+  annotations: {
+    openWorldHint: false,
+    readOnlyHint: false,
+    destructiveHint: false,
+    idempotentHint: true,
+  },
+  timeoutMs: 10_000,
+  parameters: wire(Filter, []),
+  outputSchema: wire(
+    Schema.Struct({ event: Schema.Literal(EVENT), arguments: SubscriptionInput }),
+    []
+  ),
+  execute: async (input, invocation) => {
+    try {
+      const { address } = decodeFilter(input);
+      const actor = await options.identity.resolveAuthorized(invocation);
+      if (invocation.signal.aborted || actor.session === undefined)
+        throw new Error("Watch preparation refused.");
+      const session = actor.session;
+      const { ticket } = await options.authority.prepare(
+        { address, principal: actor.principal, session },
+        async (signal) =>
+          (
+            await options.wake.observe(
+              { address, session, maxResultBytes: MAX_WAKE_OBSERVATION_BYTES },
+              signal
+            )
+          ).binding,
+        invocation.signal
+      );
+      const result = { event: EVENT, arguments: { address, ticket } };
+      return {
+        content: [{ type: "text", text: JSON.stringify(result) }],
+        structuredContent: result,
+      };
+    } catch {
+      return {
+        isError: true,
+        content: [
+          { type: "text", text: "Watch preparation refused; no watching authority was returned." },
+        ],
+      };
+    }
+  },
+});
 
 /** The host owns leases, pending notices and delivery; this adapter owns Bus authority and evidence. */
 export const eventsProgram = (options: {
   readonly identity: ReturnType<typeof clerkPeerIdentity>;
   readonly wake: ReturnType<typeof wakePort>;
   readonly resource: string;
+  readonly authority: Pick<WatchAuthority, "resolve">;
   readonly diagnostics?: AuthorizationDiagnosticObserver | undefined;
   readonly storage: {
     readonly path: string;
@@ -128,8 +179,11 @@ export const eventsProgram = (options: {
     canDiscover: (account, event, signal) =>
       event === EVENT && options.identity.checkAccountGrant(account.principal, signal),
     authorizeSubscription: async ({ account, event, arguments: input, invocation, signal }) => {
-      let failure: "input_refused" | "context_refused" | "native_observation_failed" =
-        "input_refused";
+      let failure:
+        | "input_refused"
+        | "context_refused"
+        | "watch_authority_refused"
+        | "native_observation_failed" = "input_refused";
       try {
         if (signal.aborted || invocation.signal.aborted) {
           record("subscription", "cancelled");
@@ -139,7 +193,7 @@ export const eventsProgram = (options: {
           record("subscription", "input_refused");
           return undefined;
         }
-        const { address } = decodeFilter(input);
+        const { address, ticket } = decodeInput(input);
         failure = "context_refused";
         const actor = await options.identity.resolveAuthorized(invocation);
         if (signal.aborted) {
@@ -150,14 +204,23 @@ export const eventsProgram = (options: {
           record("subscription", "account_mismatch");
           return undefined;
         }
-        if (actor.session === undefined) {
-          if (options.diagnostics !== undefined)
-            record("subscription", correlationFailure(invocation));
+        failure = "watch_authority_refused";
+        const binding = await options.authority.resolve(
+          { address, ticket, principal: actor.principal },
+          signal
+        );
+        if (actor.session !== undefined && actor.session !== binding.session) {
+          record("subscription", "correlation_mismatch");
           return undefined;
         }
         failure = "native_observation_failed";
         const observed = await options.wake.observe(
-          { address, session: actor.session, maxResultBytes: MAX_WAKE_OBSERVATION_BYTES },
+          {
+            address,
+            session: binding.session,
+            expectedBinding: binding,
+            maxResultBytes: MAX_WAKE_OBSERVATION_BYTES,
+          },
           signal
         );
         if (signal.aborted) {
@@ -197,7 +260,7 @@ export const eventsProgram = (options: {
           record("delivery", "scope_refused");
           return { allowed: false };
         }
-        const { address } = decodeFilter(context.arguments);
+        const { address } = decodeInput(context.arguments);
         const binding = decodeBinding(scope.binding);
         if (binding.address !== address || binding.runtime !== "other") {
           record("delivery", "scope_refused");
@@ -237,7 +300,7 @@ export const eventsProgram = (options: {
       {
         name: EVENT,
         description: "A wake notice for unread eligible mail at the held address.",
-        inputSchema: wire(Filter, []),
+        inputSchema: wire(SubscriptionInput, []),
         payloadSchema: wire(Filter, []),
         source: {
           replay: "none",
@@ -250,7 +313,7 @@ export const eventsProgram = (options: {
             waitMs,
             signal,
           }) => {
-            const { address } = decodeFilter(filter);
+            const { address } = decodeInput(filter);
             const binding = decodeBinding(principal.binding);
             if (
               signal.aborted ||

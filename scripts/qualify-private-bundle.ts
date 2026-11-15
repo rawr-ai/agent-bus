@@ -8,11 +8,13 @@ import {
   mkdtempSync,
   readFileSync,
   realpathSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse } from "node:path";
+import { pathToFileURL } from "node:url";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -227,6 +229,52 @@ try {
   };
   const startupConfig = join(dir, "startup-config.json");
   writeFileSync(startupConfig, JSON.stringify(startup), { mode: 0o600 });
+  const bundle: unknown = await import(pathToFileURL(join(relocated, "main.js")).href);
+  assert(
+    bundle &&
+      typeof bundle === "object" &&
+      "initializeWatchAuthority" in bundle &&
+      typeof bundle.initializeWatchAuthority === "function"
+  );
+  const initializationCommand = [
+    process.execPath,
+    "--no-env-file",
+    "--config=/dev/null",
+    "-e",
+    `
+      try {
+        const { initializeWatchAuthority } = await import(process.argv[1]);
+        initializeWatchAuthority(process.argv[2]);
+      } catch {
+        console.error("Watch authority initialization refused; preserve existing state.");
+        process.exitCode = 1;
+      }
+    `,
+    join(relocated, "main.js"),
+    startupConfig,
+  ];
+  const initialization = Bun.spawnSync(initializationCommand, {
+    cwd: dir,
+    env: { HOME: dir, PATH: "/usr/bin:/bin" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  assert(initialization.success, "Bundled offline initialization refused.");
+  const watchState = eventsPath + ".watch.sqlite";
+  const initializedBytes = readFileSync(watchState);
+  const repeatedInitialization = Bun.spawnSync(initializationCommand, {
+    cwd: dir,
+    env: { HOME: dir, PATH: "/usr/bin:/bin" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  assert.equal(repeatedInitialization.exitCode, 1);
+  assert.equal(repeatedInitialization.stdout.byteLength, 0);
+  assert.equal(
+    repeatedInitialization.stderr.toString().trim(),
+    "Watch authority initialization refused; preserve existing state."
+  );
+  assert.deepEqual(readFileSync(watchState), initializedBytes);
   const falseConfig = join(dir, "false-config.json");
   writeFileSync(falseConfig, JSON.stringify({ ...startup, requestDiagnostics: false }), {
     mode: 0o600,
@@ -436,7 +484,14 @@ try {
   await probeStartup(startupConfig, { host: false, consumer: false });
   await probeStartup(falseConfig, { host: false, consumer: false });
   await probeStartup(diagnosticConfig, { host: true, consumer: true });
-  await probeStartup(toolsDiagnosticConfig, { host: true, consumer: false });
+  const watchPath = `${eventsPath}.watch.sqlite`;
+  const parkedWatchPath = `${watchPath}.parked`;
+  renameSync(watchPath, parkedWatchPath);
+  try {
+    await probeStartup(toolsDiagnosticConfig, { host: true, consumer: false });
+  } finally {
+    renameSync(parkedWatchPath, watchPath);
+  }
   writeFileSync(privateConfig, JSON.stringify({ ...startup, requestDiagnostics: true }), {
     mode: 0o600,
   });

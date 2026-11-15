@@ -23,6 +23,7 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Duration, Effect, Layer, ManagedRuntime } from "effect";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
+import { prepareWatchTool } from "../src/private-web/events.ts";
 import * as Serve from "../src/serve.ts";
 import * as Timing from "../src/timing.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
@@ -67,6 +68,21 @@ const served = async () => {
 };
 
 const { tools, instructions } = await served();
+// Construct actual hosted metadata without acquiring its state or executing a callback.
+const notExecuted = async (): Promise<never> => {
+  throw new Error("Docs catalogue only.");
+};
+const hostedPreparation = prepareWatchTool({
+  identity: {
+    resolveAccount: notExecuted,
+    resolveAuthorized: notExecuted,
+    checkAccountGrant: notExecuted,
+    resolvePeer: notExecuted,
+  },
+  wake: { observe: notExecuted, check: notExecuted },
+  authority: { prepare: notExecuted },
+});
+const documentedToolNames = new Set([...tools.map((tool) => tool.name), hostedPreparation.name]);
 const toolNamed = (name: string) => tools.find((tool) => tool.name === name);
 type Schema = {
   type?: string;
@@ -388,7 +404,7 @@ describe("tool names in the pages are real", () => {
       ([name = ""]) => name
     );
     expect(written.length).toBeGreaterThan(0);
-    expect(written.filter((name) => toolNamed(name) === undefined)).toEqual([]);
+    expect(written.filter((name) => !documentedToolNames.has(name))).toEqual([]);
   });
 });
 
@@ -407,6 +423,8 @@ const NOT_PARAMETERS = [
   "INCOMPLETE",
   "UNAVAILABLE",
   "UNKNOWN",
+  // The host Events subscription receipt, not a native tool parameter.
+  "refreshBefore",
 ];
 
 describe("parameter names in the skill are real", () => {
