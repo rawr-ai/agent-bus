@@ -525,7 +525,7 @@ try {
     ].find((label) =>
       captured?.text.split("\n").some((line) => {
         const message = line.trim();
-        return message === label || message.endsWith(`: ${label}`);
+        return message === `AssertionError: ${label}` || message === `error: ${label}`;
       })
     );
     throw new Error(guidanceFailure ?? "Relocated fixture failed.");

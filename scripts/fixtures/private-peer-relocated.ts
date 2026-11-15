@@ -197,6 +197,9 @@ try {
   console.log(
     JSON.stringify({
       schema: "agent-bus-hosted-guidance-wire-v1",
+      phase: "intermediate-guidance-assertions",
+      completionRequires: ["supervised-child-exit-0", "successful-parent-checks"],
+      scope: "synthetic-api-key-modern-http",
       instructionsSha256: digest(instructions),
       instructionsBytes: Buffer.byteLength(instructions),
       joinDescriptionSha256: digest(joinDescription),
