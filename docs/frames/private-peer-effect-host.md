@@ -62,8 +62,13 @@ exact 120-ID checkpoint, exceeding four KiB, after the old host has joined.
 All three qualifiers passed on the initial runtime cohort with disposable
 services and supervised children, but did not all exercise one built host
 checksum. That producer candidate is held for its separately observed
-authenticated declared-size admission regression. The successor requires fresh
-exact-bundle qualification; prior green results do not override that hold.
+authenticated declared-size admission regression and has been superseded.
+The corrected successor passed all three qualifiers against one prebuilt,
+manifest-verified host output, without rebuilding or changing its bytes between
+lanes. Its own Bus-cap header-only overflow probe completes an empty refusal
+before identity, grant or handler entry; a normal call then succeeds. The
+fully transmitted oversized-body check remains separate. Prior green results
+were not relabelled into that successor evidence.
 The mandatory full source check and committed native-package independence
 remain separate from these fixture results.
 

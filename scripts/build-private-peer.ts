@@ -4,8 +4,8 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { dirname, isAbsolute, join, sep } from "node:path";
 
-const archiveHash = "a89ea13eea6eea52950ffedfdf381672f8aa69448185cfdc474f337431de574a";
-const entryHash = "d262e777cac0ee6bf7cf6d5f22719c87c6713396de0cdaee8be878da1c4244a2";
+const archiveHash = "e26644a170ea32a4ce7b97a0105a5c93bab43f7dc1145cd9aaf96c7181dfba77";
+const entryHash = "12cc12d7df1441b2926c4664a60376afa9fdaf2738ea90e91b7585d703d9c3cf";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const [archive, parent] = process.argv.slice(2);
 if (!archive || !parent || !isAbsolute(archive) || !isAbsolute(parent) || process.argv.length !== 4)
@@ -69,8 +69,8 @@ try {
   const manifest = {
     schema: "agent-bus-private-peer-review-v2",
     host: {
-      sourceCommit: "12794ff42710c8e468cbb06f9b7111ee2385e090",
-      sourceTree: "84af328b4bbdaf74033cbdfc83cea6969d8e6eba",
+      sourceCommit: "7d19ed341e4c18ef6523770dac8df1fe49cb9afc",
+      sourceTree: "fe37466b3ef1d4d8860c780016745957b943aa24",
       archiveSha256: archiveHash,
       entrySha256: entryHash,
       bundleSha256: hash(readFileSync(host)),

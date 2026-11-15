@@ -2,6 +2,7 @@
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
+import { request as httpRequest, type IncomingMessage } from "node:http";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 import { parseArgs } from "node:util";
@@ -29,6 +30,7 @@ import {
   hostForQualification,
   modernHttp,
   modernRequest,
+  protocolVersion,
 } from "./private-modern-http.ts";
 
 /** Every property path an output schema names, `[]` for array items, through local references. */
@@ -465,6 +467,59 @@ try {
     assert.deepEqual(observed, {
       lacking: [{ address: "chatgpt/never-joined", standing: "not-joined" }],
     });
+    assert.equal(hostConfig(fixtureConfig).httpLimits.maxBodyBytes, 1_048_576);
+    const beforeDeclared = { identityChecks, grantChecks, handlers: executed.length };
+    let withheldResponse: IncomingMessage | undefined;
+    const withheld = httpRequest(`http://127.0.0.1:${hostPort}/mcp`, {
+      method: "POST",
+      agent: false,
+      signal: AbortSignal.timeout(5_000),
+      headers: {
+        "content-type": "application/json",
+        accept: "application/json, text/event-stream",
+        "mcp-protocol-version": protocolVersion,
+        "mcp-method": "tools/call",
+        "mcp-name": "bus_publish",
+        "x-api-key": apiKey,
+        "content-length": hostConfig(fixtureConfig).httpLimits.maxBodyBytes + 1,
+      },
+    });
+    try {
+      const early = await new Promise<{
+        status: number | undefined;
+        bytes: number;
+        complete: boolean;
+      }>((resolve, reject) => {
+        withheld.once("error", reject);
+        withheld.once("response", (response) => {
+          withheldResponse = response;
+          let bytes = 0;
+          response.on("data", (chunk: Buffer) => {
+            bytes += chunk.length;
+            if (bytes > 0) {
+              reject(new Error("Early body refusal was not empty."));
+              response.destroy();
+            }
+          });
+          response.once("error", reject);
+          response.once("aborted", () => reject(new Error("Incomplete early body refusal.")));
+          response.once("close", () => {
+            if (!response.complete) reject(new Error("Early body refusal closed prematurely."));
+          });
+          response.once("end", () =>
+            resolve({ status: response.statusCode, bytes, complete: response.complete })
+          );
+        });
+        // Flush only headers: declared overflow must refuse before any body bytes arrive.
+        withheld.flushHeaders();
+      });
+      assert.deepEqual(early, { status: 413, bytes: 0, complete: true });
+      assert.deepEqual({ identityChecks, grantChecks, handlers: executed.length }, beforeDeclared);
+    } finally {
+      withheldResponse?.destroy();
+      withheld.destroy();
+    }
+    await success("bus_peers", {}, "chat-a");
     const oversized = {
       name: "bus_publish",
       arguments: {

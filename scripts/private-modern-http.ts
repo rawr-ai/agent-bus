@@ -6,8 +6,8 @@ import { isAbsolute, join } from "node:path";
 import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Schema } from "effect";
 
-export const archiveHash = "a89ea13eea6eea52950ffedfdf381672f8aa69448185cfdc474f337431de574a";
-export const entryHash = "d262e777cac0ee6bf7cf6d5f22719c87c6713396de0cdaee8be878da1c4244a2";
+export const archiveHash = "e26644a170ea32a4ce7b97a0105a5c93bab43f7dc1145cd9aaf96c7181dfba77";
+export const entryHash = "12cc12d7df1441b2926c4664a60376afa9fdaf2738ea90e91b7585d703d9c3cf";
 export const digest = (file: string) =>
   createHash("sha256").update(readFileSync(file)).digest("hex");
 const manifestSchema = Schema.Struct({
@@ -15,8 +15,8 @@ const manifestSchema = Schema.Struct({
   peerSha256: Schema.String,
   source: Schema.String,
   host: Schema.Struct({
-    sourceCommit: Schema.Literal("12794ff42710c8e468cbb06f9b7111ee2385e090"),
-    sourceTree: Schema.Literal("84af328b4bbdaf74033cbdfc83cea6969d8e6eba"),
+    sourceCommit: Schema.Literal("7d19ed341e4c18ef6523770dac8df1fe49cb9afc"),
+    sourceTree: Schema.Literal("fe37466b3ef1d4d8860c780016745957b943aa24"),
     archiveSha256: Schema.Literal(archiveHash),
     entrySha256: Schema.Literal(entryHash),
     bundleSha256: Schema.String,

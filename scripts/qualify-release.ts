@@ -187,6 +187,8 @@ try {
     "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236",
     "a89ea13eea6eea52950ffedfdf381672f8aa69448185cfdc474f337431de574a",
     "d262e777cac0ee6bf7cf6d5f22719c87c6713396de0cdaee8be878da1c4244a2",
+    "e26644a170ea32a4ce7b97a0105a5c93bab43f7dc1145cd9aaf96c7181dfba77",
+    "12cc12d7df1441b2926c4664a60376afa9fdaf2738ea90e91b7585d703d9c3cf",
   ];
   const privatePath = (path: string) =>
     path
