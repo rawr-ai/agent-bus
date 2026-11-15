@@ -512,7 +512,24 @@ try {
     await within(fixtureDrain, 1_000);
   }
   if (status === null) throw new Error("Relocated fixture timed out.");
-  assert.equal(status, 0);
+  if (status !== 0) {
+    // Surface fixed guidance failures without forwarding captured wire errors or source frames.
+    const guidanceFailure = [
+      "Hosted discovery instructions are missing.",
+      "Hosted discovery lost essential opening guidance.",
+      "Hosted discovery lost identity, wake or recovery guidance.",
+      "Hosted catalogue discovery failed.",
+      "Hosted join description lost its wake or recovery qualification.",
+      "Hosted activity description lost its conditional wake or guarded retry guidance.",
+      "Hosted catalogue leaked native-only guidance.",
+    ].find((label) =>
+      captured?.text.split("\n").some((line) => {
+        const message = line.trim();
+        return message === `AssertionError: ${label}` || message === `error: ${label}`;
+      })
+    );
+    throw new Error(guidanceFailure ?? "Relocated fixture failed.");
+  }
   if (captured === undefined || captured.failed || captured.overflow)
     throw new Error("Relocated callback diagnostic capture failed.");
   const hasCallbackOutcome = captured.text.split("\n").some((line) => {
