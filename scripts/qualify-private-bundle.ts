@@ -1,6 +1,6 @@
 // Qualify a copied review bundle in a source-independent child against a disposable owning Bus.
 import { strict as assert } from "node:assert";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import {
   copyFileSync,
   existsSync,
@@ -16,7 +16,7 @@ import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse } from "node:path";
 import { pathToFileURL } from "node:url";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
@@ -32,35 +32,12 @@ import {
   ownership,
 } from "../test/processes.ts";
 import { spawnSupervised } from "../test/supervised.ts";
+import { verifyPrivateBundle } from "./private-modern-http.ts";
 
 const input = process.argv[2];
 if (!input || !isAbsolute(input) || process.argv.length !== 3)
   throw new Error("Supply one absolute bundle path.");
-const Manifest = Schema.Struct({
-  schema: Schema.Literal("agent-bus-private-peer-review-v1"),
-  peerSha256: Schema.String,
-  source: Schema.String,
-  host: Schema.Struct({
-    sourceCommit: Schema.String,
-    sourceTree: Schema.String,
-    archiveSha256: Schema.String,
-    entrySha256: Schema.String,
-  }),
-});
-const manifest = Schema.decodeUnknownSync(Manifest, { onExcessProperty: "error" })(
-  JSON.parse(readFileSync(join(input, "manifest.json"), "utf8"))
-);
-const digest = (file: string) => createHash("sha256").update(readFileSync(file)).digest("hex");
-assert.equal(
-  manifest.host.archiveSha256,
-  "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2"
-);
-assert.equal(
-  manifest.host.entrySha256,
-  "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236"
-);
-assert.equal(digest(join(input, "main.js")), manifest.peerSha256);
-assert.equal(digest(join(input, "mcp-host.mjs")), manifest.host.entrySha256);
+verifyPrivateBundle(input);
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-relocated-")));
 let disposeBus: (() => Promise<void>) | undefined;
 let provider: ReturnType<typeof Bun.serve> | undefined;

@@ -1,24 +1,63 @@
 // Build an isolated review artifact; no credentials, service or public CLI dependencies are changed.
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
+import { mkdtempSync, readFileSync, realpathSync, rmSync } from "node:fs";
+import { createRequire } from "node:module";
+import { dirname, isAbsolute, join, sep } from "node:path";
 
-const archiveHash = "7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2";
-const entryHash = "7f62c9aa60b97ed1e6eae3bdb2aaafba38c87234cbae04b10cb0e9f615d3c236";
+const archiveHash = "e26644a170ea32a4ce7b97a0105a5c93bab43f7dc1145cd9aaf96c7181dfba77";
+const entryHash = "12cc12d7df1441b2926c4664a60376afa9fdaf2738ea90e91b7585d703d9c3cf";
 const hash = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const [archive, parent] = process.argv.slice(2);
 if (!archive || !parent || !isAbsolute(archive) || !isAbsolute(parent) || process.argv.length !== 4)
   throw new Error("Supply the absolute host archive and existing private output directory.");
 if (hash(readFileSync(archive)) !== archiveHash) throw new Error("Wrong host artifact.");
+const entry = realpathSync(Bun.resolveSync("mcp-openapi", import.meta.dir));
+const entryBytes = readFileSync(entry);
+if (hash(entryBytes) !== entryHash) throw new Error("Wrong installed host entry.");
+const effectPackage = realpathSync(createRequire(entry).resolve("effect/package.json"));
+const effectRoot = dirname(effectPackage);
+const effectManifest: unknown = JSON.parse(readFileSync(effectPackage, "utf8"));
+if (
+  typeof effectManifest !== "object" ||
+  effectManifest === null ||
+  !("version" in effectManifest) ||
+  effectManifest.version !== "4.1.4"
+)
+  throw new Error("Wrong isolated host runtime.");
+const entrySource = entryBytes.toString("utf8");
+const imports = new Bun.Transpiler({ loader: "js" }).scan(
+  entrySource.startsWith("#!") ? entrySource.slice(entrySource.indexOf("\n") + 1) : entrySource
+).imports;
+const runtimeImports = imports.filter(({ path }) => /^effect(?:\/|$)/u.test(path));
+if (runtimeImports.length === 0) throw new Error("Host runtime imports are missing.");
+for (const { path } of runtimeImports) {
+  const resolved = realpathSync(Bun.resolveSync(path, dirname(entry)));
+  if (!resolved.startsWith(`${effectRoot}${sep}`))
+    throw new Error("Host runtime escaped its isolated package.");
+}
 const out = mkdtempSync(join(parent, "private-peer-"));
 let complete = false;
 try {
-  const extract = Bun.spawnSync(["tar", "-xzf", archive, "-C", out, "package/dist/index.js"]);
-  if (!extract.success) throw new Error("Could not extract host entry.");
-  const extracted = join(out, "package/dist/index.js");
-  if (hash(readFileSync(extracted)) !== entryHash) throw new Error("Wrong host entry.");
-  renameSync(extracted, join(out, "mcp-host.mjs"));
-  rmSync(join(out, "package"), { recursive: true });
+  // The host owns a different Effect version from the native peer; seal it into its module.
+  const hostBuild = await Bun.build({
+    entrypoints: [entry],
+    outdir: out,
+    naming: "mcp-host.mjs",
+    target: "bun",
+    format: "esm",
+    external: ["@valibot/to-json-schema", "arktype", "sury"],
+  });
+  if (!hostBuild.success) throw new Error("Host runtime bundle failed.");
+  const host = join(out, "mcp-host.mjs");
+  const hostSource = readFileSync(host, "utf8");
+  if (
+    new Bun.Transpiler({ loader: "js" })
+      .scan(hostSource)
+      .imports.some(({ path }) => /^effect(?:\/|$)/u.test(path))
+  )
+    throw new Error("Host runtime was not bundled.");
+  if (/["'`]\/(?:Users|home)\/|["'`][A-Za-z]:\\+Users\\+/u.test(hostSource))
+    throw new Error("Host bundle contains a private build locator.");
   const result = await Bun.build({
     entrypoints: ["./src/private-web/main.ts"],
     outdir: out,
@@ -28,12 +67,15 @@ try {
   if (!result.success) throw new Error("Private peer bundle failed.");
   const peer = join(out, "main.js");
   const manifest = {
-    schema: "agent-bus-private-peer-review-v1",
+    schema: "agent-bus-private-peer-review-v2",
     host: {
-      sourceCommit: "6a0f35ac2d7a797d7cc79246effce841d0833d75",
-      sourceTree: "152271ccca2417651ddb4d1c7cb76a4e18cb60a5",
+      sourceCommit: "7d19ed341e4c18ef6523770dac8df1fe49cb9afc",
+      sourceTree: "fe37466b3ef1d4d8860c780016745957b943aa24",
       archiveSha256: archiveHash,
       entrySha256: entryHash,
+      bundleSha256: hash(readFileSync(host)),
+      effectVersion: effectManifest.version,
+      effectPackageSha256: hash(readFileSync(effectPackage)),
     },
     peerSha256: hash(readFileSync(peer)),
     source: "working tree; exact source revision not attested",

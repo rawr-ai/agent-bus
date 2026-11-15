@@ -4,11 +4,10 @@ import { randomBytes } from "node:crypto";
 import { writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { InvocationIdentity, ToolInvocation } from "mcp-openapi";
 import type * as Identity from "../../src/private-web/identity.ts";
 import type * as Service from "../../src/private-web/service.ts";
+import { type ModernHttp, modernHttp } from "../private-modern-http.ts";
 
 const [dir, configFile] = process.argv.slice(2);
 if (!dir || !configFile) throw new Error("Missing isolated fixture inputs.");
@@ -56,6 +55,7 @@ const running = bundle.runPrivatePeer({
       { mode: 0o600 }
     );
     assert.deepEqual(await lifecycle.resolveContext(invocation("second")), second);
+    // Source-free proof covers ordinary HTTP and direct callbacks, not the Events transport.
     const { events, ...ordinaryLifecycle } = lifecycle;
     if (events === undefined) throw new Error("Missing production Events program.");
     const eventInvocation: InvocationIdentity = {
@@ -107,23 +107,23 @@ const running = bundle.runPrivatePeer({
   },
 });
 void running.catch(() => undefined);
-let client: Client | undefined;
+let client: ModernHttp | undefined;
 try {
   for (let attempt = 0; attempt < 50 && client === undefined; attempt++) {
     if (hostPort === 0) {
       await Bun.sleep(100);
       continue;
     }
-    const candidate = new Client({ name: "relocated-fixture", version: "1.0.0" });
+    const candidate = modernHttp(
+      `http://127.0.0.1:${hostPort}/mcp`,
+      "relocated-fixture",
+      { "x-api-key": key },
+      { name: "Agent Bus", version: "1.0.0" }
+    );
     try {
-      await candidate.connect(
-        new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${hostPort}/mcp`), {
-          requestInit: { headers: { "x-api-key": key } },
-        })
-      );
+      await candidate.discover();
       client = candidate;
     } catch {
-      await candidate.close();
       await Bun.sleep(100);
     }
   }
@@ -181,9 +181,10 @@ try {
   assert.equal(received.messages[0]?.body, "relocated body");
   await success("bus_leave", { address: "chatgpt/bundle-a" }, "first");
   await checkWatch(args.ticket, false);
-  console.log("Relocated runPrivatePeer and exact host two-principal fixture passed.");
+  console.log(
+    "Relocated runPrivatePeer ordinary modern HTTP and direct Events-callback two-principal fixture passed; public Events transport is qualified separately."
+  );
 } finally {
-  await client?.close();
   abort.abort();
   await running.catch(() => undefined);
 }
