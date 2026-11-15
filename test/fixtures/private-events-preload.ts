@@ -1,6 +1,7 @@
 // Only this supervised fixture process may redirect an admitted public callback to the receiver.
 import dns from "node:dns";
 import { appendFileSync, readFileSync } from "node:fs";
+import type { LookupFunction } from "node:net";
 import tls from "node:tls";
 
 const config = JSON.parse(readFileSync(process.argv.at(-1) ?? "", "utf8")) as {
@@ -30,15 +31,35 @@ dns.lookup = ((
 
 tls.connect = ((options: tls.ConnectionOptions, ...rest: unknown[]) => {
   if (
-    options.host !== address ||
+    options.host !== hostname ||
     options.servername !== hostname ||
     Number(options.port) !== config.receiverPort ||
-    options.rejectUnauthorized !== true
+    options.rejectUnauthorized !== true ||
+    !("autoSelectFamily" in options) ||
+    options.autoSelectFamily !== true ||
+    typeof options.lookup !== "function"
   )
     throw new Error("Fixture TLS dial refused.");
+  const admittedLookup = options.lookup;
+  const redirectedLookup: LookupFunction = (name, lookupOptions, callback) => {
+    if (name !== hostname || lookupOptions.all !== true)
+      throw new Error("Fixture pinned lookup refused.");
+    admittedLookup(name, lookupOptions, (error, answers) => {
+      if (
+        error !== null ||
+        !Array.isArray(answers) ||
+        answers.length !== 1 ||
+        answers[0]?.address !== address ||
+        answers[0]?.family !== 4
+      )
+        throw new Error("Fixture admitted snapshot refused.");
+      appendFileSync(config.tracePath, "pinned-lookup\n");
+      callback(null, [{ address: "127.0.0.1", family: 4 }]);
+    });
+  };
   appendFileSync(config.tracePath, "admitted-tls-dial\n");
   return Reflect.apply(originalConnect, tls, [
-    { ...options, host: "127.0.0.1", ca: readFileSync(config.caPath) },
+    { ...options, lookup: redirectedLookup, ca: readFileSync(config.caPath) },
     ...rest,
   ]);
 }) as typeof tls.connect;

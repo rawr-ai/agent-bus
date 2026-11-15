@@ -10,10 +10,10 @@ The Events consumer uses the genuine host package's exported types, not copied i
 
 ```sh
 mkdir -p dist/private-artifacts
-gh release download v1.2.0-events.4 --repo rawr-ai/mcp-openapi \
-  --pattern mcp-openapi-1.2.0-events.4.tgz --dir dist/private-artifacts
-HOST_ARCHIVE="$PWD/dist/private-artifacts/mcp-openapi-1.2.0-events.4.tgz"
-printf '%s  %s\n' 72962e508686badfb36358b43b3bc14bc87721364c20c4a505ed88e2faa3ec73 "$HOST_ARCHIVE" | shasum -a 256 -c -
+gh release download v1.2.0-events.5 --repo rawr-ai/mcp-openapi \
+  --pattern mcp-openapi-1.2.0-events.5.tgz --dir dist/private-artifacts
+HOST_ARCHIVE="$PWD/dist/private-artifacts/mcp-openapi-1.2.0-events.5.tgz"
+printf '%s  %s\n' 7a0c88e1a3b61ccd06a303ad7fad5d395117b76eb3d87a45aa4d619ff30ae0c2 "$HOST_ARCHIVE" | shasum -a 256 -c -
 bun install --frozen-lockfile
 ```
 
