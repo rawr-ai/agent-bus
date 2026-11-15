@@ -370,7 +370,9 @@ describe("the skill distinguishes hosted and native guidance", () => {
     );
     expect(activity).toContain("hosted callers omit `session`");
     expect(activity).toContain("a working native wake or an accepted hosted Events watch");
-    expect(activity).toContain("Direct mail makes you active again and is eligible to wake you");
+    expect(activity).toContain(
+      "Direct mail from another peer makes you active again and is eligible to wake you"
+    );
     expect(activity).not.toContain("Direct mail still wakes you");
     expect(activity).toContain(
       "Native callers also pass `session` and can generate the UUID in a shell"

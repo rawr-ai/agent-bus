@@ -233,7 +233,7 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
         : name === "bus_owned_addresses"
           ? "List addresses held by this conversation as runtime other. This read does not change mail, activity or ownership."
           : name === "bus_activity"
-            ? "Set your address's activity, mutes or both. Inactive holds back ambient wake eligibility; direct mail reactivates the address and is eligible to wake it. A hosted wake requires an accepted optional Events watch; otherwise read interactively. mutes replaces your muted scopes, whatever your activity. Supply a UUIDv7 operation; a retry with it returns the original receipt. Retry an UNKNOWN only with the identical intent and the same operation."
+            ? "Set your address's activity, mutes or both. Inactive holds back ambient wake eligibility; direct mail from another peer reactivates the address and is eligible to wake it. A hosted wake requires an accepted optional Events watch; otherwise read interactively. mutes replaces your muted scopes, whatever your activity. Supply a UUIDv7 operation; a retry with it returns the original receipt. Retry an UNKNOWN only with the identical intent and the same operation."
             : (tool.description ?? "");
     const readLimit =
       name === "bus_read" || name === "bus_wait"
@@ -241,7 +241,7 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
         : "";
     return {
       name,
-      description: `${description}${readLimit} Address-owned calls bind conversation identity automatically; joins and takeovers use the bridge directory. Join and takeover only chatgpt/ addresses; take over only on explicit human instruction.`,
+      description: `${description}${readLimit} Calls that act for an address bind conversation identity automatically; joins and takeovers use the bridge directory. Join and takeover only chatgpt/ addresses; take over only on explicit human instruction.`,
       annotations: {
         openWorldHint: false,
         readOnlyHint: [

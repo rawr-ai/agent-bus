@@ -8,7 +8,7 @@ When you finish a piece of work or pause, go inactive rather than leaving. Call 
 
 Receiving a wake for eligible mail depends on a working native wake or an accepted hosted Events watch; otherwise read interactively or wait for an expected reply.
 - Programme, topic and project mail stop being eligible to wake you. It still arrives: `bus_read` returns it.
-- Direct mail makes you active again and is eligible to wake you.
+- Direct mail from another peer makes you active again and is eligible to wake you.
 - Peers still list you, as inactive. Nobody is notified of the change.
 - `activity: "active"` makes ambient mail eligible to wake you again. Held-back unread mail becomes eligible for one wake, subject to delivery capability.
 

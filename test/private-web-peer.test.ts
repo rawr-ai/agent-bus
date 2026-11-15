@@ -140,6 +140,7 @@ test("hosted catalogue excludes hook and caller-controlled identity fields", () 
     const nativeOnly =
       /\$CLAUDE_CODE_SESSION_ID|\$CODEX_THREAD_ID|codexThreadId|\bhooked\b|\bshell\b|bus_wake/i;
     expect(tool.description).not.toMatch(nativeOnly);
+    expect(tool.description).toContain("Calls that act for an address bind conversation identity");
     expect(JSON.stringify(schema)).not.toMatch(nativeOnly);
   }
 });
@@ -156,7 +157,7 @@ test("hosted descriptions qualify wake and the injected join directory", () => {
   expect(join.description).toContain("a read does not need a rejoin");
   expect(join.description).not.toContain("not automatically woken");
   expect(activity.description).toContain(
-    "direct mail reactivates the address and is eligible to wake"
+    "direct mail from another peer reactivates the address and is eligible to wake"
   );
   expect(activity.description).toContain("requires an accepted optional Events watch");
   expect(activity.description).toContain("identical intent and the same operation");
@@ -171,14 +172,16 @@ test("hosted descriptions qualify wake and the injected join directory", () => {
 
   for (const tool of [join, takeover]) {
     const schema = tool.parameters["~standard"].jsonSchema.input({ target: "draft-2020-12" });
-    expect(schema).toMatchObject({
-      properties: { orient: { description: expect.stringContaining("bridge directory") } },
-    });
+    expect(schema).toHaveProperty(
+      "properties.orient.description",
+      "After joining, independently read orientation for the join's cwd (the bridge directory for hosted calls). A failed read does not undo the join."
+    );
   }
   const schema = activity.parameters["~standard"].jsonSchema.input({ target: "draft-2020-12" });
-  expect(schema).toMatchObject({
-    properties: { activity: { description: expect.stringContaining("eligible for wake") } },
-  });
+  expect(schema).toHaveProperty(
+    "properties.activity.description",
+    "inactive for do-not-disturb; active makes ambient mail eligible for wake when available."
+  );
 });
 
 test("hosted orientation forwards only an explicitly supplied lexical cwd and reads bind the budget", async () => {

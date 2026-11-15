@@ -474,7 +474,7 @@ const Publish = Tool.make("bus_publish", {
 // A write, though not destructive: it changes only the caller's own address.
 const SetActivity = Tool.make("bus_activity", {
   description:
-    "Set your address's activity, mutes or both. Going inactive is do-not-disturb: programme, topic and project/concern mail stop being eligible to wake you, but direct mail reactivates you and remains eligible. Waking depends on your runtime's available delivery. mutes replaces your muted scopes, whatever your activity. Supply a UUIDv7 operation; a retry with it returns the original receipt. Retry an UNKNOWN only with the identical intent and the same operation.",
+    "Set your address's activity, mutes or both. Going inactive is do-not-disturb: programme, topic and project/concern mail stop being eligible to wake you, but direct mail from another peer reactivates you and remains eligible. Waking depends on your runtime's available delivery. mutes replaces your muted scopes, whatever your activity. Supply a UUIDv7 operation; a retry with it returns the original receipt. Retry an UNKNOWN only with the identical intent and the same operation.",
   parameters: Schema.Struct({
     address: Address,
     session: Session,
