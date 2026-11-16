@@ -78,6 +78,21 @@ mem:fact-01m6d10bq173j9s6ra81qkn1je a mem:Fact ;
     mem:branch "claude/bus-query" ;
     mem:createdAt "2026-11-02T02:21:54.273183Z"^^xsd:dateTime .
 
+mem:decision-01m7h1gatehx988tg4k6dx9nb6 a mem:Decision ;
+    mem:content "For an MCP-origin Personal ChatGPT plugin, retain its same-definition Upload new version ZIP route until a replacement such as Plugin Creator or GitHub management is verified for that definition." ;
+    mem:tag "chatgpt" ;
+    mem:tag "identity" ;
+    mem:tag "personal" ;
+    mem:tag "plugins" ;
+    mem:tag "updates" ;
+    mem:scope mem:repo ;
+    mem:artifactRef "docs/platforms/mcp-openapi.md" ;
+    mem:branch "codex/bus-chatgpt-platform-findings" ;
+    mem:createdAt "2026-11-16T02:03:17.198969+00:00"^^xsd:dateTime ;
+    mem:updatedAt "2026-11-16T02:06:44.843480+00:00"^^xsd:dateTime ;
+    mem:rationale "General Plugin Creator and workspace GitHub-management guidance does not establish identity-preserving Personal migration or continued connected-app authorization." ;
+    mem:alternatives "assume workspace GitHub management applies to Personal,replace the existing definition" .
+
 mem:decision-01m6ckr5x5hqpc9c1hqgyg9j4h a mem:Decision ;
     mem:content "The query trust model is local trusted actors: restore useful read-only SPARQL and shared saved analyses rather than proving a separate public-only graph against local agents. Read-only execution, address ownership and cursor delivery remain operational contracts; they are not reasons to remove analysis capability." ;
     mem:tag "product" ;
