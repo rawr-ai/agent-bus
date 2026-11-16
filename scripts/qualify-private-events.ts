@@ -1,9 +1,18 @@
 // Packed-host Events qualification against disposable services and synthetic principals only.
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes } from "node:crypto";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, parse, resolve } from "node:path";
 import { parseArgs } from "node:util";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import type { OAuthClientProvider } from "@modelcontextprotocol/sdk/client/auth.js";
@@ -23,6 +32,7 @@ import { initializeWatchAuthority } from "../src/private-web/watch-authority.ts"
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
 import { childrenOf, ownership } from "../test/processes.ts";
+import { sourceIsolated, sourceIsolationRefusesRead } from "../test/source-isolation.ts";
 import { spawnSupervised } from "../test/supervised.ts";
 import {
   archiveHash,
@@ -32,6 +42,7 @@ import {
   modernHttp,
   modernRequest,
 } from "./private-modern-http.ts";
+import { authoredSkill, verifySkillWire } from "./skill-wire.ts";
 
 const { positionals, values } = parseArgs({
   args: process.argv.slice(2),
@@ -217,7 +228,8 @@ const refused = async (work: Promise<unknown>, code: number, reason?: string) =>
   throw new Error("Expected Events refusal.");
 };
 
-const dir = mkdtempSync(join(tmpdir(), "agent-bus-events-qualification-"));
+const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-events-qualification-")));
+const repo = resolve(import.meta.dir, "..");
 let disposeBus: (() => Promise<void>) | undefined;
 let host: ReturnType<typeof spawnSupervised> | undefined;
 let provider: ReturnType<typeof Bun.serve> | undefined;
@@ -225,6 +237,38 @@ let receiver: ReturnType<typeof Bun.serve> | undefined;
 const owned = ownership();
 try {
   const entry = hostForQualification(archive, dir, values.bundle);
+  const original = dirname(entry);
+  const relocated = join(dir, "relocated");
+  mkdirSync(relocated);
+  for (const name of ["main.js", "mcp-host.mjs"])
+    copyFileSync(join(original, name), join(relocated, name));
+  if (
+    process.platform === "darwin" &&
+    !sourceIsolationRefusesRead(repo, [original], [join(original, "main.js"), entry])
+  )
+    throw new Error("The relocated Events peer's source-isolation control failed.");
+  for (let parent = dir; ; parent = dirname(parent)) {
+    assert(
+      !existsSync(join(parent, "node_modules")),
+      "Events fixture has a node_modules ancestor."
+    );
+    if (parent === parse(parent).root) break;
+  }
+  const fixtureBuild = await Bun.build({
+    entrypoints: [
+      join(repo, "test/fixtures/private-events-host.ts"),
+      join(repo, "test/fixtures/private-events-preload.ts"),
+    ],
+    outdir: dir,
+    target: "bun",
+    format: "esm",
+  });
+  if (!fixtureBuild.success) throw new Error("Could not build the relocated Events fixture.");
+  console.log(
+    process.platform === "darwin"
+      ? "Events peer source and original bundle reads denied."
+      : "Events peer source-read isolation not established on this platform."
+  );
   const busPort = reservePort();
   let hostPort = reservePort();
   while (hostPort === busPort) hostPort = reservePort();
@@ -309,7 +353,12 @@ try {
         authorizationCodes.delete(code);
         upstreamExchanges++;
         return Response.json({
-          access_token: grant.subject === "fixture-first" ? "synthetic-first" : "synthetic-second",
+          access_token:
+            grant.subject === "fixture-first"
+              ? "synthetic-first"
+              : grant.subject === "fixture-second"
+                ? "synthetic-second"
+                : "synthetic-unmapped",
           expires_in: grant.expiresIn,
           scope: "read",
           token_type: "Bearer",
@@ -428,7 +477,8 @@ try {
   writeFileSync(
     fixture,
     JSON.stringify({
-      entry,
+      entry: join(relocated, "mcp-host.mjs"),
+      peerEntry: join(relocated, "main.js"),
       busPort,
       hostPort,
       providerPort: provider.port,
@@ -450,15 +500,24 @@ try {
   const start = async () => {
     host = owned.supervisor(
       spawnSupervised(
-        [
-          process.execPath,
-          "--no-env-file",
-          "--preload",
-          "./test/fixtures/private-events-preload.ts",
-          "./test/fixtures/private-events-host.ts",
-          fixture,
-        ],
-        { cwd: process.cwd(), stdout: "inherit", stderr: "inherit" }
+        sourceIsolated(
+          [
+            process.execPath,
+            "--no-env-file",
+            "--preload",
+            join(dir, "private-events-preload.js"),
+            join(dir, "private-events-host.js"),
+            fixture,
+          ],
+          repo,
+          [original]
+        ),
+        {
+          cwd: dir,
+          env: { HOME: dir, PATH: "/usr/bin:/bin" },
+          stdout: "inherit",
+          stderr: "inherit",
+        }
       )
     );
     let ready = false;
@@ -483,9 +542,10 @@ try {
   };
   const stop = async () => {
     if (host === undefined) return;
-    host.kill();
-    await host.exited;
+    const stopping = host;
     host = undefined;
+    stopping.kill();
+    assert.equal(await stopping.exited, 0, "The Events fixture did not stop cleanly.");
   };
   const connect = async (auth: SyntheticOAuthClient) => {
     const token = auth.tokens()?.access_token;
@@ -547,8 +607,96 @@ try {
   const firstAuth = await authorize("fixture-first");
   const secondAuth = await authorize("fixture-second");
   assert.equal(upstreamExchanges, 2);
+  const unmappedAuth = await authorize("fixture-unmapped");
   let first = await connect(firstAuth);
   let second = await connect(secondAuth);
+  const unmappedClient = await connect(unmappedAuth);
+  const expectedSkill = authoredSkill(process.cwd());
+  await verifySkillWire(first, expectedSkill);
+  await verifySkillWire(unmappedClient, expectedSkill);
+  const rootUri = "skill://agent-bus/SKILL.md";
+  const readRoot = (client: ModernHttp) =>
+    client.request(
+      { method: "resources/read", params: { uri: rootUri } },
+      { parse: (value) => value }
+    );
+  await readRoot(unmappedClient);
+  const unmappedTool = await unmappedClient.callTool({
+    name: "bus_peers",
+    arguments: {},
+    _meta: { "openai/session": "unmapped-chat" },
+  });
+  assert.equal(unmappedTool.isError, true);
+  assert.notEqual((await first.callTool({ name: "bus_peers", arguments: {} })).isError, true);
+  const ownedWithoutCorrelation = await first.callTool({
+    name: "bus_join",
+    arguments: { address: "chatgpt/no-correlation" },
+  });
+  assert.equal(ownedWithoutCorrelation.isError, true);
+  assert(
+    JSON.stringify(ownedWithoutCorrelation.content) ===
+      JSON.stringify([
+        {
+          type: "text",
+          text: "This call requires supported conversation correlation metadata. No Bus call was sent.",
+        },
+      ]),
+    "The ownership call did not report the pre-dispatch correlation refusal."
+  );
+  const bearer = firstAuth.tokens()?.access_token;
+  assert(bearer);
+  const parts = bearer.split(".");
+  assert(parts.length === 3 && parts[0] && parts[1] && parts[2]);
+  assert(
+    createHmac("sha256", "fixture-signing-key-only")
+      .update(`${parts[0]}.${parts[1]}`)
+      .digest("base64url") === parts[2],
+    "The issued bearer did not use the expected fixture signing key."
+  );
+  const claims: unknown = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8"));
+  assert(
+    typeof claims === "object" && claims !== null && "aud" in claims && claims.aud === resource
+  );
+  const payload = Buffer.from(
+    JSON.stringify({ ...claims, aud: "https://other.invalid/mcp" })
+  ).toString("base64url");
+  const signed = `${parts[0]}.${payload}`;
+  const wrongAudience = `${signed}.${createHmac("sha256", "fixture-signing-key-only")
+    .update(signed)
+    .digest("base64url")}`;
+  for (const { headers, status } of [
+    { headers: {}, status: 401 },
+    { headers: { authorization: "Bearer invalid" }, status: 401 },
+    { headers: { authorization: `Bearer ${wrongAudience}` }, status: 401 },
+    { headers: { authorization: `Bearer ${bearer}`, host: "other.invalid" }, status: 403 },
+    {
+      headers: { authorization: `Bearer ${bearer}`, origin: "https://other.invalid" },
+      status: 403,
+    },
+  ]) {
+    for (const [method, params] of [
+      ["server/discover", {}],
+      ["skills/get", { uri: rootUri }],
+      ["resources/read", { uri: "skill://agent-bus/references/runtimes.md" }],
+    ] as const) {
+      const response = await modernRequest(endpoint, "guidance-access", 1, method, params, headers);
+      assert.equal(response.status, status);
+      const body = await response.text();
+      const expected =
+        status === 401
+          ? {
+              error: { code: -32000, message: "Unauthorized: Authentication failed" },
+              id: null,
+              jsonrpc: "2.0",
+            }
+          : { jsonrpc: "2.0", id: null, error: { code: -32000, message: "Request refused" } };
+      assert(
+        body === JSON.stringify(expected),
+        "The admission refusal differed from its fixed safe response."
+      );
+    }
+  }
+  await readRoot(first);
   assert.deepEqual(
     catalog(await first.request({ method: "events/list", params: {} }, ResultSchema)).events.map(
       (event) => event.name

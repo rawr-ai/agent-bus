@@ -48,6 +48,7 @@ import {
   RankedSelections,
   make as selectionStore,
 } from "./RankedSelections.ts";
+import { busSkill } from "./skill.ts";
 import { MAX_SPARQL_ROWS, runSparql } from "./sparql.ts";
 import { DEFAULT_HISTORY_LIMIT, MAX_WAIT_SECONDS, SAVED_QUERY_DEADLINE_SECONDS } from "./timing.ts";
 import {
@@ -1079,7 +1080,7 @@ const BusHandlers = BusToolkit.toLayer(
   })
 );
 
-const instructions = `agent-bus lets Claude and Codex sessions message each other. If your host has the agent-bus skill (from the agent-bus plugin), load it for the rest; this is the minimum protocol.
+const instructions = `agent-bus lets Claude and Codex sessions message each other. If your host has the agent-bus skill (from the plugin or the server's MCP Skills resources), load it for the rest; this is the minimum protocol.
 1. Join once with bus_join, under an address of your own for this session (e.g. claude/<project>-<task>; an address is one session's private inbox, groups share a #topic), giving your absolute working directory as cwd. Pass your session id as session on every call that takes it: $CLAUDE_CODE_SESSION_ID in Claude Code, $CODEX_THREAD_ID in Codex. Codex also passes codexThreadId, equal to session.
 2. An address another session holds is refused: choose another. Use bus_takeover only when the human tells you to.
 3. Agents you start (subagents, codex exec or claude -p runs) can share or inherit your session id: give each an address of its own, never yours.
@@ -1090,23 +1091,22 @@ const instructions = `agent-bus lets Claude and Codex sessions message each othe
 
 /** The bus tools as a streamable HTTP MCP endpoint at `/mcp` on the surrounding router. */
 export const layerHttp = (version: string) =>
-  McpServer.toolkit(BusToolkit).pipe(
-    Layer.provide(BusHandlers),
-    Layer.provide(
-      McpServer.layerHttp({
-        name: "agent-bus",
-        version,
-        instructions,
-        path: "/mcp",
-        protocols: [
-          McpProtocol.v2026_07_28,
-          McpProtocol.v2025_11_25,
-          McpProtocol.v2025_06_18,
-          McpProtocol.v2025_03_26,
-        ],
-        allowSessionTermination: true,
-        // The tool list never changes, so there is nothing to subscribe to.
-        allowSubscriptions: false,
-      })
-    )
-  );
+  McpServer.layerHttp({
+    name: "agent-bus",
+    version,
+    instructions,
+    path: "/mcp",
+    protocols: [
+      McpProtocol.v2026_07_28,
+      McpProtocol.v2025_11_25,
+      McpProtocol.v2025_06_18,
+      McpProtocol.v2025_03_26,
+    ],
+    allowSessionTermination: true,
+    // The catalogue never changes, so there is nothing to subscribe to.
+    allowSubscriptions: false,
+    registrations: Layer.mergeAll(
+      McpServer.toolkit(BusToolkit).pipe(Layer.provide(BusHandlers)),
+      McpServer.skill(busSkill)
+    ),
+  });

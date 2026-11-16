@@ -31,17 +31,34 @@ import {
   identify,
   ownership,
 } from "../test/processes.ts";
+import { sourceIsolated, sourceIsolationRefusesRead } from "../test/source-isolation.ts";
 import { spawnSupervised } from "../test/supervised.ts";
 import { verifyPrivateBundle } from "./private-modern-http.ts";
+import { authoredSkill } from "./skill-wire.ts";
 
 const input = process.argv[2];
 if (!input || !isAbsolute(input) || process.argv.length !== 3)
   throw new Error("Supply one absolute bundle path.");
 verifyPrivateBundle(input);
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-relocated-")));
+const repo = process.cwd();
 let disposeBus: (() => Promise<void>) | undefined;
 let provider: ReturnType<typeof Bun.serve> | undefined;
 try {
+  if (
+    process.platform === "darwin" &&
+    !sourceIsolationRefusesRead(
+      repo,
+      [input],
+      [join(input, "main.js"), join(input, "mcp-host.mjs")]
+    )
+  )
+    throw new Error("The relocated peer's source-isolation control failed.");
+  console.log(
+    process.platform === "darwin"
+      ? "Source and original bundle reads denied for relocated children."
+      : "Source-read isolation not established on this platform; cwd and HOME relocation only."
+  );
   for (let path = dir; ; path = dirname(path)) {
     assert(!existsSync(join(path, "node_modules")), `Node modules ancestor at ${path}`);
     if (path === parse(path).root) break;
@@ -50,6 +67,8 @@ try {
   mkdirSync(relocated);
   for (const name of ["main.js", "mcp-host.mjs"])
     copyFileSync(join(input, name), join(relocated, name));
+  const skillOracle = join(dir, "skill-oracle.json");
+  writeFileSync(skillOracle, JSON.stringify(authoredSkill(process.cwd())), { mode: 0o600 });
   const invalidConfig = join(dir, "private-config.json");
   writeFileSync(invalidConfig, "{}\n", { mode: 0o600 });
   const smoke = Bun.spawnSync(
@@ -311,12 +330,19 @@ try {
   ) => {
     const owned = ownership();
     const launched = owned.supervisor(
-      spawnSupervised([process.execPath, "--no-env-file", join(relocated, "main.js"), configPath], {
-        cwd: dir,
-        env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
-        stdout: "ignore",
-        stderr: "pipe",
-      })
+      spawnSupervised(
+        sourceIsolated(
+          [process.execPath, "--no-env-file", join(relocated, "main.js"), configPath],
+          repo,
+          [input]
+        ),
+        {
+          cwd: dir,
+          env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },
+          stdout: "ignore",
+          stderr: "pipe",
+        }
+      )
     );
     const children = new Map<string, Identity>();
     let supervisorIdentity: Identity | undefined;
@@ -473,13 +499,18 @@ try {
     mode: 0o600,
   });
   const child = spawnSupervised(
-    [
-      process.execPath,
-      "--no-env-file",
-      join(dir, "private-peer-relocated.js"),
-      relocated,
-      privateConfig,
-    ],
+    sourceIsolated(
+      [
+        process.execPath,
+        "--no-env-file",
+        join(dir, "private-peer-relocated.js"),
+        relocated,
+        privateConfig,
+        skillOracle,
+      ],
+      repo,
+      [input]
+    ),
     {
       cwd: dir,
       env: { HOME: dir, PATH: "/usr/bin:/bin", NODE_EXTRA_CA_CERTS: cert },

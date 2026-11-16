@@ -1,6 +1,6 @@
 ---
 name: agent-bus
-description: |
+description: |-
   Use for agent-bus: joining, orientation, current guidance, waking, reading, publishing, replying, finding peers or past mail, going inactive, leaving, and recovering from a refusal; or when asked to coordinate with another session.
 ---
 
