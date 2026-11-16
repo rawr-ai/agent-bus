@@ -204,6 +204,163 @@ For a separately authorized finite authorization diagnosis, use the same protect
 
 For a separately authorized principal-list change, use the same recorded host and rollback boundary. The v2 bundle requires a protected v2 configuration: replace the v1 singleton `ownerSubject` and `grantFile` with a nonempty `principals` array of explicit `{ subject, grantFile }` entries. Preserve the original subject, its grant path, session key, provider, resource, OAuth and all unrelated settings; add only the approved verified provider subjects and their grants, using distinct absolute grant-file path strings. Protect the configuration and each grant as a regular file owned by the service user at mode `0600`. Compare the approved private manifest to the complete resulting list before activation; organization membership or email is not admission. Do not print subjects, grant contents or configuration secrets. Qualify the exact new bundle off-live, retain the old bundle and v1 configuration together, and activate only the attributed host. Verify each authorized account's own OAuth and fresh correlated exchange, then revisit the original account's existing holding without takeover. A synthetic grant-revocation check is not a reason to disrupt live participants. On rollback restore both the old bundle and its matching old configuration; neither version accepts the other's schema. *Unverified as an operator procedure*; [qualification](qualify-private-peer.md) is not actual-account or activation evidence.
 
+### Update the existing hosted plugin's skill
+
+Use this when the approved release changes the bundled skill in an existing workspace plugin. It updates that definition and its existing app, not a separate plugin or connection. The observed UI update retained the app mapping and saved connection; see the [client evidence and limits](../platforms/mcp-openapi.md#direct-host-and-http-admission). The commands below apply to the observed legacy manifest with `apps: "./.app.json"`; stop and review a different layout rather than guessing. Keep the downloaded package, mapping and private paths out of public records. No server restart or credential change is implied.
+
+1. Privately record the existing plugin and app identity, saved connection, and applicable required, workspace availability and audience settings; record any setting you cannot inspect as unknown. From that plugin's detail, choose **More actions > Download plugin ZIP**. Set `BASE_PLUGIN_ZIP` to its absolute path, `BUS_SKILL_ROOT` to the absolute path of `plugin/skills/agent-bus` in the reviewed release, and `PLUGIN_VERSION` to a newer numeric `major.minor.patch` version. This procedure refuses prerelease and build suffixes; review those separately. Snapshot the download in private staging, record its digest, and inspect that snapshot and the skill before extracting either:
+
+   ```sh
+   umask 077
+   if plugin_stage=$(mktemp -d "${TMPDIR:-/tmp}/agent-bus-plugin.XXXXXX"); then
+   (
+   set -e
+   cp "$BASE_PLUGIN_ZIP" "$plugin_stage/baseline.zip"
+   cmp "$BASE_PLUGIN_ZIP" "$plugin_stage/baseline.zip"
+   shasum -a 256 "$plugin_stage/baseline.zip" > "$plugin_stage/baseline.sha256"
+   unzip -Z1 "$plugin_stage/baseline.zip"
+   zipinfo -l "$plugin_stage/baseline.zip"
+   unzip -t "$plugin_stage/baseline.zip"
+   find "$BUS_SKILL_ROOT" -exec ls -ld {} +
+   )
+   else
+     printf '%s\n' 'Could not create private staging; stop.' >&2
+     false
+   fi
+   ```
+
+   Expected: the current manifest and `.app.json` are present once, CRC checks pass, and all entries and skill files are regular files or directories. Stop on duplicate or case-colliding names, absolute or traversal paths, backslashes, links, unexpected layout or content. Preserve all unrelated members and metadata. *Checked read-only 2026-11-15 for the original export; inspect each new baseline independently.*
+
+2. Recheck the pinned snapshot and use it for the build and rollback. Replace only the skill directory and edit the existing manifest's version and skill path; do not author a new app mapping:
+
+   ```sh
+   (
+   set -e
+   shasum -a 256 -c "$plugin_stage/baseline.sha256"
+   mkdir "$plugin_stage/original" "$plugin_stage/package" "$plugin_stage/verify"
+   unzip -qq "$plugin_stage/baseline.zip" -d "$plugin_stage/original"
+   cp -R "$plugin_stage/original/." "$plugin_stage/package/"
+   if [ -e "$plugin_stage/package/skills/agent-bus" ]; then
+     mv "$plugin_stage/package/skills/agent-bus" "$plugin_stage/previous-skill"
+   fi
+   mkdir -p "$plugin_stage/package/skills"
+   cp -pR "$BUS_SKILL_ROOT" "$plugin_stage/package/skills/agent-bus"
+   python3 - "$plugin_stage/package/.codex-plugin/plugin.json" "$PLUGIN_VERSION" "$plugin_stage/baseline.zip" <<'PY'
+   import json, pathlib, re, sys, zipfile
+   def unique(pairs):
+       result = {}
+       for key, value in pairs:
+           if key in result:
+               raise ValueError("duplicate manifest key")
+           result[key] = value
+       return result
+   def numeric_version(value):
+       if not isinstance(value, str) or not re.fullmatch(
+           r"(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", value
+       ):
+           raise SystemExit("Expected a numeric major.minor.patch version; stop.")
+       return tuple(int(part) for part in value.split("."))
+   def reject_constant(_):
+       raise ValueError("invalid JSON constant")
+   path, version = pathlib.Path(sys.argv[1]), sys.argv[2]
+   manifest = json.loads(path.read_text(), object_pairs_hook=unique, parse_constant=reject_constant)
+   if (manifest.get("apps") != "./.app.json" or
+       manifest.get("skills", "./skills/") != "./skills/" or
+       numeric_version(version) <= numeric_version(manifest.get("version"))):
+       raise SystemExit("Unexpected manifest or version; stop.")
+   manifest.update(version=version, skills="./skills/")
+   path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False, allow_nan=False) + "\n")
+   with zipfile.ZipFile(sys.argv[3]) as baseline:
+       mode = (baseline.getinfo(".codex-plugin/plugin.json").external_attr >> 16) & 0o777
+   if not mode:
+       raise SystemExit("Manifest mode unavailable; stop.")
+   path.chmod(mode)
+   PY
+   cp "$plugin_stage/baseline.zip" "$plugin_stage/candidate.zip"
+   if unzip -Z1 "$plugin_stage/candidate.zip" | grep -q '^skills/agent-bus/'; then
+     zip -qd "$plugin_stage/candidate.zip" 'skills/agent-bus/*'
+   fi
+   (cd "$plugin_stage/package" &&
+     zip -q "$plugin_stage/candidate.zip" .codex-plugin/plugin.json &&
+     zip -qrD "$plugin_stage/candidate.zip" skills/agent-bus)
+   )
+   ```
+
+   Expected: a protected, digest-pinned baseline and one candidate at `"$plugin_stage/candidate.zip"`, with the selected skill and a newer version. Stop on any command failure. *The reviewed live update used a separately built candidate; this procedure has synthetic coverage.*
+
+3. Inspect the candidate's inventory, modes and CRC as in step 1 before extracting it. Then recheck the pinned baseline and compare the mapping, selected skill, manifest and other members without printing their contents:
+
+   ```sh
+   unzip -Z1 "$plugin_stage/candidate.zip"
+   zipinfo -l "$plugin_stage/candidate.zip"
+   unzip -t "$plugin_stage/candidate.zip"
+   ```
+
+   Stop before extraction if the inventory or modes are unsafe or unexpected. Otherwise continue:
+
+   ```sh
+   (
+   set -e
+   shasum -a 256 -c "$plugin_stage/baseline.sha256"
+   unzip -qq "$plugin_stage/candidate.zip" -d "$plugin_stage/verify"
+   cmp "$plugin_stage/original/.app.json" "$plugin_stage/verify/.app.json"
+   diff -rq "$BUS_SKILL_ROOT" "$plugin_stage/verify/skills/agent-bus"
+   diff -qr "$plugin_stage/original" "$plugin_stage/verify" || [ "$?" -eq 1 ]
+   python3 - "$plugin_stage/original/.codex-plugin/plugin.json" \
+     "$plugin_stage/verify/.codex-plugin/plugin.json" "$PLUGIN_VERSION" <<'PY'
+   import json, pathlib, sys
+   original, candidate = (json.loads(pathlib.Path(p).read_text()) for p in sys.argv[1:3])
+   original.update(version=sys.argv[3], skills="./skills/")
+   if original != candidate:
+       raise SystemExit("Unexpected manifest change; stop.")
+   print("Manifest fields match the intended update.")
+   PY
+   shasum -a 256 "$plugin_stage/candidate.zip" > "$plugin_stage/candidate.sha256"
+   )
+   ```
+
+   Expected: `cmp` and the skill comparison are silent; the directory comparison reports only the intended manifest and skill changes, and the final message confirms the manifest fields. Compare the inventory and modes with step 1, including unchanged members, and stop on any unexpected difference. A digest pins the candidate for upload. *The independently reviewed live candidate preserved the mapping and matched every selected skill file; this procedure has synthetic coverage.*
+
+4. Recheck the candidate digest, then on the **same** plugin detail choose **More actions > Upload new version** and select that candidate:
+
+   ```sh
+   shasum -a 256 -c "$plugin_stage/candidate.sha256"
+   ```
+
+   Check the same plugin and app identities, saved connection and the previously recorded required, availability and audience settings; keep an uninspectable setting unknown. Check that the new version and skill appear. Refresh tools normally, then use one fresh conversation selecting only that app. Its Sources must show `Skills > agent-bus`, and a bounded guidance-sensitive task can ask for the cursor-ahead remedy and a session-free peer lookup. If the skill is absent from Sources, client activation is not established. Record visible evidence separately from participant-reported tool success, individual reference reads and raw traces; a listed skill alone does not prove use. If the upload or check fails, stop and retain both archives and the observed error; use the retained previous package through the same version-update control only if that rollback is supported, and verify the original app and connection. *Observed live 2026-11-15 for the same-definition update and fresh client check; rollback through this control is unverified.*
+
+5. After a successful check, set `PLUGIN_BACKUP_DIR` to a **new** absolute directory in the owner's protected backup area, outside the staging directory. Retain both archives and their digests, then remove only this procedure's extracted staging:
+
+   ```sh
+   (
+   set -e
+   umask 077
+   shasum -a 256 -c "$plugin_stage/baseline.sha256"
+   shasum -a 256 -c "$plugin_stage/candidate.sha256"
+   mkdir -m 700 "$PLUGIN_BACKUP_DIR"
+   cp "$plugin_stage/baseline.zip" "$PLUGIN_BACKUP_DIR/baseline.zip"
+   cp "$plugin_stage/candidate.zip" "$PLUGIN_BACKUP_DIR/candidate.zip"
+   cmp "$plugin_stage/baseline.zip" "$PLUGIN_BACKUP_DIR/baseline.zip"
+   cmp "$plugin_stage/candidate.zip" "$PLUGIN_BACKUP_DIR/candidate.zip"
+   shasum -a 256 "$PLUGIN_BACKUP_DIR/baseline.zip" "$PLUGIN_BACKUP_DIR/candidate.zip" > "$PLUGIN_BACKUP_DIR/SHA256SUMS"
+   )
+   ```
+
+   Expected: the new protected backup directory holds byte-equal archives and their digests. Before cleanup, verify that `plugin_stage` still names this invocation's private temporary directory, that it is not a link, and that the retained archives are outside it. Only then remove its known entries:
+
+   ```sh
+   (
+   set -e
+   rm -r "$plugin_stage/original" "$plugin_stage/package" "$plugin_stage/verify"
+   if [ -d "$plugin_stage/previous-skill" ]; then rm -r "$plugin_stage/previous-skill"; fi
+   rm "$plugin_stage/baseline.zip" "$plugin_stage/baseline.sha256" \
+      "$plugin_stage/candidate.zip" "$plugin_stage/candidate.sha256"
+   rmdir "$plugin_stage"
+   )
+   ```
+
+   Expected: only the owned staging directory is gone; `rmdir` refuses unexpected leftovers. On a failure, keep the remaining files and inspect them before retrying. *The extraction and retention commands have synthetic coverage; cleanup and rollback through the upload control remain unverified.*
+
 ## Query tools
 
 For every deployment or rollback, enumerate every `serve` that can front the shared ledger. Each must run a commit that either refuses public queries (public-query containment) or validates them ([connections rule 6](../architecture/connections.md#rules)); a commit from before containment runs SPARQL unvalidated. No Fluree credential change, reindex, migration or rejoin is needed. Do not widen credentials or change governance to make a query succeed. Refresh cached tool and skill guidance as described in [upgrade](upgrade.md#refreshing-guidance-in-running-sessions). This check is about the endpoint: a session that connected before the restart keeps the tool list it was given, so it says nothing about what running sessions can call.
@@ -401,6 +558,7 @@ Stop if the primary is dirty, attached, divergent or its deployed identity is un
 | Foreign or modified launcher refused | Stop before replacing it. Establish ownership and resolve it explicitly; do not bypass the installer check. |
 | Release verification fails, `agree` is false/unknown, or a viewer start is pending | Do not advance guidance or delete markers. Follow [release rollback and partial failure](#release-rollback-and-partial-failure); status exit 0 is not agreement. |
 | Native release checks pass but a connected hosted peer refuses calls | Check the selected private source's exact version and attributed host binding; follow [the hosted transition](#when-a-hosted-peer-is-connected). Preserve identity material and resolve the affected operation rather than widening access. |
+| Hosted plugin upload or fresh-client skill check fails | Stop and preserve the baseline and candidate, saved connection and observed error. Follow [the hosted plugin update](#update-the-existing-hosted-plugins-skill); a listed skill, healthy server or passing fixture alone does not establish client use. |
 | Private watch preparation or shutdown is waiting on native observation | Cancellation is cooperative; the single preparation queue and connection remain owned until admitted work actually settles. Do not start a competing writer, abandon the queue or reset state to force progress. Use the attributed private-host recovery boundary and preserve acknowledged watch state. |
 | Launcher or plist rename or launchd bootstrap fails | The two file replacements are atomic individually, not together. Inspect both files and the job, then rerun the qualified narrow installer for the intended source and runtime or complete the approved rollback; do not assume either pair is active. *Unverified* on launchd. |
 | Health, process identity, query tools or delivery fails | Keep the affected `serve` stopped if query guarding is uncertain; otherwise use the complete approved rollback above. Consult [operate](operate.md) and [recover](recover.md) for diagnosis. |
