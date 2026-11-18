@@ -514,7 +514,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
                 ],
                 ["filter", "(not (bound ?otherDirectory))"],
               ];
-        const { "@context": _, ...notification } = toNode(input.notification, json);
+        const notification = toGuardedNode(input.notification, json);
         return {
           "@context": context,
           where: [

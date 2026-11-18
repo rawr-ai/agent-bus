@@ -220,7 +220,8 @@ export const directAt = (gateway: Gateway, address: string, after: number, t: nu
         .jsonld(t, {
           selectDistinct: ["?t", "?id", "?json"],
           where: [
-            { "@id": "?m", "bus:to": address },
+            ["values", ["?recipient", [address]]],
+            { "@id": "?m", "bus:to": "?recipient" },
             { "@id": "?m", "bus:id": { "@value": "?id", "@t": "?t" } },
             ["optional", { "@id": "?m", "bus:json": "?json" }],
             [
