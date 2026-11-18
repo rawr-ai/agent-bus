@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import {
   chmodSync,
   mkdirSync,
@@ -47,7 +47,7 @@ import {
 } from "../src/rollout.ts";
 import * as Serve from "../src/serve.ts";
 import { MAX_PAGES } from "../src/timing.ts";
-import { type FlureeServer, flureeServer, ledgerOn } from "./fluree-server.ts";
+import { freshLedger } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import { legacyTopicServer } from "./legacy-topic-server.ts";
 import { spawnSupervised } from "./supervised.ts";
@@ -101,15 +101,8 @@ const gitRepo = (branch: string, options: { readonly detached?: boolean } = {}) 
   return dir;
 };
 
-// The Fluree suites run on the shared throwaway server; a missing fluree CLI fails them.
-let server: FlureeServer | undefined;
-beforeAll(async () => {
-  server = await flureeServer();
-});
-
-const fluree = () => {
-  if (server === undefined) throw new Error("the Fluree server has not started");
-  const config = ledgerOn(server);
+const fluree = async () => {
+  const config = await freshLedger();
   return {
     config,
     layer: busOn(Fluree.layerFluree(config).pipe(Layer.provide(platform)), tempDir()).pipe(
@@ -119,8 +112,8 @@ const fluree = () => {
 };
 
 const backends = [
-  { name: "jsonl", make: jsonl, enabled: true },
-  { name: "fluree", make: fluree, enabled: true },
+  { name: "jsonl", make: jsonl },
+  { name: "fluree", make: fluree },
 ] as const;
 
 /** Each test address's session id. */
@@ -129,10 +122,11 @@ const sid = (address: string) => `session:${address}`;
 const bodies = (messages: ReadonlyArray<{ readonly body: string }>) => messages.map((m) => m.body);
 
 for (const backend of backends) {
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) =>
-    Effect.runPromise(Effect.provide(effect, backend.make().layer));
+  const run = async <A, E>(
+    effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>
+  ) => Effect.runPromise(Effect.provide(effect, (await backend.make()).layer));
 
-  describe.if(backend.enabled)(`delivery (${backend.name})`, () => {
+  describe(`delivery (${backend.name})`, () => {
     test("routes direct, topic and broadcast messages, never back to the sender", () =>
       run(
         Effect.gen(function* () {
@@ -618,7 +612,7 @@ for (const backend of backends) {
       ));
   });
 
-  test.if(backend.enabled)(`records where each sender joined from (${backend.name})`, () =>
+  test(`records where each sender joined from (${backend.name})`, () =>
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
@@ -684,13 +678,12 @@ for (const backend of backends) {
         );
         expect(anonymous._tag).toBe("NotJoined");
       })
-    )
-  );
+    ));
 }
 
 describe("fluree ledger", () => {
   test("a second process sees appends and is woken by the event stream", async () => {
-    const first = fluree();
+    const first = await fluree();
     const second = busOn(
       Fluree.layerFluree(first.config).pipe(Layer.provide(platform)),
       tempDir()
@@ -747,7 +740,7 @@ describe("fluree ledger", () => {
 
   test(
     "reads span several windows of commits",
-    () =>
+    async () =>
       Effect.runPromise(
         Effect.provide(
           Effect.gen(function* () {
@@ -774,24 +767,24 @@ describe("fluree ledger", () => {
             const received = bodies(yield* bus.take("codex/b", sid("codex/b")));
             expect([...received].sort()).toEqual([...sent].sort());
           }),
-          fluree().layer
+          (await fluree()).layer
         )
       ),
     60_000
   );
 
-  test("names the ledger instance by its first commit", () =>
+  test("names the ledger instance by its first commit", async () =>
     Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
           const ledger = yield* Ledger.Ledger;
           expect(ledger.instance).toStartWith("bag");
         }),
-        fluree().layer
+        (await fluree()).layer
       )
     ));
 
-  test("a cursor ahead of the ledger fails loudly", () =>
+  test("a cursor ahead of the ledger fails loudly", async () =>
     Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
@@ -802,7 +795,7 @@ describe("fluree ledger", () => {
           // A plain rejoin keeps the cursor; only a replay resets it.
           expect(error.message).toContain("a rejoin with replay restarts it at 0");
         }),
-        fluree().layer
+        (await fluree()).layer
       )
     ));
 });
@@ -4036,10 +4029,8 @@ describe("claude wake hook", () => {
 describe("mcp over http", () => {
   // Each test gets its own server and port; Bun keeps a stopped server's port briefly.
   let nextPort = 19_000 + Math.floor(Math.random() * 500) * 4;
-  // Lookups (bus_peers, the CLI's runtime lookup) need the query engine, so "fluree" serves them.
-  const serve = (store: "jsonl" | "fluree" = "jsonl") => {
+  const serve = (backing = jsonl().layer) => {
     const port = nextPort++;
-    const backing = store === "jsonl" ? jsonl().layer : fluree().layer;
     return {
       port,
       url: `http://127.0.0.1:${port}/mcp`,
@@ -4236,8 +4227,8 @@ describe("mcp over http", () => {
     );
   });
 
-  test("the CLI looks up an address's runtime on the bus, and refuses one that hasn't joined", () => {
-    const { url, layer } = serve("fluree");
+  test("the CLI looks up an address's runtime on the bus, and refuses one that hasn't joined", async () => {
+    const { url, layer } = serve((await fluree()).layer);
     return Effect.runPromise(
       Effect.gen(function* () {
         yield* Client.call(url)("bus_join", Mcp.Joined, {
