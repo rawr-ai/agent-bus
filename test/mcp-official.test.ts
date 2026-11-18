@@ -17,7 +17,7 @@ import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { Message, Origin, Presence } from "../src/domain.ts";
+import { InvalidQuery, latestPresences, Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { Messages } from "../src/mcp.ts";
@@ -33,16 +33,36 @@ const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Respo
 const port = Number(probe.url.port);
 probe.stop(true);
 const url = new URL(`http://127.0.0.1:${port}/mcp`);
-const server = ManagedRuntime.make(
-  Serve.layerHttp({ port, version: "test" }).pipe(
-    Layer.provideMerge(
-      Bus.layer("test-installation").pipe(
-        Layer.provideMerge(store),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
-    )
+const leaveRefusal = "Fixture leave was refused before dispatch. Nothing was sent or written.";
+const refusedLeaves = new Map<string, Message[]>();
+const storeWithLeaveRefusal = Layer.effect(
+  Ledger,
+  Effect.map(Ledger, (ledger) =>
+    Ledger.of({
+      ...ledger,
+      admit: (entry, basis) => {
+        const attempts = refusedLeaves.get(entry.from);
+        if (
+          attempts === undefined ||
+          entry.kind !== "presence" ||
+          entry.presence?.status !== "left"
+        )
+          return ledger.admit(entry, basis);
+        return Effect.gen(function* () {
+          attempts.push(entry);
+          return yield* new InvalidQuery({ message: leaveRefusal });
+        });
+      },
+    })
   )
+).pipe(Layer.provideMerge(store));
+const fixtureBus = Bus.layer("test-installation").pipe(
+  Layer.provideMerge(storeWithLeaveRefusal),
+  Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
+  Layer.provide(platform)
+);
+const server = ManagedRuntime.make(
+  Serve.layerHttp({ port, version: "test" }).pipe(Layer.provideMerge(fixtureBus))
 );
 beforeAll(() => server.runPromise(Effect.void));
 afterAll(async () => {
@@ -148,6 +168,42 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     };
     return { tools, call, succeed, refused };
   };
+
+  test("carries a definite ledger refusal through leave as an MCP tool error", async () => {
+    const { call, succeed } = await connect();
+    const address = `fixture/leave-admission-refusal/${version}`;
+    const session = sid(address);
+    await succeed("bus_join", joining(address));
+
+    const state = () =>
+      server.runPromise(
+        Effect.gen(function* () {
+          const ledger = yield* Ledger;
+          const { entries, cut } = yield* ledger.presenceAt();
+          return { cut, holder: latestPresences(entries).get(address) };
+        })
+      );
+    const before = await state();
+    expect(before.holder?.presence).toMatchObject({ status: "joined", session });
+    const attempts: Message[] = [];
+    refusedLeaves.set(address, attempts);
+    try {
+      const result = await call("bus_leave", { address, session });
+      expect(attempts).toHaveLength(1);
+      expect(attempts[0]).toMatchObject({
+        kind: "presence",
+        from: address,
+        presence: { status: "left", session },
+      });
+      expect(result.isError).toBe(true);
+      expect(result.structuredContent).toBeUndefined();
+      expect(text(result)).toBe(leaveRefusal);
+      expect(await state()).toEqual(before);
+    } finally {
+      refusedLeaves.delete(address);
+    }
+    await succeed("bus_leave", { address, session });
+  });
 
   // Codex asks approval for a tool that is destructive, or not read-only and possibly
   // open-world (requires_mcp_tool_approval in codex-rs/core/src/mcp_tool_call.rs), and
@@ -495,9 +551,9 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     const { succeed, refused } = await connect();
     const address = `${version}/invalid-cursor`;
     await succeed("bus_join", joining(address));
-    const path = join(dir, "cursors", `${encodeURIComponent(address)}.json`);
+    const path = join(dir, "cursors", Cursors.cursorFileName(address));
     const original = await Bun.file(path).text();
-    const malformed = JSON.stringify({ cursor: privateMarker });
+    const malformed = JSON.stringify({ address, cursor: privateMarker });
     try {
       await Bun.write(path, malformed);
       await refused(
@@ -603,4 +659,86 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(await wait(0.5)).toEqual({ messages: [] });
     expect(Date.now() - before).toBeGreaterThanOrEqual(400);
   });
+});
+
+/**
+ * One release's catalogue as a client discovers it: every listed tool object, the initialize
+ * instructions and server identity, and each listed resource with its read content hashed.
+ * Array order is kept; protocol request ids never enter the record.
+ */
+const discovered = async (client: Client) => {
+  const tools = await client.listTools();
+  const resources = await client.listResources();
+  expect([tools.nextCursor, resources.nextCursor]).toEqual([undefined, undefined]);
+  const read = [];
+  for (const resource of resources.resources) {
+    const { contents } = await client.readResource({ uri: resource.uri });
+    read.push({
+      resource,
+      contents: contents.map((content) => {
+        const { uri, mimeType, _meta } = content;
+        const body = "text" in content ? content.text : content.blob;
+        return {
+          uri,
+          mimeType,
+          _meta,
+          sha256: new Bun.CryptoHasher("sha256").update(body).digest("hex"),
+        };
+      }),
+    });
+  }
+  return {
+    server: client.getServerVersion(),
+    capabilities: client.getServerCapabilities(),
+    instructions: client.getInstructions(),
+    tools: tools.tools,
+    resources: read,
+  };
+};
+
+test("one release's native catalogue is identical across ordinary mail and a fresh connection", async () => {
+  const clients: Array<Client> = [];
+  const connect = async () => {
+    const client = new Client({ name: "catalogue-stability", version: "1" });
+    clients.push(client);
+    await client.connect(new StreamableHTTPClientTransport(url));
+    return client;
+  };
+  try {
+    const first = await connect();
+    const before = await discovered(first);
+    expect(before.tools.length).toBeGreaterThan(10);
+    expect(before.instructions?.length ?? 0).toBeGreaterThan(0);
+    expect(before.resources.map(({ resource }) => resource.uri)).toContain(
+      "skill://agent-bus/SKILL.md"
+    );
+
+    const succeed = async (name: string, args: Record<string, unknown>) => {
+      const result = (await first.callTool({ name, arguments: args })) as CallToolResult;
+      if (result.isError) throw new Error(`${name} refused: ${text(result)}`);
+      return JSON.parse(text(result));
+    };
+    const [a, b] = ["catalogue/a", "catalogue/b"];
+    await succeed("bus_join", { ...joining(a), topics: ["catalogue"] });
+    await succeed("bus_join", joining(b));
+    const sent = await succeed("bus_publish", { from: b, session: sid(b), to: [a], body: "one" });
+    await succeed("bus_publish", { from: a, session: sid(a), to: ["#catalogue"], body: "two" });
+    expect(await succeed("bus_read", { address: a, session: sid(a) })).toMatchObject({
+      messages: [{ id: sent.id }],
+    });
+    await succeed("bus_wait", { address: b, session: sid(b), timeoutSeconds: 0 });
+    await succeed("bus_activity", {
+      address: a,
+      session: sid(a),
+      operation: Bun.randomUUIDv7(),
+      activity: "inactive",
+    });
+    await succeed("bus_history", { participant: a });
+    for (const address of [a, b]) await succeed("bus_leave", { address, session: sid(address) });
+
+    expect(await discovered(first)).toEqual(before);
+    expect(await discovered(await connect())).toEqual(before);
+  } finally {
+    await Promise.all(clients.map((client) => client.close()));
+  }
 });

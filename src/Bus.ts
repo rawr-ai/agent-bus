@@ -53,6 +53,13 @@ import {
   validSession,
 } from "./domain.ts";
 import { type CommandRead, type Entry, Ledger } from "./Ledger.ts";
+import {
+  admitEntry,
+  indexable,
+  MAX_ORIGIN_CWD_BYTES,
+  presenceText,
+  unjoinable,
+} from "./message-carrier.ts";
 import { canonicalJson } from "./orientation-model.ts";
 import { directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
@@ -194,7 +201,7 @@ export type ActivityResult =
   | { readonly status: "UNKNOWN"; readonly operation: string }
   | { readonly status: "IDENTITY_MISMATCH"; readonly operation: string };
 
-type PublishError = LedgerError | NotJoined | NotOwner | InvalidQuery;
+type PublishError = LedgerError | NotJoined | NotOwner | PresenceConflict | InvalidQuery;
 
 /**
  * A subscriber as it is under its address's lock, and its unread messages that may wake it, with
@@ -275,7 +282,7 @@ export class Bus extends Context.Service<
     readonly leave: (
       address: string,
       session: string | undefined
-    ) => Effect.Effect<void, LedgerError | NotJoined | NotOwner | PresenceConflict>;
+    ) => Effect.Effect<void, LedgerError | NotJoined | NotOwner | PresenceConflict | InvalidQuery>;
     /** A pierce of "all" without its confirming digest returns NOT_SENT and writes nothing. */
     readonly publish: {
       (
@@ -615,6 +622,15 @@ const make = (installation: string, hostOf: () => string) =>
       return subscriber;
     });
 
+    /**
+     * Legacy leave exception: a holder can let go even if its generated searchable body
+     * exceeds today's limit. The exact address stays in the sender and stored entry.
+     */
+    const presenceBody = (address: string, status: Presence["status"]) => {
+      const body = presenceText(address, status);
+      return status === "left" && !indexable(body) ? "An address too long to index left" : body;
+    };
+
     const presenceMessage = (address: string, presence: Presence, cwd: string | undefined) =>
       Effect.gen(function* () {
         return new Message({
@@ -623,7 +639,7 @@ const make = (installation: string, hostOf: () => string) =>
           from: address,
           to: ["*"],
           kind: "presence",
-          body: `${address} ${presence.status}`,
+          body: presenceBody(address, presence.status),
           origin: yield* originFor(cwd, hostOf),
           presence,
         });
@@ -693,6 +709,15 @@ const make = (installation: string, hostOf: () => string) =>
           }
           // An omitted list must not make an older, malformed subscription block a rejoin.
           topics.add(topic ?? requested);
+        }
+        // The presence this join (or a later leave) writes is full-text indexed; checked here,
+        // in the pure decision, so a refusal stages no cursor and writes nothing.
+        const unindexable = unjoinable(input.address);
+        if (unindexable !== undefined) return yield* new InvalidQuery({ message: unindexable });
+        if (Buffer.byteLength(input.cwd, "utf8") > MAX_ORIGIN_CWD_BYTES) {
+          return yield* new InvalidQuery({
+            message: `The working directory cannot exceed ${MAX_ORIGIN_CWD_BYTES} UTF-8 bytes, since every message sent from the address records it. Join from a shorter path. Nothing was changed.`,
+          });
         }
         if (input.orient === true) {
           const smallestResult = {
@@ -949,8 +974,9 @@ const make = (installation: string, hostOf: () => string) =>
         .digest("hex");
 
     /**
-     * The send itself. Ownership and the wake notice come from one presence read, taken under
-     * the sender's claiming lock before the append; only the sender is held still by that lock.
+     * Ownership and the wake notice come from one presence read under the sender's claiming
+     * lock. The ledger admits the send only if the sender's presence has not changed since
+     * that read, including on another machine. The wake notice still describes the earlier cut.
      */
     function publish(
       input: PublishInput & { readonly pierce?: ReadonlyArray<string> | undefined }
@@ -973,8 +999,24 @@ const make = (installation: string, hostOf: () => string) =>
                 lacking: listed,
                 ...(unlisted > 0 ? { unlisted } : {}),
               };
-        const sent = (message: Message): Posted =>
-          wake === undefined ? { message } : { message, wake };
+        const store = Effect.fn("Bus.publish.store")(function* (message: Message) {
+          const admission = yield* ledger.admit(message, read.cut);
+          if (admission.status === "UNKNOWN") {
+            return yield* new LedgerError({
+              message:
+                "The bus could not confirm whether this message was sent: it may have committed. Check history and do not retry blindly.",
+            });
+          }
+          if (admission.status === "REFUSED") {
+            // The write is definitively refused even if the reason cannot be read back.
+            const state = yield* Effect.option(ledger.presenceAt(admission.cut.head));
+            if (Option.isSome(state)) {
+              yield* ownedIn(latestPresences(state.value.entries), input.from, input.session);
+            }
+            return yield* conflict(input.from);
+          }
+          return (wake === undefined ? { message } : { message, wake }) satisfies Posted;
+        });
         const draft = new Message({
           id: Bun.randomUUIDv7(),
           ts: yield* now,
@@ -986,10 +1028,9 @@ const make = (installation: string, hostOf: () => string) =>
           ...optional("replyTo", input.replyTo),
           origin: yield* originFor(sender.cwd, hostOf),
         });
-        if (input.pierce === undefined) {
-          yield* ledger.append(draft);
-          return sent(draft);
-        }
+        // The optional pierce set changes routing, not the public read carrier.
+        yield* admitEntry(draft);
+        if (input.pierce === undefined) return yield* store(draft);
         const audience = (yield* peers).filter((peer) => isFor(draft, peer));
         let pierce: Array<string>;
         if (input.pierce === "all") {
@@ -1018,9 +1059,7 @@ const make = (installation: string, hostOf: () => string) =>
             .filter((address) => !draft.to.includes(address))
             .sort();
         }
-        const message = pierce.length === 0 ? draft : new Message({ ...draft, pierce });
-        yield* ledger.append(message);
-        return sent(message);
+        return yield* store(pierce.length === 0 ? draft : new Message({ ...draft, pierce }));
       }).pipe(claiming(input.from), Effect.withSpan("Bus.publish"));
     }
 

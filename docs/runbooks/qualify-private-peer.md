@@ -64,6 +64,30 @@ The selected host speaks the modern wire contract only. The qualification-only h
 
 5. Keep fixture, source adoption and client outcomes separate. Building or qualifying a review bundle does not select it for an installed service. Follow [deploy](deploy.md#when-a-hosted-peer-is-connected) for the authorized deployment and qualify skill discovery and use through the existing Agent Bus integration in a new client conversation; a fixture or published resource does not establish client activation. The [platform record](../platforms/mcp-openapi.md#direct-host-and-http-admission) distinguishes the client observation after a same-plugin package update from the earlier disposable-ledger OAuth check and from server-resource discovery. Before claiming automatic hosted wake, the intended client must actually discover and subscribe to `mail.wake`, accept its verified callback, and cause the rightful conversation to read its own mail. A callback receipt, an unrelated model turn or shared-history lookup is not that chain. A late notice may correctly lead to an empty read, and retries may repeat the same notice; they do not permit another conversation's inbox or bypass ordinary tool authorization. *The client check is separate from this fixture procedure.*
 
+## Qualify an exact production bundle
+
+The review invocation above is nonpromotable. For production qualification, start only from an independently selected immutable commit and tree, the approved host archive and Bun executable, and a trusted copy of the builder. Obtain the exact recipe hash (`builder_sha`) and Bun executable hash (`bun_sha`) from the approval record, not from artifacts supplied for the build. Set `reviewed_repo`, `trusted_builder`, `approved_bun`, `HOST_ARCHIVE` and `output_parent` to approved absolute paths and select an existing protected output parent. The runner must be the exact approved Bun:
+
+```sh
+"$approved_bun" --no-env-file "$trusted_builder" build \
+  --repo "$reviewed_repo" --commit "$commit" --tree "$tree" \
+  --archive "$HOST_ARCHIVE" --bun "$approved_bun" --bun-sha256 "$bun_sha" \
+  --builder-sha256 "$builder_sha" --out "$output_parent"
+```
+
+The builder exports the selected source, verifies its recipe, lock, host and runtime identities, and returns the directory and manifest SHA-256. An operator independent of that bundle retains the approved digest and source identities. Set `PRIVATE_BUNDLE` and `expected_sha` from that external record, not by rehashing an untrusted copy. Qualify the same selected object in each lane:
+
+```sh
+"$approved_bun" --no-env-file scripts/qualify-private-peer.ts "$HOST_ARCHIVE" \
+  --bundle "$PRIVATE_BUNDLE" --expect "$expected_sha" --commit "$commit" --tree "$tree"
+"$approved_bun" --no-env-file scripts/qualify-private-bundle.ts "$PRIVATE_BUNDLE" \
+  --expect "$expected_sha" --commit "$commit" --tree "$tree"
+"$approved_bun" --no-env-file scripts/qualify-private-events.ts "$HOST_ARCHIVE" \
+  --bundle "$PRIVATE_BUNDLE" --expect "$expected_sha" --commit "$commit" --tree "$tree"
+```
+
+Expected: all lanes check the same externally selected manifest and source identity before host import, with the relocation and fixture controls above. A dirty worktree's review output, a matching digest declared only by the bundle, or a mismatched source identity cannot qualify it. This does not authorize activation or establish existing client behavior. *Unverified for the integrated production candidate until selection and exact artifact qualification run.*
+
 ## If it fails
 
 Check the pinned runtime and fixture output. A checksum mismatch refuses before host import; obtain the intended artifact rather than relaxing the check. Enabled Events with incompatible storage/key, missing or damaged watch authority, or unsupported native authorization must refuse rather than silently fall back to tools-only operation; omission of Events is the intentional disabled mode. Never delete watch state to recover from a refusal or capacity bound: preserve the evidence and use an explicitly scoped operator recovery. Identify any fixture process by its own supervisor before stopping it; never kill by a shared pattern or touch the installed Bus. For installed-service recovery, see [recover](recover.md).

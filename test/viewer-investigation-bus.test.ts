@@ -104,13 +104,15 @@ beforeAll(async () => {
         });
       }
       yield* b.publish({ from: "claude/lead", session: marker, to: ["*"], body: "Unrelated" });
-      // 39,000 UTF-8 bytes each: no two share a 65,536-byte page, so the bus cuts by bytes.
+      // 39,000 UTF-8 bytes each, split between body and subject (each within the searchable-text
+      // limit): no two share a 65,536-byte page, so the bus cuts by bytes.
       for (const tag of ["a", "b", "c"]) {
         yield* b.publish({
           from: "codex/reviewer",
           session: `${marker}-2`,
           to: ["#bulk"],
-          body: `${tag}${"€".repeat(13_000)}`,
+          body: `${tag}${"€".repeat(6_500)}`,
+          subject: "€".repeat(6_500),
         });
       }
     })

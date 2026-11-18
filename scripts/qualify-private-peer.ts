@@ -61,23 +61,41 @@ const propertyPaths = (schema: unknown): ReadonlyArray<string> => {
 const { positionals, values } = parseArgs({
   args: process.argv.slice(2),
   allowPositionals: true,
-  options: { bundle: { type: "string" } },
+  options: {
+    bundle: { type: "string" },
+    expect: { type: "string" },
+    commit: { type: "string" },
+    tree: { type: "string" },
+  },
 });
 const [artifact] = positionals;
 if (
   positionals.length !== 1 ||
   !artifact ||
   !isAbsolute(artifact) ||
+  (values.bundle === undefined && values.expect !== undefined) ||
+  (values.commit === undefined) !== (values.tree === undefined) ||
+  (values.commit !== undefined && values.expect === undefined) ||
   digest(artifact) !== archiveHash
 )
-  throw new Error("Supply the absolute host archive and optional --bundle absolute-directory.");
+  throw new Error(
+    "Supply the absolute host archive and optional --bundle directory --expect digest [--commit id --tree id]."
+  );
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-peer-qualification-"));
 const shutdown = new AbortController();
 let disposeBus: (() => Promise<void>) | undefined;
 let host: Promise<void> | undefined;
 const clients: Client[] = [];
 try {
-  const entry = hostForQualification(artifact, dir, values.bundle);
+  const expected =
+    values.expect === undefined
+      ? undefined
+      : {
+          manifestSha256: values.expect,
+          source:
+            values.commit === undefined ? undefined : { commit: values.commit, tree: values.tree! },
+        };
+  const entry = hostForQualification(artifact, dir, values.bundle, expected);
   const module: unknown = await import(entry);
   if (
     typeof module !== "object" ||
@@ -412,7 +430,8 @@ try {
       },
       { id: sent.id, body: "complete fixture body", subject: "fixture subject" }
     );
-    const largeBody = 'quoted " backslash \\ euro €\n'.repeat(3_000);
+    // Escape-heavy, and within the 32,768-byte limit for searchable text (30,000 bytes).
+    const largeBody = 'quoted " backslash \\ euro €\n'.repeat(1_000);
     assert(Buffer.byteLength(JSON.stringify(largeBody), "utf8") > 16_384);
     const large = await success(
       "bus_publish",

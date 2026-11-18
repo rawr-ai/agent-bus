@@ -91,7 +91,7 @@ const fixture = (mode: "holdRestore" | "holdAdmit", gates: Gates, prior?: number
     Layer.provideMerge(seams),
     Layer.provideMerge(base)
   );
-  const file = join(cursorDir, `${encodeURIComponent(address)}.json`);
+  const file = join(cursorDir, Cursors.cursorFileName(address));
   return { layer, file, cursorDir };
 };
 

@@ -1,32 +1,35 @@
-// Guarded presence writes across serves. A join or leave decides on the presence it read at a
-// cut T and writes its presence only if no presence for the address was written after T; a
-// refused write leaves the cursor as it was and re-decides against the presence that refused
-// it, without writing. These cases stage the interleavings two serves on one Fluree ledger can
-// produce (messaging rules 2, 4 and 8), including the join/leave-after-takeover race that was
-// tracked here as `test.failing`.
+// Guarded presence writes and ordinary sends across serves. A join, leave or send bases its
+// decision on a cut T and writes only if no presence for the acting address was written after T.
+// These cases stage interleavings between two serves on one Fluree ledger (messaging rules 2, 4
+// and 8) and verify delivery through a third serve for races that involve sends.
 //
-// The seam is deterministic: serve A writes through a relay that, on A's next presence write,
+// The seam is deterministic: serve A writes through a relay that, on A's next selected write,
 // first runs an action to completion (usually serve B's competing call, made directly on the
 // ledger), or answers with a fault. Each "machine" has its own cursor directory, read here as
 // files, and ledger contents are read with literal queries independent of the bus's reads.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger, messageIri } from "../src/Ledger.ts";
+import { historyPreset } from "../src/mcp.ts";
+import { MAX_INDEXED_FIELD_BYTES } from "../src/message-carrier.ts";
+import { startFileFlureeServer } from "./fluree-file-server.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 const address = "claude/held";
 const holder = "session:holder";
 const successor = "session:successor";
+const recipient = "claude/receiver";
+const reader = "session:reader";
 const cwd = process.cwd();
 const encodeJson = Schema.encodeSync(MessageJson);
 const TIMEOUT = 60_000;
@@ -42,7 +45,8 @@ type Outcome<A> =
 
 /** One serve: its own runtime and cursor directory, on `url` (direct, or the relay). */
 const machine = async (config: Config, url: string) => {
-  const cursorDir = join(mkdtempSync(join(tmpdir(), "agent-bus-lifecycle-")), "cursors");
+  const root = mkdtempSync(join(tmpdir(), "agent-bus-lifecycle-"));
+  const cursorDir = join(root, "cursors");
   const runtime = ManagedRuntime.make(
     Bus.layer("test-installation").pipe(
       Layer.provideMerge(layerFluree({ ...config, url }).pipe(Layer.provide(platform))),
@@ -50,8 +54,15 @@ const machine = async (config: Config, url: string) => {
       Layer.provide(platform)
     )
   );
-  await runtime.runPromise(Effect.void);
-  const file = join(cursorDir, `${encodeURIComponent(address)}.json`);
+  const dispose = () =>
+    runtime.dispose().finally(() => rmSync(root, { recursive: true, force: true }));
+  try {
+    await runtime.runPromise(Effect.void);
+  } catch (error) {
+    await dispose();
+    throw error;
+  }
+  const file = join(cursorDir, Cursors.cursorFileName(address));
   const outcome = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger>): Promise<Outcome<A>> =>
     runtime.runPromise(
       Effect.match(effect, {
@@ -60,7 +71,7 @@ const machine = async (config: Config, url: string) => {
       })
     );
   return {
-    runtime,
+    dispose,
     join: (session: string, extra: Partial<Bus.JoinInput> = {}) =>
       outcome(
         Effect.flatMap(Bus.Bus, (bus) =>
@@ -69,17 +80,46 @@ const machine = async (config: Config, url: string) => {
       ),
     leave: (session: string) =>
       outcome(Effect.flatMap(Bus.Bus, (bus) => bus.leave(address, session))),
+    publish: (session: string, body: string, extra: Partial<Bus.PublishInput> = {}) =>
+      outcome(
+        Effect.flatMap(Bus.Bus, (bus) =>
+          bus.publish({ from: address, session, to: [recipient], body, ...extra })
+        )
+      ),
+    historyIds: (query: string) =>
+      runtime.runPromise(
+        historyPreset({ query }).pipe(Effect.map(({ messages }) => messages.map(({ id }) => id)))
+      ),
+    takeMessageIds: (inbox = recipient) =>
+      runtime.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) =>
+          bus
+            .take(inbox, reader)
+            .pipe(
+              Effect.map((entries) =>
+                entries.filter((entry) => entry.kind === "message").map((entry) => entry.id)
+              )
+            )
+        )
+      ),
     /** The address's current joined peer, as this serve reads it. */
-    peer: () =>
+    peer: (name = address) =>
       runtime.runPromise(
         Effect.map(
           Effect.flatMap(Bus.Bus, (bus) => bus.peers),
-          (peers) => peers.find((peer) => peer.address === address)
+          (peers) => peers.find((peer) => peer.address === name)
         )
       ),
     head: () => runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end)),
     append: (message: Message) =>
       runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.append(message))),
+    admit: (message: Message) =>
+      outcome(
+        Effect.gen(function* () {
+          const ledger = yield* Ledger;
+          return yield* ledger.admit(message, (yield* ledger.presenceAt()).cut);
+        })
+      ),
     /** The cursor file's value, or undefined when there is no file. */
     cursor: (): number | undefined => {
       try {
@@ -90,25 +130,36 @@ const machine = async (config: Config, url: string) => {
     },
     /** The cursor file's inode: each write replaces the file, so a write changes it. */
     cursorInode: () => statSync(file).ino,
-    setCursor: (cursor: number) => writeFileSync(file, JSON.stringify({ cursor })),
+    setCursor: (cursor: number) => writeFileSync(file, JSON.stringify({ address, cursor })),
   };
 };
 type Machine = Awaited<ReturnType<typeof machine>>;
 
-type Fault = "forwarded" | "unforwarded";
+type Fault = "forwarded" | "unforwarded" | "unsettled";
 interface Plan {
   readonly before?: () => Promise<void>;
   readonly fault?: Fault;
 }
 
+const writeNode = Schema.decodeUnknownOption(
+  Schema.Struct({
+    "@type": Schema.Literals(["bus:Presence", "bus:Message"]),
+    "bus:id": Schema.Union([Schema.String, Schema.Struct({ "@value": Schema.String })]),
+  })
+);
+
 /**
- * Forwards everything to Fluree; on the next presence write, first runs `before` to completion,
- * then forwards it, or applies `fault`: "forwarded" commits upstream and answers 504,
- * "unforwarded" answers 503 without sending. Records every presence write's entry id.
+ * Runs `before` on the next write of the armed kind before forwarding it. A fault can lose
+ * the response after forwarding, with or without blocking the subsequent settlement read.
+ * The relay recognizes the inserted node, not the update's condition.
  */
-const presenceRelay = (upstream: string) => {
-  let next: Plan | undefined;
+const writeRelay = (upstream: string) => {
+  let nextPresence: Plan | undefined;
+  let nextMessage: Plan | undefined;
+  let settleUnavailable = false;
+  let writes = 0;
   const attempts: Array<string | undefined> = [];
+  const messageAttempts: Array<string | undefined> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -121,7 +172,6 @@ const presenceRelay = (upstream: string) => {
         request.method === "GET" || request.method === "HEAD"
           ? undefined
           : await request.arrayBuffer();
-      const text = body === undefined ? "" : new TextDecoder().decode(body);
       const forward = () =>
         fetch(`${upstream}${url.pathname}${url.search}`, {
           method: request.method,
@@ -129,19 +179,38 @@ const presenceRelay = (upstream: string) => {
           body,
           signal: request.signal,
         });
-      const write =
-        body !== undefined &&
-        !url.pathname.startsWith("/v1/fluree/query") &&
-        (text.includes('"bus:Presence"') || text.includes("agent-bus#Presence"));
-      if (!write) return forward();
-      attempts.push(/"bus:id"\s*:\s*"([^"]+)"/.exec(text)?.[1]);
-      const plan = next;
-      next = undefined;
+      if (settleUnavailable && url.pathname.startsWith("/v1/fluree/show/")) {
+        return new Response(null, { status: 503 });
+      }
+      if (
+        body === undefined ||
+        !["/v1/fluree/insert", "/v1/fluree/update"].includes(url.pathname)
+      ) {
+        return forward();
+      }
+      writes++;
+      const payload: unknown = JSON.parse(new TextDecoder().decode(body));
+      const node = writeNode(
+        url.pathname.endsWith("/update") &&
+          typeof payload === "object" &&
+          payload !== null &&
+          "insert" in payload
+          ? payload.insert
+          : payload
+      );
+      if (Option.isNone(node)) return forward();
+      const presence = node.value["@type"] === "bus:Presence";
+      const id = node.value["bus:id"];
+      (presence ? attempts : messageAttempts).push(typeof id === "string" ? id : id["@value"]);
+      const plan = presence ? nextPresence : nextMessage;
+      if (presence) nextPresence = undefined;
+      else nextMessage = undefined;
       if (plan?.before !== undefined) await plan.before();
       if (plan?.fault === "unforwarded") return new Response(null, { status: 503 });
       const response = await forward();
-      if (plan?.fault === "forwarded") {
+      if (plan?.fault === "forwarded" || plan?.fault === "unsettled") {
         await response.arrayBuffer();
+        settleUnavailable = plan.fault === "unsettled";
         return new Response(null, { status: 504 });
       }
       return response;
@@ -150,13 +219,18 @@ const presenceRelay = (upstream: string) => {
   return {
     url: server.url.origin,
     arm: (plan: Plan) => {
-      next = plan;
+      nextPresence = plan;
+    },
+    armMessage: (plan: Plan) => {
+      nextMessage = plan;
     },
     attempts,
+    messageAttempts,
+    writeCount: () => writes,
     stop: () => server.stop(true),
   };
 };
-type Relay = ReturnType<typeof presenceRelay>;
+type Relay = ReturnType<typeof writeRelay>;
 
 /** Literal queries on the ledger, independent of the bus's own reads. */
 const literal = async (config: Config, body: Record<string, unknown>) => {
@@ -181,11 +255,12 @@ const presenceNodes = async (config: Config) =>
     })) as Array<string>
   ).sort();
 /** The stored encodings of entry `id` at head: empty when it was never written. */
-const stored = (config: Config, id: string | undefined) => {
-  if (id === undefined) throw new Error("the relay saw no entry id in the presence write");
+const stored = (config: Config, id: string | undefined, t?: number) => {
+  if (id === undefined) throw new Error("the relay saw no entry id in the write");
   return literal(config, {
+    ...(t === undefined ? {} : { from: `${config.ledger}@t:${t}` }),
     select: "?json",
-    where: { "@id": messageIri(id), "bus:json": "?json" },
+    where: { "@id": `urn:agent-bus:message:${id}`, "bus:json": "?json" },
   });
 };
 
@@ -197,9 +272,9 @@ interface Stage {
 }
 
 /** Serve A through the relay, serve B direct, on one fresh ledger. */
-const staged = async (name: string, run: (stage: Stage) => Promise<void>) => {
-  const config = await freshLedger(name);
-  const relay = presenceRelay(config.url);
+const staged = async (name: string, run: (stage: Stage) => Promise<void>, config?: Config) => {
+  config ??= await freshLedger(name);
+  const relay = writeRelay(config.url);
   let a: Machine | undefined;
   let b: Machine | undefined;
   try {
@@ -207,9 +282,11 @@ const staged = async (name: string, run: (stage: Stage) => Promise<void>) => {
     b = await machine(config, config.url);
     await run({ config, relay, a, b });
   } finally {
-    await a?.runtime.dispose();
-    await b?.runtime.dispose();
-    relay.stop();
+    try {
+      await Promise.all([a?.dispose(), b?.dispose()]);
+    } finally {
+      relay.stop();
+    }
   }
 };
 
@@ -245,6 +322,442 @@ const expectRefused = (outcome: Outcome<unknown>, tag: string, text: string): vo
   expect(outcome.error._tag).toBe(tag);
   expect(outcome.error.message).toContain(text);
 };
+
+/** An independent commit oracle for a particular attempted message id. */
+const commitsOf = (config: Config, id: string | undefined) => {
+  if (id === undefined) throw new Error("the relay saw no message write");
+  return literal(config, {
+    select: "?t",
+    where: {
+      "@id": `urn:agent-bus:message:${id}`,
+      "bus:json": { "@value": "?json", "@t": "?t" },
+    },
+  });
+};
+
+const commitEnvelope = Schema.decodeUnknownSync(
+  Schema.Struct({
+    id: Schema.String,
+    t: Schema.Int,
+    parents: Schema.optionalKey(Schema.Array(Schema.String)),
+    flakes: Schema.Array(Schema.Array(Schema.Unknown)),
+  })
+);
+
+const entryIdentity = Schema.decodeUnknownOption(
+  Schema.fromJsonString(
+    Schema.Struct({ id: Schema.String, from: Schema.String, kind: Schema.String })
+  )
+);
+
+const readCommit = async (config: Config, t: number) => {
+  const response = await fetch(
+    `${config.url}/v1/fluree/show/${encodeURIComponent(config.ledger)}?commit=t:${t}`,
+    { headers: { authorization: `Bearer ${config.token}` } }
+  );
+  if (!response.ok) throw new Error(`commit t=${t} was not readable: HTTP ${response.status}`);
+  return commitEnvelope(await response.json());
+};
+
+/** The physical assertions in one commit, without a query or its transaction-metadata bindings. */
+const commitAt = async (config: Config, t: number) => {
+  const { flakes, ...summary } = await readCommit(config, t);
+  const entries = flakes.flatMap(([subject, predicate, value, , asserted]) => {
+    const entry = entryIdentity(value);
+    return asserted === true && Option.isSome(entry)
+      ? [{ subject, predicate, ...entry.value }]
+      : [];
+  });
+  return { ...summary, entries };
+};
+
+const projectedText = async (config: Config, t: number, id: string) => {
+  const namespace = "https://rawr.ai/ns/agent-bus#";
+  const text = ["from", "to", "body", "subject"].map((name) => `${namespace}${name}`);
+  return (await readCommit(config, t)).flakes
+    .filter(
+      ([subject, predicate, , , asserted]) =>
+        subject === `urn:agent-bus:message:${id}` &&
+        typeof predicate === "string" &&
+        text.includes(predicate) &&
+        asserted === true
+    )
+    .map(([, predicate, value, datatype]) => [predicate, value, datatype])
+    .sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
+};
+
+const ledgerIndex = Schema.decodeUnknownSync(
+  Schema.Struct({ ledger: Schema.Struct({ "index-t": Schema.Int }) })
+);
+
+const waitForIndex = async (config: Config, at: number) => {
+  for (let attempt = 0; attempt < 100; attempt++) {
+    const response = await fetch(
+      `${config.url}/v1/fluree/info/${encodeURIComponent(config.ledger)}`,
+      { headers: { authorization: `Bearer ${config.token}` } }
+    );
+    if (!response.ok) throw new Error(`index state was not readable: HTTP ${response.status}`);
+    const t = ledgerIndex(await response.json()).ledger["index-t"];
+    if (t >= at) return t;
+    await Bun.sleep(100);
+  }
+  throw new Error(`index did not reach t=${at}`);
+};
+
+const published = (result: Outcome<Bus.Posted | Bus.NotSent>) => {
+  if (!result.ok) throw new Error(`publish failed: ${result.error.message}`);
+  if (!("message" in result.value)) throw new Error("publish returned a preview");
+  return result.value.message;
+};
+
+const stagedSend = async (
+  name: string,
+  run: (stage: Stage, receiver: Machine) => Promise<void>,
+  fileBacked = false
+) => {
+  const durable = fileBacked ? await startFileFlureeServer() : undefined;
+  try {
+    await staged(
+      name,
+      async (stage) => {
+        const receiver = await machine(stage.config, stage.config.url);
+        try {
+          expect((await receiver.join(reader, { address: recipient, topics: ["watch"] })).ok).toBe(
+            true
+          );
+          expect((await stage.a.join(holder)).ok).toBe(true);
+          await run(stage, receiver);
+        } finally {
+          await receiver.dispose();
+        }
+      },
+      durable?.freshLedger(name)
+    );
+  } finally {
+    await durable?.stop();
+  }
+};
+
+describe("guarded publish across serves", () => {
+  test(
+    "guarded ledger size refusal is definite and sends no insert or update",
+    () =>
+      stagedSend("publish-pre-dispatch-bound", async ({ config, relay, a, b }, receiver) => {
+        const before = await b.head();
+        const writes = relay.writeCount();
+        const id = Bun.randomUUIDv7();
+        const error = await a.admit(
+          new Message({
+            id,
+            ts: new Date().toISOString(),
+            from: address,
+            to: [recipient],
+            kind: "message",
+            body: "a".repeat(MAX_INDEXED_FIELD_BYTES + 1),
+          })
+        );
+        expectRefused(error, "InvalidQuery", "Nothing was sent or written");
+        expect(relay.writeCount()).toBe(writes);
+        expect(await b.head()).toBe(before);
+        expect(await commitsOf(config, id)).toEqual([]);
+        const sent = published(await a.publish(holder, "admissible control"));
+        expect(relay.writeCount()).toBe(writes + 1);
+        expect(await receiver.takeMessageIds()).toEqual([sent.id]);
+      }),
+    TIMEOUT
+  );
+
+  for (const mode of ["ordinary", "named pierce", "confirmed pierce", "indexed ledger"] as const) {
+    test(
+      `${mode}: a held message write cannot land after takeover and the successor's send`,
+      () =>
+        stagedSend(
+          "publish-takeover",
+          async ({ config, relay, a, b }, receiver) => {
+            const before = await b.head();
+            const oldJoin = (await b.peer())?.joinId;
+            let extra: Partial<Bus.PublishInput> =
+              mode === "named pierce" ? { to: ["#watch"], pierce: [recipient] } : {};
+            if (mode === "confirmed pierce") {
+              extra = { to: ["#watch"], pierce: "all" };
+              const preview = await a.publish(holder, "old", extra);
+              if (!preview.ok || !("status" in preview.value)) throw new Error("no pierce preview");
+              expect(preview.value.status).toBe("NOT_SENT");
+              expect(await b.head()).toBe(before);
+              expect(relay.messageAttempts).toHaveLength(0);
+              extra = { ...extra, confirm: preview.value.digest };
+            }
+
+            let observed:
+              | {
+                  successorJoin: string;
+                  takeoverT: number;
+                  successorId: string;
+                  sendT: number;
+                  indexedAt?: number;
+                }
+              | undefined;
+            const searchWord = "sentinelfencing";
+            relay.armMessage({
+              ...(mode === "indexed ledger" ? { fault: "forwarded" } : {}),
+              before: async () => {
+                const joined = await b.join(successor, { takeover: oldJoin });
+                if (!joined.ok) throw new Error(`takeover failed: ${joined.error.message}`);
+                const successorJoin = (await b.peer())?.joinId;
+                if (successorJoin === undefined) throw new Error("takeover left no current join");
+                const takeoverT = await b.head();
+                const successorId = published(await b.publish(successor, searchWord)).id;
+                const sendT = await b.head();
+                const indexedAt =
+                  mode === "indexed ledger" ? await waitForIndex(config, sendT) : undefined;
+                observed = {
+                  successorJoin,
+                  takeoverT,
+                  successorId,
+                  sendT,
+                  ...(indexedAt === undefined ? {} : { indexedAt }),
+                };
+              },
+            });
+            const result = await a.publish(holder, "old", extra);
+
+            if (observed === undefined)
+              throw new Error("the relay did not stage the competing writes");
+            const { takeoverT, sendT, successorJoin, successorId } = observed;
+            const id = relay.messageAttempts[0];
+            const after = await b.head();
+            const delivered = await receiver.takeMessageIds();
+            const staleJson = await stored(config, id);
+            const staleJsonAtSuccessor = await stored(config, id, sendT);
+            const staleCommits = await commitsOf(config, id);
+            const takeover = await commitAt(config, takeoverT);
+            const sent = await commitAt(config, sendT);
+            const later = [];
+            for (let t = sendT + 1; t <= after; t++) later.push(await commitAt(config, t));
+            expect(takeoverT).toBeGreaterThan(before);
+            expect(sendT).toBeGreaterThan(takeoverT);
+            expect(takeover).toMatchObject({
+              t: takeoverT,
+              entries: [{ id: successorJoin, from: address, kind: "presence" }],
+            });
+            expect(sent).toMatchObject({
+              t: sendT,
+              parents: [takeover.id],
+              entries: [{ id: successorId, from: address, kind: "message" }],
+            });
+            expect(relay.messageAttempts).toHaveLength(1);
+            expect(staleJsonAtSuccessor).toHaveLength(0);
+            expect(staleJson).toHaveLength(0);
+            expect(staleCommits).toEqual([]);
+            expect(delivered).toEqual([successorId]);
+            expect(later).toEqual([]);
+            expect(after).toBe(sendT);
+            if (mode === "indexed ledger") {
+              expectRefused(result, "LedgerError", "it may have committed");
+            } else {
+              expectRefused(result, "NotOwner", "belongs to another session");
+            }
+            expectRefused(
+              await a.publish(holder, "fresh stale request"),
+              "NotOwner",
+              "belongs to another session"
+            );
+            expect(relay.messageAttempts).toHaveLength(1);
+            if (mode === "indexed ledger") {
+              expect(observed.indexedAt).toBeGreaterThanOrEqual(sendT);
+              const legacyId = Bun.randomUUIDv7();
+              await b.append(
+                new Message({
+                  id: legacyId,
+                  ts: new Date().toISOString(),
+                  from: address,
+                  to: [recipient],
+                  kind: "message",
+                  body: searchWord,
+                  origin: new Origin({ host: "fixture", cwd: "/work" }),
+                })
+              );
+              await waitForIndex(config, await b.head());
+              expect((await b.historyIds(searchWord)).sort()).toEqual(
+                [successorId, legacyId].sort()
+              );
+            }
+          },
+          mode === "indexed ledger"
+        ),
+      TIMEOUT
+    );
+  }
+
+  for (const pierced of [false, true]) {
+    test(
+      `${pierced ? "pierced" : "ordinary"} publish: question-mark literals survive the guarded update`,
+      () =>
+        stagedSend(
+          "publish-literal",
+          async ({ config, a, b }, receiver) => {
+            const text = {
+              from: address,
+              to: [pierced ? "#watch" : recipient, "?recipient"],
+              body: "?guardliteralquestion",
+              subject: "?guardliteralsubject",
+              ...(pierced ? { pierce: [recipient] } : {}),
+            };
+            const legacy = new Message({
+              ...text,
+              id: Bun.randomUUIDv7(),
+              ts: new Date().toISOString(),
+              kind: "message",
+              origin: new Origin({ host: "fixture", cwd: "/work" }),
+            });
+            await b.append(legacy);
+            const baseline = await projectedText(config, await b.head(), legacy.id);
+            expect(baseline.map(([, value]) => value).sort()).toEqual(
+              [text.from, ...text.to, text.body, text.subject].sort()
+            );
+
+            const sent = published(await a.publish(holder, text.body, text));
+            const cut = await b.head();
+            const encoded = await stored(config, sent.id);
+            expect(encoded).toHaveLength(1);
+            expect(Schema.decodeUnknownSync(MessageJson)(encoded[0])).toMatchObject(text);
+            expect(await projectedText(config, cut, sent.id)).toEqual(baseline);
+            expect(await receiver.takeMessageIds()).toEqual([legacy.id, sent.id]);
+
+            await waitForIndex(config, cut);
+            for (const query of ["guardliteralquestion", "guardliteralsubject"]) {
+              expect((await b.historyIds(query)).sort()).toEqual([legacy.id, sent.id].sort());
+            }
+          },
+          true
+        ),
+      TIMEOUT
+    );
+  }
+
+  test.each(["?owner", "?sender", "?otherT"])(
+    "the sender %s is matched literally in its ownership guard",
+    (from) =>
+      stagedSend("publish-literal-owner", async ({ config, relay, a, b }, receiver) => {
+        const inbox = "?recipient";
+        expect((await receiver.join(reader, { address: inbox })).ok).toBe(true);
+        expect((await a.join(holder, { address: from })).ok).toBe(true);
+        const current = await b.peer(from);
+        if (current === undefined) throw new Error("the literal sender did not join");
+
+        relay.armMessage({
+          before: async () => {
+            const joined = await b.join("session:unrelated", { address: "claude/other" });
+            if (!joined.ok) throw new Error(`unrelated join failed: ${joined.error.message}`);
+          },
+        });
+        const sent = published(await a.publish(holder, "?question", { from, to: [inbox] }));
+        const projected = await projectedText(config, await b.head(), sent.id);
+        expect(projected.map(([, value]) => value).sort()).toEqual(
+          [from, inbox, "?question"].sort()
+        );
+
+        relay.armMessage({
+          before: async () => {
+            const joined = await b.join(successor, { address: from, takeover: current.joinId });
+            if (!joined.ok) throw new Error(`takeover failed: ${joined.error.message}`);
+          },
+        });
+        const stale = await a.publish(holder, "?old", { from, to: [inbox] });
+        expectRefused(stale, "NotOwner", "belongs to another session");
+        expect(relay.messageAttempts).toHaveLength(2);
+        expect(await stored(config, relay.messageAttempts[1])).toEqual([]);
+        const next = published(await b.publish(successor, "?new", { from, to: [inbox] }));
+        expect(await receiver.takeMessageIds(inbox)).toEqual([sent.id, next.id]);
+      }),
+    TIMEOUT
+  );
+
+  test(
+    "a same-holder renewal refuses one attempt without claiming the holder changed",
+    () =>
+      stagedSend("publish-renewal", async ({ config, relay, a, b }, receiver) => {
+        const oldJoin = (await b.peer())?.joinId;
+        relay.armMessage({
+          before: async () => {
+            const renewed = await b.join(holder);
+            if (!renewed.ok) throw new Error(`renewal failed: ${renewed.error.message}`);
+          },
+        });
+        const result = await a.publish(holder, "old basis");
+        const current = await b.peer();
+
+        expect(current?.joinId).not.toBe(oldJoin);
+        expect(current?.presence.session).toBe(holder);
+        expectRefused(result, "PresenceConflict", "nothing was written");
+        expect(relay.messageAttempts).toHaveLength(1);
+        expect(await commitsOf(config, relay.messageAttempts[0])).toEqual([]);
+        const sent = published(await a.publish(holder, "fresh basis"));
+        expect(relay.messageAttempts).toHaveLength(2);
+        expect(await receiver.takeMessageIds()).toEqual([sent.id]);
+      }),
+    TIMEOUT
+  );
+
+  test(
+    "a presence for an unrelated address does not block the sender",
+    () =>
+      stagedSend("publish-unrelated", async ({ config, relay, a, b }, receiver) => {
+        const before = await b.head();
+        let unrelatedT: number | undefined;
+        relay.armMessage({
+          before: async () => {
+            const joined = await b.join("session:unrelated", { address: "claude/unrelated" });
+            if (!joined.ok) throw new Error(`unrelated join failed: ${joined.error.message}`);
+            unrelatedT = await b.head();
+          },
+        });
+        const sent = published(await a.publish(holder, "still the owner"));
+
+        expect(unrelatedT).toBeGreaterThan(before);
+        const sentT = await b.head();
+        expect(sentT).toBeGreaterThan(unrelatedT ?? before);
+        expect(relay.messageAttempts).toEqual([sent.id]);
+        expect(await commitsOf(config, sent.id)).toEqual([sentT]);
+        expect(await receiver.takeMessageIds()).toEqual([sent.id]);
+      }),
+    TIMEOUT
+  );
+
+  for (const fault of ["forwarded", "unsettled", "unforwarded"] as const) {
+    test(
+      `response loss (${fault}): settle by exact id or report uncertainty, never write again`,
+      () =>
+        stagedSend("publish-response-loss", async ({ config, relay, a, b }, receiver) => {
+          const before = await b.head();
+          relay.armMessage({ fault });
+          const result = await a.publish(holder, "maybe sent");
+
+          expect(relay.messageAttempts).toHaveLength(1);
+          const id = relay.messageAttempts[0];
+          if (id === undefined) throw new Error("the relay saw no message write");
+          const after = await b.head();
+          const delivered = await receiver.takeMessageIds();
+          if (fault === "unforwarded") {
+            expect(after).toBe(before);
+            expect(await commitsOf(config, id)).toEqual([]);
+            expect(delivered).toEqual([]);
+          } else {
+            expect(after).toBeGreaterThan(before);
+            expect(await commitsOf(config, id)).toEqual([after]);
+            expect(delivered).toEqual([id]);
+          }
+          if (fault === "forwarded") {
+            expect(published(result).id).toBe(id);
+          } else {
+            expectRefused(result, "LedgerError", "it may have committed");
+            if (!result.ok) expect(result.error.message).toContain("do not retry blindly");
+          }
+        }),
+      TIMEOUT
+    );
+  }
+});
 
 describe("guarded presence: a competing claim committed after the cut", () => {
   for (const prior of [undefined, 7] as const) {

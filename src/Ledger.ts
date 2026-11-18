@@ -1,5 +1,5 @@
 import { Context, type Effect, type Stream } from "effect";
-import type { DirectScan, LedgerError, Logged, Message } from "./domain.ts";
+import type { DirectScan, InvalidQuery, LedgerError, Logged, Message } from "./domain.ts";
 import type { Pin } from "./Query.ts";
 
 /** Server-selected namespaces: callers cannot name an arbitrary ledger subject. */
@@ -82,9 +82,8 @@ export interface PresenceRead {
 }
 
 /**
- * A guarded presence write, decided at its own commit by reading the attempted entry there.
- * REFUSED wrote nothing: another presence for the address committed after the basis.
- * UNKNOWN may have committed.
+ * A guarded entry write, confirmed by reading the attempted entry at its commit.
+ * REFUSED wrote nothing. UNKNOWN may have committed.
  */
 export type Admission =
   | { readonly status: "ADMITTED"; readonly cut: Pin }
@@ -113,9 +112,15 @@ export class Ledger extends Context.Service<
      * replaced ledger starts subscribers over instead of skipping messages.
      */
     readonly instance: string;
-    readonly append: (message: Message) => Effect.Effect<void, LedgerError>;
+    /**
+     * Unconditional append for fixture entries; address operations use guarded writes.
+     * Fluree refuses over-limit indexed text before dispatch in append, admit and designate.
+     */
+    readonly append: (message: Message) => Effect.Effect<void, LedgerError | InvalidQuery>;
     readonly readWitness: (operation: string) => Effect.Effect<WitnessRead, LedgerError>;
-    readonly designate: (designation: Designation) => Effect.Effect<DesignationResult, LedgerError>;
+    readonly designate: (
+      designation: Designation
+    ) => Effect.Effect<DesignationResult, LedgerError | InvalidQuery>;
     readonly read: (from: number) => Effect.Effect<Slice, LedgerError>;
     readonly end: Effect.Effect<number, LedgerError>;
     readonly changes: Stream.Stream<void>;
@@ -125,11 +130,14 @@ export class Ledger extends Context.Service<
      */
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
     /**
-     * Appends `presence` only if no presence for its address was written after `basis`, the
-     * cut its decision read. One attempt with a fresh id, never resent: a resent id is never
-     * stored twice, but its status may report the original admission.
+     * Appends an entry only if no presence for its sender was written after `basis`, the cut
+     * its ownership decision read. One attempt with a fresh id, never resent: a resent id
+     * is never stored twice, but its status may report the original admission.
      */
-    readonly admit: (presence: Message, basis: Pin) => Effect.Effect<Admission, LedgerError>;
+    readonly admit: (
+      entry: Message,
+      basis: Pin
+    ) => Effect.Effect<Admission, LedgerError | InvalidQuery>;
     /**
      * Writes an address command as its own node, `commandIri(operation)`, only if that node
      * holds no command yet. A failure says nothing about whether it committed: read it back.

@@ -2,6 +2,7 @@ import { Clock, Context, Effect } from "effect";
 import { Bus, originFor } from "./Bus.ts";
 import { InvalidQuery, Message } from "./domain.ts";
 import { type DesignationResult, Ledger } from "./Ledger.ts";
+import { admitEntry } from "./message-carrier.ts";
 import {
   BULLETIN_BODY_BYTES,
   BULLETIN_UNIT_BYTES,
@@ -139,6 +140,7 @@ export const updateDirectory = (input: DirectoryUpdate) =>
           body: `Directory ${directory.id} has a new designated revision. Read it with bus_orient.`,
           origin: yield* originFor(owner.cwd),
         });
+        yield* admitEntry(notification);
         const record: DirectoryRecord = {
           kind: "directory",
           directory,
@@ -262,6 +264,7 @@ export const updateBulletin = (input: BulletinUpdate) =>
           body: `A ${input.scope.kind} bulletin was ${input.action === "publish" ? "published" : "withdrawn"}. Read its designated state with bus_orient.`,
           origin: yield* originFor(owner.cwd),
         });
+        yield* admitEntry(notification);
         const record: BulletinRecord = {
           kind: "bulletin",
           scope: input.scope,

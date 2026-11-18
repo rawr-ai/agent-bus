@@ -79,7 +79,7 @@ const joining = (address: string, owner = session(address)) => ({
 });
 const readArgs = (address: string) => ({ address, session: session(address) });
 const cursor = (address: string) =>
-  Bun.file(join(dir, "cursors", `${encodeURIComponent(address)}.json`)).text();
+  Bun.file(join(dir, "cursors", Cursors.cursorFileName(address))).text();
 const text = (result: CallToolResult) => {
   const [first] = result.content;
   return first?.type === "text" ? first.text : "";

@@ -2695,7 +2695,7 @@ describe("one address at a time", () => {
           yield* bus.leave("codex/gone", sid("codex/gone"));
           yield* bus.deliver("codex/gone", nudge);
 
-          rmSync(join(store.file, "..", "cursors", `${encodeURIComponent("codex/lost")}.json`));
+          rmSync(join(store.file, "..", "cursors", Cursors.cursorFileName("codex/lost")));
           const lost = yield* Effect.flip(bus.deliver("codex/lost", nudge));
           expect([lost._tag, nudged]).toEqual(["NotJoined", 0]);
         }),

@@ -106,7 +106,12 @@ const failure = (message: string) => ({
   content: [{ type: "text", text: message }],
 });
 
-const HOSTED_READ_BYTES = 4 * 1024 * 1024;
+/**
+ * The complete hosted read result, as its client receives it, stays within 4 MiB: the carrier
+ * budget the Bus admits leaves 64 KiB for JSON-RPC framing, resultType and both servers' _meta.
+ */
+const HOSTED_RESULT_BYTES = 4 * 1024 * 1024;
+const HOSTED_READ_BYTES = HOSTED_RESULT_BYTES - 64 * 1024;
 class BeforeDispatch extends Error {}
 
 const canonicalTimestamp = (value: string) => {
@@ -237,7 +242,7 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
             : (tool.description ?? "");
     const readLimit =
       name === "bus_read" || name === "bus_wait"
-        ? " The oldest whole messages fitting a 4 MiB result carrier are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor."
+        ? " The oldest whole messages fitting a complete 4 MiB result are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor."
         : "";
     return {
       name,
@@ -294,6 +299,12 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
         try {
           return await exchange(name, args, context.signal);
         } catch (error) {
+          if (error instanceof VersionMismatch)
+            return failure(
+              error.confirmed
+                ? "The Bus call was not sent; the hosted bridge and the native Bus run different versions. An operator must rebind or upgrade the bridge before this call can succeed."
+                : "The Bus call was not sent; the hosted bridge could not confirm the native Bus version it is bound to. An operator must check the binding and rebind or upgrade the bridge before this call can succeed."
+            );
           if (error instanceof BeforeDispatch)
             return failure(
               "The Bus call was not sent; the connection or required tool is unavailable."
@@ -306,10 +317,80 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
     };
   });
 
+/** The native Bus did not report the exact version this bridge is bound to. */
+class VersionMismatch extends BeforeDispatch {
+  /** False when the Bus reported no usable version, so a difference is not established. */
+  readonly confirmed: boolean;
+  constructor(confirmed: boolean) {
+    super();
+    this.confirmed = confirmed;
+  }
+}
+type Preflight = "version_mismatch" | "unavailable";
+const PREFLIGHT_RECORDS = 8;
+const versionLabel = (value: unknown) =>
+  typeof value !== "string"
+    ? "absent"
+    : /^[A-Za-z0-9._+-]{1,64}$/.test(value)
+      ? value
+      : "unrecognized";
+
+/**
+ * Operator lines for pre-dispatch refusals, never caller identity, arguments, tool names, URLs
+ * or upstream error text. Each reason has its own budget, so one cannot hide the other. A
+ * mismatch is reported once per observed version until a matching version re-arms it; an
+ * unavailable tool once until that tool dispatches again. A failing writer is inert.
+ */
+const preflightDiagnostics = (expected: string, writer: (line: string) => void) => {
+  const written: Record<Preflight, number> = { version_mismatch: 0, unavailable: 0 };
+  let reportedVersion: string | undefined;
+  const unavailableTools = new Set<string>();
+  const write = (reason: Preflight, record: Record<string, string>) => {
+    if (written[reason] > PREFLIGHT_RECORDS) return;
+    written[reason]++;
+    try {
+      writer(
+        "[agent-bus] hosted-peer-preflight " +
+          JSON.stringify(
+            written[reason] > PREFLIGHT_RECORDS
+              ? { type: "exhausted", reason }
+              : { ...record, timestamp: new Date().toISOString() }
+          )
+      );
+    } catch {
+      // Diagnostics never change the call's outcome.
+    }
+  };
+  return {
+    mismatch: (observed: unknown) => {
+      const label = versionLabel(observed);
+      if (label === reportedVersion) return;
+      reportedVersion = label;
+      write("version_mismatch", {
+        reason: "version_mismatch",
+        expected: versionLabel(expected),
+        observed: label,
+      });
+    },
+    matched: () => {
+      reportedVersion = undefined;
+    },
+    unavailable: (tool: string) => {
+      if (unavailableTools.has(tool)) return;
+      unavailableTools.add(tool);
+      write("unavailable", { reason: "unavailable" });
+    },
+    dispatched: (tool: string) => {
+      unavailableTools.delete(tool);
+    },
+  };
+};
+
 /** Fresh loopback transport per call; discovery checks version before every exchange. */
 export const busPeer = async (options: {
   readonly busPort: number;
   readonly expectedBusVersion: string;
+  readonly diagnostics?: (line: string) => void;
 }) => {
   if (
     !Number.isInteger(options.busPort) ||
@@ -327,14 +408,22 @@ export const busPeer = async (options: {
     timeout: "5 seconds",
     maxMessageBytes: 8 * 1024 * 1024,
   });
+  const preflight = preflightDiagnostics(
+    options.expectedBusVersion,
+    options.diagnostics ?? ((line) => console.error(line))
+  );
   const exchange: Exchange = (name, args, signal) => {
     let dispatched = false;
+    let mismatch = false;
+    let observed: unknown;
     return runtime
       .runPromise(
         Effect.gen(function* () {
           const client = yield* McpClient.McpClient;
-          if (client.serverInfo?.version !== options.expectedBusVersion)
-            return yield* Effect.fail(new Error("Unexpected Bus version."));
+          observed = client.serverInfo?.version;
+          mismatch = observed !== options.expectedBusVersion;
+          if (mismatch) return yield* Effect.fail(new Error("Unexpected Bus version."));
+          preflight.matched();
           const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
           if (!tool) return yield* Effect.fail(new Error("Bus tool unavailable."));
           if (
@@ -360,6 +449,7 @@ export const busPeer = async (options: {
         { signal }
       )
       .then((result) => {
+        preflight.dispatched(name);
         const { structuredContent, isError, _meta } = result;
         if (structuredContent !== undefined && !object(structuredContent))
           throw new Error("Invalid Bus result.");
@@ -371,8 +461,17 @@ export const busPeer = async (options: {
         };
       })
       .catch((error: unknown) => {
-        if (!dispatched) throw new BeforeDispatch();
-        throw error;
+        if (dispatched) {
+          preflight.dispatched(name);
+          throw error;
+        }
+        // A caller's own cancellation is not an operator fault.
+        if (!signal?.aborted) {
+          if (mismatch) preflight.mismatch(observed);
+          else preflight.unavailable(name);
+        }
+        if (!mismatch) throw new BeforeDispatch();
+        throw new VersionMismatch(typeof observed === "string" && observed !== "");
       });
   };
   return { exchange, wake: wakePort(exchange), dispose: () => runtime.dispose() };

@@ -259,6 +259,12 @@ test("the bundle reports its release and the source reports itself as source", a
   expect(servers.source!.client.getServerVersion()?.version).toBe(`${VERSION}+source`);
 });
 
+test("the relocated bundle advertises exact cursor support on stdout", async () => {
+  const { code, stdout } = await run("bundle", ["cursors", "--help"]);
+  expect(code).toBe(0);
+  expect(stdout).toContain("Exact-address cursor layout v2:");
+});
+
 test("bundled and source serve present the same MCP surface", async () => {
   const [bundled, source] = [servers.bundle!.client, servers.source!.client];
   expect(bundled.getServerVersion()?.name).toBe(source.getServerVersion()?.name);

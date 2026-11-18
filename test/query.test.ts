@@ -1278,7 +1278,13 @@ describe("snapshots and cursors", () => {
     const config = await freshLedger("native-budget-pages");
     const bus = await startBus(flureeStore(config));
     const narrow = message({ from: "budget-match", to: ["*"], body: "x".repeat(27_000) });
-    const huge = message({ from: "budget-match", to: ["*"], body: "€".repeat(13_000) });
+    // 39,000 bytes, split between body and subject, each within the searchable-text limit.
+    const huge = message({
+      from: "budget-match",
+      to: ["*"],
+      body: "€".repeat(6_500),
+      subject: "€".repeat(6_500),
+    });
     const last = message({ from: "budget-match", to: ["*"], body: "last" });
     await bus.append(narrow, huge, last);
     const { ledger, headT: t } = await bus.ok("bus_queries");
@@ -1465,10 +1471,16 @@ describe("snapshots and cursors", () => {
   test("pages fit the byte limit by whole rows, resume after the last emitted row, and fail on one oversized row", async () => {
     const config = await freshLedger("bytes");
     const bus = await startBus(flureeStore(config));
-    // 39,000 UTF-8 bytes in 13,000 characters: two such rows exceed 65,536 bytes, though not
-    // 65,536 characters, so a page holds one of them only when the limit counts bytes.
+    // 39,000 UTF-8 bytes in 13,000 characters, split between body and subject (each within the
+    // searchable-text limit): two such rows exceed 65,536 bytes, though not 65,536 characters,
+    // so a page holds one of them only when the limit counts bytes.
     const big = (tag: string) =>
-      message({ from: "claude/a", to: ["*"], body: `${tag}${"€".repeat(13_000)}` });
+      message({
+        from: "claude/a",
+        to: ["*"],
+        body: `${tag}${"€".repeat(6_500)}`,
+        subject: "€".repeat(6_500),
+      });
     // damaged, valid (fits), damaged, valid (too big to share the page), valid
     const before = await damaged(config);
     const fits = big("a");
@@ -1519,10 +1531,20 @@ describe("snapshots and cursors", () => {
     expect(ids(rest.rows)).toEqual([crowded.id]);
     expect(rest).toMatchObject({ damaged: 1, damagedTotal: 2, exhausted: true, complete: false });
 
-    // One row too large alone fails by name, whether it is 70,000 ASCII bytes or 66,000 UTF-8
-    // bytes in 22,000 characters.
-    const huge = message({ from: "claude/a", to: ["*"], body: "x".repeat(70_000) });
-    const wide = message({ from: "claude/a", to: ["*"], body: "€".repeat(22_000) });
+    // One row too large alone fails by name, whether its body and subject are 65,536 ASCII bytes
+    // or 65,532 UTF-8 bytes in 21,844 characters, each field within the searchable-text limit.
+    const huge = message({
+      from: "claude/a",
+      to: ["*"],
+      body: "x".repeat(32_768),
+      subject: "y".repeat(32_768),
+    });
+    const wide = message({
+      from: "claude/a",
+      to: ["*"],
+      body: "€".repeat(10_922),
+      subject: "€".repeat(10_922),
+    });
     await bus.append(huge, wide);
     for (const entry of [huge, wide]) {
       expect(
@@ -1539,7 +1561,8 @@ describe("snapshots and cursors", () => {
   test("a byte cut between entries sharing one commit resumes at the next id, in both directions", async () => {
     const config = await freshLedger("bytes-tie");
     const bus = await startBus(flureeStore(config));
-    // Two 39,000-byte entries written in one commit, listed out of id order, then a small one.
+    // Raw legacy fixture: two 39,000-byte entries in one commit, out of id order. The UTF-8 text
+    // exceeds today's writer admission but is safe for the provider index and must stay readable.
     const tie = ["tie-b", "tie-a"].map((name) =>
       message({ from: "claude/a", to: ["*"], body: "€".repeat(13_000), id: name })
     );
@@ -1706,7 +1729,8 @@ describe("raw SPARQL", () => {
       await bus.refused("bus_query", { query: "SELECT ?s WHERE { ?s bus:id ?o }", t: 0 })
     ).toBe(`t must be a commit from 1 to ${counted.t}.`);
 
-    const oversized = message({ from: "claude/a", to: ["*"], body: "z".repeat(70_000) });
+    // Within the searchable-text limit, a body of quotes doubles when JSON-escaped.
+    const oversized = message({ from: "claude/a", to: ["*"], body: '"'.repeat(32_768) });
     await bus.append(oversized);
     const at = counted.t + 1;
     expect(
