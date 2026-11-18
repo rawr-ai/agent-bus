@@ -18,6 +18,7 @@ import {
   type WitnessRead,
   witnessIri,
 } from "./Ledger.ts";
+import { storable } from "./message-carrier.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
@@ -116,6 +117,24 @@ export const toNode = (message: Message, json: string) => ({
   ...optional("bus:status", message.presence?.status),
 });
 
+const stringAsLiteral = (value: unknown) =>
+  typeof value === "string" ? { "@value": value, "@type": "xsd:string" } : value;
+
+/** Conditional INSERT templates treat bare object strings beginning with '?' as variables. */
+const toGuardedNode = (message: Message, json: string) => {
+  const { "@context": _, "@id": id, "@type": type, ...properties } = toNode(message, json);
+  return {
+    "@id": id,
+    "@type": type,
+    ...Object.fromEntries(
+      Object.entries(properties).map(([property, value]) => [
+        property,
+        Array.isArray(value) ? value.map(stringAsLiteral) : stringAsLiteral(value),
+      ])
+    ),
+  };
+};
+
 /**
  * Inline full-text scoring over message bodies and subjects. Declared in the
  * ledger's config graph before any message is written, so no reindex is needed.
@@ -147,7 +166,7 @@ const fullTextConfig = (ledger: string) => ({
  * cursor is the last commit `t` read. The server's event stream only wakes
  * readers: reading from the cursor decides what is delivered.
  */
-export const layerFluree = (config: FlureeConfig) =>
+export const layerFluree = (config: FlureeConfig, options?: { readonly existingOnly?: boolean }) =>
   Layer.effectContext(
     Effect.gen(function* () {
       const base = yield* HttpClient.HttpClient;
@@ -259,9 +278,11 @@ export const layerFluree = (config: FlureeConfig) =>
         Effect.withSpan("Ledger.end")
       );
 
-      yield* ensureLedger;
-      // A creator that stopped before writing the config leaves an empty ledger; finish it.
-      if ((yield* end) === 0) yield* writeConfig;
+      if (options?.existingOnly !== true) {
+        yield* ensureLedger;
+        // A creator that stopped before writing the config leaves an empty ledger; finish it.
+        if ((yield* end) === 0) yield* writeConfig;
+      }
       // The first commit's id names this incarnation of the ledger.
       const incarnation = send(
         HttpClientRequest.get(`${api}/show/${ledger}?commit=${encodeURIComponent("t:1")}`)
@@ -573,6 +594,8 @@ export const layerFluree = (config: FlureeConfig) =>
             input.notification.id === input.operation
           )
             return yield* invalidDesignation();
+          // Checked before the send, where a failure is still definite; after it, only UNKNOWN.
+          yield* storable(input.notification);
           const json = yield* encode(input.notification).pipe(Effect.mapError(invalidDesignation));
           const update = guardedSend(
             HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
@@ -607,6 +630,7 @@ export const layerFluree = (config: FlureeConfig) =>
         }).pipe(Effect.withSpan("Ledger.designate"));
 
       const append = Effect.fn("Ledger.append")(function* (message: Message) {
+        yield* storable(message);
         const json = yield* encode(message).pipe(
           Effect.mapError(
             () => new LedgerError({ message: "The ledger entry could not be encoded." })
@@ -685,17 +709,18 @@ export const layerFluree = (config: FlureeConfig) =>
        * with the current head), and only once for its id. The answer is read from the attempted
        * entry at its own commit, never from the response alone. Fails only before sending.
        */
-      const admit = (presence: Message, basis: Pin) =>
+      const admit = (entry: Message, basis: Pin) =>
         Effect.gen(function* () {
-          if (presence.kind !== "presence" || !validOperation(presence.id)) {
-            return yield* new LedgerError({ message: "Invalid guarded presence input." });
+          if (!validOperation(entry.id)) {
+            return yield* new LedgerError({ message: "Invalid guarded entry id." });
           }
-          const json = yield* encode(presence).pipe(
+          yield* storable(entry);
+          const json = yield* encode(entry).pipe(
             Effect.mapError(
               () => new LedgerError({ message: "The ledger entry could not be encoded." })
             )
           );
-          const { "@context": _, ...node } = toNode(presence, json);
+          const node = toGuardedNode(entry, json);
           // Narrows, without closing, the window in which a replaced ledger takes the insert.
           if ((yield* bounded(guardedIncarnation)) !== basis.incarnation) return yield* replaced();
           const update = guardedSend(
@@ -705,16 +730,18 @@ export const layerFluree = (config: FlureeConfig) =>
                 where: [
                   [
                     "optional",
+                    // VALUES binds a literal even when the address starts with '?'.
+                    ["values", ["?sender", [entry.from]]],
                     {
                       "@id": "?other",
                       "@type": "bus:Presence",
-                      "bus:from": presence.from,
+                      "bus:from": "?sender",
                       "bus:json": { "@value": "?otherJson", "@t": "?otherT" },
                     },
                     ["filter", `(> ?otherT ${basis.head})`],
                   ],
                   ["filter", "(not (bound ?otherT))"],
-                  ["optional", { "@id": messageIri(presence.id), "?predicate": "?object" }],
+                  ["optional", { "@id": messageIri(entry.id), "?predicate": "?object" }],
                   ["filter", "(not (bound ?object))"],
                 ],
                 insert: node,
@@ -729,7 +756,7 @@ export const layerFluree = (config: FlureeConfig) =>
               if (id !== basis.incarnation) return { status: "UNKNOWN" } satisfies Admission;
               const answered = Option.isSome(response) && response.value.t >= 1;
               const head = answered ? response.value.t : yield* guardedHead;
-              const commits = yield* attemptAt(presence.id, head);
+              const commits = yield* attemptAt(entry.id, head);
               if ((yield* guardedIncarnation) !== id)
                 return { status: "UNKNOWN" } satisfies Admission;
               const commit = commits[0];

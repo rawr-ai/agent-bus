@@ -31,6 +31,7 @@ import {
   WakeStanding,
 } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
+import { messageCarrierBytes, publicMessages as projectMessages } from "./message-carrier.ts";
 import { updateBulletin, updateDirectory } from "./Orientation.ts";
 import { ORIENT_DEADLINE, orient } from "./OrientationView.ts";
 import {
@@ -94,41 +95,10 @@ const PublicMessage = Schema.Struct({
 });
 export const Messages = Schema.Struct({ messages: Schema.Array(PublicMessage) });
 
-const publicMessages = (messages: ReadonlyArray<Message>): typeof Messages.Type => ({
-  messages: messages.map((message) => ({
-    id: message.id,
-    ts: message.ts,
-    from: message.from,
-    to: message.to,
-    kind: message.kind,
-    body: message.body,
-    ...(message.subject === undefined ? {} : { subject: message.subject }),
-    ...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
-    ...(message.origin === undefined
-      ? {}
-      : {
-          origin: {
-            host: message.origin.host,
-            ...(message.origin.cwd === undefined ? {} : { cwd: message.origin.cwd }),
-            ...(message.origin.repo === undefined ? {} : { repo: message.origin.repo }),
-            ...(message.origin.branch === undefined ? {} : { branch: message.origin.branch }),
-          },
-        }),
-  })),
-});
+// The projection lives with the per-entry bound that creators check; typed here against the schema.
+const publicMessages: (messages: ReadonlyArray<Message>) => typeof Messages.Type = projectMessages;
 
-/** Exact JSON bytes of the duplicated public MCP result, excluding the JSON-RPC envelope. */
-export const messageCarrierBytes = (messages: ReadonlyArray<Message>) => {
-  const structuredContent = publicMessages(messages);
-  return Buffer.byteLength(
-    JSON.stringify({
-      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-      structuredContent,
-      isError: false,
-    }),
-    "utf8"
-  );
-};
+export { messageCarrierBytes };
 
 const messageAdmission = (maximum: number | undefined) =>
   maximum === undefined
@@ -378,7 +348,8 @@ const joinFields = {
   }),
   session: Session,
   cwd: Schema.String.check(Schema.isStartingWith("/")).annotate({
-    description: "Your absolute working directory. Messages you send record its repo and branch.",
+    description:
+      "Your absolute working directory, at most 4,096 UTF-8 bytes. Messages you send record it with its repo and branch.",
   }),
   topics: Schema.optionalKey(
     Schema.Array(Schema.String).annotate({
@@ -421,7 +392,7 @@ const Join = Tool.make("bus_join", {
 // Destructive: it replaces another session's hold, which is refused from then on.
 const Takeover = Tool.make("bus_takeover", {
   description:
-    "Only to replace a session that has ended, when the human says so: joins an address another session holds, naming that holder's join id from bus_join's refusal. Its unread messages carry over to you, and it is refused from then on. The holder id is checked only while another session holds the address; on a free address, or your own, this joins as bus_join does. Otherwise join an address of your own with bus_join.",
+    "Only to replace a session that has ended, when the human says so: joins an address another session holds, naming that holder's join id from bus_join's refusal. It uses this Bus machine's cursor for the address, or starts at the decision cut if there is none. Unread position does not transfer from another machine. The holder id is checked only while another session holds the address; on a free address, or your own, this joins as bus_join does. Otherwise join an address of your own with bus_join.",
   parameters: Schema.Struct({
     ...joinFields,
     holder: Schema.String.annotate({
@@ -436,7 +407,7 @@ const Takeover = Tool.make("bus_takeover", {
 
 const Publish = Tool.make("bus_publish", {
   description:
-    "Send a message. `to` names the audience: peer addresses, #topic for its subscribers, or * for everyone. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.",
+    "Send from an address you own. The bus refuses the send if the sender's presence changes after its ownership check but before commit. If the outcome is unconfirmed, check history; do not retry blindly. `to` names the audience: peer addresses, #topic for its subscribers, or * for everyone. The complete public read carrier must fit 1 MiB, including recipients and escaping. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.",
   parameters: Schema.Struct({
     from: Address,
     session: Session,
@@ -445,10 +416,13 @@ const Publish = Tool.make("bus_publish", {
         "Audience: peer addresses, #topic for its subscribers, or * for every peer. A topic and an address may appear together; @mentions in body do not route. A sender never receives its own message. Choose a reply's audience explicitly; replyTo does not inherit recipients.",
     }),
     body: Schema.String.annotate({
-      description: "The message text, including who, if anyone, is asked to respond.",
+      description:
+        "The message text, including who, if anyone, is asked to respond. Body and subject are searchable text, each at most 32,768 UTF-8 bytes; link to longer content (a file path, URL or commit) instead.",
     }),
     subject: Schema.optionalKey(
-      Schema.String.annotate({ description: "A short subject line; bus_history searches it." })
+      Schema.String.annotate({
+        description: "A short subject line, at most 32,768 UTF-8 bytes; bus_history searches it.",
+      })
     ),
     replyTo: Schema.optionalKey(
       Schema.String.annotate({

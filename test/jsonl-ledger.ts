@@ -133,11 +133,11 @@ export const layerJsonl = (file: string) =>
       // unreadable (which `read` would skip) refuses: the guard may refuse too often, never
       // too rarely. A whole command line passes, as Fluree's command nodes are never presences;
       // a damaged one may have been anything, so it refuses.
-      const admit = (presence: Message, basis: { readonly head: number }) =>
+      const admit = (message: Message, basis: { readonly head: number }) =>
         Effect.gen(function* () {
           // An id already written, at any position, refuses: an entry is admitted once.
           const { entries: written } = yield* read(0);
-          if (written.some((entry) => entry.message.id === presence.id)) {
+          if (written.some((entry) => entry.message.id === message.id)) {
             return {
               status: "REFUSED",
               cut: { head: yield* end, incarnation: "jsonl" },
@@ -157,8 +157,8 @@ export const layerJsonl = (file: string) =>
             const decoded = yield* Effect.option(decode(line));
             if (
               Option.isNone(decoded) ||
-              decoded.value.id === presence.id ||
-              (decoded.value.kind === "presence" && decoded.value.from === presence.from)
+              decoded.value.id === message.id ||
+              (decoded.value.kind === "presence" && decoded.value.from === message.from)
             ) {
               return {
                 status: "REFUSED",
@@ -166,7 +166,7 @@ export const layerJsonl = (file: string) =>
               } satisfies Admission;
             }
           }
-          yield* write(presence);
+          yield* write(message);
           return {
             status: "ADMITTED",
             cut: { head: yield* end, incarnation: "jsonl" },

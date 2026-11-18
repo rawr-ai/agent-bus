@@ -24,6 +24,8 @@ Use this when the bus misbehaves: each symptom, how to check it, the fix and how
 | Borrowed turns fail with "out of credits", or run as the earlier user | Whether the Codex login changed since the daemon started | [Borrowed turns run as an earlier user](#borrowed-turns-run-as-an-earlier-user) | A borrowed turn succeeds |
 | A join is refused with "held by another session" | The refusal's facts about the holder | [Held by another session](#held-by-another-session) | `agent-bus peers` shows the address with the right owner |
 | A read fails with "Cursor t=… is ahead of …" | The address's cursor file | [A cursor is ahead of the ledger](#a-cursor-is-ahead-of-the-ledger) | The read returns, and the warnings stop |
+| `cursors` or `serve` refuses a cursor format transition | The current installation, exact/legacy generation, and the refusal | [Cursor format transition refused](#cursor-format-transition-refused) | A reviewed conversion or export completes, or the installation stays held |
+| `bus_read` or `bus_wait` says the oldest unread commit cannot fit | The reader limits and original holding | [The oldest unread mail does not fit](#the-oldest-unread-mail-does-not-fit) | The same owner reads the complete group, or it stays unread |
 | A read or ownership operation fails with "A ledger entry at t=… could not be decoded." | The stored entry at the named commit | [An entry cannot be decoded](#an-entry-cannot-be-decoded) | The affected operation succeeds after the underlying damage is resolved |
 | A command run over SSH on the other machine can't find `bun` | `command -v bun` over SSH | [`bun` not found over SSH](#bun-not-found-over-ssh-on-the-other-machine) | The command runs |
 
@@ -409,19 +411,23 @@ What follows a refusal: the first live one comes here. A bus maintainer establis
 
 A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again.`, and `serve`'s log has `Not waking <address> this pass: Cursor …` for a Claude address. Cursors are kept per incarnation of the ledger ([messaging](../architecture/messaging.md#rules), rule 11), so a plain replacement starts every address over, and this error shows only when the ledger went back in its own history (restored from an earlier copy) or a cursor file was edited. An agent that meets it tells the human and doesn't rejoin: a plain rejoin changes nothing, and a rejoin with `replay` re-delivers every message ever sent to the address, which is the human's choice.
 
-1. Look at the cursor.
+1. **Locate the exact cursor.** Set `active_cursor_dir` to the exact current `<first commit id>.v2` directory recorded for this installation and ledger. Use the approved Bun executable, not a wildcard across ledgers or archived generations:
 
    ```sh
-   cat ~/.agent-bus/fluree-cursors/*/*/<address, with / written as %2F>.json
+   cursor_name=$("$approved_bun" --no-env-file -e \
+     'console.log(Bun.CryptoHasher.hash("sha256", Buffer.from(process.argv[1], "utf16le"), "hex") + ".json")' \
+     "$address")
+   cursor_file="$active_cursor_dir/$cursor_name"
+   cat "$cursor_file"
    ```
 
-   Expect `{"cursor":<n>}` with the `n` in the message. *Rehearsed 2026-10-28.*
+   Expect a JSON object with this exact `address` and `cursor` equal to the `n` in the message. Refuse an unexpected address; do not read or clear it through a legacy filename. Keep state contents private. *Unverified with installed exact-format state.*
 
 2. Choose with the human what the address should see.
-   - **Start at the present** (mail since the ledger's end isn't delivered): move the cursor file aside, then have the owner rejoin. The read says the address "has not joined the bus" until the rejoin, which sets the cursor to the ledger's end. *Rehearsed 2026-10-28.*
+   - **Start at the present** (existing unread mail will not be delivered): with the owned `serve` disabled and stopped, move only the verified exact cursor file to an empty private backup directory named by `backup`. Restart the same exact-format `serve`, then have the owner rejoin. The read says the address "has not joined the bus" until the rejoin, which sets the cursor to the ledger's end. *Unverified with installed exact-format state.*
 
      ```sh
-     mv ~/.agent-bus/fluree-cursors/*/*/<address, with / written as %2F>.json ~/.Trash/
+     mv "$cursor_file" "$backup/"
      ```
 
    - **Read everything again** (every message ever sent to the address, including mail already read): the owner rejoins with `replay`, which sets the cursor to 0. *Rehearsed 2026-10-28.*
@@ -430,9 +436,70 @@ A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>): the ledger w
      agent-bus join --address <address> --runtime <runtime> --replay
      ```
 
-   A plain rejoin does not reset the cursor. *Rehearsed 2026-10-28.*
+   A plain rejoin does not reset an existing cursor. *Rehearsed 2026-10-28 with the previous file format.*
 
-3. Verify: the owner's `bus_read` returns and the `Not waking` warnings stop. *Rehearsed 2026-10-28.*
+3. Verify: the owner's `bus_read` returns and the `Not waking` warnings stop. *Unverified for the exact-format repair.*
+
+## The oldest unread mail does not fit
+
+A read or wait that refuses its oldest commit group has not advanced the cursor. Lowering the limit, reading history, replaying or joining under a different address does not consume that group. The new write bounds prevent this particular byte-limit refusal for mail from upgraded writers, but do not change older or externally written groups.
+
+1. Preserve the original holding and cursor. Ask the operator to establish whether the same authorized holder has access to a compatible reader whose budget fits the whole group. An explicit native limit may be raised when the same native session already owns the address; do not borrow hosted session credentials, move ownership or bypass the bridge's authority.
+2. Only with such a reader, have the holder read normally and verify it received the whole group before checking later unread mail. A lost response is not evidence of consumption by the caller; inspect history without treating it as acknowledgement.
+3. There is no supported in-bridge way to page, skip or acknowledge a too-large historical group. If no authorized reader can fit it, record the address as blocked and preserve its state for reviewed recovery. Do not reset its cursor or substitute a new inbox.
+
+*Hosted read/wait refusal and non-consumption, plus a same-session larger native read, are covered by disposable fixtures. No installed hosted recovery is qualified.*
+
+## Cursor format transition refused
+
+Follow the [deployment gate](deploy.md#change-the-cursor-format). Keep the owned writer disabled and stopped; preserve both directories, recognizable interrupted files, and any archived generations. Do not fall back to an older launcher against retained files or pick a cursor from the numerical maximum, minimum or preserved filename casing. An old aliased file cannot tell which address moved it. Use `cursor_cli` as defined in the deployment gate. These operator recovery steps are *Unverified on an installed service*.
+
+1. **Check the phase.** For a legacy import refusal, run `cursor_cli --action check` and retain the outcome privately. Expect a named legacy file and its first refusal (ambiguous, unattributed, damaged or ahead of the ledger), or a count and first holder when currently held local positions are missing. The holder diagnostic identifies the exact file and, where representable, its prior legacy filename. Inspect only the named incarnation. A query failure is not proof that its history was empty. Finder's `.DS_Store` and verified AppleDouble sidecars are not cursor positions and may coexist with them; a genuine `._` address remains a real cursor.
+
+2. **Decide with the human, before moving anything.** Independently establish exact positions for affected current holders or hold the installation for reviewed repair. Isolation is only an option for a file whose removal leaves no currently held local address without an attributable position. If the human approves, with the bus still stopped set `legacy_file` to that one file in the current incarnation and `backup` to a new empty private backup directory outside the active cursor directory. Never move a whole generation or a marker as a repair for one address.
+
+   There is one pre-migration exception for an existing recovery in progress: if *no exact generation or pending export has been published*, the recorded previous legacy writer is still authoritative. For a verified unaliased address whose file was already moved by an approved repair, or whose existing cursor is independently known to be ahead, the human can have that same approved legacy job and owner finish the older recovery before migration. Keep the cursor evidence; the owner's ordinary `bus_join` recreates a deliberately moved-aside position at head, while `bus_join` with `replay: true` explicitly restarts a verified address's history. Both may skip or repeat mail, so do not use this exception for an ambiguous file, unknown absence, or after any exact generation was published. Once the old repair is verified, hold the legacy writer again and rerun the stopped `check` and `migrate` steps. Do not use this exception as a rollback after activation.
+
+   ```sh
+   mv "$legacy_file" "$backup/"
+   cursor_cli --action check
+   cursor_cli --action migrate
+   ```
+
+   Expected: the uncertain file remains preserved outside active state, and only the remaining attributable values migrate. If a held local position is missing, stop: isolation cannot authorize a start at head or replay. No unaffected cursor is reset. The ledger and `bus_history` remain available for investigation. For a refused downgrade, keep exact state and repair forward; isolating an exact cursor to force a downgrade is not lossless rollback.
+
+3. **For an interrupted downgrade, choose whether to finish or return to the exact writer.** Keep `serve` disabled and stopped. Before changing binding, `cursor_cli --action export` can resume a provable export. If that is no longer possible or desired, while the exact generation is still active run:
+
+   ```sh
+   cursor_cli --action abort-export
+   cursor_cli --action check
+   ```
+
+   Expected: both report `state: "exact"` and the same original generation. An abort verifies the unchanged exact files and original legacy state, parks any untouched projected legacy directory in the reported `parked` sibling, restores the original legacy directory, and clears the hold last. Keep parked directories as private recovery evidence; they are not active state or trash. A crash during abort can be retried with the same command. A divergent source, divergent output, or a completed export with already-retired exact state refuses the abort; preserve the evidence and keep the job stopped. Rebind or verify the same approved exact binary before enabling the job. No replay, import from old files or position reset occurs.
+
+4. **If export refused without changing the active exact state, resume only the exact writer.** Recheck while held. If `check` still confirms the same exact generation, the files are unchanged and no export is pending, verify or held-bind the known exact package, then enable and start it. An ineligible projection is not corruption of the exact cursor. A long address, historical alias or witnessless position can make rollback unavailable. A first join can stage a cursor and remain unconfirmed while its provider write is still in flight. Do not infer from missing history that the cursor is disposable, or retry/replay a join to repair an export. Keep the exact state. If `check` refuses an interrupted export, use step 3 instead.
+
+5. **If export completed but the legacy binding failed, recover forward while still held.** Establish which launcher is now selected; a failed bind may have changed it. If the legacy job has not resumed, inspect the layout without writing:
+
+   ```sh
+   cursor_cli --action check
+   ```
+
+   Continue only when this reports `state: "legacy"` for the export's recorded installation and incarnation. If it refuses or reports exact state, keep the writer held and select recovery for that phase instead. Running export against an active exact generation would start a new export, not verify the completed one. With that phase confirmed, verify the completed export receipt:
+
+   ```sh
+   cursor_cli --action export
+   ```
+
+   Stop if it refuses or does not report `state: "exported"` for the same installation, incarnation and generation as the recorded export. Only after this proves the completed projection is unchanged, migrate those current positions, not the archived exact files:
+
+   ```sh
+   cursor_cli --action migrate && cursor_cli --action check
+   ```
+
+   Both commands must succeed and report the same **new** exact generation. Held-bind and verify the exact package even if its launcher appeared unchanged, then enable and start the owned job. If the legacy writer did run, hold it again and use ordinary stopped migration from its latest positions; the old export receipt is not current evidence.
+
+6. **If retained legacy state changed after migration, preserve the exact generation.** The startup and check refusal prevents treating uncertain legacy activity as harmless. Restore the original legacy files and any original receipt only from authenticated, same-generation retained bytes, after ruling out an advanced legacy writer. Then run `check` while held and verify the intended exact binding before resuming. Do not edit the manifest digest, restore an empty directory as a reset or choose a new baseline by guesswork. If original bytes or genuine legacy activity cannot be reconciled, keep the job held for reviewed repair. A concise serve refusal does not disable launchd's KeepAlive; hold the job explicitly rather than letting it retry.
 
 ## `bun` not found over SSH on the other machine
 

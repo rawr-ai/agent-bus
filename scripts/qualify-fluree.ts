@@ -46,6 +46,7 @@ import * as Catalogue from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
+import { storable } from "../src/message-carrier.ts";
 import type { QueryGateway } from "../src/Query.ts";
 import * as Selections from "../src/RankedSelections.ts";
 import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
@@ -234,6 +235,7 @@ type Guard = "full" | "pointer" | "none";
  * assert its notification a second time.
  */
 const writeBody = (r: Replacement, guard: Guard) => {
+  Effect.runSync(storable(r.message));
   const { "@context": _, ...notification } = Fluree.toNode(r.message, encodeMessage(r.message));
   const current = { "@id": scopeIri(r.scope), "bus:revision": r.expected };
   const where =

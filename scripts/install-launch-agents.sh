@@ -33,6 +33,9 @@
 # Before running anything a release holds, it checks the files it runs with system tools
 # against the anchored manifest. Run this installer from known code: the reviewed checkout,
 # or a release copy checked the same way first (docs/frames/release-packaging.md).
+# --bind-only with --release and --expect changes the launcher without starting serve. It
+# requires the existing owned job to be persistently disabled, unloaded and off its port.
+# The operator must separately establish that the previously running process has exited.
 #
 # AGENT_BUS_DIR, AGENT_BUS_FLUREE_PORT, AGENT_BUS_PORT, AGENT_BUS_LABEL (the label prefix) and
 # AGENT_BUS_LAUNCHER (the managed `agent-bus` executable) override the defaults, so a
@@ -44,12 +47,14 @@ remote=""
 release=""
 expect=""
 runtime_only=false
+bind_only=false
 show_help=false
 bun_bin=""
 usage() {
   echo "usage: $0 [--remote SSH_HOST] [--bun /absolute/path/to/bun]"
   echo "       $0 --runtime-only --bun /absolute/path/to/bun"
   echo "       $0 --release /absolute/releases/<id> --expect <manifest sha256>"
+  echo "       $0 --release /absolute/releases/<id> --expect <manifest sha256> --bind-only"
   echo "AGENT_BUS_REPO may select an absolute source root, including for explicit rollback."
 }
 fail() { echo "$*" >&2; exit 1; }
@@ -84,6 +89,11 @@ while [ "$#" -gt 0 ]; do
       runtime_only=true
       shift
       ;;
+    --bind-only)
+      [ "$bind_only" = false ] || fail "--bind-only was supplied more than once"
+      bind_only=true
+      shift
+      ;;
     --help|-h) show_help=true; shift ;;
     *) usage >&2; fail "unknown argument: $1" ;;
   esac
@@ -94,6 +104,7 @@ if [ "$runtime_only" = true ]; then
   [ -n "$bun_bin" ] || fail "--runtime-only requires an explicit --bun path"
 fi
 [ -n "$expect" ] && [ -z "$release" ] && fail "--expect requires --release"
+[ "$bind_only" = false ] || [ -n "$release" ] || fail "--bind-only requires --release and --expect"
 # One spelling of the release for every check and the binding: no trailing separator, which
 # would make a test of the path follow a link standing in its place.
 while :; do case "$release" in */) release=${release%/} ;; *) break ;; esac; done
@@ -199,7 +210,7 @@ else mode=source pins="$repo_dir/package.json" entry="$repo_dir/src/bin.ts"; fi
 validation_js=$(cat <<'JS'
 import { lstatSync, readFileSync, readlinkSync, realpathSync } from "node:fs";
 import { dirname, isAbsolute, normalize, resolve } from "node:path";
-const [mode, manifestPath, launcher, entry, runtimePath, releases] = process.argv.slice(1);
+const [mode, manifestPath, launcher, entry, runtimePath, releases, requireExisting] = process.argv.slice(1);
 const fail = (message) => { console.error(message); process.exit(1); };
 const accept = () => { process.stdout.write(`agent-bus-runtime-binding-v1:${realpathSync(runtimePath)}`); process.exit(0); };
 const manifest = JSON.parse(readFileSync(manifestPath, "utf8"));
@@ -218,7 +229,13 @@ const ownsEntry = (path) =>
   mode === "release" ? isAbsolute(path) && normalize(path) === path && path.endsWith("/src/bin.ts") : path === entry;
 let info;
 try { info = lstatSync(launcher); }
-catch (error) { if (error.code === "ENOENT") accept(); throw error; }
+catch (error) {
+  if (error.code === "ENOENT") {
+    if (requireExisting === "true") fail(`--bind-only requires an existing owned launcher at ${launcher}`);
+    accept();
+  }
+  throw error;
+}
 if (info.isSymbolicLink() && ownsEntry(resolve(dirname(launcher), readlinkSync(launcher))))
   accept();
 const quote = (value) => `'${value.replaceAll("'", "'\\''")}'`;
@@ -257,14 +274,17 @@ if (info.isFile()) {
 fail(`Refusing foreign launcher at ${launcher}; move it aside explicitly before installing`);
 JS
 )
-validation=$("$bun_bin" --no-env-file --config=/dev/null -e "$validation_js" \
-  "$mode" "$pins" "$launcher" "$entry" "$bun_bin" "$releases") \
-  || fail "Selected Bun could not validate the source and launcher"
-case "$validation" in
-  # Resolve a selected symlink once, rather than borrowing a mutable global Bun shim.
-  agent-bus-runtime-binding-v1:/*) bun_bin=${validation#agent-bus-runtime-binding-v1:} ;;
-  *) fail "Selected executable did not validate as Bun: $bun_bin" ;;
-esac
+validate_launcher() {
+  validation=$("$bun_bin" --no-env-file --config=/dev/null -e "$validation_js" \
+    "$mode" "$pins" "$launcher" "$entry" "$bun_bin" "$releases" "$bind_only") \
+    || fail "Selected Bun could not validate the source and launcher"
+  case "$validation" in
+    # Resolve a selected symlink once, rather than borrowing a mutable global Bun shim.
+    agent-bus-runtime-binding-v1:/*) bun_bin=${validation#agent-bus-runtime-binding-v1:} ;;
+    *) fail "Selected executable did not validate as Bun: $bun_bin" ;;
+  esac
+}
+validate_launcher
 if [ -z "$release" ]; then
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
     "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
@@ -276,7 +296,7 @@ fi
 # kept; anything else under the label is refused unchanged. A full install still writes it.
 keep_plist=false
 serve_plist="$agents/$prefix.plist"
-if { [ "$runtime_only" = true ] || [ -n "$release" ]; } && { [ -e "$serve_plist" ] || [ -L "$serve_plist" ]; }; then
+check_owned_plist() {
   refuse_plist() { fail "Refusing to change the serve LaunchAgent at $serve_plist: $1"; }
   [ -f "$serve_plist" ] && [ ! -L "$serve_plist" ] || refuse_plist "it is not a regular file"
   plist_json=$(/usr/bin/plutil -convert json -o - "$serve_plist" 2>/dev/null) || refuse_plist "it is not a readable plist"
@@ -306,11 +326,46 @@ process.stdout.write(`${port}\n${dir}`);
   bus_port=$kept_port
   bus_dir=$kept_dir
   keep_plist=true
+}
+if { [ "$runtime_only" = true ] || [ -n "$release" ]; } && { [ -e "$serve_plist" ] || [ -L "$serve_plist" ]; }; then
+  check_owned_plist
+fi
+[ "$bind_only" = false ] || [ "$keep_plist" = true ] || fail "--bind-only requires the existing owned serve LaunchAgent at $serve_plist"
+
+# An active exact directory can retain older legacy cursor positions. A target that
+# cannot read exact state must not be selected until a stopped export has retired it.
+if [ -e "$bus_dir/fluree-cursors" ] || [ -L "$bus_dir/fluree-cursors" ]; then
+  [ -d "$bus_dir/fluree-cursors" ] || fail "Cannot inspect the installation's cursor layouts"
+  exact=$(/usr/bin/find -L "$bus_dir/fluree-cursors" -mindepth 2 -maxdepth 2 -name '*.v2' -print -quit) \
+    || fail "Cannot inspect the installation's cursor layouts"
+  if [ -n "$exact" ]; then
+    target_cursor_help() {
+      if [ -n "$release" ]; then
+        set -- "$bun_bin" --no-env-file --config="$release/app/bunfig.toml" "$release/app/cli.js"
+      else
+        set -- "$bun_bin" --no-env-file --config=/dev/null "$entry"
+      fi
+      (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" LC_ALL=C CLICOLOR=0 \
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 "$@" cursors --help)
+    }
+    # Legacy CLIs can print main help and exit zero for unknown subcommands.
+    help=$(target_cursor_help 2>/dev/null) || help=""
+    printf '%s\n' "$help" | grep -Fq 'Exact-address cursor layout v2:' ||
+      fail "The selected target does not support the active exact cursor layout. Use the stopped cursor export procedure before selecting a legacy package (docs/runbooks/deploy.md)."
+  fi
 fi
 
 launcher_tmp=""
 agent_tmp=""
-trap '[ -z "$launcher_tmp" ] || rm -f "$launcher_tmp"; [ -z "$agent_tmp" ] || rm -f "$agent_tmp"' EXIT
+backup_pending=""
+bindings_created=""
+cleanup() {
+  [ -z "$launcher_tmp" ] || rm -f "$launcher_tmp"
+  [ -z "$agent_tmp" ] || rm -f "$agent_tmp"
+  [ -z "$backup_pending" ] || rm -f "$backup_pending"
+  [ -z "$bindings_created" ] || rmdir "$bindings_created" 2>/dev/null || true
+}
+trap cleanup EXIT
 trap 'exit 1' HUP INT TERM
 
 shell_quote() { printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"; }
@@ -404,11 +459,35 @@ install_runtime() {
     render_agent "$prefix" "$bus_dir/agent-bus.log" "$launcher" serve > "$agent_tmp"
     chmod 644 "$agent_tmp"
   fi
+  if [ "$bind_only" = true ]; then
+    held_recheck
+    # An identical held rerun leaves both the rollback witness and launcher alone.
+    if [ -f "$launcher" ] && [ ! -L "$launcher" ] && [ -x "$launcher" ] && cmp -s "$launcher" "$launcher_tmp"; then
+      echo "release already bound; serve remains disabled and unloaded"
+      return
+    fi
+  fi
   if [ -n "$release" ] && { [ -e "$launcher" ] || [ -L "$launcher" ]; }; then
     # Keep the binding this activation replaces, for rollback (a source one especially).
     bindings="$(dirname "$releases")/bindings"
-    mkdir -p "$bindings"
-    cp -P "$launcher" "$bindings/launcher.$(date -u +%Y%m%dT%H%M%SZ).$$.before-$(basename "$release")"
+    if [ "$bind_only" = true ]; then
+      if [ ! -d "$bindings" ]; then
+        [ ! -e "$bindings" ] && [ ! -L "$bindings" ] || fail "Bindings path is not a directory: $bindings"
+        mkdir "$bindings"
+        bindings_created="$bindings"
+      fi
+      [ ! -L "$bindings" ] || fail "Bindings directory is a link: $bindings"
+      backup_path="$bindings/launcher.$(date -u +%Y%m%dT%H%M%SZ).$$.before-$(basename "$release")"
+      [ ! -e "$backup_path" ] && [ ! -L "$backup_path" ] || fail "Rollback witness already exists: $backup_path"
+      backup_pending="$backup_path"
+      cp -P "$launcher" "$backup_pending"
+      held_recheck
+      # Once binding starts, retain the witness even if replacement fails.
+      backup_pending=""
+    else
+      mkdir -p "$bindings"
+      cp -P "$launcher" "$bindings/launcher.$(date -u +%Y%m%dT%H%M%SZ).$$.before-$(basename "$release")"
+    fi
   fi
   mv -f "$launcher_tmp" "$launcher"
   launcher_tmp=""
@@ -416,7 +495,11 @@ install_runtime() {
     mv -f "$agent_tmp" "$agents/$prefix.plist"
     agent_tmp=""
   fi
-  load_agent "$prefix" "$bus_dir/agent-bus.log"
+  if [ "$bind_only" = true ]; then
+    echo "release bound; serve remains disabled and unloaded"
+  else
+    load_agent "$prefix" "$bus_dir/agent-bus.log"
+  fi
 }
 
 # valid_token FILE succeeds when FILE holds a JWS (three base64url parts).
@@ -482,9 +565,62 @@ if [ -n "$release" ]; then
     fail "No valid installation-id in $bus_dir. Initialize it before a first activation, or restore this installation's own; activation creates none."
 fi
 
+# A held bind is an operator-controlled transition, not proof that a prior process exited.
+# Keep the exact entry and plist observed before staging, then recheck them and launchd just
+# before the replacement. The operator must exclude concurrent changes throughout.
+launcher_mark() {
+  if [ -L "$launcher" ]; then
+    printf 'link:%s' "$(/usr/bin/readlink "$launcher")"
+  elif [ -f "$launcher" ]; then
+    /usr/bin/shasum -a 256 "$launcher"
+  else
+    return 1
+  fi
+}
+held_recheck() {
+  validate_launcher
+  check_owned_plist
+  [ "$(launcher_mark)" = "$held_launcher" ] || fail "The launcher changed during the held bind"
+  [ "$(/usr/bin/shasum -a 256 "$serve_plist")" = "$held_plist" ] || fail "The serve LaunchAgent changed during the held bind"
+  valid_identity "$bus_dir/installation-id" || fail "The installation identity is no longer valid"
+  [ "$(/usr/bin/shasum -a 256 "$bus_dir/installation-id")" = "$held_identity" ] || fail "The installation identity changed during the held bind"
+
+  disabled=$(LC_ALL=C /bin/launchctl print-disabled "$domain" 2>/dev/null) || fail "Cannot inspect launchd's disabled state"
+  printf '%s\n' "$disabled" | /usr/bin/awk -v label="\"$prefix\"" '
+    $1 == label { count++; if (NF != 3 || $2 != "=>" || $3 != "disabled") bad = 1 }
+    END { exit !(count == 1 && !bad) }
+  ' || fail "The exact serve job is not positively disabled"
+
+  if printed=$(LC_ALL=C /bin/launchctl print "$domain/$prefix" 2>&1); then
+    print_status=0
+  else
+    print_status=$?
+  fi
+  absent=$(printf 'Bad request.\nCould not find service "%s" in domain for user gui: %s' "$prefix" "$(id -u)")
+  [ "$print_status" -eq 113 ] && [ "$printed" = "$absent" ] || fail "The exact serve job is not confirmed unloaded"
+
+  if listeners=$(LC_ALL=C /usr/sbin/lsof -nP -iTCP:"$bus_port" -sTCP:LISTEN 2>&1); then
+    listener_status=0
+  else
+    listener_status=$?
+  fi
+  [ "$listener_status" -eq 1 ] && [ -z "$listeners" ] || fail "The serve port has a listener or could not be inspected"
+}
+if [ "$bind_only" = true ]; then
+  case "$prefix" in *[!A-Za-z0-9._-]*) fail "--bind-only requires a label containing only letters, digits, dot, underscore or hyphen" ;; esac
+  case "$bus_port" in ""|0*|*[!0-9]*) fail "--bind-only requires a canonical TCP port" ;; esac
+  [ "${#bus_port}" -le 5 ] && [ "$bus_port" -le 65535 ] || fail "--bind-only requires a canonical TCP port"
+  held_launcher=$(launcher_mark) || fail "--bind-only requires an existing owned launcher"
+  held_plist=$(/usr/bin/shasum -a 256 "$serve_plist") || fail "Cannot inspect the serve LaunchAgent"
+  held_identity=$(/usr/bin/shasum -a 256 "$bus_dir/installation-id") || fail "Cannot inspect the installation identity"
+  held_recheck
+fi
+
 if [ "$runtime_only" = true ] || [ -n "$release" ]; then
   install_runtime
-  wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
+  if [ "$bind_only" = false ]; then
+    wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"
+  fi
   exit 0
 fi
 

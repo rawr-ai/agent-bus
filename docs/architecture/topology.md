@@ -118,7 +118,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | State | Where | Written by | What it is |
 | --- | --- | --- | --- |
 | The ledger | Bus host: `~/.agent-bus/fluree/storage`, with the Fluree project in `~/.agent-bus/fluree/.fluree` | The Fluree server, for every machine's `serve` | Every message and presence entry, append-only, in ledger `agent-bus:main`. [Messaging](messaging.md) gives its model |
-| Cursors | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>/` | That machine's `serve` | One per address joined from that machine: the last commit `t` read. A replaced ledger has a new first commit, so its subscribers start over |
+| Cursors | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>.v2/` | That machine's `serve` | One per exact address joined from that machine: the last commit `t` read. A replaced ledger has a new first commit, so its subscribers start over. The old format lacks the `.v2` suffix; use the [transition procedure](../runbooks/deploy.md#change-the-cursor-format), not a manual rename |
 | Native delivery identity | Each machine: `~/.agent-bus/installation-id` | That machine's `serve` | Random identity initialized once and retained across restarts. Keep it with that installation's state and do not copy it to another installation |
 | `config.json` | Each machine: `~/.agent-bus/config.json` | The installer, only when absent | The Fluree URL and ledger. `serve` won't start without it |
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |

@@ -16,6 +16,8 @@ A launcher change reaches a newly started hook immediately, but reaches `serve` 
 
 The activation decision must name the exact reviewed source commit and tree, candidate and previous installed bindings, runtime/dependency identities, affected services, checks and complete rollback. For a release, record its absolute root and manifest sha256 outside the release; its source identity is not necessarily the checkout's HEAD. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed. The [query tools' check and rollback constraint](#query-tools) applies to every server and rollback: one machine's upgrade says nothing about another's. Preserve state, credentials, cursors and `installation-id`; a release never initializes an established installation's missing identity ([recover](recover.md#the-installation-identity-is-missing-or-invalid)).
 
+Crossing between legacy and exact cursor filenames requires [the stopped-bus transition](#change-the-cursor-format) instead of the ordinary bind-and-restart or rollback step.
+
 ## Deploy a packaged release
 
 This lane needs an established installation and its valid delivery identity. First provisioning still follows [install](install.md). The release carries its own runtime, bundles and installer; the destination needs no build, dependency install or checkout change. Retain previous releases, runtimes, source dependencies and recorded launcher/viewer bindings for rollback. Never edit a sealed release or remove one named by a running process or rollback record.
@@ -84,9 +86,11 @@ The binding mechanism, source/release transitions and complete rollback have bee
 
 ### Release rollback and partial failure
 
-Verify the previous release against its retained external digest before using it. Review overlap compatibility: waiting hooks and loaded guidance from the newer release must work with or be refused safely by the older server, which must decode newer stored entries and retain public-query guarding. Include any [connected hosted peer](#when-a-hosted-peer-is-connected) in the rollback record, holding its attributed host stopped before a downgrade when the previous Bus cannot satisfy its contract. On downgrade, move guidance first: select the previous marketplace link and refresh clients, restore/rebind an existing viewer, then bind the launcher to the previous release with the same installer command. Repeat step 5 and all applicable checks. Keep newer release files while an old process still uses them. The source → release A → B → A → source mechanism is rehearsed; live rollback remains *Unverified*.
+For an exact-to-legacy rollback to a verified package, complete the [held cursor export and binding](#change-the-cursor-format) and verify its fresh `exported` receipt before permitting the legacy server to start. The current installer refuses a target without exact layout support while this installation has an active exact directory. Do not use an older installer or manually replace the launcher to bypass this refusal. Rollback across this boundary to a source target is unavailable.
 
-To return to source, first migrate the clients back to the recorded primary marketplace using [install's remove-and-add procedure](install.md#select-the-plugin-marketplace), not a release marketplace link pointed at an unversioned source plugin. Restore the viewer with the trusted release tool's `viewer-restore --from "$record"`, using its recorded source plist. Restore the approved clean, detached source and frozen dependencies with its exact Bun as in [the source lane](#deploy-a-new-version), then use the retained upgraded installer:
+Verify the previous release against its retained external digest before using it. Review overlap compatibility: waiting hooks and loaded guidance from the newer release must work with or be refused safely by the older server, which must decode newer stored entries and retain public-query guarding. Include any [connected hosted peer](#when-a-hosted-peer-is-connected) in the rollback record, holding its attributed host stopped before a downgrade when the previous Bus cannot satisfy its contract. On downgrade, move guidance first: select the previous marketplace link and refresh clients, restore/rebind an existing viewer, then bind the launcher to the previous release. Use the ordinary installer only for same-format rollback; otherwise follow the held binding above. Repeat step 5 and all applicable checks. Keep newer release files while an old process still uses them. The source → release A → B → A → source mechanism is rehearsed; live rollback remains *Unverified*.
+
+To return to source **without changing cursor format**, first migrate the clients back to the recorded primary marketplace using [install's remove-and-add procedure](install.md#select-the-plugin-marketplace), not a release marketplace link pointed at an unversioned source plugin. Restore the viewer with the trusted release tool's `viewer-restore --from "$record"`, using its recorded source plist. Restore the approved clean, detached source and frozen dependencies with its exact Bun as in [the source lane](#deploy-a-new-version), then use the retained upgraded installer:
 
 ```sh
 AGENT_BUS_REPO="$primary" /bin/sh "$R/app/install-launch-agents.sh" \
@@ -95,7 +99,7 @@ AGENT_BUS_REPO="$primary" /bin/sh "$R/app/install-launch-agents.sh" \
 
 Expected: source launcher, server, viewer and source plugins match the recorded previous cohort; state and delivery identity remain intact. Verify those identities and behavior through the source lane: release status's `agree` is release-specific and is not a source-success criterion. An older installer may refuse the release launcher, so do not substitute it. The manual sequence's shared verification mark above applies; this is not live rollback evidence.
 
-If a step fails, inspect `status` per surface and re-run only the failed owned step for the named target, or restore every changed surface in downgrade order. An unfinished viewer start leaves a marker and the viewer stopped: re-run `viewer` or `viewer-restore`, never remove the marker to claim success. If no coherent state can be restored, disable and boot out only the positively identified owned serve/viewer jobs (`launchctl disable gui/$(id -u)/<label>`, then `launchctl bootout gui/$(id -u)/<label>`). They stay stopped across login; enable and bootstrap only after reviewed repair. A held failure is not successful rollback. *Unverified for live recovery; split-binding recovery and guarded stop were exercised in the disposable rehearsal.*
+If a same-format step fails, inspect `status` per surface and re-run only the failed owned step for the named target, or restore every changed surface in downgrade order. For a cursor-format transition failure, keep the writer held and use [the recovery specific to its cursor phase](recover.md#cursor-format-transition-refused). An unfinished viewer start leaves a marker and the viewer stopped: re-run `viewer` or `viewer-restore`, never remove the marker to claim success. If no coherent state can be restored, disable and boot out only the positively identified owned serve/viewer jobs (`launchctl disable gui/$(id -u)/<label>`, then `launchctl bootout gui/$(id -u)/<label>`). They stay stopped across login; enable and bootstrap only after reviewed repair. A held failure is not successful rollback. *Unverified for live recovery; split-binding recovery and guarded stop were exercised in the disposable rehearsal.*
 
 ## Deploy a new version
 
@@ -125,7 +129,7 @@ This is the supported **source-binding lane**, including source rollback. For an
 
    Expected: the locked install completes without changing the lockfile. The development-only Effect vendor preparation is not needed by the running server. A frozen-lockfile mismatch is a failure, not permission to update the lock. *Rehearsed 2026-11-02* for both selected and previous cohorts on the disposable installation.
 
-6. **Apply the reviewed service change.** On the first upgrade from hostname routing, use [the cohort procedure](#switch-to-stable-native-delivery) instead of restarting the machines separately. Otherwise, if only source changed and the existing launcher and service configuration remain correct, restart just `serve` with `launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus`. If the runtime binding changes, use the retained, qualified upgraded installer, not the old whole installer:
+6. **Apply the reviewed service change.** Do not use this restarting lane to cross the cursor format boundary. On the first upgrade from hostname routing, use [the cohort procedure](#switch-to-stable-native-delivery) instead of restarting the machines separately. Otherwise, if only source changed and the existing launcher and service configuration remain correct, restart just `serve` with `launchctl kickstart -k gui/$(id -u)/ai.rawr.agent-bus`. If the runtime binding changes, use the retained, qualified upgraded installer, not the old whole installer:
 
    ```sh
    AGENT_BUS_REPO="$primary" "$retained_installer" --runtime-only --bun "$approved_bun"
@@ -135,7 +139,71 @@ This is the supported **source-binding lane**, including source rollback. For an
 
 7. **Verify the activated pair on each machine.** Confirm exact source commit and tree, installed dependency and Bun identities, launcher contents, LaunchAgent arguments, and the running process entrypoint and start time. Run the restart, query tools and end-to-end checks, then verify a real Claude wake through an owned participant. Do not restart another owner's session to force its hook to rearm. Refresh the plugin only if its source changed. Record every result and its basis; a stand-in hook or a health response alone is insufficient. *Observed live 2026-11-02:* identities, query checks and controlled delivery passed on both; real wakes passed with independent observation on one and a correlated participant receipt on the other.
 
-8. **On failure, restore the complete approved previous state.** Only use a previous source that keeps queries refused or validated, and public response projection; otherwise keep the affected `serve` stopped and prepare a reviewed repair. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Then run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`, and repeat the identity, query tools, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Rehearsed 2026-11-02*, with the containment check in place of the query tools check: complete source/dependency/runtime rollback under launchd at the same disposable canonical path, with a waiting candidate hook waking against the old server. A live-primary rollback remains *Unverified*.
+8. **On failure, restore the complete approved previous state.** This source rollback is same-format only: if the target is legacy and the current format is exact, keep `serve` stopped for forward repair or a separately verified packaged transition. Use only a previous source that refuses or validates queries and preserves public response projection; hold and repair forward if that is not possible. Confirm the primary is clean and detached, switch it explicitly to the recorded previous commit, verify its commit and tree, and use its exact old Bun to install its frozen dependencies. Run the retained upgraded installer with `AGENT_BUS_REPO="$primary" --runtime-only --bun "$previous_bun"`. Repeat the identity, query tools, delivery and real-wake checks. Do not use `git reset --hard`, rely on a mutable `PATH`, or run the old whole installer against the new managed launcher. Refresh a changed plugin as needed. *Rehearsed 2026-11-02*, with the containment check in place of the query tools check: complete source/dependency/runtime rollback under launchd at the same disposable canonical path, with a waiting candidate hook waking against the old server. A live-primary rollback remains *Unverified*.
+
+## Change the cursor format
+
+Use this only when changing between a server that stores URI-encoded cursor filenames and a server that stores exact-address records, with a verified packaged target. It is per installation and current ledger incarnation, not a ledger or plugin migration. The write commands require macOS launchd and the positively identified job's explicit `AGENT_BUS_LABEL` and canonical `AGENT_BUS_PORT`; Linux and other supervision have no supported in-place converter. Use one operator; do not run the converter concurrently or manually run either `serve` outside the owned job. Persistently disable the job throughout conversion and binding, so login or restart cannot bring back the wrong writer. Keep the ledger, token, installation identity, configuration and retained cursor generations unchanged. The full live activation is *Unverified*; stopped conversion and fault cases have disposable test coverage. The ordinary release rehearsal refuses a cross-format pair; exercise this sequence with the exact packages in a disposable installation instead.
+
+Before claiming the shared-ledger sender fence or admission bound for a cohort, hold all obsolete writers and account for already-dispatched writes at the provider. A mixed cohort still permits the older behavior; converting one machine does not settle the others. Preserve the version-matched hosted binding and keep it stopped during the incompatible interval.
+
+1. **Identify the actual installation and inspect without writing.** Confirm the owned job, its plist, state directory and installed launcher. Derive `serve_port` from `EnvironmentVariables.AGENT_BUS_PORT` in that successfully read and validated plist; use the serve default `8096` only if the key is genuinely absent. An unreadable plist or an invalid port is a refusal, not a reason to use the default. Set `state_dir`, `serve_label`, `serve_plist` and `launcher` to the recorded values and `domain="gui/$(id -u)"`. Define the converter from the externally verified *exact-format* release `R`, even when downgrading. Set `verified_target`, `external_sha` and `releases_dir` to the selected package, its independently retained manifest digest and its releases directory. Before converting, confirm the selected target is supported and the current trusted installer supports `--bind-only`.
+
+   ```sh
+   cursor_cli() {
+     AGENT_BUS_DIR="$state_dir" AGENT_BUS_LABEL="$serve_label" AGENT_BUS_PORT="$serve_port" \
+       "$R/runtime/bun" --no-env-file --config="$R/app/bunfig.toml" "$R/app/cli.js" cursors "$@"
+   }
+   cursor_cli --action check
+   ```
+
+   Expected: exit 0 and `state: "legacy"` before conversion or `state: "exact"` after it, with the intended `installation`, `incarnation`, inspected `head` and `count`. Exact-state `check` includes `legacyExport.eligible` and the first reason when ineligible. It describes the inspected cursor files and pinned history, not permission to downgrade later. A validation or read failure is an error, not an eligibility result. A live preflight is preliminary; only the stopped operation decides. This never creates a Fluree ledger, changes cursor files or consumes mail. *Unverified as an installed command.*
+
+2. **Hold the existing writer.**
+
+   ```sh
+   launchctl disable "$domain/$serve_label"
+   launchctl bootout "$domain/$serve_label"
+   launchctl print-disabled "$domain"
+   launchctl print "$domain/$serve_label"
+   ```
+
+   Expected: the positively identified label is disabled, `print` reports no service, and the recorded old process and listener are gone. The converter checks the exact launchd label and listener on the explicit port. Those checks supplement, not replace, your proof of the previous process's exit and settlement of its outstanding provider writes. Do not treat an unknown domain, a different label or an uninspectable port as an empty installation. Keep the owned job disabled while deciding or recovering, including after a failed command. *Unverified as an installed sequence.*
+
+3. **Convert before launching either binary.** For an upgrade:
+
+   ```sh
+   cursor_cli --action migrate
+   cursor_cli --action check
+   ```
+
+   For a downgrade instead, while the newer writer is still stopped:
+
+   ```sh
+   cursor_cli --action export
+   ```
+
+   Expected on upgrade: both receipts show `state: "exact"` and the same `installation`, `incarnation` and `generation`. Old files are retained, not reused as a fallback. Expected on downgrade: `state: "exported"` with the matching installation and incarnation. This publishes a fresh old-format directory from the *current* exact positions and retains the exact generation separately. A previous export receipt or pre-upgrade backup is not downgrade authorization. An unrepresentable address, a known case alias (including a historical address without a local cursor) or a cursor without a historical witness refuses export. The alias restriction applies on all volumes, including a case-sensitive volume with both spellings. An exact address stays valid even when it cannot be projected into the older format. On refusal, keep the job held and use [the phase-specific forward recovery](recover.md#cursor-format-transition-refused); do not remove, replay or replace a cursor to make export pass. A successful export cannot prevent a legacy server from aliasing a *future* case variant. *Tested on disposable state; installed transition Unverified.*
+
+4. **Bind the verified package while the job is held.** Use the current verified `trusted_installer`, not an old script from the rollback target. These overrides identify the already validated installation, not a replacement job or state folder.
+
+   ```sh
+   AGENT_BUS_LABEL="$serve_label" AGENT_BUS_DIR="$state_dir" \
+     AGENT_BUS_PORT="$serve_port" AGENT_BUS_LAUNCHER="$launcher" \
+     AGENT_BUS_RELEASES="$releases_dir" /bin/sh "$trusted_installer" \
+     --release "$verified_target" --expect "$external_sha" --bind-only
+   ```
+
+   Expected: the launcher points to the exact target, the plist is unchanged, and the identified job remains disabled, unloaded and off its port. Check again that the recorded previous process exited. There is no source or `--runtime-only --bind-only` fallback. On refusal, keep the job held and preserve the retained generations. *Unverified as an installed sequence.*
+
+5. **Resume the verified writer.** Verify the selected binary and retained or exported generation, and complete the applicable owned guidance, viewer and hosted binding steps. Then enable and bootstrap just the positively identified job:
+
+   ```sh
+   launchctl enable "$domain/$serve_label"
+   launchctl bootstrap "$domain" "$serve_plist"
+   ```
+
+   Expected: the selected writer runs on the recorded port and state directory and passes the applicable release health and delivery checks above. A pending export blocks exact-format startup and migration. [Recover an interrupted export](recover.md#cursor-format-transition-refused) with the retained exact-format CLI; do not remove its marker or start the old launcher. Files are staged and renamed as complete directories; process-interruption testing does not establish power-loss durability. *Unverified as an installed sequence.*
 
 ## When a hosted peer is connected
 
@@ -557,7 +625,7 @@ Stop if the primary is dirty, attached, divergent or its deployed identity is un
 | Dirty, attached or divergent primary, or unexpected source identity | Stop and [recover the checkout](#recover-a-diverged-primary-checkout); preserve the work. |
 | Foreign or modified launcher refused | Stop before replacing it. Establish ownership and resolve it explicitly; do not bypass the installer check. |
 | Release verification fails, `agree` is false/unknown, or a viewer start is pending | Do not advance guidance or delete markers. Follow [release rollback and partial failure](#release-rollback-and-partial-failure); status exit 0 is not agreement. |
-| Native release checks pass but a connected hosted peer refuses calls | Check the selected private source's exact version and attributed host binding; follow [the hosted transition](#when-a-hosted-peer-is-connected). Preserve identity material and resolve the affected operation rather than widening access. |
+| Native release checks pass but a connected hosted peer refuses calls | Read the peer's `[agent-bus] hosted-peer-preflight` stderr lines ([format](../architecture/interfaces.md#release-tools)): `version_mismatch` names the expected and observed Bus versions (`absent` when the Bus reported none); `unavailable` means the call was refused before dispatch for the loopback connection, a missing or incompatible tool, or an incompatible initialization. An `exhausted` record stops only that reason's lines until restart. Check the selected private source's exact version and attributed host binding; follow [the hosted transition](#when-a-hosted-peer-is-connected). Preserve identity material and resolve the affected operation rather than widening access. |
 | Hosted plugin upload or fresh-client skill check fails | Stop and preserve the baseline and candidate, saved connection and observed error. Follow [the hosted plugin update](#update-the-existing-hosted-plugins-skill); a listed skill, healthy server or passing fixture alone does not establish client use. |
 | Private watch preparation or shutdown is waiting on native observation | Cancellation is cooperative; the single preparation queue and connection remain owned until admitted work actually settles. Do not start a competing writer, abandon the queue or reset state to force progress. Use the attributed private-host recovery boundary and preserve acknowledged watch state. |
 | Launcher or plist rename or launchd bootstrap fails | The two file replacements are atomic individually, not together. Inspect both files and the job, then rerun the qualified narrow installer for the intended source and runtime or complete the approved rollback; do not assume either pair is active. *Unverified* on launchd. |

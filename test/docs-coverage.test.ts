@@ -114,6 +114,7 @@ const SOURCES = (() => {
     "Query",
     "catalogue",
     "sparql",
+    "message-carrier",
   ].map((file) => read(`src/${file}.ts`).replaceAll('\\"', '"'));
   const constants = new Map(
     files.flatMap((text) =>

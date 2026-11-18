@@ -11,7 +11,9 @@ import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
 import { defaultCodex } from "./codex.ts";
 import { compactRecovery, readCompactInput } from "./compact.ts";
-import { Association, Runtime } from "./domain.ts";
+import { cursorTransition, openCursorDirectory } from "./cursor-layout.ts";
+import { cursorWriterIsStopped } from "./cursor-quiescence.ts";
+import { Association, LedgerError, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import { initializeInstallation, loadInstallation } from "./installation.ts";
 import * as Ledger from "./Ledger.ts";
@@ -46,33 +48,42 @@ const loadToken = Effect.gen(function* () {
 });
 
 /** Cursors are positions in one ledger's history, so each ledger instance keeps its own. */
-const cursorsFor = (ledgerId: string) =>
+const legacyCursorPath = (ledgerId: string, instance: string) =>
+  join(busDir, "fluree-cursors", encodeURIComponent(ledgerId), instance);
+
+const cursorsFor = (ledgerId: string, installation: string) =>
   Layer.unwrap(
     Effect.gen(function* () {
       const ledger = yield* Ledger.Ledger;
-      return Cursors.layerFiles(
-        join(busDir, "fluree-cursors", encodeURIComponent(ledgerId), ledger.instance)
+      const dir = yield* openCursorDirectory(
+        legacyCursorPath(ledgerId, ledger.instance),
+        installation
       );
+      return Cursors.layerFiles(dir);
     })
   );
 
 /** `config.json` names no Fluree ledger, so the store can't open. */
 class NoStore extends Schema.TaggedError<NoStore>()("NoStore", { message: Schema.String }) {}
 
+const flureeConfig = Effect.gen(function* () {
+  const { fluree } = yield* loadConfig;
+  if (fluree === undefined) {
+    return yield* new NoStore({
+      message: `${join(busDir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`,
+    });
+  }
+  return { ...fluree, token: yield* loadToken };
+});
+
 /** Direct access to the store, for the machine's bus process. */
 const BusLayer = Layer.unwrap(
   Effect.gen(function* () {
-    const config = yield* loadConfig;
-    if (config.fluree === undefined) {
-      return yield* new NoStore({
-        message: `${join(busDir, "config.json")} has no Fluree ledger. Give it a "fluree" entry, as the installer writes: { "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`,
-      });
-    }
+    const config = yield* flureeConfig;
     const installation = yield* loadInstallation(busDir);
-    const token = yield* loadToken;
     return Bus.layer(installation).pipe(
-      Layer.provideMerge(cursorsFor(config.fluree.ledger)),
-      Layer.provideMerge(Fluree.layerFluree({ ...config.fluree, token }))
+      Layer.provideMerge(cursorsFor(config.ledger, installation)),
+      Layer.provideMerge(Fluree.layerFluree(config))
     );
   })
 );
@@ -144,7 +155,7 @@ const serve = Command.make(
         version: BUILD,
         codex: input.codex,
       })
-    ).pipe(Effect.provide(BusLayer))
+    ).pipe(Effect.provide(BusLayer), Effect.catchTag("LedgerError", fail))
 ).pipe(
   Command.withDescription(
     `Run this machine's bus: MCP over HTTP at ${endpoint}, and native delivery to this installation's Codex and Claude peers (run one per machine)`
@@ -373,10 +384,71 @@ const fail = (error: { readonly message: string }) =>
     )
   );
 
+const confirmCursorWriterOffline = Effect.try({
+  try: () => {
+    if (process.platform !== "darwin") return false;
+    return cursorWriterIsStopped(
+      process.env.AGENT_BUS_LABEL,
+      process.getuid?.(),
+      process.env.AGENT_BUS_PORT,
+      (command, args, capture) => {
+        const result = Bun.spawnSync([command, ...args], {
+          env: { LC_ALL: "C", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+          stdout: capture === "stderr" ? "ignore" : "pipe",
+          stderr: capture === "stdout" ? "ignore" : "pipe",
+        });
+        const text = (result.stdout?.toString() ?? "") + (result.stderr?.toString() ?? "");
+        return { status: result.exitCode, text };
+      }
+    );
+  },
+  catch: () => false,
+}).pipe(
+  Effect.orElseSucceed(() => false),
+  Effect.flatMap((offline) =>
+    offline
+      ? Effect.void
+      : Effect.fail(
+          new LedgerError({
+            message:
+              "Cursor transition refused: set AGENT_BUS_LABEL and AGENT_BUS_PORT to the verified owned serve job and its port. Disable and boot out that job and confirm the port is clear before changing cursor state.",
+          })
+        )
+  )
+);
+
+const cursors = Command.make(
+  "cursors",
+  { action: Flag.Literals("action", ["check", "migrate", "export", "abort-export"]) },
+  ({ action }) =>
+    Effect.gen(function* () {
+      const installation = yield* loadInstallation(busDir);
+      if (action !== "check") {
+        yield* confirmCursorWriterOffline;
+      }
+      const config = yield* flureeConfig;
+      const report = yield* Effect.gen(function* () {
+        const ledger = yield* Ledger.Ledger;
+        return yield* cursorTransition(
+          legacyCursorPath(config.ledger, ledger.instance),
+          installation,
+          action,
+          confirmCursorWriterOffline
+        );
+      }).pipe(Effect.provide(Fluree.layerFluree(config, { existingOnly: true })));
+      yield* Console.log(JSON.stringify({ installation, ...report }));
+    }).pipe(Effect.catchTag("LedgerError", fail))
+).pipe(
+  Command.withDescription(
+    "Exact-address cursor layout v2: check without writing; other actions require serve disabled, unloaded and off its port"
+  )
+);
+
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
   Command.withSubcommands([
     serve,
+    cursors,
     initialize,
     joinCommand,
     orientCommand,

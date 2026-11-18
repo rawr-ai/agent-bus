@@ -2,6 +2,7 @@
 import { strict as assert } from "node:assert";
 import { randomBytes } from "node:crypto";
 import {
+  constants,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -15,6 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, parse } from "node:path";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
@@ -33,13 +35,39 @@ import {
 } from "../test/processes.ts";
 import { sourceIsolated, sourceIsolationRefusesRead } from "../test/source-isolation.ts";
 import { spawnSupervised } from "../test/supervised.ts";
-import { verifyPrivateBundle } from "./private-modern-http.ts";
+import { digest, verifyPrivateBundle } from "./private-modern-http.ts";
 import { authoredSkill } from "./skill-wire.ts";
 
-const input = process.argv[2];
-if (!input || !isAbsolute(input) || process.argv.length !== 3)
-  throw new Error("Supply one absolute bundle path.");
-verifyPrivateBundle(input);
+const { positionals, values } = parseArgs({
+  args: process.argv.slice(2),
+  allowPositionals: true,
+  options: { expect: { type: "string" }, commit: { type: "string" }, tree: { type: "string" } },
+});
+const [input] = positionals;
+if (
+  !input ||
+  !isAbsolute(input) ||
+  positionals.length !== 1 ||
+  (values.commit !== undefined && values.expect === undefined) ||
+  (values.commit === undefined) !== (values.tree === undefined)
+)
+  throw new Error("Supply an absolute bundle path [--expect digest [--commit id --tree id]].");
+const external =
+  values.expect === undefined
+    ? undefined
+    : {
+        manifestSha256: values.expect,
+        source:
+          values.commit === undefined ? undefined : { commit: values.commit, tree: values.tree! },
+      };
+const selected = verifyPrivateBundle(input, external);
+// For legacy review bundles only, this local digest checks the exact copy, not source provenance.
+const expected = external ?? { manifestSha256: digest(join(input, "manifest.json")) };
+console.log(
+  selected.schema === "agent-bus-private-peer-review-v2"
+    ? "Qualifying a nonpromotable review bundle."
+    : "Qualifying the selected source-attributed bundle."
+);
 const dir = realpathSync(mkdtempSync(join(tmpdir(), "agent-bus-relocated-")));
 const repo = process.cwd();
 let disposeBus: (() => Promise<void>) | undefined;
@@ -50,7 +78,7 @@ try {
     !sourceIsolationRefusesRead(
       repo,
       [input],
-      [join(input, "main.js"), join(input, "mcp-host.mjs")]
+      [join(input, "main.js"), join(input, "mcp-host.mjs"), join(input, "manifest.json")]
     )
   )
     throw new Error("The relocated peer's source-isolation control failed.");
@@ -65,14 +93,24 @@ try {
   }
   const relocated = join(dir, "consumer");
   mkdirSync(relocated);
-  for (const name of ["main.js", "mcp-host.mjs"])
-    copyFileSync(join(input, name), join(relocated, name));
+  for (const name of ["main.js", "mcp-host.mjs", "manifest.json"]) {
+    copyFileSync(join(input, name), join(relocated, name), constants.COPYFILE_EXCL);
+    assert.deepEqual(readFileSync(join(relocated, name)), readFileSync(join(input, name)));
+  }
+  verifyPrivateBundle(relocated, expected);
   const skillOracle = join(dir, "skill-oracle.json");
   writeFileSync(skillOracle, JSON.stringify(authoredSkill(process.cwd())), { mode: 0o600 });
   const invalidConfig = join(dir, "private-config.json");
   writeFileSync(invalidConfig, "{}\n", { mode: 0o600 });
   const smoke = Bun.spawnSync(
-    [process.execPath, "--no-env-file", join(relocated, "main.js"), invalidConfig],
+    [
+      process.execPath,
+      "--no-env-file",
+      "--no-install",
+      "--config=/dev/null",
+      join(relocated, "main.js"),
+      invalidConfig,
+    ],
     { cwd: dir, env: { HOME: dir, PATH: "/usr/bin:/bin" }, stdout: "pipe", stderr: "pipe" }
   );
   assert(!smoke.success);
@@ -235,6 +273,7 @@ try {
   const initializationCommand = [
     process.execPath,
     "--no-env-file",
+    "--no-install",
     "--config=/dev/null",
     "-e",
     `
@@ -332,7 +371,14 @@ try {
     const launched = owned.supervisor(
       spawnSupervised(
         sourceIsolated(
-          [process.execPath, "--no-env-file", join(relocated, "main.js"), configPath],
+          [
+            process.execPath,
+            "--no-env-file",
+            "--no-install",
+            "--config=/dev/null",
+            join(relocated, "main.js"),
+            configPath,
+          ],
           repo,
           [input]
         ),
@@ -503,6 +549,8 @@ try {
       [
         process.execPath,
         "--no-env-file",
+        "--no-install",
+        "--config=/dev/null",
         join(dir, "private-peer-relocated.js"),
         relocated,
         privateConfig,
@@ -584,6 +632,10 @@ try {
   if (!hasCallbackOutcome)
     throw new Error("Relocated service did not emit a subscription authorization outcome.");
   assert(identityRequests.first > 0 && identityRequests.second > 0);
+  verifyPrivateBundle(relocated, expected);
+  verifyPrivateBundle(input, expected);
+  for (const name of ["main.js", "mcp-host.mjs", "manifest.json"])
+    assert.deepEqual(readFileSync(join(relocated, name)), readFileSync(join(input, name)));
 } finally {
   provider?.stop(true);
   await disposeBus?.();

@@ -5,6 +5,8 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
+import { type DirectTool, type EventsProgram, type StaticSkill, serveTools } from "mcp-openapi";
+import { type ModernHttp, modernHttp } from "../scripts/private-modern-http.ts";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Message } from "../src/domain.ts";
@@ -20,9 +22,12 @@ import {
   clerkPeerIdentity,
   clerkPeerResolver,
   PEER_PERMISSION,
+  type PeerActor,
   peerSession,
 } from "../src/private-web/identity.ts";
-import { busPeer, peerTools } from "../src/private-web/peer.ts";
+import { busPeer, peerTools, type wakePort } from "../src/private-web/peer.ts";
+import { servePeer } from "../src/private-web/program.ts";
+import { decodeServiceConfig, hostConfig } from "../src/private-web/service.ts";
 import { initializeWatchAuthority, WatchAuthority } from "../src/private-web/watch-authority.ts";
 import * as Serve from "../src/serve.ts";
 import { WakeBinding } from "../src/wake-observation.ts";
@@ -210,7 +215,11 @@ test("hosted orientation forwards only an explicitly supplied lexical cwd and re
     runtime: "other",
     session: actor.session,
   });
-  expect(calls[3]?.args).toMatchObject({ session: actor.session, maxResultBytes: 4 * 1024 * 1024 });
+  // 4 MiB for the complete hosted result, less the reserve for framing and metadata.
+  expect(calls[3]?.args).toMatchObject({
+    session: actor.session,
+    maxResultBytes: 4 * 1024 * 1024 - 64 * 1024,
+  });
   expect(
     (await call("bus_read", { address: "chatgpt/test", maxResultBytes: 8 * 1024 * 1024 })).isError
   ).toBe(true);
@@ -485,11 +494,15 @@ test("hosted reads drain a carrier larger than the loopback ceiling without losi
         })
       )
     );
-    const bodies = Array.from({ length: 6 }, (_, i) => `${i}:` + '"\\€'.repeat(120_000));
+    // Each fits the 1 MiB per-message carrier, its body within the 32,768-byte limit for
+    // searchable text and the rest in an escape-heavy recipient that names no peer; together they
+    // exceed the 8 MiB loopback ceiling.
+    const bodies = Array.from({ length: 12 }, (_, i) => `${i}:` + '"\\€'.repeat(6_000));
+    const padding = `fixture/pad-${'"\\€'.repeat(48_000)}`;
     for (const body of bodies)
       await server.runPromise(
         Effect.flatMap(Bus.Bus, (bus) =>
-          bus.publish({ from: sender, session: sender, to: [address], body })
+          bus.publish({ from: sender, session: sender, to: [address, padding], body })
         )
       );
     const received: Array<(typeof Messages.Type)["messages"][number]> = [];
@@ -786,3 +799,322 @@ test("real Fluree wake capture and continuing authority survive reads but fence 
     }
   }
 }, 120_000);
+
+type Published = {
+  readonly "~standard": {
+    readonly jsonSchema: {
+      readonly input: (options: { readonly target: "draft-2020-12" | "draft-07" }) => unknown;
+      readonly output: (options: { readonly target: "draft-2020-12" | "draft-07" }) => unknown;
+    };
+  };
+};
+const published = (schema: Published) =>
+  (["draft-2020-12", "draft-07"] as const).map((target) => ({
+    target,
+    input: schema["~standard"].jsonSchema.input({ target }),
+    output: schema["~standard"].jsonSchema.output({ target }),
+  }));
+/** The service's host configuration for a fixture listener; instructions come from here. */
+const fixtureHost = (hostPort: number) =>
+  hostConfig(
+    decodeServiceConfig({
+      schema: "agent-bus-private-web-v2",
+      baseUrl: "https://fixture.invalid",
+      resource,
+      port: hostPort,
+      principals: [{ subject, grantFile: "/first" }],
+      provider: {
+        issuer,
+        userInfo: `${issuer}/userinfo`,
+        authorizationEndpoint: `${issuer}/authorize`,
+        tokenEndpoint: `${issuer}/token`,
+      },
+      sessionKeyFile: "/key",
+      binding: "fixture",
+      sources: {
+        fixture: { port, expectedBusVersion: "hosted-fixture" },
+        live: { port: hostPort === 1 ? 2 : 1, expectedBusVersion: "unused" },
+      },
+      oauth: {
+        clientId: "fixture",
+        clientSecret: "fixture",
+        jwtSigningKey: "fixture",
+        encryptionKey: "fixture",
+        tokenStorageDir: "/oauth",
+        allowedRedirectUris: ["https://fixture.invalid/callback"],
+      },
+    })
+  );
+
+/**
+ * What the pinned host is handed to publish for one profile: the ordered tool catalogue with
+ * descriptions, annotations and both schema drafts, the skill files by canonical URI and
+ * content hash, and any Events definitions. Deep-copied at capture, so later mutation of the
+ * live objects cannot change an earlier snapshot.
+ */
+const hostedSurface = (
+  tools: ReadonlyArray<DirectTool<PeerActor>>,
+  lifecycle: { readonly skills: ReadonlyArray<StaticSkill>; readonly events?: EventsProgram }
+) =>
+  structuredClone({
+    instructions: fixtureHost(1).instructions,
+    tools: tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      annotations: tool.annotations,
+      meta: tool._meta,
+      timeoutMs: tool.timeoutMs,
+      parameters: published(tool.parameters),
+      output: tool.outputSchema === undefined ? undefined : published(tool.outputSchema),
+    })),
+    resources: lifecycle.skills.flatMap((skill) =>
+      Object.entries(skill.files).map(([path, text]) => ({
+        uri: new URL(path, skill.uri).href,
+        sha256: new Bun.CryptoHasher("sha256").update(text).digest("hex"),
+      }))
+    ),
+    events:
+      lifecycle.events === undefined
+        ? undefined
+        : {
+            namespace: lifecycle.events.namespace,
+            limits: lifecycle.events.limits,
+            definitions: lifecycle.events.definitions.map((definition) => ({
+              name: definition.name,
+              description: definition.description,
+              input: published(definition.inputSchema),
+              payload: published(definition.payloadSchema),
+            })),
+          },
+  });
+
+const freePort = () => {
+  const listener = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  const value = Number(listener.url.port);
+  listener.stop(true);
+  return value;
+};
+const asRecord = { parse: (value: unknown) => value as Record<string, unknown> };
+/** What a modern client discovers through the real host; request ids never enter it. */
+const wireSurface = async (client: ModernHttp) => {
+  const discovered = await client.discover();
+  const tools = await client.listTools();
+  const listed = await client.request({ method: "resources/list", params: {} }, asRecord);
+  expect([tools.nextCursor, listed.nextCursor]).toEqual([undefined, undefined]);
+  const resources = [];
+  for (const item of listed.resources as ReadonlyArray<{ readonly uri: string }>) {
+    const read = await client.request(
+      { method: "resources/read", params: { uri: item.uri } },
+      asRecord
+    );
+    resources.push({
+      item,
+      contents: (read.contents as ReadonlyArray<Record<string, unknown>>).map(
+        ({ text, blob, ...rest }) => ({
+          ...rest,
+          sha256: new Bun.CryptoHasher("sha256").update(String(text ?? blob)).digest("hex"),
+        })
+      ),
+    });
+  }
+  return structuredClone({ discovered, tools: tools.tools, resources });
+};
+
+test("each hosted profile's catalogue is identical across ordinary mail and a fresh rediscovery", async () => {
+  const eventsPath = join(dir, "catalogue-events.sqlite");
+  writeFileSync(eventsPath, "", { mode: 0o600, flag: "wx" });
+  initializeWatchAuthority({ eventsPath, resource });
+  const authority = new WatchAuthority({ eventsPath, resource });
+  const identityService = clerkPeerIdentity({
+    issuer,
+    resource,
+    key,
+    principals: [{ subject, grantFile: "/first" }],
+    identify: async () => subject,
+    readGrant: async () => grant,
+  });
+  const profiles = {
+    tools: {},
+    events: {
+      prepareWatch: (wake: ReturnType<typeof wakePort>) =>
+        prepareWatchTool({ identity: identityService, wake, authority }),
+      events: (wake: ReturnType<typeof wakePort>) =>
+        eventsProgram({
+          identity: identityService,
+          wake,
+          authority,
+          resource,
+          storage: {
+            path: join(dir, "catalogue-events-host.sqlite"),
+            maxBytes: 1_048_576,
+            encryptionKey: Buffer.alloc(32, 1).toString("base64"),
+          },
+        }),
+    },
+  };
+  const apiKey = Buffer.alloc(32, 5).toString("hex");
+  type HostInput = Parameters<Parameters<typeof servePeer>[0]["runHost"]>;
+  /**
+   * Starts the peer as the service does. The tools-only profile runs behind the real direct
+   * host on loopback with a synthetic API key; the shutdown signal is passed, so the host
+   * installs no process signal handlers, and the fixture lifts only the HTTP rate limit.
+   * The host refuses Events without native OAuth HTTP, so that profile is held open at the
+   * host boundary instead and its mail goes through the handed tools.
+   */
+  const discover = async (profile: keyof typeof profiles) => {
+    const hostPort = freePort();
+    const shutdown = new AbortController();
+    let handed: ((value: HostInput) => void) | undefined;
+    const ready = new Promise<HostInput>((settle) => {
+      handed = settle;
+    });
+    const base = fixtureHost(hostPort);
+    const held = new Promise<void>((settle) =>
+      shutdown.signal.addEventListener("abort", () => settle(), { once: true })
+    );
+    const serving = servePeer({
+      busPort: port,
+      expectedBusVersion: "hosted-fixture",
+      cwd: process.cwd(),
+      resolveContext: resolve,
+      signal: shutdown.signal,
+      ...profiles[profile],
+      runHost: async (tools, lifecycle) => {
+        handed?.([tools, lifecycle]);
+        if (profile !== "tools") return held;
+        return serveTools(
+          {
+            ...base,
+            serverAuth: { type: "apiKey", key: apiKey },
+            httpLimits: { ...base.httpLimits, rate: { requestsPerSecond: 1000, burst: 1000 } },
+          },
+          tools,
+          {
+            ...lifecycle,
+            resolveContext: (invocation) =>
+              lifecycle.resolveContext({
+                ...invocation,
+                auth: { authType: "oauth", accessToken: "good" },
+              }),
+          }
+        );
+      },
+    });
+    const ended = serving.then(() => {
+      throw new Error("The peer ended before discovery.");
+    });
+    // After a deliberate close the peer ends normally; only an early end is a failure.
+    ended.catch(() => undefined);
+    const [tools, lifecycle] = await Promise.race([ready, ended]);
+    const connect = async () => {
+      let last: unknown;
+      for (let attempt = 0; attempt < 50; attempt++) {
+        const client = modernHttp(
+          `http://127.0.0.1:${hostPort}/mcp`,
+          "catalogue-stability",
+          { "x-api-key": apiKey },
+          { name: base.name, version: base.version }
+        );
+        try {
+          await client.discover();
+          return client;
+        } catch (error) {
+          last = error;
+          await Bun.sleep(100);
+        }
+      }
+      throw last;
+    };
+    const client = profile === "tools" ? await Promise.race([connect(), ended]) : undefined;
+    return {
+      client,
+      tools,
+      surface: () => hostedSurface(tools, lifecycle),
+      wire: async () => (client === undefined ? undefined : wireSurface(client)),
+      close: () => {
+        shutdown.abort();
+        return serving;
+      },
+    };
+  };
+  const handlers = () => [process.listenerCount("SIGINT"), process.listenerCount("SIGTERM")];
+  const handlersBefore = handlers();
+  try {
+    for (const profile of ["tools", "events"] as const) {
+      const first = await discover(profile);
+      try {
+        const before = first.surface();
+        const wireBefore = await first.wire();
+        // The in-process host must not take over this process's signal handling.
+        expect(handlers()).toEqual(handlersBefore);
+        expect(before.tools.length).toBe(profile === "tools" ? 16 : 17);
+        expect(before.events?.definitions.length).toBe(profile === "tools" ? undefined : 1);
+        expect(before.resources.map(({ uri }) => uri)).toContain("skill://agent-bus/SKILL.md");
+        if (profile === "tools") {
+          if (wireBefore === undefined) throw new Error("Missing host discovery.");
+          expect(wireBefore.tools.map(({ name }) => name)).toEqual(
+            before.tools.map(({ name }) => name)
+          );
+          expect(wireBefore.resources.map(({ item }) => item.uri)).toContain(
+            "skill://agent-bus/SKILL.md"
+          );
+        }
+
+        const ok = async (name: string, args: Record<string, unknown>, chat: string) => {
+          const correlation = `catalogue-${profile}-${chat}`;
+          if (first.client !== undefined) {
+            const result = await first.client.callTool({
+              name,
+              arguments: args,
+              _meta: { "openai/session": correlation },
+            });
+            expect(result.isError).not.toBe(true);
+            return result.structuredContent;
+          }
+          const tool = first.tools.find((candidate) => candidate.name === name);
+          if (!tool) throw new Error(`missing ${name}`);
+          const result = await tool.execute(args, {
+            actor: await resolve(identity(correlation)),
+            signal,
+            auth: undefined,
+            client: { version: undefined },
+          });
+          expect(result.isError).not.toBe(true);
+          return "structuredContent" in result ? result.structuredContent : undefined;
+        };
+        const [a, b] = [`chatgpt/catalogue-${profile}-a`, `chatgpt/catalogue-${profile}-b`];
+        await ok("bus_join", { address: a, topics: [`catalogue-${profile}`] }, "a");
+        await ok("bus_join", { address: b }, "b");
+        const sent = await ok("bus_publish", { from: b, to: [a], body: "one" }, "b");
+        await ok("bus_publish", { from: a, to: [`#catalogue-${profile}`], body: "two" }, "a");
+        expect(await ok("bus_read", { address: a }, "a")).toMatchObject({
+          messages: [{ id: sent?.id }],
+        });
+        await ok("bus_wait", { address: b, timeoutSeconds: 0 }, "b");
+        await ok(
+          "bus_activity",
+          { address: a, operation: Bun.randomUUIDv7(), activity: "inactive" },
+          "a"
+        );
+        await ok("bus_history", { participant: a }, "a");
+        await ok("bus_leave", { address: a }, "a");
+        await ok("bus_leave", { address: b }, "b");
+
+        expect(first.surface()).toEqual(before);
+        expect(await first.wire()).toEqual(wireBefore);
+        const fresh = await discover(profile);
+        try {
+          expect(fresh.surface()).toEqual(before);
+          expect(await fresh.wire()).toEqual(wireBefore);
+        } finally {
+          await fresh.close();
+        }
+      } finally {
+        await first.close();
+      }
+    }
+    expect(handlers()).toEqual(handlersBefore);
+  } finally {
+    await authority.close();
+  }
+}, 60_000);

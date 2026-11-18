@@ -183,6 +183,7 @@ try {
     "mcp-openapi",
     "agent-bus-private-peer-review-v1",
     "agent-bus-private-peer-review-v2",
+    "agent-bus-private-peer-source-v1",
     "agent-bus-mail-wake-v1",
     "c8a868cdd84a5026a572dad95f6fa335d0fd09d52304f77f7526bba485045247",
     "c076ea2a9d1396bc45cd5b5d2c767268991bc41ba12392eb78b30a409c381b91",
@@ -324,6 +325,34 @@ try {
     version.status === 0 && version.stdout.trim() === `agent-bus v${a.id}`
   );
   check("launcherIgnoresCallerBunfig", !existsSync(preloadMark));
+
+  // The installer probes the selected CLI directly, not the current launcher.
+  const cursorHelp = spawnSync(
+    join(rel, "runtime/bun"),
+    [
+      "--no-env-file",
+      `--config=${join(rel, "app/bunfig.toml")}`,
+      join(rel, "app/cli.js"),
+      "cursors",
+      "--help",
+    ],
+    {
+      cwd: "/",
+      env: {
+        HOME: home,
+        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+        LC_ALL: "C",
+        CLICOLOR: "0",
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
+      },
+      encoding: "utf8",
+      timeout: 20_000,
+    }
+  );
+  check(
+    "relocatedPackagedCliDeclaresExactCursorLayoutV2",
+    cursorHelp.status === 0 && cursorHelp.stdout.includes("Exact-address cursor layout v2:")
+  );
 
   // A first install or upgrade initializes the identity a release's serve routes delivery by,
   // from the release alone: created once, private, never printed, and kept by a rerun.

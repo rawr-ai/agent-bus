@@ -3,7 +3,7 @@
  * (docs/frames/release-packaging.md, qualification): source → A → B → A → source,
  * with a disposable `serve` and viewer job, an authenticated throwaway Fluree,
  * mail sentinels, a refused tampered release, both split-binding injections with
- * their recovery, and a guarded stop.
+ * their recovery, and a guarded stop with held release bindings.
  *
  *   bun run rehearse:release [--a <commit>] [--b <commit>] [--list]
  *
@@ -14,17 +14,25 @@
  * ports. A preflight before every step refuses default or production labels,
  * ports, launcher and data paths. It prints identities and booleans only, and
  * exits non-zero when any check fails. Never cached and not part of `bun test`.
+ * Both fixed test labels must already be unloaded and explicitly enabled, with
+ * no real-home plist. Admit an absent override only after establishing ownership;
+ * this rehearsal refuses instead of changing an unknown or disabled label.
+ * Supply APPROVED_HOST_ARCHIVE, or prepare the pinned private archive in the
+ * checkout as described in docs/runbooks/qualify-private-peer.md.
  */
 import { spawnSync } from "node:child_process";
 import {
   chmodSync,
+  copyFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
   readFileSync,
+  readlinkSync,
   realpathSync,
+  renameSync,
   writeFileSync,
 } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -54,6 +62,22 @@ const git = (...args: string[]) =>
   spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" }).stdout.trim();
 const commitA = git("rev-parse", "--verify", `${arg("--a") ?? "HEAD~1"}^{commit}`);
 const commitB = git("rev-parse", "--verify", `${arg("--b") ?? "HEAD"}^{commit}`);
+// Identify the known legacy-to-v2 source boundary, not arbitrary future formats.
+const exactCursorSource = (commit: string) => {
+  const result = spawnSync(
+    "git",
+    ["-C", repo, "ls-tree", "--name-only", commit, "--", "src/cursor-layout.ts"],
+    { encoding: "utf8" }
+  );
+  if (result.status !== 0) throw new Error("Could not inspect the selected cursor format.");
+  return result.stdout.trim() === "src/cursor-layout.ts";
+};
+if (commitA === "" || commitB === "" || commitA === commitB)
+  throw new Error("Supply two distinct source commits for the ordinary release rehearsal.");
+if (exactCursorSource(commitA) !== exactCursorSource(commitB))
+  throw new Error(
+    "The ordinary release rehearsal cannot cross cursor formats. Rehearse the stopped migrate/export transition in docs/runbooks/deploy.md with the verified packages."
+  );
 
 const freePort = () => {
   const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
@@ -63,6 +87,36 @@ const freePort = () => {
 };
 const launchctl = (...args: string[]) =>
   spawnSync("/bin/launchctl", args, { encoding: "utf8" }).status ?? -1;
+const overrideState = (label: string) => {
+  const result = spawnSync("/bin/launchctl", ["print-disabled", domain], {
+    encoding: "utf8",
+    env: { LC_ALL: "C", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+  });
+  if (result.status !== 0 || result.stderr !== "") return "unknown";
+  const lines = result.stdout
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.startsWith(`${JSON.stringify(label)} `));
+  if (lines.length === 0) return "absent";
+  if (lines.length !== 1) return "unknown";
+  if (lines[0] === `${JSON.stringify(label)} => enabled`) return "enabled";
+  if (lines[0] === `${JSON.stringify(label)} => disabled`) return "disabled";
+  return "unknown";
+};
+const disabled = (label: string) => overrideState(label) === "disabled";
+/** Unlike loadedPid, only the observed not-found response proves the label unloaded. */
+const unloaded = (label: string) => {
+  const result = spawnSync("/bin/launchctl", ["print", `${domain}/${label}`], {
+    encoding: "utf8",
+    env: { LC_ALL: "C", PATH: "/usr/bin:/bin:/usr/sbin:/sbin" },
+  });
+  return (
+    result.status === 113 &&
+    result.stdout === "" &&
+    result.stderr.trimEnd() ===
+      `Bad request.\nCould not find service "${label}" in domain for user gui: ${process.getuid?.() ?? 0}`
+  );
+};
 const loadedPid = (label: string) => {
   const printed = spawnSync("/bin/launchctl", ["print", `${domain}/${label}`], {
     encoding: "utf8",
@@ -81,6 +135,20 @@ const processOf = (pid: string | null) =>
     : spawnSync("/bin/ps", ["-o", "lstart=,command=", "-p", pid], {
         encoding: "utf8",
       }).stdout.trim();
+/** An enumeration error is unknown, not evidence that a particular process exited. */
+const processStart = (pid: string) => {
+  const result = spawnSync("/bin/ps", ["-axo", "pid=,lstart="], { encoding: "utf8" });
+  if (result.status !== 0 || result.stderr !== "") return { kind: "unknown" } as const;
+  const lines = result.stdout.split("\n").filter((line) => line.trim() !== "");
+  const entries = lines.map((line) => /^\s*(\d+)\s+(\S.*\S)\s*$/.exec(line));
+  if (entries.some((entry) => entry === null)) return { kind: "unknown" } as const;
+  if (!entries.some((entry) => entry?.[1] === String(process.pid)))
+    return { kind: "unknown" } as const;
+  const matches = entries.filter((entry) => entry?.[1] === pid);
+  if (matches.length === 0) return { kind: "absent" } as const;
+  if (matches.length !== 1) return { kind: "unknown" } as const;
+  return { kind: "present", start: matches[0]![2]! } as const;
+};
 
 // ---------------------------------------------------------------------------
 // the disposable world
@@ -97,12 +165,16 @@ const servePlist = join(agents, `${LABEL}.plist`);
 const viewerPlist = join(agents, `${VIEWER}.plist`);
 const source = join(root, "source");
 const busPort = freePort();
-const viewerPort = freePort();
+let viewerPort = freePort();
+while (viewerPort === busPort) viewerPort = freePort();
+let flureePort = freePort();
+while (flureePort === busPort || flureePort === viewerPort) flureePort = freePort();
 const PATH = "/usr/bin:/bin:/usr/sbin:/sbin";
 const env = {
   HOME: home,
   PATH,
   AGENT_BUS_DIR: busDir,
+  AGENT_BUS_FLUREE_PORT: String(flureePort),
   AGENT_BUS_PORT: String(busPort),
   AGENT_BUS_LABEL: LABEL,
   AGENT_BUS_LAUNCHER: launcher,
@@ -132,11 +204,14 @@ const liveFiles = [
 const liveDigest = () =>
   liveFiles.map((path) => (existsSync(path) ? fileSha256(path) : "absent")).join(",");
 const liveBefore = liveDigest();
+const ownedJobs = new Set<string>();
+const disabledByRun = new Set<string>();
+let originalOverrides: string[] | undefined;
 
 function preflight(step: string) {
   const problems = [
     !LABEL.startsWith("test.") && "label",
-    (productionPorts.has(busPort) || productionPorts.has(viewerPort)) && "port",
+    [busPort, viewerPort, flureePort].some((port) => productionPorts.has(port)) && "port",
     !launcher.startsWith(`${root}/`) && "launcher",
     !data.startsWith(`${root}/`) && "data home",
     !busDir.startsWith(`${root}/`) && "bus directory",
@@ -253,6 +328,20 @@ function knownInstaller(target: Built) {
 }
 const installRelease = (target: Built, expect = target.digest) =>
   run(["/bin/sh", knownInstaller(target), "--release", target.dir, "--expect", expect]);
+// Held rollback is performed by the current trusted installer, not the older target's copy.
+const installHeld = (target: Built, expect = target.digest, extra: Record<string, string> = {}) =>
+  run(
+    [
+      "/bin/sh",
+      join(repo, "scripts/install-launch-agents.sh"),
+      "--release",
+      target.dir,
+      "--expect",
+      expect,
+      "--bind-only",
+    ],
+    extra
+  );
 const selectPlugin = (target: Built) =>
   tool(target.dir, "plugin", target.dir, "--expect", target.digest, "--marketplace", marketplace);
 const moveViewer = (target: Built) =>
@@ -340,9 +429,10 @@ function publish(from: typeof X, to: typeof X, body: string) {
 const read = (who: typeof X) =>
   mcp(async (client) => {
     const result = await client.callTool({ name: "bus_read", arguments: { ...who } });
-    return ((result.structuredContent as { messages?: Array<{ id: string }> })?.messages ?? [])
-      .map((message) => message.id)
-      .sort();
+    const messages = (result.structuredContent as { messages?: Array<{ id: string }> })?.messages;
+    if (result.isError || !Array.isArray(messages))
+      throw new Error("Fixture inbox read did not succeed");
+    return messages.map((message) => message.id).sort();
   });
 const same = (a: string[], b: string[]) =>
   JSON.stringify([...a].sort()) === JSON.stringify([...b].sort());
@@ -433,6 +523,45 @@ const surfaces = () => {
   ]);
 };
 
+/** Include absent entries and the rollback witnesses when testing a refused held bind. */
+const entry = (path: string) => {
+  try {
+    const stat = lstatSync(path);
+    if (stat.isSymbolicLink()) return ["link", readlinkSync(path)];
+    if (stat.isFile()) return ["file", stat.mode & 0o777, fileSha256(path)];
+    return ["other"];
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return ["absent"];
+    throw error;
+  }
+};
+const bindings = join(data, "bindings");
+const witnesses = () =>
+  existsSync(bindings)
+    ? readdirSync(bindings)
+        .sort()
+        .map((name) => [name, entry(join(bindings, name))])
+    : null;
+const heldSurfaces = () =>
+  JSON.stringify([
+    entry(launcher),
+    entry(servePlist),
+    entry(viewerPlist),
+    stateDigest(),
+    witnesses(),
+    processOf(loadedPid(LABEL)),
+    processOf(loadedPid(VIEWER)),
+  ]);
+const releaseLauncher = (target: Built) => {
+  const quote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  return (
+    "#!/bin/sh\n# agent-bus managed release launcher v2\nexec " +
+    `${quote(join(target.dir, "runtime/bun"))} --no-env-file ` +
+    `--config=${quote(join(target.dir, "app/bunfig.toml"))} ` +
+    `${quote(join(target.dir, "app/cli.js"))} "$@"\n`
+  );
+};
+
 function writeViewerJob() {
   const job = {
     Label: VIEWER,
@@ -464,12 +593,22 @@ function writeViewerJob() {
 // ---------------------------------------------------------------------------
 
 try {
-  for (const label of [LABEL, VIEWER])
-    if (loadedPid(label) !== null)
-      throw new Error(`${label} is already loaded; finish or boot out the previous rehearsal`);
+  originalOverrides = [LABEL, VIEWER].map(overrideState);
+  for (const [index, label] of [LABEL, VIEWER].entries()) {
+    if (!unloaded(label)) throw new Error(`${label} is loaded or its absence is unknown`);
+    if (entry(join(realHome, "Library/LaunchAgents", `${label}.plist`))[0] !== "absent")
+      throw new Error(`${label} has a real-home plist; refusing to use it`);
+    if (originalOverrides[index] === "absent")
+      throw new Error(
+        `${label} has no enabled override; admit the test label explicitly only after establishing ownership`
+      );
+    if (originalOverrides[index] !== "enabled")
+      throw new Error(`${label} is disabled or its override is unknown; refusing to change it`);
+  }
   facts.clients = clients ? "claude and codex" : "skipped: a client is not installed";
   facts.commitA = commitA;
   facts.commitB = commitB;
+  facts.heldInstallerSha256 = fileSha256(join(repo, "scripts/install-launch-agents.sh"));
   preflight("setup");
   // Each client keeps its state under this home; Codex refuses a CODEX_HOME that does not exist.
   for (const dir of [env.CLAUDE_CONFIG_DIR, env.CODEX_HOME]) mkdirSync(dir, { recursive: true });
@@ -482,6 +621,19 @@ try {
   )
     throw new Error("could not export the source");
   spawnSync("/usr/bin/tar", ["-xf", archive, "-C", source]);
+  // git archive excludes the approved private file: dependency required by the frozen install.
+  const hostArchive =
+    process.env.APPROVED_HOST_ARCHIVE ??
+    join(repo, "dist/private-artifacts/mcp-openapi-2.1.0-a1ca308.tgz");
+  if (
+    !existsSync(hostArchive) ||
+    fileSha256(hostArchive) !== "90ac182ec316eaff54b787573ca076aea5bd98e346d2f6290945f05a4c244cce"
+  )
+    throw new Error("the approved private host archive is missing or does not match its pin");
+  const hostDestination = join(source, "dist/private-artifacts/mcp-openapi-2.1.0-a1ca308.tgz");
+  mkdirSync(resolve(hostDestination, ".."), { recursive: true });
+  copyFileSync(hostArchive, hostDestination);
+  chmodSync(hostDestination, 0o600);
   // The real home only for Bun's package cache, as a build uses it.
   for (const step of [
     [bun, "install", "--frozen-lockfile", "--ignore-scripts"],
@@ -520,6 +672,7 @@ try {
 
   // 0. Source, as deployed today: launcher v1 and serve, and the viewer from the checkout.
   preflight("source install");
+  ownedJobs.add(LABEL);
   check(
     "source: installed",
     run(
@@ -530,6 +683,7 @@ try {
     ).status === 0
   );
   mkdirSync(agents, { recursive: true });
+  ownedJobs.add(VIEWER);
   writeViewerJob();
   for (const who of [X, Y])
     check(
@@ -641,7 +795,229 @@ try {
   const m6 = publish(Y, X, "m6");
   check("B→A: X reads m6", same(await read(X), [m6]));
 
-  // 7. A → source (decision 17), guidance first: the clients' marketplace returns to the
+  // 7. Guarded stop and held binding: the current trusted installer binds already-verified
+  // A and B without using the PATH-mediated launchctl loader; resumption is separate.
+  preflight("guarded stop and held binding");
+  if (A.id === B.id || A.digest === B.digest) throw new Error("held targets must be distinct");
+  const shimDir = join(root, "launchctl-shim");
+  const shimCalls = join(shimDir, "calls");
+  mkdirSync(shimDir);
+  const shellQuote = (value: string) => `'${value.replaceAll("'", "'\\''")}'`;
+  writeFileSync(
+    join(shimDir, "launchctl"),
+    `#!/bin/sh\nprintf '%s\n' "$*" >> ${shellQuote(shimCalls)}\nexec /bin/launchctl "$@"\n`,
+    { mode: 0o755 }
+  );
+  writeFileSync(shimCalls, "");
+  const shimPath = `${shimDir}:${PATH}`;
+  check(
+    "held: launchctl recorder detects a control call",
+    run(["/bin/sh", "-c", 'launchctl print-disabled "$1" >/dev/null', "control", domain], {
+      PATH: shimPath,
+    }).status === 0 && readFileSync(shimCalls, "utf8").includes("print-disabled")
+  );
+  const held = (
+    name: string,
+    target: Built,
+    expect = target.digest,
+    extra: Record<string, string> = {}
+  ) => {
+    writeFileSync(shimCalls, "");
+    const result = installHeld(target, expect, { PATH: shimPath, ...extra });
+    check(
+      `${name}: no PATH-mediated launchctl command attempted`,
+      readFileSync(shimCalls, "utf8") === ""
+    );
+    return result;
+  };
+  const refused = (
+    name: string,
+    target: Built,
+    expect = target.digest,
+    extra: Record<string, string> = {}
+  ) => {
+    const before = heldSurfaces();
+    const result = held(name, target, expect, extra);
+    check(`${name}: refused`, result.status !== 0);
+    check(`${name}: owned bytes and witnesses unchanged`, heldSurfaces() === before);
+  };
+  const oldPid = loadedPid(LABEL);
+  if (oldPid === null || oldPid === "loaded")
+    throw new Error("could not capture the old serve PID and identity");
+  const oldProcess = processStart(oldPid);
+  if (oldProcess.kind !== "present")
+    throw new Error("could not capture the old serve start identity");
+  const oldProcessExited = () => {
+    const current = processStart(oldPid);
+    return (
+      current.kind === "absent" ||
+      (current.kind === "present" && current.start !== oldProcess.start)
+    );
+  };
+  check(
+    "held: serve is explicitly enabled and loaded",
+    overrideState(LABEL) === "enabled" && !unloaded(LABEL)
+  );
+  refused("held enabled and loaded", B);
+
+  disabledByRun.add(LABEL);
+  check(
+    "stop serve: disabled",
+    launchctl("disable", `${domain}/${LABEL}`) === 0 && disabled(LABEL)
+  );
+  refused("held disabled but loaded", B);
+  check("stop serve: booted out", launchctl("bootout", `${domain}/${LABEL}`) === 0);
+  for (let attempt = 0; attempt < 50; attempt++) {
+    if (unloaded(LABEL) && oldProcessExited()) break;
+    await Bun.sleep(200);
+  }
+  check("stop serve: exact label unloaded", unloaded(LABEL));
+  check("stop serve: captured old process exited", oldProcessExited());
+
+  disabledByRun.add(VIEWER);
+  check(
+    "stop viewer: disabled",
+    launchctl("disable", `${domain}/${VIEWER}`) === 0 && disabled(VIEWER)
+  );
+  check("stop viewer: booted out", launchctl("bootout", `${domain}/${VIEWER}`) === 0);
+  for (let attempt = 0; attempt < 50 && !unloaded(VIEWER); attempt++) await Bun.sleep(200);
+  check("stop viewer: exact label unloaded", unloaded(VIEWER));
+
+  const temporarilyEnabled = launchctl("enable", `${domain}/${LABEL}`) === 0;
+  check("held control: temporarily enabled", temporarilyEnabled);
+  if (temporarilyEnabled) disabledByRun.delete(LABEL);
+  check(
+    "held control: enabled but unloaded",
+    overrideState(LABEL) === "enabled" && unloaded(LABEL)
+  );
+  refused("held enabled but unloaded", B);
+  disabledByRun.add(LABEL);
+  check(
+    "held control: disabled again",
+    launchctl("disable", `${domain}/${LABEL}`) === 0 && disabled(LABEL)
+  );
+
+  refused("held wrong seal", A, B.digest);
+  refused("held wrong label", B, B.digest, { AGENT_BUS_LABEL: `${LABEL}.foreign` });
+  refused("held wrong port", B, B.digest, { AGENT_BUS_PORT: String(viewerPort) });
+  refused("held wrong state directory", B, B.digest, { AGENT_BUS_DIR: join(root, "wrong-state") });
+
+  const savedLauncher = join(root, "saved-launcher");
+  renameSync(launcher, savedLauncher);
+  try {
+    refused("held missing launcher", B);
+  } finally {
+    renameSync(savedLauncher, launcher);
+  }
+  const savedPlist = join(root, "saved-serve.plist");
+  renameSync(servePlist, savedPlist);
+  try {
+    refused("held missing plist", B);
+  } finally {
+    renameSync(savedPlist, servePlist);
+  }
+  const ownedLauncher = readFileSync(launcher);
+  try {
+    writeFileSync(launcher, "#!/bin/sh\nexit 0\n");
+    refused("held foreign launcher", B);
+  } finally {
+    writeFileSync(launcher, ownedLauncher);
+  }
+  const ownedPlist = readFileSync(servePlist);
+  try {
+    const foreign = ownedPlist
+      .toString()
+      .replace("<string>serve</string>", "<string>foreign</string>");
+    if (foreign === ownedPlist.toString())
+      throw new Error("could not create foreign plist control");
+    writeFileSync(servePlist, foreign);
+    refused("held foreign plist", B);
+  } finally {
+    writeFileSync(servePlist, ownedPlist);
+  }
+
+  const socket = Bun.listen({ hostname: "0.0.0.0", port: busPort, socket: { data() {} } });
+  try {
+    const seen = spawnSync("/usr/sbin/lsof", ["-nP", `-iTCP:${busPort}`, "-sTCP:LISTEN"], {
+      encoding: "utf8",
+      env: { LC_ALL: "C", PATH },
+    });
+    check(
+      "held busy port: non-HTTP wildcard listener independently seen",
+      seen.status === 0 && seen.stdout.includes("LISTEN")
+    );
+    refused("held busy port", B);
+  } finally {
+    socket.stop(true);
+  }
+
+  const witnessNames = () => new Set(readdirSync(bindings));
+  const bindExactly = (name: string, target: Built) => {
+    const beforeNames = witnessNames();
+    const previous = readFileSync(launcher);
+    check(`${name}: bound`, held(name, target).status === 0);
+    const added = readdirSync(bindings).filter((file) => !beforeNames.has(file));
+    check(
+      `${name}: previous launcher saved once`,
+      added.length === 1 && readFileSync(join(bindings, added[0]!)).equals(previous)
+    );
+    check(
+      `${name}: exact release launcher`,
+      readFileSync(launcher, "utf8") === releaseLauncher(target)
+    );
+    check(`${name}: plist byte-for-byte preserved`, readFileSync(servePlist).equals(ownedPlist));
+    check(`${name}: still disabled and unloaded`, disabled(LABEL) && unloaded(LABEL));
+    check(`${name}: store binding unchanged`, stateDigest() === facts.stateDigest);
+  };
+  bindExactly("held B", B);
+  bindExactly("held A", A);
+  bindExactly("held B again", B);
+  const beforeRerun = heldSurfaces();
+  const beforeInode = lstatSync(launcher, { bigint: true }).ino;
+  check("held B rerun: succeeds", held("held B rerun", B).status === 0);
+  check(
+    "held B rerun: launcher and witnesses untouched",
+    heldSurfaces() === beforeRerun && lstatSync(launcher, { bigint: true }).ino === beforeInode
+  );
+  bindExactly("held reset to A", A);
+  writeFileSync(shimCalls, "");
+  const swallowed = run(
+    [
+      "/bin/sh",
+      "-c",
+      'if launchctl bootstrap "$1" "$2" >/dev/null 2>&1; then exit 1; else exit 0; fi',
+      "control",
+      domain,
+      servePlist,
+    ],
+    { PATH: shimPath }
+  );
+  check("held: bootstrap refused while disabled", swallowed.status === 0);
+  check(
+    "held: PATH recorder detects swallowed bootstrap refusal",
+    readFileSync(shimCalls, "utf8").startsWith("bootstrap ")
+  );
+  check(
+    "held: still disabled and unloaded after bootstrap control",
+    disabled(LABEL) && unloaded(LABEL)
+  );
+  check(
+    "held: viewer bootstrap refused while disabled",
+    launchctl("bootstrap", domain, viewerPlist) !== 0
+  );
+  check("held: viewer remains disabled and unloaded", disabled(VIEWER) && unloaded(VIEWER));
+  for (const [label, plist] of [
+    [LABEL, servePlist],
+    [VIEWER, viewerPlist],
+  ] as const) {
+    const enabled = launchctl("enable", `${domain}/${label}`) === 0;
+    check(`resume ${label}: enabled`, enabled && overrideState(label) === "enabled");
+    if (enabled) disabledByRun.delete(label);
+    check(`resume ${label}: bootstrapped`, launchctl("bootstrap", domain, plist) === 0);
+  }
+  await bound("held resumed", A.id, A);
+
+  // 8. A → source (decision 17), guidance first: the clients' marketplace returns to the
   // checkout by remove-and-add, the viewer is restored from its first record, then
   // the runtime-only rollback with A's installer.
   preflight("A to source");
@@ -687,33 +1063,6 @@ try {
   }
   check("A→source: X gets no redelivery", same(await read(X), []));
   check("A→source: Y gets exactly m5", same(await read(Y), [m5]));
-
-  // 8. Guarded stop (decision 20): disabled and booted out, it stays down, refuses a
-  // bootstrap while disabled, and returns only after enable then bootstrap.
-  preflight("guarded stop");
-  for (const [label, plist] of [
-    [LABEL, servePlist],
-    [VIEWER, viewerPlist],
-  ] as const) {
-    check(`stop ${label}: disabled`, launchctl("disable", `${domain}/${label}`) === 0);
-    check(`stop ${label}: booted out`, launchctl("bootout", `${domain}/${label}`) === 0);
-    await Bun.sleep(1_500);
-    check(`stop ${label}: not running`, loadedPid(label) === null);
-    check(
-      `stop ${label}: bootstrap refused while disabled`,
-      launchctl("bootstrap", domain, plist) !== 0
-    );
-    check(`stop ${label}: still not running`, loadedPid(label) === null);
-  }
-  check("stop: serve does not answer", !(await healthy(`http://127.0.0.1:${busPort}/health`, 5)));
-  for (const [label, plist] of [
-    [LABEL, servePlist],
-    [VIEWER, viewerPlist],
-  ] as const) {
-    check(`resume ${label}: enabled`, launchctl("enable", `${domain}/${label}`) === 0);
-    check(`resume ${label}: bootstrapped`, launchctl("bootstrap", domain, plist) === 0);
-  }
-  await bound("resumed", "source", A);
 } catch (error) {
   let message = error instanceof Error ? error.message.split("\n")[0]! : "unknown";
   for (const [path, name] of [
@@ -725,20 +1074,18 @@ try {
   check("completed", false);
   facts.error = message;
 } finally {
-  for (const label of [LABEL, VIEWER]) {
-    launchctl("enable", `${domain}/${label}`);
+  for (const label of ownedJobs) {
+    if (disabledByRun.has(label)) launchctl("enable", `${domain}/${label}`);
     launchctl("bootout", `${domain}/${label}`);
   }
-  for (
-    let attempt = 0;
-    attempt < 50 && [LABEL, VIEWER].some((label) => loadedPid(label) !== null);
-    attempt++
-  )
+  for (let attempt = 0; attempt < 50 && [...ownedJobs].some((label) => !unloaded(label)); attempt++)
     await Bun.sleep(200);
-  check(
-    "cleanup: disposable jobs gone",
-    [LABEL, VIEWER].every((label) => loadedPid(label) === null)
-  );
+  check("cleanup: disposable jobs gone", [...ownedJobs].every(unloaded));
+  if (ownedJobs.size > 0)
+    check(
+      "cleanup: original test-label overrides restored",
+      [LABEL, VIEWER].every((label, index) => overrideState(label) === originalOverrides?.[index])
+    );
   await stopFlureeServer();
   removeOwned(root);
   check("cleanup: rehearsal home removed", !existsSync(root));

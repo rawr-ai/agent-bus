@@ -874,6 +874,58 @@ async function writeJob(path: string, job: Record<string, unknown>) {
 }
 
 test.skipIf(process.platform !== "darwin")(
+  "an exact-aware current launcher cannot authorize selecting a legacy target against active exact state",
+  async () => {
+    const f = await fixture();
+    try {
+      const legacy = await f.release("1.0.0-d1d1d1d1d1d1");
+      const nextId = "1.0.0-d2d2d2d2d2d2";
+      const next = await f.release(nextId);
+      const nextDigest = replaceSealed(
+        next.dir,
+        "app/cli.js",
+        `const args = process.argv.slice(2);
+console.log(args[0] === "--version" ? "agent-bus v${nextId}" :
+  args.join(" ") === "cursors --help" ? "Exact-address cursor layout v2: operator-only" : "Native CLI help");\n`
+      );
+      const bindNext = ["--release", next.dir, "--expect", nextDigest];
+      const selectOld = ["--release", legacy.dir, "--expect", legacy.digest];
+      expect(await f.install(selectOld)).toMatchObject({ exitCode: 0, stderr: "" });
+      const parent = join(f.bus, "fluree-cursors", "fixture");
+      const old = join(parent, "incarnation");
+      const exact = `${old}.v2`;
+      await mkdir(old, { recursive: true });
+      await mkdir(exact);
+      await writeFile(join(old, "fixture%2FA.json"), '{"cursor":2}');
+      await writeFile(join(exact, "layout"), '{"fixture":"active"}');
+      await writeFile(join(exact, "fixture.json"), '{"address":"fixture/A","cursor":5}');
+      expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(legacy.dir));
+      expect(await f.install(bindNext)).toMatchObject({ exitCode: 0, stderr: "" });
+      await writeFile(f.toolLog, "");
+      expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(next.dir));
+      const before = await snapshot(f.root);
+      // The legacy fixture exits zero for all help requests, like the actual old CLI.
+      for (const args of [selectOld, ["--runtime-only", "--bun", f.bunA]]) {
+        const refusal = await f.install(args);
+        expect(refusal.exitCode).toBe(1);
+        expect(refusal.stderr).toContain("does not support the active exact cursor layout");
+        expect(await snapshot(f.root)).toEqual(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+      expect(await f.install(bindNext)).toMatchObject({ exitCode: 0, stderr: "" });
+      // The binder does not convert files; model the already-completed stopped export here.
+      await writeFile(join(old, "fixture%2FA.json"), '{"cursor":5}');
+      renameSync(exact, `${exact}.saved-fixture`);
+      expect(await f.install(selectOld)).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(legacy.dir));
+    } finally {
+      await f.dispose();
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
+
+test.skipIf(process.platform !== "darwin")(
   "activation keeps the owned serve job byte for byte and waits on its own port",
   async () => {
     const f = await fixture();

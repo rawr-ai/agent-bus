@@ -2,6 +2,7 @@
 import { strict as assert } from "node:assert";
 import { createHash, createHmac, randomBytes } from "node:crypto";
 import {
+  constants,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -41,13 +42,20 @@ import {
   type ModernHttp,
   modernHttp,
   modernRequest,
+  verifyPrivateBundle,
 } from "./private-modern-http.ts";
 import { authoredSkill, verifySkillWire } from "./skill-wire.ts";
 
 const { positionals, values } = parseArgs({
   args: process.argv.slice(2),
   allowPositionals: true,
-  options: { bundle: { type: "string" }, case: { type: "string" } },
+  options: {
+    bundle: { type: "string" },
+    expect: { type: "string" },
+    commit: { type: "string" },
+    tree: { type: "string" },
+    case: { type: "string" },
+  },
 });
 const [archive] = positionals;
 const selectedCase = values.case ?? "all";
@@ -55,11 +63,14 @@ if (
   positionals.length !== 1 ||
   !archive ||
   !isAbsolute(archive) ||
+  (values.bundle === undefined && values.expect !== undefined) ||
+  (values.commit === undefined) !== (values.tree === undefined) ||
+  (values.commit !== undefined && values.expect === undefined) ||
   !["all", "checkpoint", "native-expiry"].includes(selectedCase) ||
   digest(archive) !== archiveHash
 )
   throw new Error(
-    "Supply the absolute host archive, optional --bundle absolute-directory and --case checkpoint|native-expiry."
+    "Supply the absolute host archive, optional --bundle directory --expect digest [--commit id --tree id] and --case checkpoint|native-expiry."
   );
 
 const catalog = Schema.decodeUnknownSync(
@@ -236,15 +247,30 @@ let provider: ReturnType<typeof Bun.serve> | undefined;
 let receiver: ReturnType<typeof Bun.serve> | undefined;
 const owned = ownership();
 try {
-  const entry = hostForQualification(archive, dir, values.bundle);
+  const expected =
+    values.expect === undefined
+      ? undefined
+      : {
+          manifestSha256: values.expect,
+          source:
+            values.commit === undefined ? undefined : { commit: values.commit, tree: values.tree! },
+        };
+  const entry = hostForQualification(archive, dir, values.bundle, expected);
   const original = dirname(entry);
   const relocated = join(dir, "relocated");
   mkdirSync(relocated);
-  for (const name of ["main.js", "mcp-host.mjs"])
-    copyFileSync(join(original, name), join(relocated, name));
+  for (const name of ["main.js", "mcp-host.mjs", "manifest.json"]) {
+    copyFileSync(join(original, name), join(relocated, name), constants.COPYFILE_EXCL);
+    assert.deepEqual(readFileSync(join(relocated, name)), readFileSync(join(original, name)));
+  }
+  verifyPrivateBundle(relocated, expected);
   if (
     process.platform === "darwin" &&
-    !sourceIsolationRefusesRead(repo, [original], [join(original, "main.js"), entry])
+    !sourceIsolationRefusesRead(
+      repo,
+      [original],
+      [join(original, "main.js"), entry, join(original, "manifest.json")]
+    )
   )
     throw new Error("The relocated Events peer's source-isolation control failed.");
   for (let parent = dir; ; parent = dirname(parent)) {

@@ -76,8 +76,10 @@ const message = (id: string, ts: string, body = id, to = ["#window"]) =>
     body,
     origin: new Origin({ host: "fixture-host", cwd: "/workspace" }),
   });
-// 39,000 UTF-8 bytes: no two share a 65,536-byte page, so the bus cuts pages by bytes.
-const bulky = (id: string, ts: string) => message(id, ts, `${id}${"€".repeat(13_000)}`);
+// 39,000 UTF-8 bytes, split between body and subject (each within the searchable-text limit):
+// no two share a 65,536-byte page, so the bus cuts pages by bytes.
+const bulky = (id: string, ts: string) =>
+  new Message({ ...message(id, ts, `${id}${"€".repeat(6_500)}`), subject: "€".repeat(6_500) });
 const append = (...messages: ReadonlyArray<Message>) =>
   bus.runPromise(Effect.flatMap(Ledger, (ledger) => Effect.forEach(messages, ledger.append)));
 /** Entries written in one commit, listed out of id order. */
