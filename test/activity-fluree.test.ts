@@ -18,6 +18,7 @@ import { toNode } from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
 import { messageIri, scopeIri } from "../src/Ledger.ts";
 import { updateDirectory } from "../src/Orientation.ts";
+import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
 import {
   act,
@@ -1419,6 +1420,55 @@ describe("restart and store pins", () => {
         await a.run(joinAs(y, { runtime: "codex", topics: ["t"] }));
         expect(await peerRow(a, x)).toMatchObject({ activity: "active", mutes: [] });
         expect(await peerRow(a, y)).toMatchObject({ activity: "active", mutes: [] });
+      }),
+    TIMEOUT
+  );
+
+  test(
+    "direct activity treats a question-mark recipient as a literal address",
+    () =>
+      scoped(async (track) => {
+        const config = await freshFluree("literal-recipient");
+        const serve = await open(track, config);
+        const after = await serve.run(end);
+        // A partial record for another recipient must not mark this recipient's scan damaged.
+        const unrelated = uuid();
+        await insertRaw(config, {
+          "@context": context,
+          "@id": messageIri(unrelated),
+          "bus:id": unrelated,
+          "bus:to": "codex/elsewhere",
+        });
+        const message = new Message({
+          id: uuid(),
+          ts: "2026-01-02T03:04:05.000Z",
+          from: y,
+          to: ["?m", x],
+          kind: "message",
+          body: "direct notice",
+        });
+        await insertRaw(config, toNode(message, Schema.encodeSync(MessageJson)(message)));
+        const cut = await serve.run(end);
+        const expected = await serve.run(
+          Effect.flatMap(QueryGateway, (gateway) =>
+            gateway.sparql(
+              cut,
+              `PREFIX bus: <${context.bus}> PREFIX f: <https://ns.flur.ee/db#>
+               SELECT ?id ?t WHERE { ?m bus:to "?m" . << ?m bus:id ?id >> f:t ?t }`
+            )
+          )
+        );
+        expect(expected.rows).toEqual([{ "?id": message.id, "?t": cut }]);
+        for (const address of message.to) {
+          const scan = await serve.run(
+            Effect.flatMap(Ledger.Ledger, (ledger) => ledger.direct(address, after, cut))
+          );
+          expect(scan).toEqual({
+            found: { t: cut, ts: message.ts },
+            damaged: false,
+            complete: true,
+          });
+        }
       }),
     TIMEOUT
   );

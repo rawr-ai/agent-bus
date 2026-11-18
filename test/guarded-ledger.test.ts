@@ -515,6 +515,37 @@ test("control: dropping the global witness guard permits cross-scope operation r
   }
 });
 
+test("designation notices preserve the literal sender and every recipient in the graph", async () => {
+  const store = await setup();
+  try {
+    const input = request({ kind: "programme" }, null);
+    const notification = new Message({
+      ...input.notification,
+      from: "?publisher",
+      to: ["?recipient", "codex/reader"],
+    });
+    const result = await store.designate({ ...input, notification });
+    expect(result.status).toBe("APPLIED");
+    if (result.status !== "APPLIED") throw new Error("missing designation cut");
+    const rows = await query(store.config, {
+      from: at(store.config, result.cut.head),
+      select: ["?sender", "?recipient"],
+      where: {
+        "@id": `urn:agent-bus:message:${notification.id}`,
+        "bus:from": "?sender",
+        "bus:to": "?recipient",
+      },
+      orderBy: "?recipient",
+    });
+    expect(rows).toEqual([
+      ["?publisher", "?recipient"],
+      ["?publisher", "codex/reader"],
+    ]);
+  } finally {
+    await store.runtime.dispose();
+  }
+});
+
 test("noncanonical IDs and invalid scopes fail before a write", async () => {
   const store = await setup();
   try {
