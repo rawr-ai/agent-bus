@@ -8,6 +8,9 @@ import { InvalidQuery, type Message } from "./domain.ts";
  */
 export const MAX_ENTRY_CARRIER_BYTES = 1_048_576;
 
+/** The largest JSON array of listed wake-notice rows. A publish receipt must fit after the write. */
+export const WAKE_LISTED_BYTES = 4096;
+
 /** The longest joined working directory, which every later entry from the address records. */
 export const MAX_ORIGIN_CWD_BYTES = 4096;
 

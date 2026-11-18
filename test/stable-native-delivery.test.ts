@@ -9,6 +9,7 @@ import { Cursors, layerFiles } from "../src/Cursors.ts";
 import { type Daemon, deliverOnce, type Queue } from "../src/codex.ts";
 import { Message, Origin, Presence } from "../src/domain.ts";
 import { Ledger } from "../src/Ledger.ts";
+import { WAKE_LISTED_BYTES } from "../src/message-carrier.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
@@ -384,7 +385,7 @@ test("a send's wake notice comes from its one ownership read, before the append"
       expect(cuts).toHaveLength(1);
       // However many lack and however long their addresses, the notice lists the prefix whose
       // JSON array fits the budget and counts the rest. The docs say 4 KiB.
-      expect(Bus.WAKE_LISTED_BYTES).toBe(4096);
+      expect(WAKE_LISTED_BYTES).toBe(4096);
       const rowBytes = (rows: ReadonlyArray<unknown>) => Buffer.byteLength(JSON.stringify(rows));
       const many = Array.from({ length: 200 }, (_, i) => `codex/absent-${i}`);
       const bounded = yield* post(bus, many, "to many");
@@ -392,13 +393,13 @@ test("a send's wake notice comes from its one ownership read, before the append"
       expect(listed).toEqual(
         many.slice(0, listed.length).map((address) => ({ address, standing: "not-joined" }))
       );
-      expect(rowBytes(listed)).toBeLessThanOrEqual(Bus.WAKE_LISTED_BYTES);
+      expect(rowBytes(listed)).toBeLessThanOrEqual(WAKE_LISTED_BYTES);
       expect(
         rowBytes([...listed, { address: many[listed.length], standing: "not-joined" }])
-      ).toBeGreaterThan(Bus.WAKE_LISTED_BYTES);
+      ).toBeGreaterThan(WAKE_LISTED_BYTES);
       expect(bounded.wake?.unlisted).toBe(many.length - listed.length);
       // One address too long to list, even one quoted twice over, is only counted.
-      const long = `codex/${'"'.repeat(Bus.WAKE_LISTED_BYTES)}`;
+      const long = `codex/${'"'.repeat(WAKE_LISTED_BYTES)}`;
       expect((yield* post(bus, [long, "codex/absent-0"], "long")).wake).toEqual({
         ledger: cuts[0]?.incarnation ?? "",
         t: expect.any(Number),

@@ -106,6 +106,7 @@ const SOURCES = (() => {
   const files = [
     "Bus",
     "mcp",
+    "mcp-tools",
     "Ledger",
     "Fluree",
     "Cursors",
@@ -113,6 +114,7 @@ const SOURCES = (() => {
     "bin",
     "Query",
     "catalogue",
+    "query-contract",
     "sparql",
     "message-carrier",
   ].map((file) => read(`src/${file}.ts`).replaceAll('\\"', '"'));

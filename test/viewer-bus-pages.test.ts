@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Schema } from "effect";
-import { CATALOGUE_VERSION, MAX_ENVELOPE_BYTES, operations } from "../src/catalogue.ts";
+import { CATALOGUE_VERSION, operations } from "../src/catalogue.ts";
+import { MAX_ENVELOPE_BYTES } from "../src/query-contract.ts";
 import {
   historyOf,
   peersOf,

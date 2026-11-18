@@ -12,7 +12,6 @@ import { Cursors } from "../src/Cursors.ts";
 import { LedgerError, Message, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { HostedNativeTools } from "../src/mcp.ts";
 import { peerTools } from "../src/private-web/peer.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
@@ -1121,13 +1120,11 @@ test("official SDK sees a pure native-only tool, complete duplicated content and
   });
   expect(tool?.inputSchema.properties).toHaveProperty("expectedBinding");
   expect(tool?.outputSchema?.required).toContain("observationCut");
-  expect(HostedNativeTools).not.toHaveProperty("ObserveWake");
-  expect(HostedNativeTools).not.toHaveProperty("CheckWakeBinding");
-  expect(
-    peerTools(async () => {
-      throw new Error("Must not forward.");
-    }, "/fixture").map((entry) => entry.name)
-  ).not.toContain("bus_observe_wake");
+  const hosted = peerTools(async () => {
+    throw new Error("Must not forward.");
+  }, "/fixture").map((entry) => entry.name);
+  expect(hosted).not.toContain("bus_observe_wake");
+  expect(hosted).not.toContain("bus_check_wake_binding");
   await f.say([address], 'body-not-returned-"-\\-\u20ac');
   const response = await client.callTool({
     name: "bus_observe_wake",

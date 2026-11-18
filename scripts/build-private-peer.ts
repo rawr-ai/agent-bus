@@ -106,8 +106,9 @@ async function bundle(root: string, out: string, isolated: boolean): Promise<Bui
     throw new Error("Host runtime was not bundled.");
   if (/["'`]\/(?:Users|home)\/|["'`][A-Za-z]:\\+Users\\+/u.test(hostSource))
     throw new Error("Host bundle contains a private build locator.");
+  const peerEntry = join(root, "src/private-web/main.ts");
   const peerBuild = await Bun.build({
-    entrypoints: [join(root, "src/private-web/main.ts")],
+    entrypoints: [peerEntry],
     outdir: out,
     target: "bun",
     format: "esm",
@@ -115,6 +116,26 @@ async function bundle(root: string, out: string, isolated: boolean): Promise<Bui
     metafile: true,
   });
   if (!peerBuild.success) throw new Error("Private peer bundle failed.");
+  const peer = join(out, "main.js");
+  const output = Object.values(peerBuild.metafile?.outputs ?? {}).find(
+    ({ entryPoint }) => entryPoint !== undefined && resolve(root, entryPoint) === peerEntry
+  );
+  // Scanned inputs can be eliminated; only emitted contributions belong to the artifact.
+  const emitted = new Map(
+    Object.entries(output?.inputs ?? {}).map(([path, input]) => [
+      resolve(root, path),
+      input.bytesInOutput,
+    ])
+  );
+  if (
+    (emitted.get(join(root, "src/mcp-tools.ts")) ?? 0) <= 0 ||
+    [...emitted.values()].some((bytes) => !Number.isSafeInteger(bytes) || bytes < 0)
+  )
+    throw new Error("Private peer bundle output metadata is unrecognizable.");
+  for (const path of ["src/mcp.ts", "src/Bus.ts", "src/catalogue.ts", "src/sparql.ts"]) {
+    if ((emitted.get(join(root, path)) ?? 0) > 0)
+      throw new Error(`Private peer bundle contains native implementation from ${path}.`);
+  }
   return {
     host: {
       sourceCommit: "a1ca3083913b9d9cc0794c1acdf6c682678de1d1",
@@ -125,7 +146,7 @@ async function bundle(root: string, out: string, isolated: boolean): Promise<Bui
       effectVersion: effectManifest.version,
       effectPackageSha256: fileHash(effectPackage),
     },
-    peerSha256: fileHash(join(out, "main.js")),
+    peerSha256: fileHash(peer),
     hostInputs: inputs(root, hostBuild.metafile),
     peerInputs: inputs(root, peerBuild.metafile),
   };

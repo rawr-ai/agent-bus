@@ -17,7 +17,8 @@ import { Association, LedgerError, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import { initializeInstallation, loadInstallation } from "./installation.ts";
 import * as Ledger from "./Ledger.ts";
-import * as Mcp from "./mcp.ts";
+import { Peers, Published } from "./mcp-tools.ts";
+import { OrientationResult } from "./orientation-model.ts";
 import * as Serve from "./serve.ts";
 import { BUILD } from "./version.ts";
 
@@ -104,7 +105,7 @@ const call = Client.call(endpoint);
  * standing a newer serve adds still prints instead of failing a send that would invite a resend.
  */
 const Sent = Schema.Struct({
-  id: Mcp.Published.fields.id,
+  id: Published.fields.id,
   wake: Schema.optionalKey(
     Schema.Struct({
       t: Schema.Int,
@@ -281,7 +282,7 @@ const orientCommand = Command.make(
   },
   (input) =>
     Effect.gen(function* () {
-      const result = yield* call("bus_orient", Mcp.OrientationResult, {
+      const result = yield* call("bus_orient", OrientationResult, {
         cwd: Option.getOrUndefined(input.cwd) ?? process.cwd(),
         ...Client.defined({
           directory: Option.getOrUndefined(input.directory),
@@ -329,7 +330,7 @@ const publish = Command.make(
 
 const peers = Command.make("peers", {}, () =>
   Effect.gen(function* () {
-    const { peers } = yield* call("bus_peers", Mcp.Peers, {});
+    const { peers } = yield* call("bus_peers", Peers, {});
     for (const peer of peers) {
       const topics = peer.topics.length === 0 ? "" : ` #${peer.topics.join(" #")}`;
       const host = peer.host === undefined ? "" : ` on ${peer.host}`;

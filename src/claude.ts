@@ -1,7 +1,7 @@
 import { Clock, Duration, Effect, Option, Schema } from "effect";
 import * as Client from "./client.ts";
 import { validSession } from "./domain.ts";
-import { Woken } from "./mcp.ts";
+import { Woken } from "./mcp-tools.ts";
 import { WAKE_CALL_TIMEOUT_SECONDS, WAKE_FAILING_FOR, WAKE_RETRY } from "./timing.ts";
 
 /** The session and lifecycle fields of a Claude Code hook's input that the wake uses. */

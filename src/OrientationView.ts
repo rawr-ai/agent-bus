@@ -1,10 +1,5 @@
 import { Clock, Effect, Schema } from "effect";
-import {
-  CATALOGUE_VERSION,
-  MAX_ENVELOPE_BYTES,
-  orientationAssociations,
-  orientationDirectories,
-} from "./catalogue.ts";
+import { CATALOGUE_VERSION, orientationAssociations, orientationDirectories } from "./catalogue.ts";
 import { InvalidQuery, LedgerError, type QueryCapacity } from "./domain.ts";
 import {
   bulletinView,
@@ -15,6 +10,7 @@ import {
 } from "./orientation-model.ts";
 import { bulletinAt, DAMAGE_MESSAGE, directoryAt } from "./orientation-read.ts";
 import { QueryGateway } from "./Query.ts";
+import { MAX_ENVELOPE_BYTES } from "./query-contract.ts";
 
 const Candidates = Schema.Array(
   Schema.Struct({ id: Schema.String, name: Schema.String, revision: Schema.String })

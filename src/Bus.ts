@@ -59,10 +59,12 @@ import {
   MAX_ORIGIN_CWD_BYTES,
   presenceText,
   unjoinable,
+  WAKE_LISTED_BYTES,
 } from "./message-carrier.ts";
 import { canonicalJson } from "./orientation-model.ts";
 import { directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
+import { MAX_ENVELOPE_BYTES } from "./query-contract.ts";
 import {
   CheckWakeBindingRequest,
   MAX_WAKE_COVERAGE_IDS,
@@ -132,12 +134,6 @@ export interface WakeNotice {
   /** How many more lacked beyond those listed, when any did. */
   readonly unlisted?: number;
 }
-
-/**
- * The most UTF-8 bytes the JSON array of rows a wake notice lists may take. `to` and its addresses are unbounded, and
- * a receipt that outgrew its carrier would fail after the message was already stored.
- */
-export const WAKE_LISTED_BYTES = 4096;
 
 /** The longest prefix of `rows` whose JSON array fits the budget, and how many it leaves out. */
 const listWithin = <A>(rows: ReadonlyArray<A>, budget: number) => {
@@ -734,7 +730,7 @@ const make = (installation: string, hostOf: () => string) =>
               recovery: { tool: "bus_orient", input: { cwd: input.cwd } },
             },
           };
-          if (Buffer.byteLength(JSON.stringify(smallestResult), "utf8") > 65_536) {
+          if (Buffer.byteLength(JSON.stringify(smallestResult), "utf8") > MAX_ENVELOPE_BYTES) {
             return yield* new InvalidQuery({
               message:
                 "The join echo is too large to include an orientation status. Shorten the join fields, or join without orientation. Nothing was changed.",

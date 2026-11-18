@@ -1,7 +1,7 @@
 import { Effect, Schema } from "effect";
 import { McpClient, McpProtocol, type McpSchema } from "effect/ai";
 import { type Association, canonicalAssociations, type Runtime, validSession } from "./domain.ts";
-import { Joined, Peers } from "./mcp.ts";
+import { Joined, Peers } from "./mcp-tools.ts";
 import { CALL_TIMEOUT_SECONDS } from "./timing.ts";
 import { VERSION } from "./version.ts";
 

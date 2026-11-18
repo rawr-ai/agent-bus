@@ -9,7 +9,7 @@ import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { Messages } from "../src/mcp.ts";
+import { Messages } from "../src/mcp-tools.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger } from "./fluree-server.ts";

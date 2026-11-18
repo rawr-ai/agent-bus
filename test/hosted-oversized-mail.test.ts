@@ -20,7 +20,7 @@ import * as Cursors from "../src/Cursors.ts";
 import { Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { Messages } from "../src/mcp.ts";
+import { Messages } from "../src/mcp-tools.ts";
 import {
   MAX_ENTRY_CARRIER_BYTES,
   MAX_INDEXED_FIELD_BYTES,

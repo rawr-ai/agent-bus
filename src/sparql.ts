@@ -2,6 +2,7 @@ import { Effect } from "effect";
 import SparqlJs from "sparqljs";
 import { InvalidQuery, LedgerError } from "./domain.ts";
 import { QueryGateway } from "./Query.ts";
+import { MAX_ENVELOPE_BYTES, MAX_QUERY_LENGTH, MAX_SPARQL_ROWS } from "./query-contract.ts";
 
 export const BUS = "https://rawr.ai/ns/agent-bus#";
 
@@ -12,10 +13,6 @@ export const PREFIXES = {
   rdf: "http://www.w3.org/1999/02/22-rdf-syntax-ns#",
   f: "https://ns.flur.ee/db#",
 };
-
-export const MAX_QUERY_LENGTH = 32_768;
-/** The most rows a raw query returns; one more is fetched to tell whether more exist. */
-export const MAX_SPARQL_ROWS = 500;
 
 const invalid = (message: string) => new InvalidQuery({ message });
 
@@ -212,11 +209,7 @@ export const largestFitting = (n: number, fits: (k: number) => boolean) => {
   return k;
 };
 
-/** The largest `bus_query` result, as UTF-8 JSON; the same cap as catalogue results. */
-const MAX_RESULT_BYTES = 65_536;
-
-export const SPARQL_NOTE =
-  "Rows are SPARQL bindings at t, keyed by variable, not messages: one message can give many rows or none. complete means every solution of the query as written is here; cut says which server cap stopped it (rows: more than 500 solutions; bytes: the byte budget). limitReached means your own LIMIT may have stopped it. Page with your own ORDER BY and OFFSET or a keyset at the same t, or use bus_run_query.";
+export const SPARQL_NOTE = `Rows are SPARQL bindings at t, keyed by variable, not messages: one message can give many rows or none. complete means every solution of the query as written is here; cut says which server cap stopped it (rows: more than ${MAX_SPARQL_ROWS} solutions; bytes: the byte budget). limitReached means your own LIMIT may have stopped it. Page with your own ORDER BY and OFFSET or a keyset at the same t, or use bus_run_query.`;
 
 export interface SparqlEnvelope {
   readonly name: "sparql";
@@ -235,7 +228,7 @@ export interface SparqlEnvelope {
 /**
  * Runs a caller's SPARQL SELECT read-only at one commit: validated and
  * regenerated first, pinned to `t` (head by default) of one ledger incarnation,
- * capped at 500 rows with a sentinel and at MAX_RESULT_BYTES, whole rows trimmed.
+ * capped at MAX_SPARQL_ROWS with a sentinel and at MAX_ENVELOPE_BYTES, whole rows trimmed.
  */
 export const runSparql = (text: string, t: number | undefined) =>
   Effect.gen(function* () {
@@ -282,7 +275,7 @@ export const runSparql = (text: string, t: number | undefined) =>
       };
     };
     const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
-    const kept = largestFitting(rows.length, (k) => size(envelope(k)) <= MAX_RESULT_BYTES);
+    const kept = largestFitting(rows.length, (k) => size(envelope(k)) <= MAX_ENVELOPE_BYTES);
     const envelopeNow = envelope(kept);
     // An empty preview is never returned: no binding fitting means the first one is oversized.
     if (kept === 0 && (rows.length > 0 || result.truncated)) {

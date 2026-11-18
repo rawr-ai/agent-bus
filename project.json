@@ -43,7 +43,7 @@
         "{workspaceRoot}/src/orientation-model.ts",
         "{workspaceRoot}/src/orientation-read.ts",
         "{workspaceRoot}/src/Query.ts",
-        "{workspaceRoot}/src/query-envelope.ts",
+        "{workspaceRoot}/src/query-contract.ts",
         "{workspaceRoot}/src/sparql.ts",
         "{workspaceRoot}/viewer/src/features/conversations/model.ts",
         "{workspaceRoot}/viewer/src/markdown-policy.ts",
