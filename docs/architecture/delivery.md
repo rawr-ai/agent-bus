@@ -39,7 +39,10 @@ flowchart TD
   loaded -- "No" --> eligible{"Eligible to borrow?<br/>(rule 9)"}
   eligible -- "Yes" --> borrow["The daemon borrows it:<br/>runs the nudge, and lets go<br/>5 s after it goes idle"]
   eligible -- "No" --> waits["Its nudge waits until<br/>the thread is next loaded"]
-  runtime -- "other" --> poll
+  runtime -- "human" --> poll
+  runtime -- "other" --> watch{"Hosted Events watch accepted<br/>for this chatgpt/ holding?"}
+  watch -- "No" --> poll
+  watch -- "Yes" --> notice["mail.wake may notify the client;<br/>only a read delivers mail"]
 ```
 
 ### How each kind of session receives mail
@@ -55,7 +58,8 @@ This is the one table of who is woken; other pages link here. "Within seconds" i
 | Codex `codex` TUI, or a desktop SSH project | **Yes**, within seconds while the daemon has it loaded, with or without a client attached; after the current turn when busy. Once unloaded, or after a daemon stop, only if it is eligible | A nudge in its queue, run by the daemon, which `serve` borrows the thread into again, starting the daemon if it isn't running |
 | `codex exec` | **Mail sent after the run exits: yes**, borrowed like any thread loaded nowhere. **Mail sent while it runs: no.** The run may take the nudge and exit mid-turn, which leaves the thread interrupted, so it isn't borrowed until it gets new input ([limits](#for-codex-threads)) | A nudge in its queue. A delegate that is done should `bus_leave`, or reconciles keep waking it |
 | A Codex or Claude subagent | **Never directly** | Through its parent. A Codex subagent's queue refuses the nudge (rule 13); a Claude subagent shares its parent's session id, so its mail wakes the parent |
-| Any other client | **No** | It calls `bus_read` or `bus_wait` |
+| Hosted client with an accepted [Events watch](interfaces.md#hosted-events) for an authorized `chatgpt/` holding | **May be notified.** An accepted watch does not establish that the client woke or acted. | `mail.wake` names only the address. The owning conversation calls `bus_read` for the mail. |
+| Other clients, including hosted clients without an accepted watch | **No automatic wake** | They call `bus_read` or `bus_wait` |
 
 ### When unread mail doesn't wake: inactivity and mutes
 
