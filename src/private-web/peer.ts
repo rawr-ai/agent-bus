@@ -3,7 +3,8 @@ import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import type { StandardJSONSchemaV1 } from "effect/StandardSchema";
 import type { DirectToolResult } from "mcp-openapi";
-import { HostedNativeTools as native } from "../mcp.ts";
+import * as native from "../mcp-tools.ts";
+import { MAX_WAIT_SECONDS } from "../timing.ts";
 import {
   CheckWakeBindingRequest,
   MAX_WAKE_OBSERVATION_BYTES,
@@ -222,7 +223,7 @@ const wakeCapability = (tool: {
     budget.type === "integer" &&
     budget.maximum === MAX_WAKE_OBSERVATION_BYTES &&
     object(timeout) &&
-    timeout.maximum === 50 &&
+    timeout.maximum === MAX_WAIT_SECONDS &&
     ["ready", "news"].every((name) => required.includes(name))
   );
 };
@@ -242,7 +243,7 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
             : (tool.description ?? "");
     const readLimit =
       name === "bus_read" || name === "bus_wait"
-        ? " The oldest whole messages fitting a complete 4 MiB result are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor."
+        ? ` The oldest whole messages fitting a complete ${HOSTED_RESULT_BYTES / (1024 * 1024)} MiB result are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor.`
         : "";
     return {
       name,
@@ -437,7 +438,7 @@ export const busPeer = async (options: {
             if (
               !object(budget) ||
               budget.type !== "integer" ||
-              budget.minimum !== 128 ||
+              budget.minimum !== native.MIN_READ_RESULT_BYTES ||
               (budget.maximum !== undefined &&
                 (typeof budget.maximum !== "number" || budget.maximum < HOSTED_READ_BYTES))
             )

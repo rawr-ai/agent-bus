@@ -1,5 +1,26 @@
 import { Schema } from "effect";
 
+/** The UTF-8 JSON cap on query and orientation results, including a join that requests it. */
+export const MAX_ENVELOPE_BYTES = 65_536;
+export const MAX_QUERY_LENGTH = 32_768;
+/** The most rows a raw query returns; one more is fetched to tell whether more exist. */
+export const MAX_SPARQL_ROWS = 500;
+
+/** Saved-query identifiers, in discovery order, independent of their execution. */
+export const SavedQuery = {
+  history: "history",
+  messages: "messages",
+  thread: "thread",
+  search: "search",
+  counts: "counts",
+  peers: "peers",
+  orientationDirectories: "orientation_directories",
+  orientationAssociations: "orientation_associations",
+  directorDmVolume: "director-dm-volume",
+} as const;
+type SavedQueryName = (typeof SavedQuery)[keyof typeof SavedQuery];
+export const operationNames: ReadonlyArray<SavedQueryName> = Object.values(SavedQuery);
+
 const QueryName = Schema.String;
 const CatalogueVersion = Schema.Int;
 

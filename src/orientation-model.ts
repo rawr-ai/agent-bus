@@ -1,7 +1,7 @@
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { Effect, Schema } from "effect";
 import { InvalidQuery, OrientationId, topicName } from "./domain.ts";
-import { PageEnvelope } from "./query-envelope.ts";
+import { PageEnvelope } from "./query-contract.ts";
 
 export const DIRECTORY_BYTES = 16_384;
 export const DIRECTORY_METADATA_BYTES = 4_096;

@@ -12,7 +12,7 @@ import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { Messages } from "../src/mcp.ts";
+import { Messages } from "../src/mcp-tools.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
 

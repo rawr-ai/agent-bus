@@ -36,7 +36,8 @@ import {
 import { LedgerError, Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
-import * as Mcp from "../src/mcp.ts";
+import { ownedAddresses } from "../src/mcp.ts";
+import * as Mcp from "../src/mcp-tools.ts";
 import { QueryGateway } from "../src/Query.ts";
 import {
   eligibility,
@@ -3299,7 +3300,7 @@ describe("claude wake", () => {
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
         const cwd = process.cwd();
-        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: [] });
+        expect(yield* ownedAddresses("shared", "codex")).toEqual({ addresses: [] });
         for (const [address, runtime] of [
           ["z", "codex"],
           ["a", "codex"],
@@ -3307,12 +3308,12 @@ describe("claude wake", () => {
         ] as const) {
           yield* bus.join({ address, runtime, session: "shared", cwd });
         }
-        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: ["a", "z"] });
-        expect(yield* Mcp.ownedAddresses("shared", "claude")).toEqual({
+        expect(yield* ownedAddresses("shared", "codex")).toEqual({ addresses: ["a", "z"] });
+        expect(yield* ownedAddresses("shared", "claude")).toEqual({
           addresses: ["other-runtime"],
         });
         yield* bus.leave("a", "shared");
-        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: ["z"] });
+        expect(yield* ownedAddresses("shared", "codex")).toEqual({ addresses: ["z"] });
         yield* bus.join({ address: "a", runtime: "codex", session: "shared", cwd });
         const holder = (yield* bus.peers).find((peer) => peer.address === "z");
         yield* bus.join({
@@ -3322,8 +3323,8 @@ describe("claude wake", () => {
           cwd,
           takeover: holder?.joinId,
         });
-        expect(yield* Mcp.ownedAddresses("shared", "codex")).toEqual({ addresses: ["a"] });
-        expect(yield* Mcp.ownedAddresses("replacement", "codex")).toEqual({ addresses: ["z"] });
+        expect(yield* ownedAddresses("shared", "codex")).toEqual({ addresses: ["a"] });
+        expect(yield* ownedAddresses("replacement", "codex")).toEqual({ addresses: ["z"] });
       })
     ));
 

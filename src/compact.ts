@@ -3,7 +3,7 @@ import { Duration, Effect, Option, Schema, Stream } from "effect";
 import type { HttpClient } from "effect/http";
 import * as Client from "./client.ts";
 import { validSession } from "./domain.ts";
-import { OwnedAddresses } from "./mcp.ts";
+import { OwnedAddresses } from "./mcp-tools.ts";
 import { COMPACT_DEADLINE, COMPACT_OUTPUT_BYTES } from "./timing.ts";
 
 type NativeRuntime = "claude" | "codex";

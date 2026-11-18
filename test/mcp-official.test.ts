@@ -20,7 +20,8 @@ import * as Cursors from "../src/Cursors.ts";
 import { InvalidQuery, latestPresences, Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { Messages } from "../src/mcp.ts";
+import { Messages } from "../src/mcp-tools.ts";
+import { WAKE_LISTED_BYTES } from "../src/message-carrier.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger } from "./fluree-server.ts";
 
@@ -413,7 +414,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       },
     });
     // The notice stays bounded and says how many it left out.
-    const long = `${absent}-${"x".repeat(Bus.WAKE_LISTED_BYTES)}`;
+    const long = `${absent}-${"x".repeat(WAKE_LISTED_BYTES)}`;
     const bounded = await succeed("bus_publish", {
       from: b,
       session: sid(b),

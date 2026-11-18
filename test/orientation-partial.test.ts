@@ -1,6 +1,5 @@
 import { expect, test } from "bun:test";
 import { Effect, Layer } from "effect";
-import { MAX_ENVELOPE_BYTES } from "../src/catalogue.ts";
 import { LedgerError } from "../src/domain.ts";
 import { messageIri, revisionIri, scopeIri, witnessIri } from "../src/Ledger.ts";
 import { orient } from "../src/OrientationView.ts";
@@ -14,6 +13,7 @@ import {
   jsonBytes,
 } from "../src/orientation-model.ts";
 import { QueryGateway } from "../src/Query.ts";
+import { MAX_ENVELOPE_BYTES } from "../src/query-contract.ts";
 
 const publishedAt = "2026-11-03T00:00:00.000Z";
 const uuid = (n: number) => `01900000-0000-7000-8000-${n.toString(16).padStart(12, "0")}`;

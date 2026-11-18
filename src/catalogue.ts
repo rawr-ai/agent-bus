@@ -35,7 +35,13 @@ import { messageIri, scopeIri } from "./Ledger.ts";
 import { checkoutMatches } from "./orientation-model.ts";
 import { DAMAGE_MESSAGE, directoryAt } from "./orientation-read.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
-import { type QueryEnvelope } from "./query-envelope.ts";
+import {
+  MAX_QUERY_LENGTH,
+  MAX_SPARQL_ROWS,
+  operationNames,
+  type QueryEnvelope,
+  SavedQuery,
+} from "./query-contract.ts";
 import {
   checkBounds,
   HANDLE_LENGTH,
@@ -44,20 +50,13 @@ import {
   type Selected,
   type Selection,
 } from "./RankedSelections.ts";
-import {
-  largestFitting,
-  MAX_QUERY_LENGTH,
-  MAX_SPARQL_ROWS,
-  PREFIXES,
-  READABLE_PREDICATES,
-} from "./sparql.ts";
+import { largestFitting, PREFIXES, READABLE_PREDICATES } from "./sparql.ts";
 
 /**
  * The saved-query catalogue: each operation's metadata, argument and row
- * schemas, and execution live in one definition. `bus_queries`, the
- * `bus_run_query` name enum, argument validation and dispatch all derive from
- * `operations` below. Every query is pinned to one commit `t` of one ledger
- * incarnation; see docs/frames/turnaround-query-design.md.
+ * schemas, and execution live in one definition. Its listing and dispatch
+ * use the same ordered names as the `bus_run_query` enum. Every query is pinned
+ * to one commit `t` of one ledger incarnation; see docs/frames/turnaround-query-design.md.
  */
 
 /**
@@ -73,8 +72,6 @@ export const CATALOGUE_VERSION = 1;
  * of a ranking evaluated again for each page, carry no revision and are refused.
  */
 const SEARCH_REVISION = 1;
-/** The largest `bus_run_query` or `bus_query` result, as UTF-8 JSON. */
-export const MAX_ENVELOPE_BYTES = 65_536;
 const MAX_CURSOR_LENGTH = 1024;
 const MAX_DAMAGED_AT = 20;
 const MAX_THREAD_MEMBERS = 10_000;
@@ -750,7 +747,7 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
               },
             }),
         note: spec.note,
-        ...(spec.name === "messages" ? { notFound } : {}),
+        ...(spec.name === SavedQuery.messages ? { notFound } : {}),
         ...fetched.extra,
       };
     };
@@ -794,17 +791,18 @@ const run = <S extends Schema.Top & { readonly DecodingServices: never }, Row, R
     while (
       consumed > 0 &&
       fetched.items[consumed - 1]?.kind !== "row" &&
-      (spec.name !== "orientation_directories" || fetched.items[consumed - 1]?.kind !== "passed")
+      (spec.name !== SavedQuery.orientationDirectories ||
+        fetched.items[consumed - 1]?.kind !== "passed")
     )
       consumed -= 1;
     if (consumed === 0) {
       const first = fetched.items.find((item) => item.kind === "row");
-      if (spec.name === "orientation_associations" && normalized.projection === "full") {
+      if (spec.name === SavedQuery.orientationAssociations && normalized.projection === "full") {
         return yield* invalid(
           `A full association unit exceeds the ${budget}-byte result limit. Start a new orientation_associations traversal at t=${t} with args ${JSON.stringify({ ...normalized, projection: "membership" })}, without a cursor.`
         );
       }
-      if (spec.name === "orientation_associations") {
+      if (spec.name === SavedQuery.orientationAssociations) {
         return yield* invalid(
           `An association unit exceeds the ${budget}-byte result limit at t=${t}; retry at the same cut without consuming this cursor.`
         );
@@ -1074,7 +1072,7 @@ const optionalKey = <K extends string, V>(key: K, value: V | undefined) =>
 // ---- Operations -------------------------------------------------------------------------------
 
 export const history = define({
-  name: "history",
+  name: SavedQuery.history,
   purpose: "Entries in commit order, from the oldest (forward) or the newest (backward).",
   unit: "entry",
   paging: "keyset",
@@ -1129,7 +1127,7 @@ export const history = define({
 });
 
 export const messages = define({
-  name: "messages",
+  name: SavedQuery.messages,
   purpose: "Entries by id, in the order asked; ids absent at t are listed in notFound.",
   unit: "entry",
   paging: "offset",
@@ -1172,7 +1170,7 @@ const MemberRows = Schema.Array(
 );
 
 export const thread = define({
-  name: "thread",
+  name: SavedQuery.thread,
   purpose:
     "The reply tree containing a message, from the nearest top its replyTo links reach at t, in commit order.",
   unit: "entry",
@@ -1336,7 +1334,7 @@ const encodingsOf = (t: number, entries: ReadonlyArray<Selected>) =>
   });
 
 export const search = define({
-  name: "search",
+  name: SavedQuery.search,
   purpose: "Messages ranked by full-text relevance over subjects and bodies.",
   unit: "ranked match",
   paging: "offset",
@@ -1419,7 +1417,7 @@ const missingJson = (t: number, scope: ReturnType<typeof scopeOf>) =>
   );
 
 export const counts = define({
-  name: "counts",
+  name: SavedQuery.counts,
   purpose: "Message counts grouped by sender, recipient and/or UTC day.",
   unit: "group",
   paging: "offset",
@@ -1522,7 +1520,7 @@ export const counts = define({
 });
 
 export const peers = define({
-  name: "peers",
+  name: SavedQuery.peers,
   purpose: "The latest recorded presence per address at t.",
   unit: "address",
   paging: "offset",
@@ -1613,7 +1611,7 @@ const SubjectRows = Schema.Array(Schema.Tuple([Schema.String]));
 const isOrientationId = Schema.is(OrientationId);
 
 export const orientationDirectories = define({
-  name: "orientation_directories",
+  name: SavedQuery.orientationDirectories,
   purpose: "Discover current directories whose explicit checkout aliases contain cwd.",
   unit: "directory",
   paging: "offset",
@@ -1717,7 +1715,7 @@ export const orientationDirectories = define({
 });
 
 export const orientationAssociations = define({
-  name: "orientation_associations",
+  name: SavedQuery.orientationAssociations,
   purpose: "Explicit associations on latest joined addresses, with registration diagnostics.",
   unit: "address association",
   paging: "offset",
@@ -1854,7 +1852,7 @@ const isAddress = (token: string) => token !== "*" && !token.startsWith("#");
 const isTopic = (token: string) => token.startsWith("#") && token.length > 1;
 
 export const directorDmVolume = define({
-  name: "director-dm-volume",
+  name: SavedQuery.directorDmVolume,
   purpose:
     "Per UTC day: the director's direct messages to a cohort, beside whether the day had observed cohort or concern-topic traffic.",
   unit: "UTC day",
@@ -2006,30 +2004,20 @@ export const directorDmVolume = define({
     }),
 });
 
-/** The catalogue, in listing order. */
-export const operations: ReadonlyArray<Operation> = [
+const byOperation = {
   history,
   messages,
   thread,
   search,
   counts,
   peers,
-  orientationDirectories,
-  orientationAssociations,
-  directorDmVolume,
-];
+  [SavedQuery.orientationDirectories]: orientationDirectories,
+  [SavedQuery.orientationAssociations]: orientationAssociations,
+  [SavedQuery.directorDmVolume]: directorDmVolume,
+} satisfies Record<(typeof operationNames)[number], Operation>;
 
-export const operationNames = [
-  "history",
-  "messages",
-  "thread",
-  "search",
-  "counts",
-  "peers",
-  "orientation_directories",
-  "orientation_associations",
-  "director-dm-volume",
-] as const;
+/** The catalogue, in listing order. */
+export const operations: ReadonlyArray<Operation> = operationNames.map((name) => byOperation[name]);
 
 export const byName = (name: string) => operations.find((operation) => operation.name === name);
 
