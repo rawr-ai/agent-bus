@@ -799,6 +799,7 @@ describe("entries", () => {
       "Deploying the adapters now",
       "unrelated",
     ]);
+    expect(page.rows[1].subject).toBe("adapter");
     expect(page.rows[0].score).toBeGreaterThan(page.rows[1].score);
     expect(page).toMatchObject({ unit: "ranked match", exhausted: true, complete: false });
     const literal = await bus.run("search", { text: '") (bind ?x' });
