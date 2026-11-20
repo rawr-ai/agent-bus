@@ -123,6 +123,22 @@ export interface Slice {
   readonly next: number;
 }
 
+/** The independently enumerated subject of an asserted or retracted message type. */
+export interface MailboxCandidate {
+  readonly subject: string;
+  readonly end: number;
+  /** Absent when the type was retracted or its routing projection cannot be established. */
+  readonly routing?: {
+    readonly id: string;
+    readonly from: string;
+    readonly to: ReadonlyArray<string>;
+  };
+}
+
+export interface LocatedSlice extends Slice {
+  readonly entries: ReadonlyArray<Entry & { readonly subject: string }>;
+}
+
 /**
  * Append-only message storage. Cursors are opaque positions owned by the
  * implementation: commit `t` for the Fluree ledger, byte offsets for the
@@ -153,7 +169,15 @@ export class Ledger extends Context.Service<
      * Encoded entry assertions in (from, cut.head], at one incarnation and commit. This does not
      * discover a damaged entry with no encoding, or prove audience and served-prefix completeness.
      */
-    readonly readAt: (from: number, cut: Pin) => Effect.Effect<Slice, LedgerError>;
+    readonly readAt: (from: number, cut: Pin) => Effect.Effect<LocatedSlice, LedgerError>;
+    /**
+     * Enumerate candidates in (from, cut.head] without requiring their id, routing or carrier.
+     * In Fluree the type history establishes membership independently of the encoded slice.
+     */
+    readonly mailboxCandidatesAt: (
+      from: number,
+      cut: Pin
+    ) => Effect.Effect<ReadonlyArray<MailboxCandidate>, LedgerError>;
     readonly end: Effect.Effect<number, LedgerError>;
     readonly changes: Stream.Stream<void>;
     /**

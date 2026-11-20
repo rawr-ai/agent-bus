@@ -6,8 +6,8 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { Message, Origin, Presence } from "../src/domain.ts";
-import { layerFluree } from "../src/Fluree.ts";
-import { Ledger } from "../src/Ledger.ts";
+import { layerFluree, toNode } from "../src/Fluree.ts";
+import { Ledger, messageIri } from "../src/Ledger.ts";
 import {
   encodeMailboxRecord,
   type MailboxAck,
@@ -18,6 +18,7 @@ import {
   mailboxServedDigest,
   mailboxTopicsDigest,
 } from "../src/mailbox-model.ts";
+import { readMailboxSlice } from "../src/mailbox-read.ts";
 import type { Pin } from "../src/Query.ts";
 import { boundary } from "./fluree-boundary.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -51,6 +52,20 @@ const handle = async (layer: LedgerLayer) => {
       use((ledger) => ledger.mailboxReceiptAt(sender, operation, cut)),
     read: (from: number) => use((ledger) => ledger.read(from)),
     readAt: (from: number, cut: Pin) => use((ledger) => ledger.readAt(from, cut)),
+    candidates: (from: number, cut: Pin) => use((ledger) => ledger.mailboxCandidatesAt(from, cut)),
+    checked: (from: number, cut: Pin) =>
+      use((ledger) =>
+        readMailboxSlice(ledger, from, cut, {
+          address,
+          presence: new Presence({
+            runtime: "claude",
+            status: "joined",
+            topics: [],
+            session: "tester",
+          }),
+          joinId: "fixture",
+        })
+      ),
     log: (to: number) => use((ledger) => ledger.log(to)),
     direct: (sender: string, after: number, to: number) =>
       use((ledger) => ledger.direct(sender, after, to)),
@@ -1540,18 +1555,44 @@ describe("mailbox Fluree boundaries", () => {
     const config = await freshLedger("mailbox-unencoded-message");
     const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
     const before = await store.cut();
+    const first = message();
+    await store.append(first);
+    const complete = await store.cut();
+    const goodSibling = message();
+    const damagedSubject = "urn:agent-bus:damaged-mail-without-id-or-address";
     await insertRaw(config, {
       "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
-      "@id": `urn:agent-bus:message:${Bun.randomUUIDv7()}`,
-      "@type": "bus:Message",
-      "bus:id": Bun.randomUUIDv7(),
-      "bus:to": address,
+      "@graph": [
+        toNode(goodSibling, JSON.stringify(goodSibling)),
+        { "@id": damagedSubject, "@type": "bus:Message" },
+      ],
     });
     const after = await store.cut();
     const slice = await store.readAt(before.head, after);
-    expect(slice.entries).toEqual([]);
+    expect(slice.entries.map((entry) => entry.message.id)).toEqual([first.id, goodSibling.id]);
     expect(slice.next).toBe(after.head);
-    // D2 must independently check candidate completeness and damage before acknowledging.
+    expect(await store.candidates(complete.head, after)).toEqual(
+      expect.arrayContaining([
+        { subject: damagedSubject, end: after.head },
+        {
+          subject: messageIri(goodSibling.id),
+          end: after.head,
+          routing: {
+            id: goodSibling.id,
+            from: goodSibling.from,
+            to: [address],
+          },
+        },
+      ])
+    );
+    expect(await store.checked(before.head, after)).toEqual({
+      entries: [{ message: first, end: complete.head }],
+      damage: after.head,
+    });
+    expect(await store.checked(before.head, complete)).toEqual({
+      entries: [{ message: first, end: complete.head }],
+      damage: undefined,
+    });
   });
 
   test("the selected Fluree build refuses a lone-surrogate projected sender", async () => {

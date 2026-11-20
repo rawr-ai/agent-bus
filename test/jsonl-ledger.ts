@@ -15,6 +15,7 @@ import {
   Ledger,
   type MailboxReceiptRead,
   type MailboxWrite,
+  messageIri,
 } from "../src/Ledger.ts";
 import {
   decodeMailboxRecord,
@@ -466,8 +467,34 @@ export const layerJsonl = (file: string) =>
           const slice = yield* readWithin(from, at.head, true);
           if (slice.next !== at.head)
             return yield* ledgerError("The entry snapshot is incomplete.");
-          return slice;
+          return {
+            ...slice,
+            entries: slice.entries.map((entry) => ({
+              ...entry,
+              subject: messageIri(entry.message.id),
+            })),
+          };
         }).pipe(Effect.withSpan("Ledger.readAt"));
+      const mailboxCandidatesAt = (from: number, at: Pin) =>
+        Effect.gen(function* () {
+          if (!Number.isSafeInteger(from) || from < 0 || from > at.head) {
+            return yield* ledgerError("Invalid entry snapshot.");
+          }
+          yield* mailboxLines(at);
+          yield* mailboxLines({ head: from, incarnation: at.incarnation });
+          const slice = yield* readWithin(from, at.head, true);
+          return slice.entries.flatMap(({ message, end }) =>
+            message.kind === "message"
+              ? [
+                  {
+                    subject: messageIri(message.id),
+                    end,
+                    routing: { id: message.id, from: message.from, to: message.to },
+                  },
+                ]
+              : []
+          );
+        }).pipe(Effect.withSpan("Ledger.mailboxCandidatesAt"));
       const mailboxReceiptAt = (address: string, operation: string, at: Pin) =>
         Effect.gen(function* () {
           const records = (yield* mailboxLines(at)).filter(
@@ -730,6 +757,7 @@ export const layerJsonl = (file: string) =>
           Effect.fail(new LedgerError({ message: "Guarded designations need Fluree." })),
         read,
         readAt,
+        mailboxCandidatesAt,
         end,
         changes,
         presenceAt,
