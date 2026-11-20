@@ -12,9 +12,12 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
+import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
+import { Message } from "../src/domain.ts";
 import { type Admission, type EntryRead, Ledger } from "../src/Ledger.ts";
+import { MAX_ENTRY_CARRIER_BYTES, messageCarrierBytes } from "../src/message-carrier.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -46,8 +49,19 @@ afterAll(async () => {
   await Promise.all(runtimes.map((runtime) => runtime.dispose()));
 });
 
+/** The host name a serve records in each origin; tests can lengthen it between attempts. */
+interface Host {
+  name: string;
+}
+
 /** One serve on `file`, whose Ledger reads and writes can be staged through `seams`. */
-const serve = (file: string, seams: Seams = {}) => {
+const serve = (
+  file: string,
+  seams: Seams = {},
+  host: Host = { name: "fixture-host" },
+  /** Every serve made with it reads the same time, as two attempts in one millisecond do. */
+  frozen = false
+) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-publish-op-"));
   const ledger = Layer.effect(
     Ledger,
@@ -73,8 +87,9 @@ const serve = (file: string, seams: Seams = {}) => {
     )
   ).pipe(Layer.provideMerge(layerJsonl(file).pipe(Layer.provide(platform))));
   const runtime = ManagedRuntime.make(
-    Bus.layer("test-installation").pipe(
+    Bus.layer("test-installation", () => host.name).pipe(
       Layer.provideMerge(ledger),
+      Layer.provideMerge(frozen ? TestClock.layer() : Layer.empty),
       Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
       Layer.provide(platform)
     )
@@ -138,9 +153,9 @@ const serve = (file: string, seams: Seams = {}) => {
 };
 
 /** A fresh file with the sender and receiver joined on one serve. */
-const world = async (seams: Seams = {}) => {
+const world = async (seams: Seams = {}, host?: Host) => {
   const file = join(mkdtempSync(join(tmpdir(), "agent-bus-publish-op-")), "ledger.jsonl");
-  const bus = serve(file, seams);
+  const bus = serve(file, seams, host);
   for (const address of [sender, receiver]) {
     const joined = await bus.join(address, { topics: ["watch"] });
     if (!joined.ok) throw new Error(`join failed: ${joined.error.message}`);
@@ -525,8 +540,141 @@ describe("publish with an operation (jsonl)", () => {
       expect(both.count).toBe(2);
       expect(results.map((result) => result.message.id)).toEqual([operation, operation]);
       expect(results[0]?.message.ts).toBe(results[1]?.message.ts ?? "");
-      expect(results.filter((result) => result.replayed === true)).toHaveLength(1);
+      // Which attempt wrote it is not asserted: `replayed` promises only that its call wrote
+      // nothing, and its absence only that the message is stored once.
       expect(stored(operation)).toBe(1);
+    },
+    TIMEOUT
+  );
+
+  test(
+    "two identical attempts with one time and origin, both read as admitted: stored once, neither claims too much",
+    async () => {
+      const file = join(mkdtempSync(join(tmpdir(), "agent-bus-publish-op-")), "ledger.jsonl");
+      const host: Host = { name: "fixture-host" };
+      const seamsA: Seams = {};
+      const seamsB: Seams = {};
+      const a = serve(file, seamsA, host, true);
+      const b = serve(file, seamsB, host, true);
+      for (const address of [sender, receiver]) expect((await a.join(address)).ok).toBe(true);
+      const text = () => readFileSync(file, "utf8");
+      const operation = Bun.randomUUIDv7();
+      const looked = Effect.runSync(Deferred.make<void>());
+      let waiting = 0;
+      const barrier = async () => {
+        waiting++;
+        if (waiting === 2) Effect.runSync(Deferred.succeed(looked, undefined));
+        await Effect.runPromise(Deferred.await(looked));
+        return undefined;
+      };
+      seamsA.readEntry = barrier;
+      seamsB.readEntry = barrier;
+      // As Fluree answers a guarded insert that found the id taken at a coincident commit:
+      // the attempt is reported admitted though it committed nothing.
+      const misread = async (write: () => Promise<Admission>) => {
+        const real = await write();
+        return real.status === "REFUSED" ? { status: "ADMITTED" as const, cut: real.cut } : real;
+      };
+      seamsA.admit = misread;
+      seamsB.admit = misread;
+      const results = (
+        await Promise.all([
+          a.publish({ body: "same instant", operation }),
+          b.publish({ body: "same instant", operation }),
+        ])
+      ).map(sent);
+      const lines = text()
+        .split("\n")
+        .filter((line) => line.includes(`"id":"${operation}"`));
+      expect(lines).toHaveLength(1);
+      for (const result of results) {
+        expect(result.message.id).toBe(operation);
+        expect(result.message.ts).toBe(results[0]?.message.ts ?? "");
+        // Same time and origin: nothing certain says either wrote nothing, so neither says so.
+        expect(result.replayed).toBeUndefined();
+      }
+    },
+    TIMEOUT
+  );
+
+  test(
+    "a stored entry that cannot be read back after the write is unconfirmed, never a mismatch",
+    async () => {
+      const seams: Seams = {};
+      const { bus, stored } = await world(seams);
+      const operation = Bun.randomUUIDv7();
+      // The lookup reads for real; the read after the write fails.
+      seams.readEntry = async () => {
+        seams.readEntry = async () => ({ status: "UNAVAILABLE" });
+        return undefined;
+      };
+      const error = refused(await bus.publish({ body: "unread after", operation }));
+      expect(error._tag).toBe("LedgerError");
+      expect(error.code).toBeUndefined();
+      expect(error.message).toContain("it may have committed");
+      expect(error.message).toContain(`Retry the identical call with operation ${operation}`);
+      expect(stored(operation)).toBe(1);
+      const retry = sent(await bus.publish({ body: "unread after", operation }));
+      expect(retry.replayed).toBe(true);
+      expect(stored(operation)).toBe(1);
+    },
+    TIMEOUT
+  );
+  test(
+    "a send stored at the carrier bound replays after its origin grows; a new one is refused",
+    async () => {
+      const host: Host = { name: "fixture-host" };
+      const { bus, text, stored } = await world({}, host);
+      // The origin this serve records, taken from a stored probe, so the bound can be met.
+      const probe = sent(await bus.publish({ body: "probe", operation: Bun.randomUUIDv7() }));
+      const carrier = (pad: number) =>
+        messageCarrierBytes([
+          new Message({
+            id: Bun.randomUUIDv7(),
+            ts: probe.message.ts,
+            from: sender,
+            to: [receiver, `claude/${"p".repeat(pad)}`],
+            kind: "message",
+            body: "at the bound",
+            ...(probe.message.origin === undefined ? {} : { origin: probe.message.origin }),
+          }),
+        ]);
+      // Recipients count in the carrier but not in the searchable-text limit: pad one.
+      let pad = 0;
+      for (let step = 0; step < 8; step++) {
+        pad += Math.floor((MAX_ENTRY_CARRIER_BYTES - carrier(pad)) / 2);
+      }
+      const bytes = carrier(pad);
+      expect(bytes).toBeLessThanOrEqual(MAX_ENTRY_CARRIER_BYTES);
+      // Every ASCII character counts twice, so the bound is met exactly or one byte under.
+      expect(bytes).toBeGreaterThanOrEqual(MAX_ENTRY_CARRIER_BYTES - 1);
+      const call = {
+        body: "at the bound",
+        to: [receiver, `claude/${"p".repeat(pad)}`],
+      };
+
+      const operation = Bun.randomUUIDv7();
+      const first = sent(await bus.publish({ ...call, operation }));
+      expect(messageCarrierBytes([first.message])).toBe(bytes);
+      expect(stored(operation)).toBe(1);
+
+      // The same holder's origin grows past what the bound left: the stored send still answers.
+      host.name = `${host.name}-with-a-longer-name`;
+      const before = text();
+      const retry = sent(await bus.publish({ ...call, operation }));
+      expect(retry.replayed).toBe(true);
+      expect(retry.message.id).toBe(operation);
+      expect(retry.message.ts).toBe(first.message.ts);
+      expect(text()).toBe(before);
+
+      // The identical inputs as a new send now exceed the bound: refused, nothing written.
+      const fresh = Bun.randomUUIDv7();
+      const error = refused(await bus.publish({ ...call, operation: fresh }));
+      expect(error._tag).toBe("InvalidQuery");
+      expect(error.message).toContain("This message is too large");
+      expect(error.message).toContain("Nothing was sent or written");
+      expect(text()).toBe(before);
+      expect(stored(fresh)).toBe(0);
     },
     TIMEOUT
   );
