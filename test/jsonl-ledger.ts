@@ -8,7 +8,13 @@ import {
   MessageJson,
   qualifies,
 } from "../src/domain.ts";
-import { type Admission, type CommandRead, type Entry, Ledger } from "../src/Ledger.ts";
+import {
+  type Admission,
+  type CommandRead,
+  type Entry,
+  type EntryRead,
+  Ledger,
+} from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 
 const NEWLINE = 0x0a;
@@ -273,6 +279,31 @@ export const layerJsonl = (file: string) =>
           return { damaged: false, complete: true };
         });
 
+      // As Fluree's point read: a line naming the id that does not decode to exactly one entry
+      // with that id is MALFORMED, never ABSENT.
+      const readEntry = (id: string) =>
+        Effect.gen(function* () {
+          const at = yield* cut;
+          const found: Array<{ readonly message: Message; readonly t: number }> = [];
+          let damaged = false;
+          for (const { text, end: t } of yield* lines(at.head)) {
+            if (text.trim() === "" || text.startsWith(COMMAND_MARK)) continue;
+            const decoded = yield* Effect.option(decode(text));
+            if (Option.isSome(decoded)) {
+              if (decoded.value.id === id) found.push({ message: decoded.value, t });
+            } else if (text.includes(id)) {
+              damaged = true;
+            }
+          }
+          const [only] = found;
+          if (only === undefined && !damaged)
+            return { status: "ABSENT", cut: at } satisfies EntryRead;
+          if (only === undefined || damaged || found.length > 1) {
+            return { status: "MALFORMED", cut: at } satisfies EntryRead;
+          }
+          return { status: "FOUND", message: only.message, t: only.t, cut: at } satisfies EntryRead;
+        }).pipe(Effect.orElseSucceed((): EntryRead => ({ status: "UNAVAILABLE" })));
+
       return Ledger.of({
         instance: "jsonl",
         append,
@@ -289,6 +320,7 @@ export const layerJsonl = (file: string) =>
         readCommand,
         log,
         direct,
+        readEntry,
       });
     })
   ).pipe(

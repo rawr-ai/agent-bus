@@ -106,6 +106,7 @@ const call = Client.call(endpoint);
  */
 const Sent = Schema.Struct({
   id: Published.fields.id,
+  replayed: Schema.optionalKey(Schema.Boolean),
   wake: Schema.optionalKey(
     Schema.Struct({
       t: Schema.Int,
@@ -305,6 +306,12 @@ const publish = Command.make(
     body: Flag.String("body"),
     subject: Flag.String("subject").pipe(Flag.optional),
     replyTo: Flag.String("reply-to").pipe(Flag.optional),
+    operation: Flag.String("operation").pipe(
+      Flag.withDescription(
+        "A lowercase UUIDv7 naming this send and its retries; repeat it to retry an unconfirmed send"
+      ),
+      Flag.optional
+    ),
   },
   (input) =>
     Effect.gen(function* () {
@@ -316,9 +323,11 @@ const publish = Command.make(
         ...Client.defined({
           subject: Option.getOrUndefined(input.subject),
           replyTo: Option.getOrUndefined(input.replyTo),
+          operation: Option.getOrUndefined(input.operation),
         }),
       });
       yield* Console.log(published.id);
+      if (published.replayed === true) yield* Console.error("already sent: nothing was written");
       // The id stays the only stdout line; what the send could not wake goes to stderr.
       for (const { address, standing } of published.wake?.lacking ?? []) {
         yield* Console.error(`${address}: ${standing} at t=${published.wake?.t}`);
