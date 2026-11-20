@@ -3,6 +3,7 @@ import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { directAt, logAt, PRESENCE_NODES, presencesOf } from "./activity-read.ts";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
+import { makeFlureeMailbox } from "./FlureeMailbox.ts";
 import {
   type Admission,
   type CommandRead,
@@ -202,7 +203,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
        */
       const sendBounded = (request: HttpClientRequest.HttpClientRequest, maxBytes: number) =>
         Effect.gen(function* () {
-          const response = yield* client.execute(request);
+          const response = yield* HttpClient.withScope(client).execute(request);
           if (response.status >= 400) {
             return yield* httpFailure(response.status);
           }
@@ -665,6 +666,58 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
         return { entries, next: head } satisfies Slice;
       });
 
+      const readAt = (from: number, cut: Pin) =>
+        bounded(
+          Effect.gen(function* () {
+            if (
+              cut.incarnation !== instance ||
+              !Number.isSafeInteger(cut.head) ||
+              !Number.isSafeInteger(from) ||
+              from < 0 ||
+              from > cut.head ||
+              (yield* guardedIncarnation) !== instance ||
+              (yield* guardedHead) < cut.head
+            ) {
+              return yield* new LedgerError({
+                message: "The entry snapshot is unavailable or the ledger was replaced.",
+              });
+            }
+            const entries: Array<Slice["entries"][number]> = [];
+            for (let start = from + 1; start <= cut.head; start += READ_WINDOW) {
+              const stop = Math.min(cut.head, start + READ_WINDOW - 1);
+              const rows = yield* sendBounded(
+                HttpClientRequest.post(`${api}/query`).pipe(
+                  HttpClientRequest.bodyJsonUnsafe({
+                    "@context": context,
+                    from: `${config.ledger}@t:${start}`,
+                    to: `${config.ledger}@t:${stop}`,
+                    select: ["?json", "?t"],
+                    where: [
+                      { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t", "@op": true } },
+                    ],
+                  })
+                ),
+                JSONLD_RESPONSE_BYTES
+              ).pipe(Effect.flatMap(decode(Rows)));
+              for (const [text, t] of rows) {
+                if (t < start || t > stop) return yield* invalidResponse();
+                entries.push({ message: yield* decodeMessage(text, t), end: t });
+              }
+            }
+            if ((yield* guardedIncarnation) !== instance || (yield* guardedHead) < cut.head) {
+              return yield* new LedgerError({
+                message: "The entry snapshot is unavailable or the ledger was replaced.",
+              });
+            }
+            entries.sort(
+              (a, b) =>
+                a.end - b.end ||
+                (a.message.id < b.message.id ? -1 : a.message.id > b.message.id ? 1 : 0)
+            );
+            return { entries, next: cut.head } satisfies Slice;
+          })
+        ).pipe(Effect.withSpan("Ledger.readAt"));
+
       const replaced = () =>
         new LedgerError({
           message:
@@ -904,6 +957,45 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           )
         ).pipe(Effect.asVoid, Effect.withSpan("Ledger.appendCommand"));
 
+      const mailbox = makeFlureeMailbox({
+        instance,
+        timeout: QUERY_TIMEOUT,
+        head: bounded(guardedHead),
+        incarnation: bounded(guardedIncarnation),
+        at: (head, body) =>
+          sendBounded(
+            HttpClientRequest.post(pinned(head)).pipe(
+              HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
+            ),
+            JSONLD_RESPONSE_BYTES
+          ),
+        history: (head, body) =>
+          sendBounded(
+            HttpClientRequest.post(`${api}/query`).pipe(
+              HttpClientRequest.bodyJsonUnsafe({
+                "@context": context,
+                from: `${config.ledger}@t:1`,
+                to: `${config.ledger}@t:${head}`,
+                ...body,
+              })
+            ),
+            JSONLD_RESPONSE_BYTES
+          ),
+        update: (body) =>
+          bounded(
+            guardedSend(
+              HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
+                HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
+              )
+            ).pipe(
+              Effect.flatMap(decode(UpdateResponse)),
+              Effect.map((response) => response.t)
+            )
+          ),
+        attemptedMessage: attemptAt,
+        messageNode: toGuardedNode,
+      });
+
       return Context.make(
         Ledger,
         Ledger.of({
@@ -912,10 +1004,12 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           readWitness,
           designate,
           read,
+          readAt,
           end,
           changes,
           presenceAt,
           admit,
+          ...mailbox,
           appendCommand,
           readCommand,
           log: (t) => logAt(gateway, t).pipe(Effect.withSpan("Ledger.log")),
