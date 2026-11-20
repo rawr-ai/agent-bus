@@ -169,7 +169,7 @@ const PublishResult = Schema.Struct({
   replayed: Schema.optionalKey(
     Schema.Literal(true).annotate({
       description:
-        "The message was already stored under this operation: id and ts are the original's, and this call wrote nothing.",
+        "This call wrote nothing: the message was already stored under this operation, and id and ts are the original's. Its absence means only that the message is stored once under that id, not that this call wrote it.",
     })
   ),
   status: Schema.optionalKey(
@@ -379,7 +379,7 @@ export const Takeover = Tool.make("bus_takeover", {
   .annotate(Tool.Destructive, true);
 
 export const Publish = Tool.make("bus_publish", {
-  description: `Send from an address you own. The bus refuses the send if the sender's presence changes after its ownership check but before commit. Give an operation (a UUIDv7) to make it safe to retry: the message takes it as its id, and retrying the identical call with the same operation returns the original id and ts with replayed and writes nothing, while a different send under it is refused with nothing written. If the outcome is unconfirmed, retry with the same operation. \`to\` names the audience: peer addresses, #topic for its subscribers, or * for everyone. The complete public read carrier must fit ${MAX_ENTRY_CARRIER_BYTES / (1024 * 1024)} MiB, including recipients and escaping. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.`,
+  description: `Send from an address you own. The bus refuses the send if the sender's presence changes after its ownership check but before commit. Give an operation (a UUIDv7) to make it safe to retry: the message takes it as its id, and retrying the identical call with the same operation returns the stored message's id and ts, with replayed when the retry certainly wrote nothing, while a different send under it is refused with nothing written. If the outcome is unconfirmed, retry with the same operation. \`to\` names the audience: peer addresses, #topic for its subscribers, or * for everyone. The complete public read carrier must fit ${MAX_ENTRY_CARRIER_BYTES / (1024 * 1024)} MiB, including recipients and escaping. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.`,
   parameters: Schema.Struct({
     from: Address,
     session: Session,

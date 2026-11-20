@@ -1051,27 +1051,47 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
         );
 
       /**
-       * The entry at one cut, by its id: every fact of its node first, so a partial node is never
-       * an absent one, then its one stored encoding, which must decode to that id.
+       * The entry at one cut, by its id: whether its node has any fact first, so a partial node
+       * is never an absent one, then its one stored encoding, which must decode to that id.
+       *
+       * Both queries read whole stored entries, so they use the bound whole-entry JSON-LD reads
+       * already use (JSONLD_RESPONSE_BYTES, 32 MiB), not the guarded writes' 256 KiB. The public
+       * fields of an admissible entry fit MAX_ENTRY_CARRIER_BYTES (1 MiB) even counted twice
+       * with escaping; the stored JSON adds only `pierce`, and the response escapes the string
+       * once more, at most six bytes per input byte (a `\u00XX` escape). So the public part of
+       * a row stays under 6 MiB, leaving over 26 MiB for the pierce set: hundreds of addresses
+       * at the 32 KiB join limit, far more at real lengths. A larger set reads as UNAVAILABLE.
+       *
+       * A transport failure, an over-bound response or a timeout fails the read (UNAVAILABLE).
+       * Only a node read completely that is not one decodable entry of the id is MALFORMED.
        */
+      const entryQuery = (t: number, body: Record<string, unknown>) =>
+        sendBounded(
+          HttpClientRequest.post(pinned(t)).pipe(
+            HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
+          ),
+          JSONLD_RESPONSE_BYTES
+        );
       const entryAt = (id: string, cut: Pin) =>
         Effect.gen(function* () {
           const subject = messageIri(id);
-          const predicates = yield* guardedQuery(cut.head, {
+          const facts = yield* entryQuery(cut.head, {
             select: "?predicate",
             where: { "@id": subject, "?predicate": "?object" },
+            limit: 1,
           }).pipe(Effect.flatMap(decode(Strings)));
-          if (predicates.length === 0) return { status: "ABSENT", cut } satisfies EntryRead;
+          if (facts.length === 0) return { status: "ABSENT", cut } satisfies EntryRead;
           // As in commandAt: bind the IRI through a typed `values`, so `@t` is the real commit.
-          const rows = yield* guardedQuery(cut.head, {
+          const response = yield* entryQuery(cut.head, {
             select: ["?json", "?t"],
             values: [["?m"], [[{ "@type": "@id", "@value": subject }]]],
             where: { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t" } },
-          }).pipe(Effect.flatMap(decode(Rows)), Effect.option);
+          });
+          const rows = Schema.decodeUnknownOption(Rows)(response);
           const row = Option.isSome(rows) && rows.value.length === 1 ? rows.value[0] : undefined;
           if (row === undefined) return { status: "MALFORMED", cut } satisfies EntryRead;
           const [json, t] = row;
-          const message = yield* Effect.option(Schema.decodeUnknownEffect(MessageJson)(json));
+          const message = Schema.decodeUnknownOption(MessageJson)(json);
           if (Option.isNone(message) || message.value.id !== id) {
             return { status: "MALFORMED", cut } satisfies EntryRead;
           }

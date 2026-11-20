@@ -166,7 +166,10 @@ const listWithin = <A>(rows: ReadonlyArray<A>, budget: number) => {
 export interface Posted {
   readonly message: Message;
   readonly wake?: WakeNotice;
-  /** The message was already stored under the call's operation; this call wrote nothing. */
+  /**
+   * This call wrote nothing: the message was already stored under its operation. Absent, the
+   * message is stored once under that id; it does not say this call was the one that wrote it.
+   */
   readonly replayed?: true;
 }
 
@@ -1135,24 +1138,26 @@ const make = (installation: string, hostOf: () => string) =>
           const settled = yield* ledger.readEntry(message.id);
           if (settled.status === "FOUND") {
             if (!isThisSend(settled.message)) return yield* mismatch(message.id);
-            // A refusal wrote nothing. An admission, or an unknown outcome, may be another
-            // attempt's entry read at its commit: only this attempt's own time and origin say it
-            // was this call's write.
-            const own =
-              admission.status !== "REFUSED" &&
-              settled.message.ts === message.ts &&
-              canonicalJson(settled.message.origin) === canonicalJson(message.origin);
-            return posted(settled.message, !own);
+            // `replayed` is reported only where it is certain this call wrote nothing: the insert
+            // was refused, or the stored entry carries another attempt's time or origin. Its
+            // absence never says which attempt wrote the entry: an admission or an unknown
+            // outcome can be another attempt's identical entry, read at its commit, and two
+            // attempts with one time and origin can't be told apart.
+            const wroteNothing =
+              admission.status === "REFUSED" ||
+              settled.message.ts !== message.ts ||
+              canonicalJson(settled.message.origin) !== canonicalJson(message.origin);
+            return posted(settled.message, wroteNothing);
           }
           if (settled.status === "ABSENT" && admission.status === "REFUSED") {
             return yield* conflict(input.from);
           }
           return yield* unconfirmed(message.id);
         });
-        // The optional pierce set changes routing, not the public read carrier.
-        yield* admitEntry(draft);
-        // A send already stored under the operation is returned before its pierce set is
-        // resolved again or anything is written.
+        // A send already stored under the operation is returned before anything outside its
+        // intent is checked: its carrier was admitted when it was stored, and this attempt's
+        // origin, which the carrier counts and the intent ignores, may since have grown. Nor is
+        // its pierce set resolved again, and nothing is written.
         if (operation !== undefined) {
           const recorded = yield* ledger.readEntry(operation);
           if (recorded.status === "FOUND") {
@@ -1165,6 +1170,9 @@ const make = (installation: string, hostOf: () => string) =>
             });
           }
         }
+        // Only a new send is admitted. The optional pierce set changes routing, not the public
+        // read carrier.
+        yield* admitEntry(draft);
         if (input.pierce === undefined) return yield* store(draft);
         const audience = (yield* peers).filter((peer) => isFor(draft, peer));
         let pierce: Array<string>;

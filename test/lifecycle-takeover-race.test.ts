@@ -20,7 +20,11 @@ import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger, messageIri } from "../src/Ledger.ts";
 import type { MailboxState } from "../src/mailbox-model.ts";
 import { historyPreset } from "../src/mcp.ts";
-import { MAX_INDEXED_FIELD_BYTES } from "../src/message-carrier.ts";
+import {
+  MAX_ENTRY_CARRIER_BYTES,
+  MAX_INDEXED_FIELD_BYTES,
+  messageCarrierBytes,
+} from "../src/message-carrier.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -1257,7 +1261,6 @@ describe("publish with an operation across serves", () => {
           });
           const result = await a.publish(holder, "raced", { operation });
           if (racer === undefined) throw new Error("the relay did not stage the race");
-          expect(racer.replayed).toBeUndefined();
           // A's insert was forwarded, found the id taken and committed nothing.
           expect(relay.messageAttempts).toEqual([operation]);
           expect(await commitsOf(config, operation)).toHaveLength(1);
@@ -1308,6 +1311,53 @@ describe("publish with an operation across serves", () => {
         expect((await b.entry(damaged)).status).toBe("MALFORMED");
         const refused = await a.publish(holder, "over damage", { operation: damaged });
         expectRefused(refused, "LedgerError", "nothing was sent");
+      }),
+    TIMEOUT
+  );
+
+  test(
+    "a send near the carrier bound is read back whole: its retry replays",
+    () =>
+      stagedSend("publish-op-large", async ({ config, relay, a }, receiver) => {
+        const probe = await a.publish(holder, "probe", { operation: Bun.randomUUIDv7() });
+        if (!probe.ok || !("message" in probe.value)) throw new Error("the probe failed");
+        const { origin, ts } = probe.value.message;
+        const toOf = (pad: number) => [recipient, `claude/${"p".repeat(pad)}`];
+        const carrier = (pad: number) =>
+          messageCarrierBytes([
+            new Message({
+              id: Bun.randomUUIDv7(),
+              ts,
+              from: address,
+              to: toOf(pad),
+              kind: "message",
+              body: "near the bound",
+              ...(origin === undefined ? {} : { origin }),
+            }),
+          ]);
+        // Leave room for a later millisecond's timestamp or origin difference.
+        const target = MAX_ENTRY_CARRIER_BYTES - 256;
+        let pad = 0;
+        for (let step = 0; step < 8; step++) pad += Math.floor((target - carrier(pad)) / 2);
+        expect(carrier(pad)).toBeGreaterThan(MAX_ENTRY_CARRIER_BYTES - 512);
+
+        const operation = Bun.randomUUIDv7();
+        const first = await a.publish(holder, "near the bound", { to: toOf(pad), operation });
+        if (!first.ok || !("message" in first.value)) {
+          throw new Error(`the large send failed: ${first.ok ? "preview" : first.error.message}`);
+        }
+        const retry = await a.publish(holder, "near the bound", { to: toOf(pad), operation });
+        if (!retry.ok || !("message" in retry.value)) {
+          throw new Error(`the retry failed: ${retry.ok ? "preview" : retry.error.message}`);
+        }
+        expect(retry.value.replayed).toBe(true);
+        expect(retry.value.message.id).toBe(operation);
+        expect(retry.value.message.ts).toBe(first.value.message.ts);
+        expect(relay.messageAttempts.filter((id) => id === operation)).toHaveLength(1);
+        expect(await commitsOf(config, operation)).toHaveLength(1);
+        expect((await receiver.takeMessageIds()).filter((id) => id === operation)).toEqual([
+          operation,
+        ]);
       }),
     TIMEOUT
   );
