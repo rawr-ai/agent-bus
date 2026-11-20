@@ -207,7 +207,7 @@ Every timeout, retry, delay, schedule and limit of the deliverer, the Claude wak
 
 | Constant | Value | Used in | What it bounds |
 | --- | --- | --- | --- |
-| `POLL_INTERVAL` | 15 s | `src/Fluree.ts` | The tick merged into the ledger's change stream. Each tick runs a delivery cycle and a pass of every waiting `bus_wake`. It is what notices a read, which moves a cursor file, not the ledger |
+| `POLL_INTERVAL` | 15 s | `src/Fluree.ts` | The tick merged into the ledger's change stream. Each tick runs a delivery cycle and a pass of every waiting `bus_wake`, including when a change notice for an acknowledgement did not arrive |
 | `RECONNECT_INTERVAL` | 5 s | `src/Fluree.ts` | The pause before reconnecting Fluree's event stream; each reconnection wakes readers once |
 | `MAX_WAIT_SECONDS` | 50 s | `src/mcp.ts` | How long one `bus_wake` call waits, and the longest `bus_wait` |
 | `DEFAULT_HISTORY_LIMIT` | 50 | `src/mcp.ts` | `bus_history`'s default number of messages |

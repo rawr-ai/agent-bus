@@ -16,7 +16,7 @@ A launcher change reaches a newly started hook immediately, but reaches `serve` 
 
 The activation decision must name the exact reviewed source commit and tree, candidate and previous installed bindings, runtime/dependency identities, affected services, checks and complete rollback. For a release, record its absolute root and manifest sha256 outside the release; its source identity is not necessarily the checkout's HEAD. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed. The [query tools' check and rollback constraint](#query-tools) applies to every server and rollback: one machine's upgrade says nothing about another's. Preserve state, credentials, cursors and `installation-id`; a release never initializes an established installation's missing identity ([recover](recover.md#the-installation-identity-is-missing-or-invalid)).
 
-Crossing between legacy and exact cursor filenames requires [the stopped-bus transition](#change-the-cursor-format) instead of the ordinary bind-and-restart or rollback step.
+Crossing between legacy and exact cursor filenames in retained file-based releases requires [the stopped-bus transition](#change-the-cursor-format). Moving from exact files to ledger positions instead requires [the paired import](#import-file-positions-into-the-ledger). Neither uses the ordinary bind-and-restart or rollback step.
 
 ## Deploy a packaged release
 
@@ -204,6 +204,35 @@ Before claiming the shared-ledger sender fence or admission bound for a cohort, 
    ```
 
    Expected: the selected writer runs on the recorded port and state directory and passes the applicable release health and delivery checks above. A pending export blocks exact-format startup and migration. [Recover an interrupted export](recover.md#cursor-format-transition-refused) with the retained exact-format CLI; do not remove its marker or start the old launcher. Files are staged and renamed as complete directories; process-interruption testing does not establish power-loss durability. *Unverified as an installed sequence.*
+
+## Import file positions into the ledger
+
+Use this only for the paired cutover from a file-based release. It is not an activation or rollback procedure. Keep both old writers disabled and unloaded through reconciliation and selection of the paired release. The Fluree server and tunnel stay up. Use the reviewed candidate executable without rebinding either installed launcher; set `AGENT_BUS_DIR`, `AGENT_BUS_LABEL` and `AGENT_BUS_PORT` to the verified local installation, job and listener. The CLI verifies the local hold; the operator establishes the remote hold separately.
+
+1. After verifying both holds, on **each** original installation:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-source > "$source_receipt"
+   ```
+
+   Expect one JSON receipt with the installation, ledger, cut and cursor inventory digest. The receipts must name distinct expected installations and the same ledger incarnation and commit. Retain them independently from the payload copies. *Unverified on the paired installed hosts; covered on disposable source trees.*
+
+2. Copy only the two `installation-id` files and each installation's exact `fluree-cursors/<encoded ledger>/<first commit id>.v2` directory plus its matching retained directory without the suffix, when present. Keep each source's paths under a separate copied state root. Do not copy credentials. Preserve the captured inventory and bytes without making either copy into a new active state directory.
+
+   Expect two read-only copies with their original installation identities and inventory digests, no adopted launcher or edited cursor. *Unverified on the paired installed hosts.*
+
+3. On the verified local installation, with both old writers still held, apply the paired import once:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-import \
+     --first-state "$first_copy" --first-receipt "$first_receipt" \
+     --second-state "$second_copy" --second-receipt "$second_receipt" \
+     --paired-holds-confirmed
+   ```
+
+   Expect a per-address report: `IMPORTED` carries the original exact value; `VERIFIED_IMPORT` or `VERIFIED_CLASSIFICATION` confirms this capture's previously stored operation; `UNCHANGED` means another mailbox fact already exists, not that this import applied. A `CLASSIFIED` row has a reason and no guessed position. Keep both holds while reconciling any unexpected result, unresolved position or hosted checkpoint. The existing file export does not project later ledger positions; retained files are not permission to roll back. *Unverified on the paired installed hosts; interruption and exact-result checks run on disposable ledgers.*
+
+   On interruption or an uncertain result, retain the same copies and receipts and repeat this exact command while both holds remain in force. Never recapture to conceal a mismatch or treat an incomplete copy as a missing cursor. See [recover](recover.md#mailbox-import-cannot-be-established).
 
 ## When a hosted peer is connected
 
@@ -562,6 +591,8 @@ Expected: `PASS` and exit status 0, in a few seconds. Afterwards `agent-bus peer
 That a hook already waiting before the restart calls `serve` again by itself (it retries every five seconds) was seen once, with an earlier form of this check: `hooked` was true 6 s after the restart. *Unverified* in a real Claude session: from a joined session, call `bus_join` again with its own address and session after the restart, and expect `hooked: true` within about ten seconds.
 
 ## Switch to stable native delivery
+
+This procedure describes the earlier file-based release. It does not establish or change a ledger mailbox position; follow the paired cutover when changing position storage.
 
 Only for the first upgrade from hostname-based wake routing. Do not repeat it on a network change or ordinary restart. Record the state directory, approved source and exact Bun on each machine. Remove any manually supplied `serve --host` argument before starting the new server; the managed LaunchAgent never used it. Arrange a one-time ordinary renewal with the owners of live native addresses. Do not rely on bus wakes to reach those owners during this transition.
 

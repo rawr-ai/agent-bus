@@ -503,6 +503,10 @@ Follow the [deployment gate](deploy.md#change-the-cursor-format). Keep the owned
 
 6. **If retained legacy state changed after migration, preserve the exact generation.** The startup and check refusal prevents treating uncertain legacy activity as harmless. Restore the original legacy files and any original receipt only from authenticated, same-generation retained bytes, after ruling out an advanced legacy writer. Then run `check` while held and verify the intended exact binding before resuming. Do not edit the manifest digest, restore an empty directory as a reset or choose a new baseline by guesswork. If original bytes or genuine legacy activity cannot be reconciled, keep the job held for reviewed repair. A concise serve refusal does not disable launchd's KeepAlive; hold the job explicitly rather than letting it retry.
 
+## Mailbox import cannot be established
+
+Keep both old writers held. Preserve the original cursor directories, both independent receipts and copies, and the reported operation or classification. A truncated or unreadable copy is not evidence a cursor was absent. For an uncertain write, rerun the [paired import](deploy.md#import-file-positions-into-the-ledger) with the same captures: it verifies its own stored operation before proceeding. Do not ask `bus_join` to settle a classified unresolved position. Fix the evidence and reconcile through the owner-approved procedure before selecting a release. There is no qualified file rollback after later ledger reads or joins. *Unverified on the paired installed hosts.*
+
 ## `bun` not found over SSH on the other machine
 
 The other machine's non-interactive SSH `PATH` lacks `bun`, so a remote command that needs it can fail to find it. The source records this as a limit, not as an observed error message. *Unverified, every step: it needs the other machine, and no SSH was made to it.*
