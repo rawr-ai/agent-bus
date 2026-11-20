@@ -11,7 +11,6 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -313,30 +312,24 @@ for (const backend of backends) {
 describe("presence guard (jsonl): two Bus layers on one file", () => {
   /** A Bus whose next admit first runs `before`, the seam that interleaves two layers. */
   const busOn = (file: string, seam: { before?: (() => Promise<void>) | undefined }) => {
-    const dir = mkdtempSync(join(tmpdir(), "agent-bus-guard-bus-"));
     const ledger = Layer.effect(
       Ledger,
-      Effect.map(Ledger, (inner) =>
-        Ledger.of({
+      Effect.map(Ledger, (inner) => {
+        const before = Effect.promise(async () => {
+          const pending = seam.before;
+          seam.before = undefined;
+          await pending?.();
+        });
+        return Ledger.of({
           ...inner,
-          admit: (message, basis) =>
-            Effect.flatMap(
-              Effect.promise(async () => {
-                const before = seam.before;
-                seam.before = undefined;
-                await before?.();
-              }),
-              () => inner.admit(message, basis)
-            ),
-        })
-      )
+          admit: (message, basis) => before.pipe(Effect.andThen(inner.admit(message, basis))),
+          admitWithStart: (message, start, basis) =>
+            before.pipe(Effect.andThen(inner.admitWithStart(message, start, basis))),
+        });
+      })
     ).pipe(Layer.provideMerge(layerJsonl(file).pipe(Layer.provide(platform))));
     const runtime = ManagedRuntime.make(
-      Bus.layer("test-installation").pipe(
-        Layer.provideMerge(ledger),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
+      Bus.layer("test-installation").pipe(Layer.provideMerge(ledger), Layer.provide(platform))
     );
     runtimes.push(runtime);
     const join_ = (session: string) =>

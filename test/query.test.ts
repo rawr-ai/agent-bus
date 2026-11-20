@@ -14,7 +14,6 @@ import { Clock, Context, Duration, Effect, Layer, ManagedRuntime, Schema } from 
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { CATALOGUE_VERSION, search } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
@@ -27,6 +26,7 @@ import { READABLE_PREDICATES } from "../src/sparql.ts";
 import { boundary, chunked, padded, stallBeforeHeaders, stallMidBody } from "./fluree-boundary.ts";
 import { flureeFetch, freshLedger, insertRaw } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 type Config = Awaited<ReturnType<typeof freshLedger>>;
 type Json = Record<string, any>;
@@ -56,16 +56,10 @@ const startBus = async (
   store: Store,
   options: { readonly testClock?: boolean; readonly onSleep?: (milliseconds: number) => void } = {}
 ) => {
-  const dir = mkdtempSync(join(tmpdir(), "agent-bus-query-"));
-  dirs.push(dir);
   const port = freePort();
   const layer = Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer("test-installation").pipe(
-        Layer.provideMerge(store),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
+      Bus.layer("test-installation").pipe(Layer.provideMerge(store), Layer.provide(platform))
     )
   );
   const clock = Layer.effect(
@@ -1961,11 +1955,10 @@ describe("transport bounds", () => {
         expect(await bus.runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end))).toBe(
           head
         );
-        expect(
-          await bus.runtime.runPromise(
-            Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get("pool-waiter"))
-          )
-        ).toMatchObject({ _tag: "Some", value: cursor });
+        expect(await bus.runtime.runPromise(mailboxPosition("pool-waiter"))).toMatchObject({
+          _tag: "Some",
+          value: cursor,
+        });
       } finally {
         for (const finish of release) finish();
         abort.abort();
@@ -2114,10 +2107,7 @@ describe("transport bounds", () => {
     await bus.append(message({ id, body, from: sender.address, to: [recipient.address] }));
     const snapshot = () =>
       bus.runtime.runPromise(Effect.flatMap(QueryGateway, (gateway) => gateway.pin));
-    const cursor = () =>
-      bus.runtime.runPromise(
-        Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(recipient.address))
-      );
+    const cursor = () => bus.runtime.runPromise(mailboxPosition(recipient.address));
     const wake = () =>
       bus.runtime.runPromise(Effect.flatMap(Bus.Bus, (owner) => owner.wake(recipient.session, 1)));
     expect((await wake()).addresses).toEqual([recipient.address]);

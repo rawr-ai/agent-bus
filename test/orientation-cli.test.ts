@@ -9,6 +9,7 @@ import * as Cursors from "../src/Cursors.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Serve from "../src/serve.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const associations = '[{"directory":"bus","concerns":["orientation"]}]';
 const joinCli = async (
@@ -89,10 +90,9 @@ test("a failed post-join orientation reports the committed join and retries read
     const before = await runtime.runPromise(
       Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
-        const cursors = yield* Cursors.Cursors;
         const presence = yield* Effect.map(ledger.presenceAt(), (read) => read.entries);
         expect(presence).toHaveLength(1);
-        return { head: yield* ledger.end, cursor: yield* cursors.get("other/cli") };
+        return { head: yield* ledger.end, cursor: yield* mailboxPosition("other/cli") };
       })
     );
     const retry = Bun.spawn([process.execPath, join(import.meta.dir, "../src/bin.ts"), "orient"], {
@@ -108,8 +108,7 @@ test("a failed post-join orientation reports the committed join and retries read
     const after = await runtime.runPromise(
       Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
-        const cursors = yield* Cursors.Cursors;
-        return { head: yield* ledger.end, cursor: yield* cursors.get("other/cli") };
+        return { head: yield* ledger.end, cursor: yield* mailboxPosition("other/cli") };
       })
     );
     expect(after).toEqual(before);
@@ -300,14 +299,13 @@ test("association CLI preserves a real owner refusal without changing presence o
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
         const ledger = yield* Ledger.Ledger;
-        const cursors = yield* Cursors.Cursors;
         yield* bus.join({
           address: "other/cli",
           runtime: "other",
           session: "current-owner",
           cwd: process.cwd(),
         });
-        return { end: yield* ledger.end, cursor: yield* cursors.get("other/cli") };
+        return { end: yield* ledger.end, cursor: yield* mailboxPosition("other/cli") };
       })
     );
     const refused = await cli(port, "competitor");
@@ -321,8 +319,7 @@ test("association CLI preserves a real owner refusal without changing presence o
     const after = await runtime.runPromise(
       Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
-        const cursors = yield* Cursors.Cursors;
-        return { end: yield* ledger.end, cursor: yield* cursors.get("other/cli") };
+        return { end: yield* ledger.end, cursor: yield* mailboxPosition("other/cli") };
       })
     );
     expect(after).toEqual(before);

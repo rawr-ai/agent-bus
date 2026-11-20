@@ -66,7 +66,14 @@ const Rows = Schema.Array(
 const LocatedRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.Int]));
 const CandidateRows = Schema.Array(Schema.Tuple([Schema.String, Schema.Int, Schema.Boolean]));
 const RoutingRows = Schema.Array(
-  Schema.Tuple([Schema.String, Schema.String, Schema.Unknown, Schema.Int, Schema.Unknown])
+  Schema.Tuple([
+    Schema.String,
+    Schema.String,
+    Schema.Unknown,
+    Schema.Int,
+    Schema.Boolean,
+    Schema.Unknown,
+  ])
 );
 const JsonRows = Schema.Array(Schema.Tuple([Schema.String]));
 const Strings = Schema.Array(Schema.String);
@@ -758,28 +765,25 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
                 const batch = typed.slice(offset, offset + 100);
                 const iri = (value: string) => ({ "@type": "@id", "@value": value });
                 const subjects = [...new Set(batch.map(([subject]) => subject))];
-                const rows = yield* sendBounded(
-                  HttpClientRequest.post(pinned(cut.head)).pipe(
-                    HttpClientRequest.bodyJsonUnsafe({
-                      "@context": context,
-                      select: ["?m", "?p", "?value", "?t", "?datatype"],
-                      values: [["?m"], subjects.map((subject) => [iri(subject)])],
-                      where: [
-                        ["values", ["?p", ["id", "from", "to"].map((p) => iri(`bus:${p}`))]],
-                        { "@id": "?m", "?p": { "@value": "?value", "@t": "?t" } },
-                        ["bind", "?datatype", "(datatype ?value)"],
-                      ],
-                    })
-                  ),
-                  JSONLD_RESPONSE_BYTES
-                ).pipe(Effect.flatMap(decode(RoutingRows)));
+                // A generic snapshot predicate can report t=0 for freshly guarded writes. History exposes
+                // the actual routing assertions and any later retraction up to the same cut.
+                const rows = yield* entryHistory(start, cut.head, {
+                  select: ["?m", "?p", "?value", "?t", "?op", "?datatype"],
+                  values: [["?m"], subjects.map((subject) => [iri(subject)])],
+                  where: [
+                    ["values", ["?p", ["id", "from", "to"].map((p) => iri(`bus:${p}`))]],
+                    { "@id": "?m", "?p": { "@value": "?value", "@t": "?t", "@op": "?op" } },
+                    ["bind", "?datatype", "(datatype ?value)"],
+                  ],
+                }).pipe(Effect.flatMap(decode(RoutingRows)));
                 for (const [subject, end, asserted] of batch) {
                   if (end < start || end > stop) return yield* invalidResponse();
                   const projection = rows.filter(([node]) => node === subject);
                   const fields = new Map<string, Array<string>>();
                   let intact = asserted;
-                  for (const [, p, value, t, datatype] of projection) {
+                  for (const [, p, value, t, assertion, datatype] of projection) {
                     if (
+                      !assertion ||
                       t !== end ||
                       typeof value !== "string" ||
                       (datatype !== "xsd:string" &&
@@ -788,7 +792,15 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
                       intact = false;
                       break;
                     }
-                    const key = p.startsWith(BUS) ? p.slice(BUS.length) : p.slice("bus:".length);
+                    const key = p.startsWith(BUS)
+                      ? p.slice(BUS.length)
+                      : p.startsWith("bus:")
+                        ? p.slice("bus:".length)
+                        : undefined;
+                    if (key !== "id" && key !== "from" && key !== "to") {
+                      intact = false;
+                      break;
+                    }
                     const values = fields.get(key) ?? [];
                     values.push(value);
                     fields.set(key, values);
@@ -799,7 +811,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
                   const id = ids.length === 1 ? ids[0] : undefined;
                   const sender = senders.length === 1 ? senders[0] : undefined;
                   const routing =
-                    intact && id !== undefined && sender !== undefined && to.length > 0
+                    intact && id !== undefined && sender !== undefined
                       ? { id, from: sender, to }
                       : undefined;
                   candidates.push({ subject, end, ...optional("routing", routing) });

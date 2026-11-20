@@ -128,29 +128,31 @@ const fixture = (dir: string) => {
     const second = await publish("second");
     return { position, first, second };
   };
-  const take = (cursorDir: string) =>
-    bus(
-      layerFiles(cursorDir),
-      Effect.flatMap(Bus.Bus, (bus) => bus.take(upper.address, upper.session))
+  // Inspect what the file's value leaves unread, without putting file authority back in Bus.
+  const after = (position: number) =>
+    run(
+      Effect.gen(function* () {
+        const store = yield* Ledger;
+        const { entries } = yield* store.read(position);
+        return entries.flatMap(({ message }) =>
+          message.kind === "message" && message.to.includes(upper.address) ? [message] : []
+        );
+      })
     );
-  // An independent legacy observer for this one fixture address, using its literal old filename.
-  const oldCursors = Layer.succeed(Cursors)(
-    Cursors.of({
-      get: (address) =>
-        Effect.sync(() => (address === upper.address ? Option.some(oldPosition()) : Option.none())),
-      set: (address, cursor) =>
-        Effect.sync(() => {
-          if (address !== upper.address) throw new Error("Unexpected legacy writer");
-          stageLegacy(legacyName, JSON.stringify({ cursor }));
-        }),
-      clear: () => Effect.die("Unexpected legacy cursor clear"),
-    })
-  );
-  const oldTake = () =>
-    bus(
-      oldCursors,
-      Effect.flatMap(Bus.Bus, (bus) => bus.take(upper.address, upper.session))
-    );
+  const inspect = async (cursorDir: string) => {
+    if (cursorDir !== exact) throw new Error("Expected the exact cursor directory");
+    const position = await withCursors((cursors) => cursors.get(upper.address));
+    if (Option.isNone(position)) throw new Error("Expected an exact file position");
+    return after(position.value);
+  };
+  const head = () => run(Effect.flatMap(Ledger, (store) => store.end));
+  const advanceExact = async () => {
+    const position = await head();
+    await withCursors((cursors) => cursors.set(upper.address, position));
+  };
+  const inspectLegacy = () => after(oldPosition());
+  const advanceLegacy = async () =>
+    stageLegacy(legacyName, JSON.stringify({ cursor: await head() }));
   return {
     dir,
     legacy,
@@ -165,8 +167,10 @@ const fixture = (dir: string) => {
     remoteAlias,
     seed,
     publish,
-    take,
-    oldTake,
+    inspect,
+    inspectLegacy,
+    advanceExact,
+    advanceLegacy,
   };
 };
 
@@ -188,12 +192,13 @@ test("migrate preserves the next message, not the latest head; later reads and e
     expect(existsSync(f.exact)).toBe(false);
     const migrated = await f.transition("migrate");
     expect(migrated).toMatchObject({ state: "exact", count: 1 });
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([second]);
-    expect(await f.take(await f.open())).toEqual([]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([second]);
+    await f.advanceExact();
+    expect(await f.inspect(await f.open())).toEqual([]);
     expect(f.oldPosition()).toBe(position);
     await f.withCursors((cursors) => cursors.set(upper.address, 0));
     expect(await f.transition("migrate")).toMatchObject({ generation: migrated.generation });
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([first, second]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([first, second]);
   }));
 
 test("even a left historical case alias makes one old slot ambiguous; no cursor or presence changes", () =>
@@ -278,7 +283,7 @@ test("an explicitly local holding with unread mail cannot be mistaken for a fres
     expect(existsSync(f.exact)).toBe(false);
     f.stageLegacy(legacyName, JSON.stringify({ cursor: position }));
     await f.transition("migrate");
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([second]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([second]);
   }));
 
 test("export uses current exact state, and a subsequent upgrade/downgrade uses a fresh generation", () =>
@@ -286,7 +291,8 @@ test("export uses current exact state, and a subsequent upgrade/downgrade uses a
     const { first: firstId, second: secondId } = await f.seed();
     f.stageLegacy(legacyName, '{"cursor":0}');
     const first = await f.transition("migrate");
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([firstId, secondId]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([firstId, secondId]);
+    await f.advanceExact();
     const position = await f.run(Effect.flatMap(Ledger, (ledger) => ledger.end));
     const third = await f.publish("third");
     expect(await f.transition("export")).toMatchObject({
@@ -300,20 +306,23 @@ test("export uses current exact state, and a subsequent upgrade/downgrade uses a
       generation: first.generation,
     });
 
-    expect((await f.oldTake()).map(({ id }) => id)).toEqual([third]);
-    expect(await f.oldTake()).toEqual([]);
+    expect((await f.inspectLegacy()).map(({ id }) => id)).toEqual([third]);
+    await f.advanceLegacy();
+    expect(await f.inspectLegacy()).toEqual([]);
     await expect(f.transition("export")).rejects.toThrow("no completed export");
     const fourth = await f.publish("fourth");
     const second = await f.transition("migrate");
     expect(second.generation).not.toBe(first.generation);
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([fourth]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([fourth]);
+    await f.advanceExact();
     const fifth = await f.publish("fifth");
     expect(await f.transition("export")).toMatchObject({
       state: "exported",
       generation: second.generation,
     });
-    expect((await f.oldTake()).map(({ id }) => id)).toEqual([fifth]);
-    expect(await f.oldTake()).toEqual([]);
+    expect((await f.inspectLegacy()).map(({ id }) => id)).toEqual([fifth]);
+    await f.advanceLegacy();
+    expect(await f.inspectLegacy()).toEqual([]);
   }));
 
 test("two conversions preserve three independent legacy filenames at zero, midrange and head", () =>
@@ -481,8 +490,9 @@ for (const after of [false, true]) {
       if (after) expect(await f.open()).toBe(f.exact);
       else await expect(f.open()).rejects.toThrow("run agent-bus cursors --action migrate");
       expect(await f.transition("migrate")).toMatchObject({ state: "exact", count: 1 });
-      expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([second]);
-      expect(await f.take(await f.open())).toEqual([]);
+      expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([second]);
+      await f.advanceExact();
+      expect(await f.inspect(await f.open())).toEqual([]);
     }));
 }
 
@@ -551,8 +561,9 @@ for (const phase of ["move original", "publish legacy", "retire exact"] as const
         expect(recovered.parked).toBeUndefined();
       }
       expect(f.oldPosition()).toBe(0);
-      expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([second]);
-      expect(await f.take(await f.open())).toEqual([]);
+      expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([second]);
+      await f.advanceExact();
+      expect(await f.inspect(await f.open())).toEqual([]);
     }));
 }
 
@@ -582,7 +593,8 @@ test("completed export can recover forward from its verified latest positions, n
     const { first, second } = await f.seed();
     f.stageLegacy(legacyName, '{"cursor":0}');
     const migrated = await f.transition("migrate");
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([first, second]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([first, second]);
+    await f.advanceExact();
     const position = await f.run(Effect.flatMap(Ledger, (ledger) => ledger.end));
     const unread = await f.publish("after the exact writer advanced");
     const exported = await f.transition("export");
@@ -598,8 +610,9 @@ test("completed export can recover forward from its verified latest positions, n
     const resumed = await f.transition("migrate");
     expect(resumed).toMatchObject({ state: "exact", incarnation: migrated.incarnation });
     expect(resumed.generation).not.toBe(migrated.generation);
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([unread]);
-    expect(await f.take(await f.open())).toEqual([]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([unread]);
+    await f.advanceExact();
+    expect(await f.inspect(await f.open())).toEqual([]);
     expect(readFileSync(retiredCursor)).toEqual(retired);
   }));
 
@@ -685,7 +698,7 @@ test("changed retained legacy bytes refuse exact startup and check until the ori
       generation: migrated.generation,
       legacyExport: { eligible: true },
     });
-    expect((await f.take(await f.open())).map(({ id }) => id)).toEqual([second]);
+    expect((await f.inspect(await f.open())).map(({ id }) => id)).toEqual([second]);
   }));
 
 test("an existing-only Fluree cursor preflight neither provisions a missing ledger nor configures an empty one", async () => {

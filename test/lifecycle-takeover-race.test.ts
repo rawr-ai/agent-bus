@@ -5,22 +5,23 @@
 //
 // The seam is deterministic: serve A writes through a relay that, on A's next selected write,
 // first runs an action to completion (usually serve B's competing call, made directly on the
-// ledger), or answers with a fault. Each "machine" has its own cursor directory, read here as
-// files, and ledger contents are read with literal queries independent of the bus's reads.
+// ledger), or answers with a fault. Mailbox positions are read through serve B's direct handle at
+// a fresh pin, and other ledger contents with literal queries independent of the bus's reads.
 import { describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger, messageIri } from "../src/Ledger.ts";
+import type { MailboxState } from "../src/mailbox-model.ts";
 import { historyPreset } from "../src/mcp.ts";
 import { MAX_INDEXED_FIELD_BYTES } from "../src/message-carrier.ts";
+import { QueryGateway } from "../src/Query.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
 
@@ -43,14 +44,12 @@ type Outcome<A> =
   | { readonly ok: true; readonly value: A }
   | { readonly ok: false; readonly error: Failure };
 
-/** One serve: its own runtime and cursor directory, on `url` (direct, or the relay). */
+/** One serve: its own runtime, on `url` (direct, or the relay). */
 const machine = async (config: Config, url: string) => {
   const root = mkdtempSync(join(tmpdir(), "agent-bus-lifecycle-"));
-  const cursorDir = join(root, "cursors");
   const runtime = ManagedRuntime.make(
     Bus.layer("test-installation").pipe(
       Layer.provideMerge(layerFluree({ ...config, url }).pipe(Layer.provide(platform))),
-      Layer.provideMerge(Cursors.layerFiles(cursorDir)),
       Layer.provide(platform)
     )
   );
@@ -62,7 +61,6 @@ const machine = async (config: Config, url: string) => {
     await dispose();
     throw error;
   }
-  const file = join(cursorDir, Cursors.cursorFileName(address));
   const outcome = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger>): Promise<Outcome<A>> =>
     runtime.runPromise(
       Effect.match(effect, {
@@ -120,17 +118,17 @@ const machine = async (config: Config, url: string) => {
           return yield* ledger.admit(message, (yield* ledger.presenceAt()).cut);
         })
       ),
-    /** The cursor file's value, or undefined when there is no file. */
-    cursor: (): number | undefined => {
-      try {
-        return (JSON.parse(readFileSync(file, "utf8")) as { cursor: number }).cursor;
-      } catch {
-        return undefined;
-      }
-    },
-    /** The cursor file's inode: each write replaces the file, so a write changes it. */
-    cursorInode: () => statSync(file).ino,
-    setCursor: (cursor: number) => writeFileSync(file, JSON.stringify({ address, cursor })),
+    /**
+     * The address's mailbox at a fresh pin of the head. Pinned through the query gateway, since
+     * past presence damage the presence read itself fails.
+     */
+    mailbox: () =>
+      runtime.runPromise(
+        Effect.gen(function* () {
+          const pin = yield* Effect.flatMap(QueryGateway, (gateway) => gateway.pin);
+          return yield* Effect.flatMap(Ledger, (ledger) => ledger.mailboxAt(address, pin));
+        })
+      ),
   };
 };
 type Machine = Awaited<ReturnType<typeof machine>>;
@@ -159,7 +157,11 @@ const writeRelay = (upstream: string) => {
   let settleUnavailable = false;
   let writes = 0;
   const attempts: Array<string | undefined> = [];
+  /** Per presence attempt: whether its mailbox start travelled in the same request. */
+  const starts: Array<boolean> = [];
   const messageAttempts: Array<string | undefined> = [];
+  /** Every armed plan that actually ran, in order. */
+  const fired: Array<{ readonly kind: "presence" | "message"; readonly plan: Plan }> = [];
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -190,21 +192,35 @@ const writeRelay = (upstream: string) => {
       }
       writes++;
       const payload: unknown = JSON.parse(new TextDecoder().decode(body));
-      const node = writeNode(
+      const inserted =
         url.pathname.endsWith("/update") &&
-          typeof payload === "object" &&
-          payload !== null &&
-          "insert" in payload
+        typeof payload === "object" &&
+        payload !== null &&
+        "insert" in payload
           ? payload.insert
-          : payload
-      );
-      if (Option.isNone(node)) return forward();
-      const presence = node.value["@type"] === "bus:Presence";
-      const id = node.value["bus:id"];
+          : payload;
+      // One logical write: a single entry node, or the unique entry node of an atomic insert
+      // array beside its mailbox nodes. Receipt and mailbox nodes are never entries.
+      const nodes = Array.isArray(inserted) ? inserted : [inserted];
+      const entries = nodes.flatMap((item) => {
+        const decoded = writeNode(item);
+        return Option.isSome(decoded) ? [decoded.value] : [];
+      });
+      const node = entries.length === 1 ? entries[0] : undefined;
+      if (node === undefined) return forward();
+      const presence = node["@type"] === "bus:Presence";
+      const id = node["bus:id"];
       (presence ? attempts : messageAttempts).push(typeof id === "string" ? id : id["@value"]);
+      if (presence)
+        starts.push(
+          nodes.some(
+            (item) => typeof item === "object" && item !== null && "bus:mailboxStart" in item
+          )
+        );
       const plan = presence ? nextPresence : nextMessage;
       if (presence) nextPresence = undefined;
       else nextMessage = undefined;
+      if (plan !== undefined) fired.push({ kind: presence ? "presence" : "message", plan });
       if (plan?.before !== undefined) await plan.before();
       if (plan?.fault === "unforwarded") return new Response(null, { status: 503 });
       const response = await forward();
@@ -225,7 +241,9 @@ const writeRelay = (upstream: string) => {
       nextMessage = plan;
     },
     attempts,
+    starts,
     messageAttempts,
+    fired,
     writeCount: () => writes,
     stop: () => server.stop(true),
   };
@@ -321,6 +339,52 @@ const expectRefused = (outcome: Outcome<unknown>, tag: string, text: string): vo
   if (outcome.ok) return;
   expect(outcome.error._tag).toBe(tag);
   expect(outcome.error.message).toContain(text);
+};
+
+/**
+ * A mailbox as tests compare it: its position and the identity of each start that set one. The
+ * only place this file reads stored records; change it here when the storage shape changes.
+ */
+const positionView = (state: MailboxState) => {
+  if (state.status === "UNRESOLVED") throw new Error("Fixture position unexpectedly unresolved.");
+  if (state.status === "ABSENT") return { status: "ABSENT" as const };
+  return {
+    status: "FOUND" as const,
+    position: state.position,
+    starts: state.records.flatMap(({ record, t }) =>
+      record.kind === "start" ? [{ operation: record.operation, position: record.position, t }] : []
+    ),
+  };
+};
+
+/**
+ * The whole expected state after a competitor won: everything there was before, plus exactly one
+ * new start, the winner's join at the head its decision read, which is now the position.
+ */
+const expectOneNewStart = (
+  before: MailboxState,
+  after: MailboxState,
+  winner: string | undefined,
+  readHead: number | undefined
+) => {
+  const earlier = positionView(before);
+  expect<unknown>(positionView(after)).toEqual({
+    status: "FOUND",
+    position: readHead,
+    starts: [
+      ...(earlier.status === "FOUND" ? earlier.starts : []),
+      { operation: winner, position: readHead, t: expect.any(Number) },
+    ],
+  });
+};
+
+/** A real earlier holding of the address, by another session, that has left. */
+const leftHolding = async (b: Machine) => {
+  expect((await b.join("session:earlier")).ok).toBe(true);
+  expect((await b.leave("session:earlier")).ok).toBe(true);
+  const prior = await b.mailbox();
+  expect(prior.status).toBe("FOUND");
+  return prior;
 };
 
 /** An independent commit oracle for a particular attempted message id. */
@@ -760,14 +824,18 @@ describe("guarded publish across serves", () => {
 });
 
 describe("guarded presence: a competing claim committed after the cut", () => {
-  for (const prior of [undefined, 7] as const) {
+  for (const prior of [false, true] as const) {
     test(
-      `two free claims: the loser is refused naming the winner, writes nothing, and its cursor is ${prior === undefined ? "absent" : "its prior value"} again`,
+      `two free claims: the loser is refused naming the winner and writes nothing; only the winner's start is added${prior ? " to an earlier holding's" : ""}`,
       () =>
         staged("free-claims", async ({ config, relay, a, b }) => {
-          if (prior !== undefined) a.setCursor(prior);
+          const earlier = prior ? await leftHolding(b) : await b.mailbox();
           const before = await presenceNodes(config);
-          const winner = during(relay, () => b.join("session:b"));
+          let readHead: number | undefined;
+          const winner = during(relay, async () => {
+            readHead = await b.head();
+            return b.join("session:b");
+          });
           const loser = await a.join("session:a");
 
           expect(winner.value?.ok).toBe(true);
@@ -779,7 +847,9 @@ describe("guarded presence: a competing claim committed after the cut", () => {
           expect(await presenceNodes(config)).toEqual(
             [...before, messageIri(held?.joinId ?? "")].sort()
           );
-          expect(a.cursor()).toBe(prior);
+          // The loser's start travelled with its presence, and neither was stored.
+          expect(relay.starts).toEqual([true]);
+          expectOneNewStart(earlier, await b.mailbox(), held?.joinId, readHead);
         }),
       TIMEOUT
     );
@@ -800,7 +870,9 @@ describe("guarded presence: a competing claim committed after the cut", () => {
         expectRefused(result, "NotOwner", `"${legacy.id}"`);
         expect((await b.peer())?.joinId).toBe(legacy.id);
         expect(await stored(config, relay.attempts.at(-1))).toEqual([]);
-        expect(a.cursor()).toBeUndefined();
+        expect(relay.starts.at(-1)).toBe(true);
+        // The unconditional append carries no start, and the refused join stored none.
+        expect(positionView(await b.mailbox())).toEqual({ status: "ABSENT" });
       }),
     TIMEOUT
   );
@@ -837,18 +909,21 @@ describe("guarded presence: the old holder's call committed after a takeover", (
 
   for (const replay of [false, true]) {
     test(
-      `stale ${replay ? "replay " : ""}rejoin: refused naming the successor's join; the holder's cursor keeps its prior value`,
+      `stale ${replay ? "replay " : ""}rejoin: refused naming the successor's join; the address keeps its prior position`,
       () =>
         staged("stale-rejoin", async (stage) => {
-          let prior: number | undefined;
-          const { result, successorJoin } = await takenOverDuring(stage, () => {
-            prior = stage.a.cursor();
+          let prior: MailboxState | undefined;
+          const { result, successorJoin } = await takenOverDuring(stage, async () => {
+            prior = await stage.b.mailbox();
             return stage.a.join(holder, { replay });
           });
-          // A replay would have moved it to 0, so a prior value above 0 shows the restore.
-          expect(prior).toBeGreaterThan(0);
+          // A replay would have started at 0, so a prior position above 0 shows nothing moved it.
+          if (prior?.status !== "FOUND") throw new Error("The holder has no position.");
+          expect(prior.position).toBeGreaterThan(0);
           expectRefused(result, "NotOwner", `"${successorJoin}"`);
-          expect(stage.a.cursor()).toBe(prior);
+          // Only a replay carries a start; the takeover between writes no position.
+          expect(stage.relay.starts.at(-1)).toBe(replay);
+          expect(positionView(await stage.b.mailbox())).toEqual(positionView(prior));
           expect(await stored(stage.config, stage.relay.attempts.at(-1))).toEqual([]);
         }),
       TIMEOUT
@@ -862,6 +937,8 @@ describe("guarded presence: the old holder's call committed after a takeover", (
         // Here the taker writes through the relay, and the holder rejoins directly.
         expect((await b.join(holder)).ok).toBe(true);
         const j1 = (await a.peer())?.joinId;
+        const before = await b.mailbox();
+        expect(before.status).toBe("FOUND");
         const rejoined = during(relay, () => b.join(holder));
         const result = await a.join(successor, { takeover: j1 });
 
@@ -870,7 +947,9 @@ describe("guarded presence: the old holder's call committed after a takeover", (
         expect(current?.presence.session).toBe(holder);
         expect(current?.joinId).not.toBe(j1);
         expectRefused(result, "NotOwner", `"${current?.joinId}"`);
-        expect(a.cursor()).toBeUndefined();
+        // Neither the takeover nor the rejoin carries a start: the holder's position stands.
+        expect(relay.starts.at(-1)).toBe(false);
+        expect(positionView(await b.mailbox())).toEqual(positionView(before));
         expect(await stored(config, relay.attempts.at(-1))).toEqual([]);
       }),
     TIMEOUT
@@ -884,7 +963,12 @@ describe("guarded presence: the same session on two serves", () => {
     "two joins: one succeeds, the other is a PresenceConflict that writes nothing; calling again renews",
     () =>
       staged("same-session-joins", async ({ config, relay, a, b }) => {
-        const other = during(relay, () => b.join(session));
+        const earlier = await b.mailbox();
+        let readHead: number | undefined;
+        const other = during(relay, async () => {
+          readHead = await b.head();
+          return b.join(session);
+        });
         const result = await a.join(session);
 
         expect(other.value?.ok).toBe(true);
@@ -895,13 +979,17 @@ describe("guarded presence: the same session on two serves", () => {
           `${address} changed while this call was deciding, so nothing was written. Call again`
         );
         expect(await stored(config, relay.attempts.at(-1))).toEqual([]);
-        expect(a.cursor()).toBeUndefined();
+        expect(relay.starts.at(-1)).toBe(true);
+        const afterRace = await b.mailbox();
+        expectOneNewStart(earlier, afterRace, won?.joinId, readHead);
         expect((await a.peer())?.joinId).toBe(won?.joinId);
 
         expect((await a.join(session)).ok).toBe(true);
         const renewed = await a.peer();
         expect(renewed?.joinId).not.toBe(won?.joinId);
         expect(renewed?.presence.rejoinOf).toBe(won?.joinId);
+        // A renewal continues the run and adds no start.
+        expect(positionView(await b.mailbox())).toEqual(positionView(afterRace));
       }),
     TIMEOUT
   );
@@ -929,17 +1017,17 @@ describe("guarded presence: the same session on two serves", () => {
   );
 });
 
-describe("guarded presence: cursor law", () => {
+describe("guarded presence: position law", () => {
   test(
-    "a rejoin by the holder with an existing cursor writes no cursor",
+    "a rejoin by the holder with an existing position writes no position",
     () =>
-      staged("rejoin-cursor", async ({ a }) => {
+      staged("rejoin-cursor", async ({ relay, a, b }) => {
         expect((await a.join(holder)).ok).toBe(true);
-        const value = a.cursor();
-        const inode = a.cursorInode();
+        const before = await b.mailbox();
+        expect(before.status).toBe("FOUND");
         expect((await a.join(holder)).ok).toBe(true);
-        expect(a.cursor()).toBe(value);
-        expect(a.cursorInode()).toBe(inode);
+        expect(relay.starts).toEqual([true, false]);
+        expect(positionView(await b.mailbox())).toEqual(positionView(before));
       }),
     TIMEOUT
   );
@@ -949,25 +1037,30 @@ describe("guarded presence: an unconfirmed write", () => {
   test(
     "a write that committed but whose response failed is the call's success",
     () =>
-      staged("unknown-committed", async ({ config, relay, a }) => {
+      staged("unknown-committed", async ({ config, relay, a, b }) => {
         const head = await a.head();
         relay.arm({ fault: "forwarded" });
         const result = await a.join(holder);
 
+        expect(relay.fired.map(({ plan }) => plan.fault)).toEqual(["forwarded"]);
+        expect(relay.starts).toEqual([true]);
         expect(result.ok).toBe(true);
         expect(relay.attempts).toHaveLength(1);
         expect((await a.peer())?.joinId).toBe(relay.attempts[0]);
         expect(await stored(config, relay.attempts[0])).toHaveLength(1);
-        expect(a.cursor()).toBe(head);
+        expect<unknown>(positionView(await b.mailbox())).toEqual({
+          status: "FOUND",
+          position: head,
+          starts: [{ operation: relay.attempts[0], position: head, t: expect.any(Number) }],
+        });
       }),
     TIMEOUT
   );
 
   test(
-    "an unsent join reports it could not confirm, keeps the new cursor, writes nothing; a later join decides honestly",
+    "an unsent join reports it could not confirm and stores neither presence nor start; a later join decides honestly",
     () =>
-      staged("unknown-join", async ({ config, relay, a }) => {
-        const head = await a.head();
+      staged("unknown-join", async ({ config, relay, a, b }) => {
         const before = await presenceNodes(config);
         relay.arm({ fault: "unforwarded" });
         const result = await a.join(holder);
@@ -977,13 +1070,23 @@ describe("guarded presence: an unconfirmed write", () => {
           "LedgerError",
           `The bus could not confirm whether this join of ${address} was recorded`
         );
+        expect(relay.fired.map(({ plan }) => plan.fault)).toEqual(["unforwarded"]);
         expect(relay.attempts).toHaveLength(1);
-        expect(a.cursor()).toBe(head);
+        expect(relay.starts).toEqual([true]);
+        // Read independently, not from the ambiguous answer: no presence and no start were stored.
+        expect(await stored(config, relay.attempts[0])).toEqual([]);
         expect(await presenceNodes(config)).toEqual(before);
+        expect(positionView(await b.mailbox())).toEqual({ status: "ABSENT" });
 
+        const head = await a.head();
         expect((await a.join(holder)).ok).toBe(true);
         expect((await a.peer())?.presence.session).toBe(holder);
         expect(relay.attempts).toHaveLength(2);
+        expect<unknown>(positionView(await b.mailbox())).toEqual({
+          status: "FOUND",
+          position: head,
+          starts: [{ operation: relay.attempts[1], position: head, t: expect.any(Number) }],
+        });
       }),
     TIMEOUT
   );
@@ -991,10 +1094,11 @@ describe("guarded presence: an unconfirmed write", () => {
   test(
     "an unsent leave reports it could not confirm and changes nothing; a later leave decides honestly",
     () =>
-      staged("unknown-leave", async ({ config, relay, a }) => {
+      staged("unknown-leave", async ({ config, relay, a, b }) => {
         expect((await a.join(holder)).ok).toBe(true);
         const joined = await a.peer();
-        const cursor = a.cursor();
+        const position = await b.mailbox();
+        expect(position.status).toBe("FOUND");
         const before = await presenceNodes(config);
         relay.arm({ fault: "unforwarded" });
         const result = await a.leave(holder);
@@ -1005,8 +1109,9 @@ describe("guarded presence: an unconfirmed write", () => {
           `The bus could not confirm whether this leave of ${address} was recorded`
         );
         expect(await presenceNodes(config)).toEqual(before);
+        expect(relay.fired.map(({ plan }) => plan.fault)).toEqual(["unforwarded"]);
         expect((await a.peer())?.joinId).toBe(joined?.joinId);
-        expect(a.cursor()).toBe(cursor);
+        expect(positionView(await b.mailbox())).toEqual(positionView(position));
 
         expect((await a.leave(holder)).ok).toBe(true);
         expect(await a.peer()).toBeUndefined();
@@ -1046,16 +1151,16 @@ describe("guarded presence: damaged presence", () => {
 
   for (const [kind, node] of Object.entries(damage)) {
     test(
-      `${kind} presence in history at the cut: a decode error, no cursor, nothing attempted`,
+      `${kind} presence in history at the cut: a decode error, no position, nothing attempted`,
       () =>
-        staged("damage-at-cut", async ({ config, relay, a }) => {
+        staged("damage-at-cut", async ({ config, relay, a, b }) => {
           await insertRaw(config, node());
           const before = await presenceNodes(config);
           const result = await a.join(holder);
 
           expectRefused(result, "LedgerError", "could not be decoded");
           expect(relay.attempts).toHaveLength(0);
-          expect(a.cursor()).toBeUndefined();
+          expect(positionView(await b.mailbox())).toEqual({ status: "ABSENT" });
           expect(await presenceNodes(config)).toEqual(before);
         }),
       TIMEOUT
@@ -1063,10 +1168,10 @@ describe("guarded presence: damaged presence", () => {
   }
 
   test(
-    "damage for the address committed after the cut: refused, the re-read fails, the cursor is restored",
+    "damage for the address committed after the cut: refused, the re-read fails, the earlier position stands",
     () =>
-      staged("damage-after-cut", async ({ config, relay, a }) => {
-        a.setCursor(3);
+      staged("damage-after-cut", async ({ config, relay, a, b }) => {
+        const prior = await leftHolding(b);
         const inserted = during(relay, async () => {
           await insertRaw(config, damage.undecodable?.());
           return true;
@@ -1076,8 +1181,9 @@ describe("guarded presence: damaged presence", () => {
         expect(inserted.value).toBe(true);
         expectRefused(result, "LedgerError", "could not be decoded");
         expect(relay.attempts).toHaveLength(1);
+        expect(relay.starts).toEqual([true]);
         expect(await stored(config, relay.attempts[0])).toEqual([]);
-        expect(a.cursor()).toBe(3);
+        expect(positionView(await b.mailbox())).toEqual(positionView(prior));
       }),
     TIMEOUT
   );

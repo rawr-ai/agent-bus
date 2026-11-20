@@ -5,13 +5,13 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Context, Deferred, Effect, Fiber, Layer, Option, type Scope, Stream } from "effect";
 import * as Bus from "../src/Bus.ts";
-import { Cursors, layerFiles } from "../src/Cursors.ts";
 import { type Daemon, deliverOnce, type Queue } from "../src/codex.ts";
 import { Message, Origin, Presence } from "../src/domain.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { WAKE_LISTED_BYTES } from "../src/message-carrier.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const installation = "7fd8a650-af65-475f-bbb0-d8d61aa6007c";
 const otherInstallation = "b373d27f-5383-4688-9df6-c3dbf5c94c7c";
@@ -42,39 +42,26 @@ const withStore = <A, E>(
     )
   );
 
-const openBus = (
-  dir: string,
-  options: {
-    readonly id: string;
-    readonly hostOf: () => string;
-    readonly cursorDir: string;
-    readonly observeLedger?: (ledger: Ledger["Service"]) => Ledger["Service"];
-    readonly onCursorRead?: (address: string) => void;
-  }
-) =>
+const openBus = (options: {
+  readonly id: string;
+  readonly hostOf: () => string;
+  readonly observeLedger?: (ledger: Ledger["Service"]) => Ledger["Service"];
+  readonly onMailboxRead?: (address: string) => void;
+}) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger;
     const gateway = yield* QueryGateway;
-    const files = layerFiles(join(dir, options.cursorDir));
-    const cursorsLayer =
-      options.onCursorRead === undefined
-        ? files
-        : Layer.effect(
-            Cursors,
-            Effect.map(Cursors, (cursors) =>
-              Cursors.of({
-                ...cursors,
-                get: (address) =>
-                  Effect.sync(() => options.onCursorRead?.(address)).pipe(
-                    Effect.andThen(cursors.get(address))
-                  ),
-              })
-            )
-          ).pipe(Layer.provide(files));
+    const observed = options.observeLedger?.(ledger) ?? ledger;
+    const instrumented = Ledger.of({
+      ...observed,
+      mailboxAt: (address, cut) =>
+        Effect.sync(() => options.onMailboxRead?.(address)).pipe(
+          Effect.andThen(observed.mailboxAt(address, cut))
+        ),
+    });
     const dependencies = Layer.mergeAll(
-      Layer.succeed(Ledger)(options.observeLedger?.(ledger) ?? ledger),
-      Layer.succeed(QueryGateway)(gateway),
-      cursorsLayer
+      Layer.succeed(Ledger)(instrumented),
+      Layer.succeed(QueryGateway)(gateway)
     );
     const context = yield* Layer.build(
       Bus.layer(options.id, options.hostOf).pipe(
@@ -82,7 +69,7 @@ const openBus = (
         Layer.provide(platform)
       )
     );
-    return { bus: Context.get(context, Bus.Bus), cursors: Context.get(context, Cursors) };
+    return { bus: Context.get(context, Bus.Bus) };
   });
 
 const joining = (
@@ -135,18 +122,16 @@ const codexCalls: Array<readonly [string, string]> = [
   ["rollout", codex.session],
 ];
 
-const wakeAndRead = (
-  bus: Bus.Bus["Service"],
-  cursors: Cursors["Service"],
-  expected: ReadonlyArray<Message>
-) =>
+const wakeAndRead = (bus: Bus.Bus["Service"], expected: ReadonlyArray<Message>) =>
   Effect.gen(function* () {
-    const before = yield* Effect.forEach(owners, (owner) => cursors.get(owner.address));
+    const before = yield* Effect.forEach(owners, (owner) => mailboxPosition(owner.address));
     const queue = observeQueue();
     yield* queue.pass(bus);
     expect(queue.calls).toEqual(codexCalls);
     expect((yield* bus.wake(claude.session, 2)).addresses).toEqual([claude.address]);
-    expect(yield* Effect.forEach(owners, (owner) => cursors.get(owner.address))).toEqual(before);
+    expect(yield* Effect.forEach(owners, (owner) => mailboxPosition(owner.address))).toEqual(
+      before
+    );
     const read = yield* Effect.forEach(owners, (owner) => bus.take(owner.address, owner.session));
     expect(read.map((messages) => messages.map(({ id }) => id))).toEqual(
       expected.map(({ id }) => [id])
@@ -158,7 +143,7 @@ test("native wakes survive a hostname change and restart without selecting a for
     Effect.gen(function* () {
       const ledger = yield* Ledger;
       let host = originalHost;
-      const local = { id: installation, hostOf: () => host, cursorDir: "local" };
+      const local = { id: installation, hostOf: () => host };
       const foreign = [
         { ...codex, address: "codex/foreign", session: "thread-foreign" },
         { ...claude, address: "claude/foreign" },
@@ -167,7 +152,7 @@ test("native wakes survive a hostname change and restart without selecting a for
       const excluded = [...foreign.map(({ address }) => address), withoutThread];
       const { backlog, joins, excludedCursors } = yield* Effect.scoped(
         Effect.gen(function* () {
-          const { bus, cursors } = yield* openBus(dir, local);
+          const { bus } = yield* openBus(local);
           yield* bus.join(joining(sender, dir));
           for (const owner of [...owners, ...foreign]) yield* bus.join(joining(owner, dir));
           yield* bus.join({
@@ -191,14 +176,13 @@ test("native wakes survive a hostname change and restart without selecting a for
           }
 
           host = wifiHost;
-          const remote = yield* openBus(dir, {
+          const remote = yield* openBus({
             id: otherInstallation,
             hostOf: () => wifiHost,
-            cursorDir: "remote",
           });
-          // The owners moved these addresses; the abandoned cursors are still present locally.
+          // Foreign holdings and local holdings without native wake still have ledger positions.
           for (const owner of foreign) yield* remote.bus.join(joining(owner, dir));
-          const excludedCursors = yield* Effect.forEach(excluded, cursors.get);
+          const excludedCursors = yield* Effect.forEach(excluded, mailboxPosition);
           expect(excludedCursors.every(Option.isSome)).toBe(true);
           // The sender's own read sees the remote joins' recorded prerequisites (another
           // installation, not this one) and the thread missing here, never a locality check.
@@ -213,7 +197,7 @@ test("native wakes survive a hostname change and restart without selecting a for
             })
           );
           expect(pending.map((message) => message.origin?.host)).toEqual([wifiHost, wifiHost]);
-          yield* wakeAndRead(bus, cursors, pending);
+          yield* wakeAndRead(bus, pending);
           const backlog = yield* Effect.forEach(owners, ({ address }) =>
             send(bus, [address], "before restart")
           );
@@ -221,15 +205,15 @@ test("native wakes survive a hostname change and restart without selecting a for
         })
       );
 
-      const { bus, cursors } = yield* openBus(dir, local);
-      yield* wakeAndRead(bus, cursors, backlog);
+      const { bus } = yield* openBus(local);
+      yield* wakeAndRead(bus, backlog);
       host = originalHost;
       const returned = yield* Effect.forEach(owners, ({ address }) =>
         send(bus, [address], "back on original network")
       );
       expect(returned.map((message) => message.origin?.host)).toEqual([originalHost, originalHost]);
-      yield* wakeAndRead(bus, cursors, returned);
-      expect(yield* Effect.forEach(excluded, cursors.get)).toEqual(excludedCursors);
+      yield* wakeAndRead(bus, returned);
+      expect(yield* Effect.forEach(excluded, mailboxPosition)).toEqual(excludedCursors);
       expect(
         (yield* bus.peers).filter(({ address }) =>
           owners.some((owner) => owner.address === address)
@@ -247,17 +231,16 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
   withStore((dir) =>
     Effect.gen(function* () {
       const ledger = yield* Ledger;
-      const { bus, cursors } = yield* openBus(dir, {
+      const { bus } = yield* openBus({
         id: installation,
         hostOf: () => originalHost,
-        cursorDir: "local",
       });
       yield* bus.join(joining(sender, dir));
       const topics = ["reviews"];
       const associations = [{ directory: "project", concerns: ["delivery"] }];
       const legacy = yield* Effect.forEach(owners, (owner) =>
         Effect.gen(function* () {
-          yield* cursors.set(owner.address, yield* ledger.end);
+          const basis = (yield* ledger.presenceAt()).cut;
           const entry = new Message({
             id: Bun.randomUUIDv7(),
             ts: new Date().toISOString(),
@@ -275,14 +258,30 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
               ...(owner.runtime === "codex" ? { codexThreadId: owner.session } : {}),
             }),
           });
-          yield* ledger.append(entry);
+          // The durable position is independently known; the legacy presence does not name
+          // a serving installation and must not authorize a read until its owner renews.
+          expect(
+            (yield* ledger.admitWithStart(
+              entry,
+              {
+                version: 1,
+                kind: "start",
+                origin: "join",
+                address: owner.address,
+                operation: entry.id,
+                run: entry.id,
+                position: basis.head,
+              },
+              basis
+            )).status
+          ).toBe("ADMITTED");
           return entry;
         })
       );
       const { message: sentinel, wake } = yield* post(
         bus,
         owners.map(({ address }) => address),
-        "explicit read before renewal"
+        "unread before renewal"
       );
       expect(wake).toEqual({
         ledger: expect.any(String),
@@ -290,14 +289,9 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
         lacking: owners.map(({ address }) => ({ address, standing: "no-installation" })),
       });
       for (const owner of owners) {
-        expect((yield* bus.take(owner.address, owner.session)).map(({ id }) => id)).toEqual([
-          sentinel.id,
-        ]);
+        expect((yield* Effect.flip(bus.take(owner.address, owner.session)))._tag).toBe("NotJoined");
       }
-      const unread = yield* Effect.forEach(owners, ({ address }) =>
-        send(bus, [address], "still unread")
-      );
-      const before = yield* Effect.forEach(owners, ({ address }) => cursors.get(address));
+      const before = yield* Effect.forEach(owners, ({ address }) => mailboxPosition(address));
       const head = yield* ledger.end;
       const queue = observeQueue();
       yield* queue.pass(bus);
@@ -314,7 +308,9 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
         expect(refused._tag).toBe("NotOwner");
       }
       expect(yield* ledger.end).toBe(head);
-      expect(yield* Effect.forEach(owners, ({ address }) => cursors.get(address))).toEqual(before);
+      expect(yield* Effect.forEach(owners, ({ address }) => mailboxPosition(address))).toEqual(
+        before
+      );
 
       const renewedCursors: Array<Option.Option<number>> = [];
       for (const [index, owner] of owners.entries()) {
@@ -326,7 +322,7 @@ test("legacy joins need owner renewal, which keeps unread mail, subscriptions an
         expect(peer?.presence.rejoinOf).toBe(legacy[index]?.id);
       }
       expect(renewedCursors).toEqual(before);
-      yield* wakeAndRead(bus, cursors, unread);
+      yield* wakeAndRead(bus, [sentinel, sentinel]);
       const afterRenewal = yield* post(
         bus,
         owners.map(({ address }) => address),
@@ -341,10 +337,9 @@ test("a send's wake notice comes from its one ownership read, before the append"
     Effect.gen(function* () {
       const ledger = yield* Ledger;
       const cuts: Array<{ readonly head: number; readonly incarnation: string }> = [];
-      const { bus } = yield* openBus(dir, {
+      const { bus } = yield* openBus({
         id: installation,
         hostOf: () => originalHost,
-        cursorDir: "local",
         observeLedger: (inner) => ({
           ...inner,
           presenceAt: (at) =>
@@ -410,7 +405,7 @@ test("a send's wake notice comes from its one ownership read, before the append"
   ));
 
 test.each(owners.map((owner) => [owner.runtime, owner] as const))(
-  "%s rechecks locality before even reading a stale local cursor",
+  "%s rechecks locality before even reading a stale discovery's mailbox",
   (_runtime, owner) =>
     withStore((dir) =>
       Effect.gen(function* () {
@@ -418,11 +413,10 @@ test.each(owners.map((owner) => [owner.runtime, owner] as const))(
         const release = yield* Deferred.make<void>();
         let pauseDiscovery = false;
         const reads: Array<string> = [];
-        const { bus, cursors } = yield* openBus(dir, {
+        const { bus } = yield* openBus({
           id: installation,
           hostOf: () => originalHost,
-          cursorDir: "local",
-          onCursorRead: (address) => reads.push(address),
+          onMailboxRead: (address) => reads.push(address),
           observeLedger: (ledger) => ({
             ...ledger,
             // One controlled notification after the stale first pass; no filesystem event races.
@@ -443,13 +437,12 @@ test.each(owners.map((owner) => [owner.runtime, owner] as const))(
         });
         yield* bus.join(joining(sender, dir));
         yield* bus.join(joining(owner, dir));
-        const previous = yield* cursors.get(owner.address);
+        const previous = yield* mailboxPosition(owner.address);
         expect(Option.isSome(previous)).toBe(true);
         reads.length = 0;
-        const remote = yield* openBus(dir, {
+        const remote = yield* openBus({
           id: otherInstallation,
           hostOf: () => originalHost,
-          cursorDir: "remote",
         });
         const queue = observeQueue();
         pauseDiscovery = true;
@@ -462,7 +455,7 @@ test.each(owners.map((owner) => [owner.runtime, owner] as const))(
         );
         yield* Deferred.await(captured);
         yield* remote.bus.join(joining(owner, dir));
-        // No mail for this address: a late guard on only the nudge callback cannot protect its cursor.
+        // No mail for this address: a late guard on only the nudge callback cannot protect its mailbox.
         yield* send(bus, ["human/elsewhere"], "unrelated traffic");
         yield* Deferred.succeed(release, undefined);
         const result = yield* Fiber.join(delivery);
@@ -470,7 +463,7 @@ test.each(owners.map((owner) => [owner.runtime, owner] as const))(
           expect(result).toEqual({ addresses: [], owns: false, superseded: false });
         expect(queue.calls).toEqual([]);
         expect(reads).toEqual([]);
-        expect(yield* cursors.get(owner.address)).toEqual(previous);
+        expect(yield* mailboxPosition(owner.address)).toEqual(previous);
       })
     )
 );

@@ -6,13 +6,13 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { Messages } from "../src/mcp-tools.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger } from "./fluree-server.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const gate = () => {
   let release = () => {};
@@ -55,7 +55,6 @@ test("wait applies byte admission on arrival and hosted cancellation reaches the
   ).pipe(Layer.provideMerge(store));
   const baseBus = Bus.layer("fixture").pipe(
     Layer.provideMerge(observedLedger),
-    Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
   );
   const observedBus = Layer.effect(
@@ -90,11 +89,9 @@ test("wait applies byte admission on arrival and hosted cancellation reaches the
     expect((await invoke("bus_join", { address: "chatgpt/wait-a" }, a)).isError).not.toBe(true);
     expect((await invoke("bus_join", { address: "chatgpt/wait-b" }, b)).isError).not.toBe(true);
     const getCursor = async () => {
-      const cursor = await server.runPromise(
-        Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get("chatgpt/wait-a"))
-      );
-      if (cursor._tag !== "Some") throw new Error("Missing cursor.");
-      return cursor.value;
+      const position = await server.runPromise(mailboxPosition("chatgpt/wait-a"));
+      if (position._tag !== "Some") throw new Error("Missing mailbox position.");
+      return position.value;
     };
     const smallWait = peer.exchange("bus_wait", {
       address: "chatgpt/wait-a",

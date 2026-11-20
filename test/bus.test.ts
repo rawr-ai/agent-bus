@@ -51,6 +51,7 @@ import { MAX_PAGES } from "../src/timing.ts";
 import { freshLedger } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import { legacyTopicServer } from "./legacy-topic-server.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 import { spawnSupervised } from "./supervised.ts";
 
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
@@ -222,7 +223,6 @@ for (const backend of backends) {
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
           const ledger = yield* Ledger.Ledger;
-          const cursors = yield* Cursors.Cursors;
           const joining = {
             address: "claude/subscriber",
             runtime: "claude" as const,
@@ -237,22 +237,22 @@ for (const backend of backends) {
             to: ["#reviews"],
             body: "still unread",
           });
-          const before = yield* cursors.get(joining.address);
+          const before = yield* mailboxPosition(joining.address);
           const end = yield* ledger.end;
           for (const topics of [[""], [" # "], ["##reviews"], ["valid", " "]]) {
             const error = yield* Effect.flip(bus.join({ ...joining, topics }));
             expect(error._tag).toBe("InvalidTopics");
-            expect(yield* cursors.get(joining.address)).toEqual(before);
+            expect(yield* mailboxPosition(joining.address)).toEqual(before);
             expect(yield* ledger.end).toBe(end);
             expect((yield* bus.peers)[0]?.presence.topics).toEqual(["reviews"]);
           }
           expect(bodies(yield* bus.take(joining.address, joining.session))).toEqual([
             "still unread",
           ]);
-          const read = yield* cursors.get(joining.address);
+          const read = yield* mailboxPosition(joining.address);
           const cleared = yield* bus.join({ ...joining, topics: [] });
           expect(cleared.topics).toEqual([]);
-          expect(yield* cursors.get(joining.address)).toEqual(read);
+          expect(yield* mailboxPosition(joining.address)).toEqual(read);
           yield* bus.publish({
             from: "claude/sender",
             session: "sender",
@@ -268,7 +268,6 @@ for (const backend of backends) {
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
           const ledger = yield* Ledger.Ledger;
-          const cursors = yield* Cursors.Cursors;
           const joining = {
             address: "codex/associated",
             runtime: "codex" as const,
@@ -294,14 +293,14 @@ for (const backend of backends) {
           ).toEqual(expected);
           expect((yield* bus.join(joining)).associations).toEqual(expected);
           expect((yield* bus.join({ ...joining, replay: true })).associations).toEqual(expected);
-          const beforeInvalid = yield* cursors.get(joining.address);
+          const beforeInvalid = yield* mailboxPosition(joining.address);
           const beforeEnd = yield* ledger.end;
           const invalid = yield* Effect.flip(
             bus.join({ ...joining, associations: [{ directory: "bad id", concerns: [] }] })
           );
           expect(invalid._tag).toBe("InvalidAssociations");
           expect(yield* ledger.end).toBe(beforeEnd);
-          expect(yield* cursors.get(joining.address)).toEqual(beforeInvalid);
+          expect(yield* mailboxPosition(joining.address)).toEqual(beforeInvalid);
           expect((yield* bus.join({ ...joining, associations: [] })).associations).toEqual([]);
           yield* bus.join({ ...joining, associations: expected });
           yield* bus.leave(joining.address, joining.session);
@@ -350,7 +349,6 @@ for (const backend of backends) {
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
           const ledger = yield* Ledger.Ledger;
-          const cursors = yield* Cursors.Cursors;
           const joining = {
             address: `other/${"a".repeat(507)}`,
             runtime: "other" as const,
@@ -365,9 +363,9 @@ for (const backend of backends) {
           expect(yield* ledger.end).toBe(before);
           const ordinary = { ...joining, address: "other/plain" };
           expect((yield* bus.join(ordinary)).associations).toEqual([]);
-          const priorCursor = yield* cursors.get(ordinary.address);
+          const priorCursor = yield* mailboxPosition(ordinary.address);
           expect((yield* bus.join({ ...ordinary, associations: [] })).associations).toEqual([]);
-          expect(yield* cursors.get(ordinary.address)).toEqual(priorCursor);
+          expect(yield* mailboxPosition(ordinary.address)).toEqual(priorCursor);
         })
       ));
 
@@ -376,7 +374,6 @@ for (const backend of backends) {
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
           const ledger = yield* Ledger.Ledger;
-          const cursors = yield* Cursors.Cursors;
           const topics = ["x".repeat(66_000)];
           const legacy = {
             address: "other/large-topics",
@@ -386,11 +383,14 @@ for (const backend of backends) {
             topics,
           };
           expect((yield* bus.join(legacy)).topics).toEqual(topics);
-          const before = { head: yield* ledger.end, cursor: yield* cursors.get(legacy.address) };
+          const before = {
+            head: yield* ledger.end,
+            cursor: yield* mailboxPosition(legacy.address),
+          };
           const refusal = yield* Effect.flip(bus.join({ ...legacy, orient: true }));
           expect(refusal._tag).toBe("InvalidQuery");
           expect(yield* ledger.end).toBe(before.head);
-          expect(yield* cursors.get(legacy.address)).toEqual(before.cursor);
+          expect(yield* mailboxPosition(legacy.address)).toEqual(before.cursor);
         })
       ));
 
@@ -399,7 +399,6 @@ for (const backend of backends) {
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
           const ledger = yield* Ledger.Ledger;
-          const cursors = yield* Cursors.Cursors;
           const joining = {
             address: "claude/subscriber",
             runtime: "claude" as const,
@@ -430,15 +429,15 @@ for (const backend of backends) {
             to: ["#reviews"],
             body: "pending topic mail",
           });
-          const before = yield* cursors.get(joining.address);
+          const before = yield* mailboxPosition(joining.address);
           expect(
             yield* bus.deliver(joining.address, ({ messages }) => Effect.succeed(bodies(messages)))
           ).toEqual(["pending topic mail"]);
-          expect(yield* cursors.get(joining.address)).toEqual(before);
+          expect(yield* mailboxPosition(joining.address)).toEqual(before);
           const rejoined = yield* bus.join(joining);
           expect(rejoined.topics).toEqual(["reviews", "##legacy"]);
           expect(Option.some(rejoined.cursor)).toEqual(before);
-          expect(yield* cursors.get(joining.address)).toEqual(before);
+          expect(yield* mailboxPosition(joining.address)).toEqual(before);
           const presences = yield* Effect.map(ledger.presenceAt(), (read) => read.entries);
           expect(presences.at(-1)?.presence?.topics).toEqual(["reviews", "##legacy"]);
           expect(presences.at(-1)?.presence?.rejoinOf).toBe(legacy.id);
@@ -2559,13 +2558,12 @@ describe("one address at a time", () => {
       )
     ));
 
-  test("with nothing for the subscriber, a nudge passes over only what isn't its mail", () =>
+  test("with nothing for the subscriber, a nudge makes no acknowledgement", () =>
     Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
           const ledger = yield* Ledger.Ledger;
-          const cursors = yield* Cursors.Cursors;
           yield* bus.join({
             address: "codex/a",
             runtime: "codex",
@@ -2592,9 +2590,12 @@ describe("one address at a time", () => {
             Effect.sync(() => {
               nudged += 1;
             });
+          const emptyHead = yield* ledger.end;
+          const emptyPosition = yield* mailboxPosition("codex/a");
           yield* bus.deliver("codex/a", nudge);
           expect(nudged).toBe(0);
-          expect(yield* cursors.get("codex/a")).toEqual(Option.some(yield* ledger.end));
+          expect(yield* ledger.end).toBe(emptyHead);
+          expect(yield* mailboxPosition("codex/a")).toEqual(emptyPosition);
 
           yield* bus.publish({
             from: "claude/b",
@@ -2602,10 +2603,10 @@ describe("one address at a time", () => {
             to: ["#t"],
             body: "topic",
           });
-          const before = yield* cursors.get("codex/a");
+          const before = yield* mailboxPosition("codex/a");
           yield* bus.deliver("codex/a", nudge);
           expect(nudged).toBe(1);
-          expect(yield* cursors.get("codex/a")).toEqual(before);
+          expect(yield* mailboxPosition("codex/a")).toEqual(before);
           expect(bodies(yield* bus.take("codex/a", sid("codex/a")))).toEqual(["topic"]);
         }),
         jsonl().layer
@@ -2655,12 +2656,13 @@ describe("one address at a time", () => {
       )
     ));
 
-  test("a nudge for a peer that has left does nothing; one whose cursor is missing still fails", () => {
+  test("a nudge for a peer that has left does nothing; a holding without a ledger position fails", () => {
     const store = jsonl();
     return Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger.Ledger;
           let nudged = 0;
           const nudge = () =>
             Effect.sync(() => {
@@ -2672,24 +2674,39 @@ describe("one address at a time", () => {
             session: sid("claude/b"),
             cwd: process.cwd(),
           });
-          for (const address of ["codex/gone", "codex/lost"]) {
-            yield* bus.join({
-              address,
-              runtime: "codex",
-              session: sid(address),
-              cwd: process.cwd(),
-            });
-            yield* bus.publish({
-              from: "claude/b",
-              session: sid("claude/b"),
-              to: [address],
-              body: "hi",
-            });
-          }
+          yield* bus.join({
+            address: "codex/gone",
+            runtime: "codex",
+            session: sid("codex/gone"),
+            cwd: process.cwd(),
+          });
+          // An earlier serve recorded only presence; cutover has not established its position.
+          yield* ledger.append(
+            new Message({
+              id: Bun.randomUUIDv7(),
+              ts: new Date().toISOString(),
+              from: "codex/lost",
+              to: ["*"],
+              kind: "presence",
+              body: "codex/lost joined",
+              presence: new Presence({
+                runtime: "codex",
+                status: "joined",
+                topics: [],
+                session: sid("codex/lost"),
+                installation: "test-installation",
+              }),
+            })
+          );
+          yield* bus.publish({
+            from: "claude/b",
+            session: sid("claude/b"),
+            to: ["codex/gone", "codex/lost"],
+            body: "hi",
+          });
           yield* bus.leave("codex/gone", sid("codex/gone"));
           yield* bus.deliver("codex/gone", nudge);
 
-          rmSync(join(store.file, "..", "cursors", Cursors.cursorFileName("codex/lost")));
           const lost = yield* Effect.flip(bus.deliver("codex/lost", nudge));
           expect([lost._tag, nudged]).toEqual(["NotJoined", 0]);
         }),
@@ -2716,11 +2733,10 @@ describe("one session per address", () => {
     Effect.gen(function* () {
       const bus = yield* Bus.Bus;
       const ledger = yield* Ledger.Ledger;
-      const cursors = yield* Cursors.Cursors;
       const snapshot = Effect.all({
         end: ledger.end,
         peers: bus.peers,
-        cursor: cursors.get(address),
+        cursor: mailboxPosition(address),
       });
       const before = yield* snapshot;
       const error = yield* Effect.flip(refused);
@@ -3335,7 +3351,6 @@ describe("claude wake", () => {
     return run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const cursors = yield* Cursors.Cursors;
         const ledger = yield* Ledger.Ledger;
         const gateway = yield* QueryGateway;
         const environment = Layer.mergeAll(
@@ -3361,12 +3376,12 @@ describe("claude wake", () => {
               })
             );
           const before = yield* refused();
-          const cursor = yield* cursors.get("claude/a");
+          const cursor = yield* mailboxPosition("claude/a");
           const head = yield* ledger.end;
           yield* Effect.sleep("10 millis");
           expect(yield* observe).toEqual({ addresses: ["claude/a"] });
           expect(yield* refused()).toEqual(before);
-          expect(yield* cursors.get("claude/a")).toEqual(cursor);
+          expect(yield* mailboxPosition("claude/a")).toEqual(cursor);
           expect(yield* ledger.end).toBe(head);
           expect(
             (yield* bus.join({
@@ -3436,10 +3451,9 @@ describe("claude wake", () => {
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const cursors = yield* Cursors.Cursors;
         yield* joinBoth(bus);
         yield* send(bus, "kept across compact");
-        const cursor = yield* cursors.get("claude/a");
+        const cursor = yield* mailboxPosition("claude/a");
         expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
         expect(yield* quiet(bus, a)).toEqual(nothing);
         expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
@@ -3447,7 +3461,7 @@ describe("claude wake", () => {
         // Fresh is a hook-lifetime request, not a durable event id: another call may ring again.
         expect((yield* bus.wake(a, 5, true)).addresses).toEqual(["claude/a"]);
         expect(yield* bus.wake(a, 0.3, false)).toEqual(nothing);
-        expect(yield* cursors.get("claude/a")).toEqual(cursor);
+        expect(yield* mailboxPosition("claude/a")).toEqual(cursor);
         expect(bodies(yield* bus.take("claude/a", a))).toEqual(["kept across compact"]);
       })
     ));
@@ -3456,14 +3470,13 @@ describe("claude wake", () => {
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const cursors = yield* Cursors.Cursors;
         yield* joinBoth(bus);
         // Complete an empty read first: no new irrelevant entries remain to pass over.
         expect(yield* bus.take("claude/a", a)).toEqual([]);
-        const cursor = yield* cursors.get("claude/a");
+        const cursor = yield* mailboxPosition("claude/a");
         expect(yield* bus.wake(a, 0.3, true)).toEqual(nothing);
         expect(yield* bus.wake(a, 0.3, true)).toEqual(nothing);
-        expect(yield* cursors.get("claude/a")).toEqual(cursor);
+        expect(yield* mailboxPosition("claude/a")).toEqual(cursor);
         yield* send(bus, "later");
         expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
         expect(yield* bus.wake("session:after-clear", 5, true)).toEqual({
@@ -3478,10 +3491,9 @@ describe("claude wake", () => {
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const cursors = yield* Cursors.Cursors;
         yield* joinBoth(bus);
         yield* send(bus, "kept");
-        const cursor = yield* cursors.get("claude/a");
+        const cursor = yield* mailboxPosition("claude/a");
         expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
         let calls = 0;
         const lost = yield* Deferred.make<void>();
@@ -3507,7 +3519,7 @@ describe("claude wake", () => {
         yield* TestClock.adjust("5 seconds");
         expect(yield* Fiber.join(hook)).toEqual(Option.some(formatWake("claude/a")));
         expect(calls).toBe(2);
-        expect(yield* cursors.get("claude/a")).toEqual(cursor);
+        expect(yield* mailboxPosition("claude/a")).toEqual(cursor);
         // Use the test clock for the ordinary suppressed waiter too.
         const ordinary = yield* Effect.forkChild(quiet(bus, a));
         yield* TestClock.adjust("1 second");
@@ -3540,20 +3552,22 @@ describe("claude wake", () => {
     15_000
   );
 
-  test("passes over what isn't the session's mail, as its read would, without waking it", () =>
+  test("empty wake scans write nothing and do not touch its last acknowledged position", () =>
     run(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
         const ledger = yield* Ledger.Ledger;
-        const cursors = yield* Cursors.Cursors;
         yield* joinBoth(bus);
         yield* send(bus, "kept");
         expect((yield* soon(bus, a)).addresses).toEqual(["claude/a"]);
         yield* bus.take("claude/a", a);
+        const position = yield* mailboxPosition("claude/a");
         yield* send(bus, "elsewhere", "codex/c");
         yield* bus.publish({ from: "claude/a", session: a, to: ["codex/b"], body: "own" });
+        const head = yield* ledger.end;
         expect(yield* quiet(bus, a)).toEqual(nothing);
-        expect(yield* cursors.get("claude/a")).toEqual(Option.some(yield* ledger.end));
+        expect(yield* mailboxPosition("claude/a")).toEqual(position);
+        expect(yield* ledger.end).toBe(head);
       })
     ));
 
@@ -3562,32 +3576,43 @@ describe("claude wake", () => {
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
         const ledger = yield* Ledger.Ledger;
-        const cursors = yield* Cursors.Cursors;
         yield* joinBoth(bus);
         // The same session holding an address joined on another machine, and a Codex one.
         for (const [address, runtime, installation] of [
           ["claude/far", "claude", "foreign-installation"],
           ["codex/same-id", "codex", "test-installation"],
         ] as const) {
-          yield* ledger.append(
-            new Message({
-              id: Bun.randomUUIDv7(),
-              ts: new Date().toISOString(),
-              from: address,
-              to: ["*"],
-              kind: "presence",
-              body: `${address} joined`,
-              origin: new Origin({ host: hostname() }),
-              presence: new Presence({
-                runtime,
-                status: "joined",
-                topics: [],
-                session: a,
-                installation,
-              }),
-            })
+          const entry = new Message({
+            id: Bun.randomUUIDv7(),
+            ts: new Date().toISOString(),
+            from: address,
+            to: ["*"],
+            kind: "presence",
+            body: `${address} joined`,
+            origin: new Origin({ host: hostname() }),
+            presence: new Presence({
+              runtime,
+              status: "joined",
+              topics: [],
+              session: a,
+              installation,
+            }),
+          });
+          const cut = (yield* ledger.presenceAt()).cut;
+          const admitted = yield* ledger.admitWithStart(
+            entry,
+            {
+              version: 1,
+              kind: "start",
+              operation: entry.id,
+              address,
+              run: entry.id,
+              origin: "join",
+              position: cut.head,
+            },
+            cut
           );
-          yield* cursors.set(address, yield* ledger.end);
+          expect(admitted.status).toBe("ADMITTED");
         }
         yield* send(bus, "far", "claude/far");
         yield* send(bus, "codex", "codex/same-id");
@@ -3710,12 +3735,12 @@ describe("claude wake", () => {
         const inner = yield* Ledger.Ledger;
         return Ledger.Ledger.of({
           ...inner,
-          read: (from) =>
+          readAt: (from, cut) =>
             Effect.suspend(() => {
               const next = planned.shift() ?? "read";
-              if (next === "read") return inner.read(from);
+              if (next === "read") return inner.readAt(from, cut);
               if (next === "fail") return Effect.fail(new LedgerError({ message: "store down" }));
-              return Effect.andThen(Deferred.await(next), inner.read(from));
+              return Effect.andThen(Deferred.await(next), inner.readAt(from, cut));
             }),
         });
       })

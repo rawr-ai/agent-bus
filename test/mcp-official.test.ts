@@ -16,14 +16,14 @@ import {
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { InvalidQuery, latestPresences, Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
+import { mailboxIri } from "../src/mailbox-model.ts";
 import { Messages } from "../src/mcp-tools.ts";
 import { WAKE_LISTED_BYTES } from "../src/message-carrier.ts";
 import * as Serve from "../src/serve.ts";
-import { freshLedger } from "./fluree-server.ts";
+import { freshLedger, insertRaw } from "./fluree-server.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-official-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -59,7 +59,6 @@ const storeWithLeaveRefusal = Layer.effect(
 ).pipe(Layer.provideMerge(store));
 const fixtureBus = Bus.layer("test-installation").pipe(
   Layer.provideMerge(storeWithLeaveRefusal),
-  Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
   Layer.provide(platform)
 );
 const server = ManagedRuntime.make(
@@ -73,8 +72,11 @@ afterAll(async () => {
 
 /** The SDK always offers its latest protocol; offering another stands in for an older client. */
 class Offering extends StreamableHTTPClientTransport {
-  constructor(private readonly offered: string) {
-    super(url);
+  constructor(
+    private readonly offered: string,
+    target: URL = url
+  ) {
+    super(target);
   }
   override send(
     message: JSONRPCMessage,
@@ -124,6 +126,45 @@ const privatePresence = new Presence({
   rejoinOf: "synthetic-private-run",
 });
 
+/** A serve on its own fresh ledger, for tests that damage stored state. */
+const damagedPositionServer = async (name: string) => {
+  const config = await freshLedger(name);
+  const opened = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+  const own = Number(opened.url.port);
+  opened.stop(true);
+  const runtime = ManagedRuntime.make(
+    Serve.layerHttp({ port: own, version: "test" }).pipe(
+      Layer.provideMerge(
+        Bus.layer("test-installation").pipe(
+          Layer.provideMerge(layerFluree(config).pipe(Layer.provide(platform))),
+          Layer.provide(platform)
+        )
+      )
+    )
+  );
+  await runtime.runPromise(Effect.void);
+  return {
+    config,
+    url: new URL(`http://127.0.0.1:${own}/mcp`),
+    head: () => runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end)),
+    dispose: () => runtime.dispose(),
+  };
+};
+
+/**
+ * Stores a malformed mailbox acknowledgement for `address`, carrying the private marker, the
+ * way test/mailbox-ledger.test.ts damages a position. Swap this when the representation changes.
+ */
+const injectMalformedPosition = (
+  config: Awaited<ReturnType<typeof freshLedger>>,
+  address: string
+) =>
+  insertRaw(config, {
+    "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+    "@id": mailboxIri(address),
+    "bus:mailboxAck": JSON.stringify({ address, cursor: privateMarker }),
+  });
+
 test("the public message schema excludes presence and unknown objects at every level", () => {
   const message = new Message({
     ...publicMessage,
@@ -144,10 +185,10 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
   const clients: Array<Client> = [];
   afterEach(() => Promise.all(clients.splice(0).map((client) => client.close())));
 
-  const connect = async () => {
+  const connect = async (target: URL = url) => {
     const client = new Client({ name: "official-sdk-test", version: "1" });
     clients.push(client);
-    const transport = new Offering(version);
+    const transport = new Offering(version, target);
     await client.connect(transport);
     expect(transport.protocolVersion).toBe(version);
     // callTool checks structured content only against the output schemas listTools cached.
@@ -548,26 +589,31 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     });
   });
 
-  test("a malformed cursor fails safely without overwriting its stored value", async () => {
-    const { succeed, refused } = await connect();
-    const address = `${version}/invalid-cursor`;
-    await succeed("bus_join", joining(address));
-    const path = join(dir, "cursors", Cursors.cursorFileName(address));
-    const original = await Bun.file(path).text();
-    const malformed = JSON.stringify({ address, cursor: privateMarker });
+  test("a malformed stored position fails safely, discloses nothing and writes nothing", async () => {
+    // Its own disposable ledger and serve, so the damage cannot reach the shared fixture.
+    const damaged = await damagedPositionServer(`official-damaged-position-${version}`);
     try {
-      await Bun.write(path, malformed);
-      await refused(
-        "bus_read",
-        { address, session: sid(address) },
-        /^The cursor could not be read or written\.$/
-      );
-      expect(await Bun.file(path).text()).toBe(malformed);
+      const { call, succeed } = await connect(damaged.url);
+      const address = `${version}/invalid-position`;
+      const sender = `${version}/invalid-position-sender`;
+      await succeed("bus_join", joining(address));
+      await succeed("bus_join", joining(sender));
+      await succeed("bus_publish", {
+        from: sender,
+        session: sid(sender),
+        to: [address],
+        body: "x",
+      });
+      await injectMalformedPosition(damaged.config, address);
+      const before = await damaged.head();
+      const result = await call("bus_read", { address, session: sid(address) });
+      expect([result.isError, result.structuredContent]).toEqual([true, undefined]);
+      expect(text(result).length).toBeGreaterThan(0);
+      expect(JSON.stringify(result)).not.toContain(privateMarker);
+      expect(await damaged.head()).toBe(before);
     } finally {
-      await Bun.write(path, original);
+      await damaged.dispose();
     }
-    expect(await succeed("bus_read", { address, session: sid(address) })).toEqual({ messages: [] });
-    await succeed("bus_leave", { address, session: sid(address) });
   });
 
   test("refusals are tool errors that say why, not protocol errors", async () => {

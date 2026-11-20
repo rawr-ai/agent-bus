@@ -8,7 +8,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Deferred, Effect, Fiber, Layer, ManagedRuntime, Option, Schema, Stream } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import { Cursors } from "../src/Cursors.ts";
 import { LedgerError, Message, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -47,20 +46,38 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
   });
   const base = await store.runPromise(Ledger);
   const gateway = await store.runPromise(QueryGateway);
-  const positions = new Map<string, number>();
   const state: {
-    cursorWrites: number;
-    cursorReads: number;
+    /** Mailbox starts, acknowledgements and imports. */
+    mailboxWrites: number;
+    /** Mailbox position reads. */
+    mailboxReads: number;
     ledgerWrites: number;
+    /** Pinned entry reads (`readAt`), the slice a mailbox read and an observation use. */
     reads: number;
+    /** How often each one-shot seam below actually ran. */
+    fired: { before: number; after: number; fail: number; candidates: number };
     beforeRead?: () => Effect.Effect<void>;
     afterRead?: () => Effect.Effect<void>;
     failRead?: boolean;
+    /** Runs inside the candidate enumeration that runs concurrently with `readAt`. */
+    holdCandidates?: () => Effect.Effect<void>;
     failLog?: boolean;
     replacement?: string;
     failPresence?: boolean;
     afterPresence?: () => Effect.Effect<void>;
-  } = { cursorWrites: 0, cursorReads: 0, ledgerWrites: 0, reads: 0 };
+  } = {
+    mailboxWrites: 0,
+    mailboxReads: 0,
+    ledgerWrites: 0,
+    reads: 0,
+    fired: { before: 0, after: 0, fail: 0, candidates: 0 },
+  };
+  const mailboxWrite = <A, E>(write: Effect.Effect<A, E>) =>
+    Effect.suspend(() => {
+      state.ledgerWrites++;
+      state.mailboxWrites++;
+      return write;
+    });
   const ledger = Ledger.of({
     ...base,
     append: (message) =>
@@ -73,6 +90,24 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
         state.ledgerWrites++;
         return base.admit(message, cut);
       }),
+    admitWithStart: (message, start, cut) => mailboxWrite(base.admitWithStart(message, start, cut)),
+    appendMailboxAck: (ack, cut) => mailboxWrite(base.appendMailboxAck(ack, cut)),
+    importMailbox: (start, cut) => mailboxWrite(base.importMailbox(start, cut)),
+    mailboxAt: (name, cut) =>
+      Effect.suspend(() => {
+        state.mailboxReads++;
+        return base.mailboxAt(name, cut);
+      }),
+    mailboxCandidatesAt: (from, cut) =>
+      Effect.gen(function* () {
+        const hold = state.holdCandidates;
+        delete state.holdCandidates;
+        if (hold !== undefined) {
+          state.fired.candidates++;
+          yield* hold();
+        }
+        return yield* base.mailboxCandidatesAt(from, cut);
+      }),
     appendCommand: (operation, command) =>
       Effect.suspend(() => {
         state.ledgerWrites++;
@@ -84,18 +119,27 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
           ? Effect.fail(new LedgerError({ message: "Synthetic standing unavailable." }))
           : base.log(t)
       ),
-    read: (from) =>
+    // The seams sit on the pinned slice every mailbox read and observation takes.
+    readAt: (from, cut) =>
       Effect.gen(function* () {
         state.reads++;
         const before = state.beforeRead;
         delete state.beforeRead;
-        if (before !== undefined) yield* before();
-        if (state.failRead)
+        if (before !== undefined) {
+          state.fired.before++;
+          yield* before();
+        }
+        if (state.failRead) {
+          state.fired.fail++;
           return yield* new LedgerError({ message: "Synthetic incomplete read." });
-        const slice = yield* base.read(from);
+        }
+        const slice = yield* base.readAt(from, cut);
         const after = state.afterRead;
         delete state.afterRead;
-        if (after !== undefined) yield* after();
+        if (after !== undefined) {
+          state.fired.after++;
+          yield* after();
+        }
         return slice;
       }),
     presenceAt: (at) =>
@@ -114,34 +158,16 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
       }),
     changes: silent ? Stream.never : base.changes,
   });
-  const cursors = Cursors.of({
-    get: (name) =>
-      Effect.sync(() => {
-        state.cursorReads++;
-        return Option.fromUndefinedOr(positions.get(name));
-      }),
-    set: (name, next) =>
-      Effect.sync(() => {
-        state.cursorWrites++;
-        positions.set(name, next);
-      }),
-    clear: (name) =>
-      Effect.sync(() => {
-        state.cursorWrites++;
-        positions.delete(name);
-      }),
-  });
   const services = Layer.mergeAll(
     Layer.succeed(Ledger, ledger),
-    Layer.succeed(QueryGateway, gateway),
-    Layer.succeed(Cursors, cursors)
+    Layer.succeed(QueryGateway, gateway)
   );
   const runtime = ManagedRuntime.make(
     Bus.layer("fixture-installation").pipe(Layer.provideMerge(services))
   );
   cleanups.push(() => runtime.dispose());
   const bus = await runtime.runPromise(Bus.Bus);
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger | Cursors | QueryGateway>) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger | QueryGateway>) =>
     runtime.runPromise(effect);
   const joinAs = (
     name = address,
@@ -174,9 +200,17 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
     );
     return posted.message;
   };
+  /** The holder's stored position, read through the unwrapped ledger at a fresh cut. */
+  const position = () =>
+    store.runPromise(
+      Effect.gen(function* () {
+        const state = yield* base.mailboxAt(address, (yield* base.presenceAt()).cut);
+        return state.status === "FOUND" ? Option.some(state.position) : Option.none<number>();
+      })
+    );
   const durable = async () => ({
-    cursor: positions.get(address),
-    cursorWrites: state.cursorWrites,
+    position: await position(),
+    mailboxWrites: state.mailboxWrites,
     ledgerWrites: state.ledgerWrites,
     presence: await store.runPromise(base.presenceAt()),
     head: await store.runPromise(base.end),
@@ -190,7 +224,7 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
     run,
     services,
     state,
-    positions,
+    position,
     joinAs,
     observe,
     say,
@@ -205,6 +239,13 @@ const bindingOnly = async (fixture: Awaited<ReturnType<typeof open>>) => {
   const ledger = Ledger.of({
     ...fixture.ledger,
     read: forbidden,
+    readAt: forbidden,
+    mailboxAt: forbidden,
+    mailboxCandidatesAt: forbidden,
+    mailboxReceiptAt: forbidden,
+    admitWithStart: forbidden,
+    appendMailboxAck: forbidden,
+    importMailbox: forbidden,
     log: forbidden,
     direct: forbidden,
     end: forbidden(),
@@ -218,7 +259,6 @@ const bindingOnly = async (fixture: Awaited<ReturnType<typeof open>>) => {
   });
   const services = Layer.mergeAll(
     Layer.succeed(Ledger, ledger),
-    Layer.succeed(Cursors, Cursors.of({ get: forbidden, set: forbidden, clear: forbidden })),
     Layer.succeed(
       QueryGateway,
       QueryGateway.of({
@@ -441,7 +481,7 @@ test("unavailable standing preserves direct-only capture but refuses ambient-onl
 
 for (const kind of ["jsonl", "fluree"])
   describe(`pure wake observation (${kind})`, () => {
-    test("binding checks use complete presence only, remain valid without cursors and fence lifecycle changes", async () => {
+    test("binding checks use complete presence only, never read a mailbox and fence lifecycle changes", async () => {
       const f = await open(kind);
       const presence = await f.store.runPromise(f.base.presenceAt());
       const holder = presence.entries.find((entry) => entry.from === address);
@@ -456,12 +496,8 @@ for (const kind of ["jsonl", "fluree"])
       });
       const only = await bindingOnly(f);
       const before = await f.durable();
+      // Every mailbox read and write is forbidden to the binding check, so it cannot depend on one.
       expect(await only.check(binding)).toEqual({ binding, observationCut: presence.cut });
-      f.positions.delete(address);
-      expect((await only.check(binding)).binding).toEqual(binding);
-      f.positions.set(address, Number.NaN);
-      expect((await only.check(binding)).binding).toEqual(binding);
-      f.positions.set(address, before.cursor ?? 0);
       expect(await f.durable()).toEqual(before);
       await f.joinAs(address, session, "other", { topics: ["renewed"] });
       expect((await only.check(binding)).binding).toEqual(binding);
@@ -533,7 +569,7 @@ for (const kind of ["jsonl", "fluree"])
         ready: true,
         news: true,
         binding: { address, session, runtime: "other", installation: "fixture-installation" },
-        nextCoverage: { cursor: before.cursor, rung: [a.id, b.id] },
+        nextCoverage: { cursor: Option.getOrThrow(before.position), rung: [a.id, b.id] },
       });
       const holder = (await f.run(f.bus.peers)).find((peer) => peer.address === address);
       if (holder === undefined) throw new Error("Missing holder.");
@@ -563,9 +599,11 @@ for (const kind of ["jsonl", "fluree"])
         ).toBe("NotOwner");
       }
       f.state.failRead = true;
+      const failedBefore = f.state.fired.fail;
       expect((await f.run(Effect.flip(f.bus.observeWake({ address, session }))))._tag).toBe(
         "LedgerError"
       );
+      expect(f.state.fired.fail).toBeGreaterThan(failedBefore);
       delete f.state.failRead;
       expect(await f.durable()).toEqual(stable);
       expect((await f.run(f.bus.take(address, session))).map((message) => message.id)).toEqual([
@@ -664,8 +702,38 @@ for (const kind of ["jsonl", "fluree"])
           )._tag
         ).toBe("InvalidQuery");
       }
-      f.positions.delete(address);
-      expect((await f.run(Effect.flip(f.bus.observeWake({ address, session }))))._tag).toBe(
+      // A holding from before mailbox positions, admitted with no start, has nothing to read from.
+      const legacy = `${address}-legacy`;
+      const current = (await f.store.runPromise(f.base.presenceAt())).entries.find(
+        (entry) => entry.from === address
+      );
+      const held = current?.presence;
+      if (current === undefined || held === undefined) throw new Error("Missing fixture holding.");
+      const seeded = await f.store.runPromise(
+        Effect.gen(function* () {
+          const read = yield* f.base.presenceAt();
+          return yield* f.base.admit(
+            new Message({
+              ...current,
+              id: Bun.randomUUIDv7(),
+              from: legacy,
+              body: `${legacy} joined`,
+              presence: new Presence({
+                runtime: held.runtime,
+                status: "joined",
+                topics: [],
+                session,
+                ...(held.installation === undefined ? {} : { installation: held.installation }),
+              }),
+            }),
+            read.cut
+          );
+        })
+      );
+      expect(seeded.status).toBe("ADMITTED");
+      const legacyCut = (await f.store.runPromise(f.base.presenceAt())).cut;
+      expect((await f.store.runPromise(f.base.mailboxAt(legacy, legacyCut))).status).toBe("ABSENT");
+      expect((await f.run(Effect.flip(f.bus.observeWake({ address: legacy, session }))))._tag).toBe(
         "NotJoined"
       );
     });
@@ -736,6 +804,7 @@ for (const kind of ["jsonl", "fluree"])
           );
         });
       f.state.beforeRead = change;
+      const firedBefore = f.state.fired.before;
       const before = await f.durable();
       expect(
         (
@@ -744,13 +813,16 @@ for (const kind of ["jsonl", "fluree"])
           )
         )._tag
       ).toBe("NotOwner");
-      expect(f.state.cursorWrites).toBe(before.cursorWrites);
+      expect(f.state.fired.before).toBe(firedBefore + 1);
+      expect(f.state.mailboxWrites).toBe(before.mailboxWrites);
+      expect(await f.position()).toEqual(before.position);
       // A same-owner return is still a new run, even when the original session returns.
       await f.joinAs(address, session, "other", {
         takeover: (await f.run(f.bus.peers)).find((peer) => peer.address === address)?.joinId,
       });
       const live = await f.observe();
       f.state.afterRead = change;
+      const firedAfter = f.state.fired.after;
       expect(
         (
           await f.run(
@@ -758,6 +830,7 @@ for (const kind of ["jsonl", "fluree"])
           )
         )._tag
       ).toBe("NotOwner");
+      expect(f.state.fired.after).toBe(firedAfter + 1);
       await f.joinAs(address, session, "other", {
         takeover: (await f.run(f.bus.peers)).find((peer) => peer.address === address)?.joinId,
       });
@@ -766,6 +839,7 @@ for (const kind of ["jsonl", "fluree"])
         Effect.sync(() => {
           f.state.replacement = "new-history-at-same-head";
         });
+      const firedReplacement = f.state.fired.after;
       expect(
         (
           await f.run(
@@ -773,6 +847,7 @@ for (const kind of ["jsonl", "fluree"])
           )
         )._tag
       ).toBe("InvalidQuery");
+      expect(f.state.fired.after).toBe(firedReplacement + 1);
     });
   });
 
@@ -838,6 +913,7 @@ test("bounded expiry freshly observes cursor-only progress and cancellation rele
           })
         );
         yield* Deferred.await(entered);
+        expect(f.state.fired.after).toBe(1);
         const taken = yield* f.bus.take(address, session, 1);
         expect(taken.map((message) => message.id)).toEqual([a.id]);
         expect(yield* Fiber.join(waiting)).toMatchObject({
@@ -851,6 +927,7 @@ test("bounded expiry freshly observes cursor-only progress and cancellation rele
           f.bus.observeWake({ address, session, timeoutSeconds: 1 })
         );
         yield* Deferred.await(gate);
+        expect(f.state.fired.before).toBe(1);
         yield* Fiber.interrupt(cancelled);
         expect((yield* f.bus.observeWake({ address, session })).ready).toBe(true);
       })
@@ -858,7 +935,7 @@ test("bounded expiry freshly observes cursor-only progress and cancellation rele
   );
 });
 
-test("foreign-installation holdings refuse before accessing their cursor", async () => {
+test("foreign-installation holdings refuse before accessing their mailbox", async () => {
   const f = await open();
   const read = await f.store.runPromise(f.base.presenceAt());
   const peer = read.entries.find((entry) => entry.from === address);
@@ -883,12 +960,12 @@ test("foreign-installation holdings refuse before accessing their cursor", async
     run: peer.id,
   });
   expect((await only.refused(binding))._tag).toBe("InvalidQuery");
-  const cursorReads = f.state.cursorReads;
+  const mailboxReads = f.state.mailboxReads;
   expect((await f.run(Effect.flip(f.bus.observeWake({ address, session }))))._tag).toBe(
     "InvalidQuery"
   );
   expect(f.state.reads).toBe(0);
-  expect(f.state.cursorReads).toBe(cursorReads);
+  expect(f.state.mailboxReads).toBe(mailboxReads);
   expect(await f.durable()).toEqual(before);
 });
 
@@ -939,12 +1016,42 @@ test("a wait fences its initial same-session run even if its first message slice
   );
 });
 
+test("a slice whose entry read fails while its concurrent candidate read is held fails whole and writes nothing", async () => {
+  const f = await open("jsonl", true);
+  await f.say([address]);
+  const started = Deferred.makeUnsafe<void>();
+  const release = Deferred.makeUnsafe<void>();
+  const interrupted = Deferred.makeUnsafe<void>();
+  // A failing assertion must never leave the held read waiting.
+  cleanups.push(() => Effect.runPromise(Deferred.succeed(release, undefined)).then(() => {}));
+  f.state.holdCandidates = () =>
+    Deferred.succeed(started, undefined).pipe(
+      Effect.andThen(Deferred.await(release)),
+      Effect.onInterrupt(() => Deferred.succeed(interrupted, undefined))
+    );
+  // The entry read fails only once the competing candidate read has demonstrably started.
+  f.state.beforeRead = () => Deferred.await(started);
+  f.state.failRead = true;
+  const before = await f.durable();
+  const error = await f.run(Effect.flip(f.bus.observeWake({ address, session })));
+  delete f.state.failRead;
+  expect(f.state.fired).toMatchObject({ candidates: 1, before: 1, fail: 1 });
+  expect(error._tag).toBe("LedgerError");
+  expect(error.message).toBe("Synthetic incomplete read.");
+  // The held read was abandoned rather than completed, and nothing was written.
+  expect(await Effect.runPromise(Deferred.isDone(interrupted))).toBe(true);
+  expect(await f.durable()).toEqual(before);
+  // Released, the same mail is still there to observe.
+  await Effect.runPromise(Deferred.succeed(release, undefined));
+  expect((await f.observe()).ready).toBe(true);
+});
+
 test("complete input and coverage capacity refusals never truncate or store evidence", async () => {
   const f = await open();
   const initial = await f.observe();
   const previousCoverage = {
     binding: initial.binding,
-    cursor: f.positions.get(address) ?? 0,
+    cursor: Option.getOrThrow(await f.position()),
     rung: ["duplicate", "duplicate"],
   };
   const before = await f.durable();
@@ -981,7 +1088,7 @@ test("complete input and coverage capacity refusals never truncate or store evid
     "InvalidQuery"
   );
   expect(await f.durable()).toEqual(saved);
-  expect(saved.cursorWrites).toBe(before.cursorWrites);
+  expect(saved.mailboxWrites).toBe(before.mailboxWrites);
 });
 
 test("exact complete carrier budget admits multibyte escaped evidence and one byte less refuses", async () => {

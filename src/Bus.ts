@@ -13,7 +13,6 @@ import {
   Semaphore,
   Stream,
 } from "effect";
-import { Cursors } from "./Cursors.ts";
 import {
   type Activity,
   type ActivityReason,
@@ -54,9 +53,18 @@ import {
 } from "./domain.ts";
 import { type CommandRead, type Entry, Ledger } from "./Ledger.ts";
 import {
+  type MailboxAck,
+  type MailboxStart,
+  type MailboxUnresolved,
+  mailboxServedDigest,
+  mailboxTopicsDigest,
+} from "./mailbox-model.ts";
+import { incompleteMailbox, readMailboxSlice } from "./mailbox-read.ts";
+import {
   admitEntry,
   indexable,
   MAX_ORIGIN_CWD_BYTES,
+  messageCarrierBytes,
   presenceText,
   unjoinable,
   WAKE_LISTED_BYTES,
@@ -96,6 +104,8 @@ export interface JoinInput {
   readonly note?: string | undefined;
   /** Start from the beginning of the ledger instead of only new messages. */
   readonly replay?: boolean | undefined;
+  /** An explicit owner recovery for an unresolved import, distinct from replay. */
+  readonly restartPosition?: boolean | undefined;
   /** The session's working directory; its entries record it, with its repo and branch. */
   readonly cwd: string;
 }
@@ -256,6 +266,18 @@ interface DeliveryOptions<E> {
   readonly idle?: (subscriber: Subscriber) => Effect.Effect<void, E>;
 }
 
+interface MailboxBasis {
+  readonly subscriber: Subscriber;
+  readonly cut: Pin;
+  readonly position: number;
+  readonly positionOperation: string;
+}
+
+interface MailboxPlan {
+  readonly through: number;
+  readonly messages: ReadonlyArray<Message>;
+}
+
 export class Bus extends Context.Service<
   Bus,
   {
@@ -312,7 +334,7 @@ export class Bus extends Context.Service<
     /**
      * Hands an address's unread messages to `nudge`, and marks none of them
      * read: only the owner's read does. With nothing for the subscriber, it
-     * passes over what isn't its mail, as the owner's read would. Joins,
+     * remembers the empty scan in this process without acknowledging it. Joins,
      * leaves, reads and nudges for one address run one at a time, so a nudge
      * acts on the subscriber's current state. Nonlocal joins and joins `accepts`
      * rejects do not access a cursor or invoke a callback. Returns what `nudge` returns, or
@@ -515,7 +537,6 @@ type Concerns = Map<
 const make = (installation: string, hostOf: () => string) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger;
-    const cursors = yield* Cursors;
     const gateway = yield* QueryGateway;
 
     const now = Effect.map(Clock.currentTimeMillis, (millis) => new Date(millis).toISOString());
@@ -529,9 +550,6 @@ const make = (installation: string, hostOf: () => string) =>
 
     const local = (peer: Subscriber) => peer.presence.installation === installation;
     const localPeers = Effect.map(peers, (all) => all.filter(local));
-
-    const peer = (address: string) =>
-      Effect.map(peers, (all) => all.find((subscriber) => subscriber.address === address));
 
     const lockFor = (locks: Map<string, Semaphore.Semaphore>) => (address: string) => {
       let lock = locks.get(address);
@@ -641,10 +659,6 @@ const make = (installation: string, hostOf: () => string) =>
         });
       });
 
-    /** Puts an address's cursor back exactly as it was, including its absence. */
-    const restore = (address: string, previous: Option.Option<number>) =>
-      Option.isSome(previous) ? cursors.set(address, previous.value) : cursors.clear(address);
-
     const conflict = (address: string) =>
       new PresenceConflict({
         address,
@@ -654,6 +668,11 @@ const make = (installation: string, hostOf: () => string) =>
     const unconfirmed = (operation: "join" | "leave", address: string) =>
       new LedgerError({
         message: `The bus could not confirm whether this ${operation} of ${address} was recorded: it may or may not have committed, and nothing was undone. Calling it again is safe, since the bus decides against the address's current state, but that result doesn't show what this attempt did.`,
+      });
+
+    const unresolvedMailbox = (reason: MailboxUnresolved["reason"]) =>
+      new LedgerError({
+        message: `This mailbox position is unresolved (${reason}); reconcile the import or explicitly restart it at the present. Nothing was changed.`,
       });
 
     /**
@@ -673,7 +692,11 @@ const make = (installation: string, hostOf: () => string) =>
           takeover = last.joinId;
         }
         const renews =
-          last !== undefined && mine && last.presence.status === "joined" && input.replay !== true;
+          last !== undefined &&
+          mine &&
+          last.presence.status === "joined" &&
+          input.replay !== true &&
+          input.restartPosition !== true;
         // A rejoin that names no topics keeps its subscriptions; only the caller changes them.
         const requestedTopics =
           input.topics ??
@@ -707,7 +730,7 @@ const make = (installation: string, hostOf: () => string) =>
           topics.add(topic ?? requested);
         }
         // The presence this join (or a later leave) writes is full-text indexed; checked here,
-        // in the pure decision, so a refusal stages no cursor and writes nothing.
+        // in the pure decision, so a refusal writes nothing.
         const unindexable = unjoinable(input.address);
         if (unindexable !== undefined) return yield* new InvalidQuery({ message: unindexable });
         if (Buffer.byteLength(input.cwd, "utf8") > MAX_ORIGIN_CWD_BYTES) {
@@ -773,42 +796,57 @@ const make = (installation: string, hostOf: () => string) =>
           session,
           latestPresences(read.entries)
         );
-        // The owner rejoining, or a takeover, keeps unread messages; a new owner starts at
-        // the cut its decision read, so a left address's mail isn't handed to another session.
-        // The cursor is set before the write, so no reply to it is skipped, and only when it
-        // changes, so a refusal has nothing else to undo.
-        const previous = yield* cursors.get(input.address);
-        const cursor = input.replay
-          ? 0
-          : Option.isSome(previous) && (mine || takeover !== undefined)
-            ? previous.value
-            : read.cut.head;
-        const staged = Option.isNone(previous) || previous.value !== cursor;
-        const unstage = staged ? restore(input.address, previous) : Effect.void;
-        // Staging, the message and the restoration after a definite refusal can't be cut
-        // short by cancellation, so a cancelled call never leaves a refused join's cursor
-        // staged. Only the admission itself stays interruptible: cancelled there, its outcome
-        // is unknown, and the cursor is kept.
-        const admission = yield* Effect.uninterruptibleMask((interruptible) =>
-          Effect.gen(function* () {
-            if (staged) yield* cursors.set(input.address, cursor);
-            const message = yield* presenceMessage(input.address, presence, input.cwd).pipe(
-              Effect.tapError(() => unstage)
-            );
-            const admission = yield* interruptible(ledger.admit(message, read.cut)).pipe(
-              Effect.tapError(() => unstage)
-            );
-            if (admission.status === "REFUSED") yield* unstage;
-            return admission;
-          })
-        );
-        // A possibly admitted join keeps its cursor: undoing it could skip the owner's mail.
+        const previous = yield* ledger.mailboxAt(input.address, read.cut);
+        const restart = input.restartPosition === true;
+        if (previous.status === "UNRESOLVED" && (!restart || !mine || input.replay === true)) {
+          return yield* unresolvedMailbox(previous.reason);
+        }
+        if (restart && previous.status !== "UNRESOLVED") {
+          return yield* new InvalidQuery({
+            message:
+              "A restart at the present requires an unresolved mailbox position; nothing was changed.",
+          });
+        }
+        const message = yield* presenceMessage(input.address, presence, input.cwd);
+        // Never copy an inherited position: an old holder may acknowledge mail after our
+        // decision and before the takeover commits. A fresh start and its presence are atomic.
+        const start: MailboxStart | undefined =
+          restart ||
+          input.replay === true ||
+          previous.status === "ABSENT" ||
+          (!mine && takeover === undefined)
+            ? {
+                version: 1,
+                kind: "start",
+                operation: message.id,
+                address: input.address,
+                run: presence.rejoinOf ?? message.id,
+                origin: restart ? "restart" : input.replay === true ? "replay" : "join",
+                position: input.replay === true ? 0 : read.cut.head,
+              }
+            : undefined;
+        const admission = yield* start === undefined
+          ? ledger.admit(message, read.cut)
+          : ledger.admitWithStart(message, start, read.cut);
         if (admission.status === "UNKNOWN") return yield* unconfirmed("join", input.address);
         if (admission.status === "REFUSED") {
           const now = yield* ledger.presenceAt(admission.cut.head);
           yield* decideJoin(input, session, latestPresences(now.entries));
           return yield* conflict(input.address);
         }
+        // Report the position at admission, including an old holder's last acknowledged
+        // read if it committed between a takeover decision and the guarded join.
+        const cursor = yield* start === undefined
+          ? ledger.mailboxAt(input.address, admission.cut).pipe(
+              Effect.map((state) => (state.status === "FOUND" ? state.position : undefined)),
+              Effect.orElseSucceed(() => undefined)
+            )
+          : Effect.succeed(start.position);
+        if (cursor === undefined)
+          return yield* new LedgerError({
+            message:
+              "The join was recorded, but its mailbox position could not be established; call again as its holder.",
+          });
         yield* touch(input.address);
         return {
           address: input.address,
@@ -1173,40 +1211,122 @@ const make = (installation: string, hostOf: () => string) =>
         Effect.withSpan("Bus.withOwner")
       );
 
-    /** The unread messages of the subscriber `reader` resolves, as it is under the lock. */
-    const pending = <R>(
-      address: string,
-      reader: Effect.Effect<Subscriber | undefined, R>,
-      limit?: number
-    ) =>
+    const mailboxBasis = (subscriber: Subscriber, cut: Pin) =>
       Effect.gen(function* () {
-        const notJoined = new NotJoined({
-          address,
-          message: `${address} has not joined the bus; join first.`,
-        });
-        const subscriber = yield* reader;
-        if (subscriber === undefined) return yield* notJoined;
-        const cursor = yield* cursors.get(address);
-        if (Option.isNone(cursor)) return yield* notJoined;
-
-        const slice = yield* ledger.read(cursor.value);
-        const entries: Array<Entry> = [];
-        const batch = (next: number) => ({
-          subscriber,
-          entries,
-          messages: entries.map((entry) => entry.message),
-          from: cursor.value,
-          next,
-        });
-        for (const entry of slice.entries) {
-          if (!isFor(entry.message, subscriber)) continue;
-          entries.push(entry);
-          if (limit !== undefined && entries.length >= limit) return batch(entry.end);
+        const address = subscriber.address;
+        if (!local(subscriber)) {
+          return yield* new NotJoined({
+            address,
+            message: "This holding did not join from this installation; nothing was changed.",
+          });
         }
-        return batch(slice.next);
+        const state = yield* ledger.mailboxAt(address, cut);
+        if (state.status === "UNRESOLVED") return yield* unresolvedMailbox(state.reason);
+        const position = state.status === "FOUND" ? state.records.at(-1) : undefined;
+        if (state.status !== "FOUND" || position === undefined) {
+          return yield* new NotJoined({
+            address,
+            message: "This holding has no ledger position; nothing was changed.",
+          });
+        }
+        return {
+          subscriber,
+          cut,
+          position: state.position,
+          positionOperation: position.record.operation,
+        } satisfies MailboxBasis;
+      });
+
+    const hints = new Map<string, { readonly basis: string; readonly through: number }>();
+    const hintBasis = ({ subscriber, cut, positionOperation }: MailboxBasis) =>
+      JSON.stringify([
+        cut.incarnation,
+        positionOperation,
+        runOf(subscriber),
+        subscriber.presence.topics,
+      ]);
+
+    /** Shared pinned proof; only a successful empty pass may choose to retain its progress. */
+    const pending = (basis: MailboxBasis) =>
+      Effect.gen(function* () {
+        const { subscriber, cut, position } = basis;
+        const hint = hints.get(subscriber.address);
+        let from = position;
+        if (hint !== undefined) {
+          if (
+            hint.basis === hintBasis(basis) &&
+            hint.through >= position &&
+            hint.through <= cut.head
+          ) {
+            from = hint.through;
+          } else {
+            hints.delete(subscriber.address);
+          }
+        }
+        return yield* readMailboxSlice(ledger, from, cut, subscriber);
       }).pipe(Effect.withSpan("Bus.pending"));
 
-    const ack = (address: string, cursor: number) => cursors.set(address, cursor);
+    const rememberEmpty = (basis: MailboxBasis) =>
+      Effect.sync(() => {
+        if (basis.cut.head > basis.position) {
+          hints.set(basis.subscriber.address, { basis: hintBasis(basis), through: basis.cut.head });
+        }
+      });
+
+    const wholeRead = (basis: MailboxBasis) =>
+      pending(basis).pipe(
+        Effect.flatMap(({ entries, damage }) =>
+          damage === undefined ? Effect.succeed(entries) : Effect.fail(incompleteMailbox(damage))
+        )
+      );
+
+    const acknowledge = (
+      { subscriber, cut, position }: MailboxBasis,
+      { through, messages }: MailboxPlan,
+      operation: string,
+      carrierBytes: number
+    ) =>
+      Effect.gen(function* () {
+        const address = subscriber.address;
+        const record: MailboxAck = {
+          version: 1,
+          kind: "ack",
+          operation,
+          address,
+          mode: "read",
+          run: runOf(subscriber),
+          from: position,
+          through,
+          dataCut: cut,
+          subscription: {
+            presenceId: subscriber.joinId,
+            topicsDigest: mailboxTopicsDigest(subscriber.presence.topics),
+          },
+          servedCount: messages.length,
+          servedDigest: mailboxServedDigest(messages.map(({ id }) => id)),
+          carrierBytes,
+        };
+        const saved = yield* ledger.appendMailboxAck(record, cut);
+        switch (saved.status) {
+          case "APPLIED":
+            hints.delete(address);
+            return;
+          case "CONFLICT":
+            return yield* new LedgerError({
+              message:
+                "The holding or mailbox position changed during this read; nothing was acknowledged. Read again from its current position.",
+            });
+          case "IDENTITY_MISMATCH":
+            return yield* new LedgerError({
+              message: "This mailbox operation names a different recorded acknowledgement.",
+            });
+          case "UNKNOWN":
+            return yield* new LedgerError({
+              message:
+                "The bus could not confirm this acknowledgement; it may have committed. Inspect bus_history before reading again.",
+            });
+        }
+      });
 
     const wakeHolding = (address: string, session: string | undefined, at?: number) =>
       Effect.gen(function* () {
@@ -1299,7 +1419,7 @@ const make = (installation: string, hostOf: () => string) =>
         const { address, session, expectedBinding, previousCoverage } = input;
         const refuse = (message: string) => new InvalidQuery({ message });
         const first = yield* wakeHolding(address, session);
-        const { subscriber: initial, binding } = first;
+        const { subscriber, binding, cut } = first;
         for (const expected of [expectedBinding, previousCoverage?.binding]) {
           if (expected !== undefined && !sameWakeBinding(expected, binding)) {
             return yield* refuse(
@@ -1309,33 +1429,15 @@ const make = (installation: string, hostOf: () => string) =>
         }
         // Retain this wait's first authorized holding even if its initial slice times out.
         bind?.(binding);
-        const position = yield* cursors.get(address);
-        if (Option.isNone(position)) {
-          return yield* new NotJoined({
-            address,
-            message: "This holding has no local read cursor; nothing was changed.",
-          });
-        }
-        const cursor = position.value;
-        if (!Number.isSafeInteger(cursor) || cursor < 0) {
-          return yield* new LedgerError({ message: "The local read cursor is invalid." });
-        }
+        const basis = yield* mailboxBasis(subscriber, cut);
+        const cursor = basis.position;
         if (previousCoverage !== undefined && previousCoverage.cursor > cursor) {
           return yield* refuse(
             "Wake coverage is ahead of this holding's read position; nothing was changed."
           );
         }
-        const slice = yield* ledger.read(cursor);
-        // Presence and eligibility belong to the read's cut, not the earlier ownership lookup.
-        const at = yield* ledger.presenceAt(slice.next);
-        const subscriber = yield* ownedIn(latestPresences(at.entries), address, session);
-        if (at.cut.incarnation !== first.cut.incarnation || subscriber.joinId !== initial.joinId) {
-          return yield* refuse(
-            "The holding or ledger changed during observation; retry without advancing coverage."
-          );
-        }
-        const entries = slice.entries.filter((entry) => isFor(entry.message, subscriber));
-        const messages = yield* eligibleOf(subscriber, entries, slice.next);
+        const entries = yield* wholeRead(basis);
+        const messages = yield* eligibleOf(subscriber, entries, cut.head);
         const ready = messages.length > 0;
         let latestEligibleAt: { readonly millis: number; readonly tail: string } | undefined;
         for (const message of messages) {
@@ -1378,7 +1480,7 @@ const make = (installation: string, hostOf: () => string) =>
         const nextCoverage = ready ? { binding, ...covered.coverage } : previousCoverage;
         const result: WakeObservation = {
           binding,
-          observationCut: at.cut,
+          observationCut: cut,
           ready,
           news: ready && covered.news,
           ...(latestEligibleAt === undefined
@@ -1399,12 +1501,14 @@ const make = (installation: string, hostOf: () => string) =>
           );
         }
         // A remote writer does not share our lock. Fence changes observed before return admission.
-        yield* currentWakeHolding(address, session, { subscriber, cut: at.cut });
-        return yield* Schema.decodeUnknownEffect(WakeObservation)(result).pipe(
+        yield* currentWakeHolding(address, session, first);
+        const observation = yield* Schema.decodeUnknownEffect(WakeObservation)(result).pipe(
           Effect.mapError(
             () => new LedgerError({ message: "The complete wake evidence could not be validated." })
           )
         );
+        if (entries.length === 0) yield* rememberEmpty(basis);
+        return observation;
       }).pipe(exclusive(input.address), Effect.withSpan("Bus.observeWake.snapshot"));
 
     const observeWake = Effect.fn("Bus.observeWake")(function* (input: ObserveWakeRequest) {
@@ -1464,28 +1568,32 @@ const make = (installation: string, hostOf: () => string) =>
       { accepts, idle }: DeliveryOptions<E2> = {}
     ) =>
       Effect.gen(function* () {
-        // The join may have changed since discovery. Check before even an empty scan can ack.
-        const subscriber = yield* peer(address);
-        if (subscriber === undefined || !local(subscriber) || accepts?.(subscriber) === false) {
+        // Discovery is not authority: membership, position and mail are all read at this cut.
+        const { entries: presence, cut } = yield* ledger.presenceAt();
+        const subscriber = latestPresences(presence).get(address);
+        if (
+          subscriber?.presence.status !== "joined" ||
+          !local(subscriber) ||
+          accepts?.(subscriber) === false
+        ) {
           return undefined;
         }
-        const { entries, from, next } = yield* pending(address, Effect.succeed(subscriber));
+        const basis = yield* mailboxBasis(subscriber, cut);
+        const entries = yield* wholeRead(basis);
         if (entries.length > 0) {
-          const eligible = yield* eligibleOf(subscriber, entries, next);
+          const eligible = yield* eligibleOf(subscriber, entries, cut.head);
           if (eligible.length > 0) {
             return yield* nudge({
               subscriber,
               messages: eligible,
               unread: entries.map((entry) => entry.message.id),
-              cursor: from,
+              cursor: basis.position,
             });
           }
           // Suppressed: nothing wakes it, and its unread mail stays unread and unacknowledged.
           return undefined;
         }
-        // With nothing for this subscriber, pass over what was read, as its own read would,
-        // so later passes don't read it again.
-        yield* ack(address, next);
+        yield* rememberEmpty(basis);
         if (idle !== undefined) yield* idle(subscriber);
         return undefined;
       }).pipe(exclusive(address), Effect.withSpan("Bus.deliver"));
@@ -1498,31 +1606,46 @@ const make = (installation: string, hostOf: () => string) =>
       admit?: ReadAdmission
     ) =>
       Effect.gen(function* () {
-        const batch = yield* pending(address, owned(address, session));
-        const offered = batch.messages.slice(0, limit);
+        if (!validSession(session)) return yield* noSession(address);
+        const { entries: presence, cut } = yield* ledger.presenceAt();
+        const subscriber = yield* ownedIn(latestPresences(presence), address, session);
+        const basis = yield* mailboxBasis(subscriber, cut);
+        yield* touch(address);
+        const { entries, damage } = yield* pending(basis);
+        if (entries.length === 0) {
+          if (damage !== undefined) return yield* incompleteMailbox(damage);
+          yield* rememberEmpty(basis);
+          return [];
+        }
+        const offered = entries.slice(0, limit).map(({ message }) => message);
         let count = admit === undefined ? offered.length : admit(offered);
         if (!Number.isInteger(count) || count < 0 || count > offered.length)
           return yield* Effect.die(new Error("The read admission returned an invalid prefix."));
         // A Fluree cursor names a commit, not a row. Never consume only part of one commit.
         while (
           count > 0 &&
-          count < batch.entries.length &&
-          batch.entries[count - 1]?.end === batch.entries[count]?.end
+          count < entries.length &&
+          entries[count - 1]?.end === entries[count]?.end
         )
           count--;
-        if (count === 0 && batch.messages.length > 0)
+        if (count === 0)
           return yield* new InvalidQuery({
             message:
               "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Use a reader with larger limits.",
           });
-        const next =
-          count === batch.messages.length && (limit === undefined || count < limit)
-            ? batch.next
-            : batch.entries[count - 1]?.end;
-        if (next === undefined)
-          return yield* Effect.die(new Error("The read prefix has no cursor."));
-        yield* ack(address, next);
-        return batch.messages.slice(0, count);
+        const exhausted = count === entries.length && (limit === undefined || count < limit);
+        if (exhausted && damage !== undefined) return yield* incompleteMailbox(damage);
+        const through = exhausted ? cut.head : entries[count - 1]?.end;
+        if (through === undefined)
+          return yield* Effect.die(new Error("The read prefix has no ledger position."));
+        const messages = offered.slice(0, count);
+        yield* acknowledge(
+          basis,
+          { through, messages },
+          Bun.randomUUIDv7(),
+          messageCarrierBytes(messages)
+        );
+        return messages;
       }).pipe(exclusive(address), Effect.withSpan("Bus.take"));
 
     const waitFor = Effect.fn("Bus.wait")(function* (
@@ -1619,7 +1742,7 @@ const make = (installation: string, hostOf: () => string) =>
             },
             { accepts: eligible }
           ).pipe(
-            // A join from this machine without a cursor (a replaced ledger, say), or a failing read,
+            // A join without an established mailbox, or a failing read,
             // leaves this address for a later pass rather than holding up the others.
             Effect.catchTags({
               NotJoined: (error) => Effect.as(skipped(peer.address, error), undefined),

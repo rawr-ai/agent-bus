@@ -1595,6 +1595,38 @@ describe("mailbox Fluree boundaries", () => {
     });
   });
 
+  test("a fresh guarded write exposes matching routing, including a deliberately empty audience", async () => {
+    const config = await freshLedger("mailbox-guarded-routing");
+    const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const before = await store.cut();
+    const empty = new Message({ ...message(), to: [] });
+    expect((await store.admit(empty, before)).status).toBe("ADMITTED");
+    const afterEmpty = await store.cut();
+    const direct = message();
+    expect((await store.admit(direct, afterEmpty)).status).toBe("ADMITTED");
+    const after = await store.cut();
+    expect(await store.checked(before.head, after)).toEqual({
+      entries: [{ message: direct, end: after.head }],
+      damage: undefined,
+    });
+  });
+
+  test.each(["bus:id", "bus:from", "bus:to"])(
+    "an encoded message alone cannot hide its missing %s projection",
+    async (field) => {
+      const config = await freshLedger("mailbox-unprojected");
+      const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+      const basis = await store.cut();
+      const candidate = message();
+      await insertRaw(config, { ...toNode(candidate, JSON.stringify(candidate)), [field]: null });
+      const cut = await store.cut();
+      expect(
+        (await store.readAt(basis.head, cut)).entries.map(({ message }) => message.id)
+      ).toEqual([candidate.id]);
+      expect(await store.checked(basis.head, cut)).toEqual({ entries: [], damage: cut.head });
+    }
+  );
+
   test("the selected Fluree build refuses a lone-surrogate projected sender", async () => {
     const config = await freshLedger("mailbox-surrogate");
     await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);

@@ -6,12 +6,11 @@ import { Console, Effect, FileSystem, Layer, Logger, Option, Schema } from "effe
 import { Command, Flag } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "./Bus.ts";
-import * as Cursors from "./Cursors.ts";
 import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
 import { defaultCodex } from "./codex.ts";
 import { compactRecovery, readCompactInput } from "./compact.ts";
-import { cursorTransition, openCursorDirectory } from "./cursor-layout.ts";
+import { cursorTransition } from "./cursor-layout.ts";
 import { cursorWriterIsStopped } from "./cursor-quiescence.ts";
 import { Association, LedgerError, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
@@ -48,21 +47,9 @@ const loadToken = Effect.gen(function* () {
   return (yield* fs.readFileString(file)).trim();
 });
 
-/** Cursors are positions in one ledger's history, so each ledger instance keeps its own. */
+/** The retained file layout used by the previous release's operator commands. */
 const legacyCursorPath = (ledgerId: string, instance: string) =>
   join(busDir, "fluree-cursors", encodeURIComponent(ledgerId), instance);
-
-const cursorsFor = (ledgerId: string, installation: string) =>
-  Layer.unwrap(
-    Effect.gen(function* () {
-      const ledger = yield* Ledger.Ledger;
-      const dir = yield* openCursorDirectory(
-        legacyCursorPath(ledgerId, ledger.instance),
-        installation
-      );
-      return Cursors.layerFiles(dir);
-    })
-  );
 
 /** `config.json` names no Fluree ledger, so the store can't open. */
 class NoStore extends Schema.TaggedError<NoStore>()("NoStore", { message: Schema.String }) {}
@@ -82,10 +69,7 @@ const BusLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* flureeConfig;
     const installation = yield* loadInstallation(busDir);
-    return Bus.layer(installation).pipe(
-      Layer.provideMerge(cursorsFor(config.ledger, installation)),
-      Layer.provideMerge(Fluree.layerFluree(config))
-    );
+    return Bus.layer(installation).pipe(Layer.provideMerge(Fluree.layerFluree(config)));
   })
 );
 

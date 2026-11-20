@@ -130,13 +130,11 @@ export const layerJsonl = (file: string) =>
                 return yield* ledgerError("Invalid mailbox acknowledgement line.");
               }
               text = "";
-            } else if (text.startsWith(COMMAND_MARK) && strict) {
-              if (Option.isNone(decodeCommandLine(text))) {
-                return yield* ledgerError("Invalid address command line.");
-              }
+            } else if (text.startsWith(COMMAND_MARK)) {
+              // An address command is standing evidence, never mail.
               text = "";
             }
-            if (text.trim() !== "" && !text.startsWith(COMMAND_MARK)) {
+            if (text.trim() !== "") {
               const decoded = yield* Effect.option(decode(text));
               if (Option.isSome(decoded)) {
                 entries.push({ message: decoded.value, end: from + stop + 1 });
@@ -489,7 +487,7 @@ export const layerJsonl = (file: string) =>
                   {
                     subject: messageIri(message.id),
                     end,
-                    routing: { id: message.id, from: message.from, to: message.to },
+                    routing: { id: message.id, from: message.from, to: [...new Set(message.to)] },
                   },
                 ]
               : []

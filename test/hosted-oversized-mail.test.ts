@@ -16,7 +16,6 @@ import { FetchHttpClient } from "effect/http";
 import { serveTools } from "mcp-openapi";
 import { modernRequest } from "../scripts/private-modern-http.ts";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -33,6 +32,7 @@ import type { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
 import { flureeFetch, freshLedger } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 /** The complete hosted result ceiling the peer promises, measured as HTTP response-body bytes. */
 const HOSTED_RESULT_BYTES = 4 * 1024 * 1024;
@@ -54,23 +54,15 @@ const freePort = () => {
 const busPort = freePort();
 const hostPort = freePort();
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
-const busOn = (ledger: Layer.Layer<Ledger | QueryGateway, unknown, never>, cursors: string) =>
-  Bus.layer("fixture", () => HOST).pipe(
-    Layer.provideMerge(ledger),
-    Layer.provideMerge(Cursors.layerFiles(cursors)),
-    Layer.provide(platform)
-  );
+const busOn = (ledger: Layer.Layer<Ledger | QueryGateway, unknown, never>) =>
+  Bus.layer("fixture", () => HOST).pipe(Layer.provideMerge(ledger), Layer.provide(platform));
 const carrierLedger = await freshLedger("carrier");
 const store = layerFluree(carrierLedger).pipe(Layer.provide(platform));
 const server = ManagedRuntime.make(
-  Serve.layerHttp({ port: busPort, version: VERSION }).pipe(
-    Layer.provideMerge(busOn(store, join(dir, "cursors")))
-  )
+  Serve.layerHttp({ port: busPort, version: VERSION }).pipe(Layer.provideMerge(busOn(store)))
 );
 const jsonlFile = join(dir, "jsonl", "ledger.jsonl");
-const jsonl = ManagedRuntime.make(
-  busOn(layerJsonl(jsonlFile).pipe(Layer.provide(platform)), join(dir, "jsonl-cursors"))
-);
+const jsonl = ManagedRuntime.make(busOn(layerJsonl(jsonlFile).pipe(Layer.provide(platform))));
 const client = new Client({ name: "carrier-fixture", version: "1.0.0" });
 const injected: Array<unknown> = [];
 const apiKey = `fixture-${Bun.randomUUIDv7()}`;
@@ -188,10 +180,8 @@ const head = () => server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.e
 const entriesAfter = async (from: number) =>
   (await server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.read(from)))).entries;
 const cursor = async (address: string) => {
-  const result = await server.runPromise(
-    Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(address))
-  );
-  if (result._tag !== "Some") throw new Error("Missing cursor.");
+  const result = await server.runPromise(mailboxPosition(address));
+  if (result._tag !== "Some") throw new Error("Missing mailbox position.");
   return result.value;
 };
 /** A refused write: an error result, and no commit at all by a nonconsuming head read. */
@@ -495,7 +485,10 @@ test("an oversized entry from before the bound stays readable natively and refus
   expect(messages.map((message) => message.id)).toEqual([old.id]);
   expect(messages[0]?.body).toBe(body);
   expect(Bun.hash(JSON.stringify(messages[0]?.to))).toBe(Bun.hash(JSON.stringify(old.to)));
-  expect(await cursor(reader)).toBeGreaterThan(saved);
+  // The read acknowledged exactly through the commit holding the delivered entry.
+  const oldEnd = (await entriesAfter(saved)).find((entry) => entry.message.id === old.id)?.end;
+  expect(oldEnd).toBeDefined();
+  expect(await cursor(reader)).toBe(oldEnd as number);
   const resumed = await hostedOk("bus_read", { address: reader }, session);
   expect(pageOf(resumed.result).map((message) => message.id)).toEqual([laterId]);
 }, 300_000);
