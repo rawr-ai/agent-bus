@@ -148,7 +148,9 @@ export class PresenceConflict extends Schema.TaggedError<PresenceConflict>()("Pr
  */
 export class InvalidQuery extends Schema.TaggedError<InvalidQuery>()("InvalidQuery", {
   message: Schema.String,
-  code: Schema.optionalKey(Schema.Literals(["RANKING_UNAVAILABLE", "STALE_LEDGER"])),
+  code: Schema.optionalKey(
+    Schema.Literals(["RANKING_UNAVAILABLE", "STALE_LEDGER", "IDENTITY_MISMATCH"])
+  ),
 }) {}
 
 /**

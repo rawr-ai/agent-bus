@@ -51,7 +51,7 @@ import {
   topicName,
   validSession,
 } from "./domain.ts";
-import { type CommandRead, type Entry, Ledger } from "./Ledger.ts";
+import { type CommandRead, type Entry, Ledger, validEntryId } from "./Ledger.ts";
 import {
   type MailboxAck,
   type MailboxStart,
@@ -125,6 +125,11 @@ export interface PublishInput {
   readonly pierce?: ReadonlyArray<string> | "all" | undefined;
   /** The digest of a NOT_SENT pierce of all, to send exactly that set. */
   readonly confirm?: string | undefined;
+  /**
+   * A lowercase UUIDv7 naming this send and all its retries; it becomes the message's id. The
+   * entry stored under it decides a retry: the same send returns the original, replayed.
+   */
+  readonly operation?: string | undefined;
 }
 
 /**
@@ -161,6 +166,8 @@ const listWithin = <A>(rows: ReadonlyArray<A>, budget: number) => {
 export interface Posted {
   readonly message: Message;
   readonly wake?: WakeNotice;
+  /** The message was already stored under the call's operation; this call wrote nothing. */
+  readonly replayed?: true;
 }
 
 /** A pierce of all that was not confirmed: nothing was written. */
@@ -527,6 +534,31 @@ const intentOf = (command: {
     activity: command.activity,
     mutes: command.mutes,
   });
+
+/**
+ * A send's retry identity: what the caller asked for, with the pierce set it resolved to, never
+ * its id, time or origin. A NOT_SENT digest hashes exactly this.
+ */
+const sendIntentOf = (
+  draft: Pick<Message, "from" | "to" | "subject" | "body" | "kind" | "replyTo">,
+  bypass: ReadonlyArray<string>
+) =>
+  canonicalJson({
+    from: draft.from,
+    to: draft.to,
+    subject: draft.subject,
+    body: draft.body,
+    kind: draft.kind,
+    replyTo: draft.replyTo,
+    bypass,
+  });
+
+const digestOf = (draft: Parameters<typeof sendIntentOf>[0], bypass: ReadonlyArray<string>) =>
+  createHash("sha256").update(sendIntentOf(draft, bypass)).digest("hex");
+
+/** A named pierce as it is stored: once each, without the direct recipients, sorted. */
+const namedPierce = (pierce: ReadonlyArray<string>, to: ReadonlyArray<string>) =>
+  [...new Set(pierce)].filter((address) => !to.includes(address)).sort();
 
 /** Concern topics by directory id at one commit; undefined where the designation is unreadable. */
 type Concerns = Map<
@@ -992,21 +1024,6 @@ const make = (installation: string, hostOf: () => string) =>
         return eligible;
       });
 
-    const digestOf = (draft: Message, bypass: ReadonlyArray<string>) =>
-      createHash("sha256")
-        .update(
-          canonicalJson({
-            from: draft.from,
-            to: draft.to,
-            subject: draft.subject,
-            body: draft.body,
-            kind: draft.kind,
-            replyTo: draft.replyTo,
-            bypass,
-          })
-        )
-        .digest("hex");
-
     /**
      * Ownership and the wake notice come from one presence read under the sender's claiming
      * lock. The ledger admits the send only if the sender's presence has not changed since
@@ -1018,9 +1035,31 @@ const make = (installation: string, hostOf: () => string) =>
     function publish(input: PublishInput): Effect.Effect<Posted | NotSent, PublishError>;
     function publish(input: PublishInput): Effect.Effect<Posted | NotSent, PublishError> {
       return Effect.gen(function* () {
+        const { operation } = input;
+        if (operation !== undefined && !validEntryId(operation)) {
+          return yield* new InvalidQuery({
+            message:
+              "operation must be a lowercase UUIDv7, the same for every retry of this send. Nothing was sent.",
+          });
+        }
+        /**
+         * Ownership, required on every attempt. A retry's refusal says nothing of an earlier
+         * attempt under the operation, which may have committed; nor does it reveal one.
+         */
+        const owns = (presences: ReadonlyMap<string, Subscriber>) =>
+          ownedIn(presences, input.from, input.session).pipe(
+            Effect.mapError((error) => {
+              if (operation === undefined || !validSession(input.session)) return error;
+              const fields = {
+                address: input.from,
+                message: `${input.from} is not held by this session, so the bus cannot answer for operation ${operation}: an earlier attempt under it may have committed. Read whether it did from history before sending this message again.`,
+              };
+              return error._tag === "NotJoined" ? new NotJoined(fields) : new NotOwner(fields);
+            })
+          );
         const read = yield* ledger.presenceAt();
         const all = latestPresences(read.entries);
-        const sender = yield* ownedIn(all, input.from, input.session);
+        const sender = yield* owns(all);
         yield* touch(input.from);
         const lacking = lackingWake(all, input.from, input.to);
         const { listed, unlisted } = listWithin(lacking, WAKE_LISTED_BYTES);
@@ -1033,26 +1072,13 @@ const make = (installation: string, hostOf: () => string) =>
                 lacking: listed,
                 ...(unlisted > 0 ? { unlisted } : {}),
               };
-        const store = Effect.fn("Bus.publish.store")(function* (message: Message) {
-          const admission = yield* ledger.admit(message, read.cut);
-          if (admission.status === "UNKNOWN") {
-            return yield* new LedgerError({
-              message:
-                "The bus could not confirm whether this message was sent: it may have committed. Check history and do not retry blindly.",
-            });
-          }
-          if (admission.status === "REFUSED") {
-            // The write is definitively refused even if the reason cannot be read back.
-            const state = yield* Effect.option(ledger.presenceAt(admission.cut.head));
-            if (Option.isSome(state)) {
-              yield* ownedIn(latestPresences(state.value.entries), input.from, input.session);
-            }
-            return yield* conflict(input.from);
-          }
-          return (wake === undefined ? { message } : { message, wake }) satisfies Posted;
+        const posted = (message: Message, replayed: boolean): Posted => ({
+          message,
+          ...(wake === undefined ? {} : { wake }),
+          ...(replayed ? { replayed: true as const } : {}),
         });
         const draft = new Message({
-          id: Bun.randomUUIDv7(),
+          id: operation ?? Bun.randomUUIDv7(),
           ts: yield* now,
           from: input.from,
           to: [...input.to],
@@ -1062,8 +1088,83 @@ const make = (installation: string, hostOf: () => string) =>
           ...optional("replyTo", input.replyTo),
           origin: yield* originFor(sender.cwd, hostOf),
         });
+        const mismatch = (id: string) =>
+          new InvalidQuery({
+            code: "IDENTITY_MISMATCH",
+            message: `operation ${id} already names another entry than this send: another sender, audience, subject, body, replyTo or pierce. Nothing was written; use a new operation for a new message.`,
+          });
+        const unconfirmed = (id: string) =>
+          new LedgerError({
+            message: `The bus could not confirm whether this message was sent: it may have committed as ${id}. Retry the identical call with operation ${id}: it returns the message if it was stored and sends it once if not.`,
+          });
+        /**
+         * Whether a stored entry is this send: the same sender, `to` exactly as given (order and
+         * duplicates included, as the digest hashes it), subject, body, replyTo and pierce set.
+         * A named pierce compares as it is stored. A pierce of all is the stored set this call's
+         * `confirm` names, so a retry is decided by what was sent, not by the set now; without
+         * `confirm` it is not the confirmed send.
+         */
+        const isThisSend = (stored: Message) => {
+          if (stored.kind !== "message" || stored.from !== input.from) return false;
+          const bypass = stored.pierce ?? [];
+          const intent = sendIntentOf(stored, bypass);
+          if (input.pierce === "all") {
+            return (
+              sendIntentOf(draft, bypass) === intent && input.confirm === digestOf(stored, bypass)
+            );
+          }
+          const named = input.pierce === undefined ? [] : namedPierce(input.pierce, draft.to);
+          return sendIntentOf(draft, named) === intent;
+        };
+        const store = Effect.fn("Bus.publish.store")(function* (message: Message) {
+          const admission = yield* ledger.admit(message, read.cut);
+          if (admission.status === "REFUSED") {
+            // The write is definitively refused even if the reason cannot be read back.
+            const state = yield* Effect.option(ledger.presenceAt(admission.cut.head));
+            if (Option.isSome(state)) {
+              yield* owns(latestPresences(state.value.entries));
+            }
+          }
+          if (operation === undefined) {
+            if (admission.status === "UNKNOWN") return yield* unconfirmed(message.id);
+            if (admission.status === "REFUSED") return yield* conflict(input.from);
+            return posted(message, false);
+          }
+          // The entry stored under the operation decides every outcome: an earlier or racing
+          // attempt's entry refuses this insert, or answers it as a no-op at its own commit.
+          const settled = yield* ledger.readEntry(message.id);
+          if (settled.status === "FOUND") {
+            if (!isThisSend(settled.message)) return yield* mismatch(message.id);
+            // A refusal wrote nothing. An admission, or an unknown outcome, may be another
+            // attempt's entry read at its commit: only this attempt's own time and origin say it
+            // was this call's write.
+            const own =
+              admission.status !== "REFUSED" &&
+              settled.message.ts === message.ts &&
+              canonicalJson(settled.message.origin) === canonicalJson(message.origin);
+            return posted(settled.message, !own);
+          }
+          if (settled.status === "ABSENT" && admission.status === "REFUSED") {
+            return yield* conflict(input.from);
+          }
+          return yield* unconfirmed(message.id);
+        });
         // The optional pierce set changes routing, not the public read carrier.
         yield* admitEntry(draft);
+        // A send already stored under the operation is returned before its pierce set is
+        // resolved again or anything is written.
+        if (operation !== undefined) {
+          const recorded = yield* ledger.readEntry(operation);
+          if (recorded.status === "FOUND") {
+            if (!isThisSend(recorded.message)) return yield* mismatch(operation);
+            return posted(recorded.message, true);
+          }
+          if (recorded.status !== "ABSENT") {
+            return yield* new LedgerError({
+              message: `The entry under operation ${operation} could not be read, so nothing was sent. Retry the identical call with the same operation.`,
+            });
+          }
+        }
         if (input.pierce === undefined) return yield* store(draft);
         const audience = (yield* peers).filter((peer) => isFor(draft, peer));
         let pierce: Array<string>;
@@ -1089,9 +1190,7 @@ const make = (installation: string, hostOf: () => string) =>
               message: `${outside} is not in this message's audience: pierce names only joined peers it already reaches. Nothing was sent.`,
             });
           }
-          pierce = [...new Set(input.pierce)]
-            .filter((address) => !draft.to.includes(address))
-            .sort();
+          pierce = namedPierce(input.pierce, draft.to);
         }
         return yield* store(pierce.length === 0 ? draft : new Message({ ...draft, pierce }));
       }).pipe(claiming(input.from), Effect.withSpan("Bus.publish"));

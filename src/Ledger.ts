@@ -29,6 +29,9 @@ export const scopeIri = (scope: DesignationScope): string => {
 export const revisionIri = (operation: string) => `urn:agent-bus:revision:${operation}`;
 export const witnessIri = (operation: string) => `urn:agent-bus:witness:${operation}`;
 export const messageIri = (id: string) => `urn:agent-bus:message:${id}`;
+/** A guarded entry id or operation: a lowercase UUIDv7, as Fluree's guarded writes require. */
+export const validEntryId = (id: string) =>
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(id);
 export const COMMAND_PREFIX = "urn:agent-bus:command:";
 export const commandIri = (operation: string) => `${COMMAND_PREFIX}${operation}`;
 
@@ -75,6 +78,17 @@ export type DesignationResult =
   | { readonly status: "IDENTITY_MISMATCH"; readonly cut: Pin }
   | { readonly status: "CONFLICT"; readonly current: string | null; readonly cut: Pin }
   | { readonly status: "UNKNOWN" };
+
+/**
+ * One entry, read by its id at one cut: the immutable attempted entry a retried send compares
+ * against. A node with facts but no single decodable entry of that id is MALFORMED, never ABSENT;
+ * any failure to read it is UNAVAILABLE.
+ */
+export type EntryRead =
+  | { readonly status: "FOUND"; readonly message: Message; readonly t: number; readonly cut: Pin }
+  | { readonly status: "ABSENT"; readonly cut: Pin }
+  | { readonly status: "MALFORMED"; readonly cut: Pin }
+  | { readonly status: "UNAVAILABLE" };
 
 /** A decoded entry and the cursor just past it. */
 export interface Entry {
@@ -254,5 +268,7 @@ export class Ledger extends Context.Service<
       after: number,
       upTo: number
     ) => Effect.Effect<DirectScan, LedgerError>;
+    /** The entry with this id at the current head, decoded; any failure to read it is UNAVAILABLE. */
+    readonly readEntry: (id: string) => Effect.Effect<EntryRead>;
   }
 >()("agent-bus/Ledger") {}
