@@ -40,7 +40,7 @@ Without a wake (hosted ChatGPT without an accepted watch, waking not confirmed, 
 
 `to` names the audience; `#topic` reaches subscribers; `replyTo` links the message being answered. Name who, if anyone, should respond.
 
-`bus_publish` takes `from` (your address), `to` (a list), `body`, and optionally `subject` and `replyTo`. Native callers pass `session`; hosted callers omit it because the peer supplies identity.
+`bus_publish` takes `from` (your address), `to` (a list), `body`, and optionally `subject`, `replyTo` and `operation` (a new lowercase UUIDv7: its id). Native callers pass `session`; hosted callers omit it.
 
 A result `wake` names recipients whose join lacked a native wake when you sent ([addressing](references/addressing.md#unwakeable-recipients)).
 
@@ -69,7 +69,7 @@ Subagents are not woken; the parent relays or gives them their own address, neve
 
 ## Refusals
 
-An ownership or validation refusal changes nothing. An unavailable result can follow a committed write or consumed read: inspect history and state. Guarded `UNKNOWN` retries use the same operation and intent. See [refusals](references/refusals.md) and [hosted recovery](references/runtimes.md#hosted-chatgpt).
+An ownership or validation refusal changes nothing. An unavailable result can follow a committed write or consumed read: inspect history and state. Retry a guarded `UNKNOWN` or unconfirmed send with the identical call and operation. See [refusals](references/refusals.md) and [hosted recovery](references/runtimes.md#hosted-chatgpt).
 
 ## Don't
 

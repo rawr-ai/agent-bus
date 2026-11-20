@@ -9,6 +9,7 @@ import {
   commandIri,
   type Designation,
   type DesignationResult,
+  type EntryRead,
   Ledger,
   messageIri,
   type PresenceRead,
@@ -18,7 +19,7 @@ import {
   type WitnessRead,
   witnessIri,
 } from "./Ledger.ts";
-import { storable } from "./message-carrier.ts";
+import { ENTRY_READ_BYTES, storable } from "./message-carrier.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
@@ -198,11 +199,13 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
 
       /**
        * A pinned query: at most `maxBytes` of response are read, and the request
-       * is interrupted after QUERY_TIMEOUT. Upstream error bodies are never read.
+       * is interrupted after QUERY_TIMEOUT. Upstream error bodies are never read. As in
+       * `guardedSend`, the request belongs to this call's scope, so an early refusal, an
+       * over-bound body or a timeout closes the connection instead of leaving the body flowing.
        */
       const sendBounded = (request: HttpClientRequest.HttpClientRequest, maxBytes: number) =>
         Effect.gen(function* () {
-          const response = yield* client.execute(request);
+          const response = yield* HttpClient.withScope(client).execute(request);
           if (response.status >= 400) {
             return yield* httpFailure(response.status);
           }
@@ -883,6 +886,69 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           Effect.withSpan("Ledger.readCommand")
         );
 
+      /**
+       * The entry at one cut, by its id: whether its node has any fact first, so a partial node
+       * is never an absent one, then its one stored encoding, which must decode to that id.
+       *
+       * Both queries read whole stored entries, bounded by ENTRY_READ_BYTES (32 MiB, the bound of
+       * whole-entry JSON-LD reads), not the guarded writes' 256 KiB. Every new send is sized
+       * against the same constant before its write (`readableEntry` in message-carrier.ts): its
+       * stored encoding, pierce set included and escaped as a response escapes it, fits this
+       * read. An older entry that doesn't reads as UNAVAILABLE.
+       *
+       * A transport failure, an over-bound response or a timeout fails the read (UNAVAILABLE).
+       * Only a node read completely that is not one decodable entry of the id is MALFORMED.
+       */
+      const entryQuery = (t: number, body: Record<string, unknown>) =>
+        sendBounded(
+          HttpClientRequest.post(pinned(t)).pipe(
+            HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
+          ),
+          ENTRY_READ_BYTES
+        );
+      const entryAt = (id: string, cut: Pin) =>
+        Effect.gen(function* () {
+          const subject = messageIri(id);
+          const facts = yield* entryQuery(cut.head, {
+            select: "?predicate",
+            where: { "@id": subject, "?predicate": "?object" },
+            limit: 1,
+          }).pipe(Effect.flatMap(decode(Strings)));
+          if (facts.length === 0) return { status: "ABSENT", cut } satisfies EntryRead;
+          // As in commandAt: bind the IRI through a typed `values`, so `@t` is the real commit.
+          const response = yield* entryQuery(cut.head, {
+            select: ["?json", "?t"],
+            values: [["?m"], [[{ "@type": "@id", "@value": subject }]]],
+            where: { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t" } },
+          });
+          const rows = Schema.decodeUnknownOption(Rows)(response);
+          const row = Option.isSome(rows) && rows.value.length === 1 ? rows.value[0] : undefined;
+          if (row === undefined) return { status: "MALFORMED", cut } satisfies EntryRead;
+          const [json, t] = row;
+          const message = Schema.decodeUnknownOption(MessageJson)(json);
+          if (Option.isNone(message) || message.value.id !== id) {
+            return { status: "MALFORMED", cut } satisfies EntryRead;
+          }
+          return { status: "FOUND", message: message.value, t, cut } satisfies EntryRead;
+        });
+
+      const readEntry = (id: string) =>
+        bounded(
+          Effect.gen(function* () {
+            const incarnationId = yield* guardedIncarnation;
+            if (incarnationId !== instance) return { status: "UNAVAILABLE" } satisfies EntryRead;
+            const head = yield* guardedHead;
+            const result = yield* entryAt(id, { head, incarnation: incarnationId });
+            if ((yield* guardedIncarnation) !== incarnationId) {
+              return { status: "UNAVAILABLE" } satisfies EntryRead;
+            }
+            return result;
+          })
+        ).pipe(
+          Effect.catch(() => Effect.succeed({ status: "UNAVAILABLE" } satisfies EntryRead)),
+          Effect.withSpan("Ledger.readEntry")
+        );
+
       /** One update that inserts the command only while its node holds none. */
       const appendCommand = (operation: string, json: string) =>
         bounded(
@@ -921,6 +987,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           log: (t) => logAt(gateway, t).pipe(Effect.withSpan("Ledger.log")),
           direct: (address, after, upTo) =>
             directAt(gateway, address, after, upTo).pipe(Effect.withSpan("Ledger.direct")),
+          readEntry,
         })
       ).pipe(Context.add(QueryGateway, gateway));
     })
