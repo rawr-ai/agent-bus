@@ -5,16 +5,18 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
-import { Message, Presence } from "../src/domain.ts";
+import { Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import {
   encodeMailboxRecord,
   type MailboxAck,
   type MailboxStart,
+  type MailboxUnresolved,
   mailboxIri,
   mailboxReceiptIri,
   mailboxServedDigest,
+  mailboxTopicsDigest,
 } from "../src/mailbox-model.ts";
 import type { Pin } from "../src/Query.ts";
 import { boundary } from "./fluree-boundary.ts";
@@ -40,6 +42,8 @@ const handle = async (layer: LedgerLayer) => {
     admit: (message: Message, cut: Pin) => use((ledger) => ledger.admit(message, cut)),
     start: (message: Message, value: MailboxStart, cut: Pin) =>
       use((ledger) => ledger.admitWithStart(message, value, cut)),
+    classify: (value: MailboxUnresolved, cut: Pin) =>
+      use((ledger) => ledger.classifyMailboxImport(value, cut)),
     import: (value: MailboxStart, cut: Pin) => use((ledger) => ledger.importMailbox(value, cut)),
     ack: (value: MailboxAck, cut: Pin) => use((ledger) => ledger.appendMailboxAck(value, cut)),
     mailbox: (value: string, cut: Pin) => use((ledger) => ledger.mailboxAt(value, cut)),
@@ -121,6 +125,16 @@ const starting = (
   origin,
   position: basis.head,
 });
+const unresolved = (
+  sender = address,
+  reason: MailboxUnresolved["reason"] = "missing"
+): MailboxUnresolved => ({
+  version: 1,
+  kind: "unresolved",
+  operation: Bun.randomUUIDv7(),
+  address: sender,
+  reason,
+});
 const acknowledgement = (
   run: string,
   from: number,
@@ -137,7 +151,7 @@ const acknowledgement = (
   from,
   through,
   dataCut,
-  subscription: [],
+  subscription: { presenceId: run, topicsDigest: mailboxTopicsDigest([]) },
   servedCount: 1,
   servedDigest: mailboxServedDigest(["synthetic"]),
   carrierBytes: 42,
@@ -174,16 +188,312 @@ for (const backend of backends) {
       expect(first.status).toBe("ADMITTED");
       if (first.status !== "ADMITTED" || entry.presence === undefined) return;
 
-      const different = new Message({
-        ...entry,
-        presence: new Presence({ ...entry.presence, topics: ["different"] }),
-      });
-      expect((await two.start(different, start, basis)).status).not.toBe("ADMITTED");
+      const variants = [
+        new Message({
+          ...entry,
+          presence: new Presence({ ...entry.presence, topics: ["different"] }),
+        }),
+        new Message({ ...entry, presence: new Presence({ ...entry.presence, session: "other" }) }),
+        new Message({
+          ...entry,
+          presence: new Presence({ ...entry.presence, installation: "other" }),
+        }),
+        new Message({ ...entry, presence: new Presence({ ...entry.presence, note: "other" }) }),
+        new Message({
+          ...entry,
+          presence: new Presence({
+            ...entry.presence,
+            associations: [{ directory: "other", concerns: [] }],
+          }),
+        }),
+        new Message({ ...entry, origin: new Origin({ host: "other" }) }),
+      ];
+      for (const different of variants) {
+        expect((await two.start(different, start, basis)).status).toBe("REFUSED");
+      }
       const final = await two.cut();
       expect(final).toEqual(first.cut);
       const stored = await two.read(basis.head);
       expect(stored.entries).toHaveLength(1);
       expect(stored.entries[0]?.message.presence?.topics).toEqual([]);
+    });
+
+    test("an exact start retry recovers its original cut after later commits", async () => {
+      const { one, two } = await backend.make();
+      const basis = await one.cut();
+      const entry = presence();
+      const start = starting(entry, basis);
+      const first = await one.start(entry, start, basis);
+      if (first.status !== "ADMITTED") throw new Error("start was not admitted");
+      await two.append(message("claude/neighbour"));
+      const later = await two.cut();
+      expect(await two.start(entry, start, basis)).toEqual(first);
+      expect(await two.cut()).toEqual(later);
+      const state = await two.mailbox(address, later);
+      if (state.status !== "FOUND") throw new Error("missing start");
+      expect(state.records).toHaveLength(1);
+      const stored = await two.read(basis.head);
+      expect(stored.entries.filter((item) => item.message.id === entry.id)).toHaveLength(1);
+    });
+
+    test("a settled message or another mailbox fact cannot be claimed as a start", async () => {
+      const { one } = await backend.make();
+      const basis = await one.cut();
+      const original = message();
+      await one.append(original);
+      const different = new Message({ ...presence(), id: original.id });
+      expect((await one.start(different, starting(different, basis), basis)).status).toBe(
+        "REFUSED"
+      );
+      const afterMessage = await one.cut();
+      expect((await one.mailbox(address, afterMessage)).status).toBe("ABSENT");
+
+      const marker = unresolved();
+      const marked = await one.classify(marker, afterMessage);
+      if (marked.status !== "APPLIED") throw new Error("classification was not written");
+      const collided = new Message({ ...presence(), id: marker.operation });
+      expect(
+        (await one.start(collided, starting(collided, afterMessage), afterMessage)).status
+      ).toBe("REFUSED");
+      expect(await one.cut()).toEqual(marked.cut);
+    });
+
+    test("receipt lookup cannot expose a different address's operation", async () => {
+      const { one, two } = await backend.make();
+      const basis = await one.cut();
+      const entry = presence();
+      const first = await one.start(entry, starting(entry, basis), basis);
+      if (first.status !== "ADMITTED") throw new Error("start was not admitted");
+      const other = "claude/other";
+      const wrong = await two.receipt(entry.id, first.cut, other);
+      expect(wrong.status).toBe("ADDRESS_MISMATCH");
+      expect(wrong).not.toHaveProperty("record");
+      const imported: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: entry.id,
+        address: other,
+        run: "other-run",
+        origin: "import",
+        position: 0,
+      };
+      expect((await two.import(imported, first.cut)).status).toBe("IDENTITY_MISMATCH");
+      expect((await two.mailbox(other, await two.cut())).status).toBe("ABSENT");
+      expect(await two.cut()).toEqual(first.cut);
+    });
+
+    test("unresolved imports persist until explicit reconciliation", async () => {
+      const { one, two } = await backend.make();
+      const before = await one.cut();
+      const marker = unresolved(address, "conflict");
+      const first = await one.classify(marker, before);
+      if (first.status !== "APPLIED") throw new Error("classification was not written");
+      expect(await two.mailbox(address, before)).toEqual({ status: "ABSENT" });
+      const unknown = await two.mailbox(address, first.cut);
+      expect(unknown.status).toBe("UNRESOLVED");
+      if (unknown.status !== "UNRESOLVED") return;
+      expect(unknown.reason).toBe("conflict");
+      expect(unknown.records).toHaveLength(1);
+      expect(await two.classify(marker, before)).toEqual(first);
+      expect((await two.classify({ ...marker, reason: "stale" }, before)).status).toBe(
+        "IDENTITY_MISMATCH"
+      );
+
+      expect((await two.admit(presence(), first.cut)).status).toBe("ADMITTED");
+      const renewed = await two.cut();
+      expect((await one.mailbox(address, renewed)).status).toBe("UNRESOLVED");
+      const entry = presence();
+      expect((await two.start(entry, starting(entry, renewed), renewed)).status).toBe("REFUSED");
+      const noGuess: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: Bun.randomUUIDv7(),
+        address,
+        run: "reconciled-run",
+        origin: "import",
+        position: 0,
+      };
+      expect((await two.import(noGuess, renewed)).status).toBe("CONFLICT");
+      const recovered: MailboxStart = { ...noGuess, origin: "reconcile" };
+      const applied = await two.import(recovered, renewed);
+      if (applied.status !== "APPLIED") throw new Error("reconciliation was not written");
+      const final = await one.mailbox(address, applied.cut);
+      if (final.status !== "FOUND") throw new Error("reconciliation lost the position");
+      expect(final.position).toBe(0);
+      expect(final.records).toHaveLength(2);
+      expect((await one.mailbox(address, first.cut)).status).toBe("UNRESOLVED");
+    });
+
+    test("restart resolves an unresolved import only as an explicit atomic start", async () => {
+      const { one, two } = await backend.make();
+      const before = await one.cut();
+      const marker = await one.classify(unresolved(), before);
+      if (marker.status !== "APPLIED") throw new Error("classification was not written");
+      const entry = presence();
+      const replay = { ...starting(entry, marker.cut, "replay"), position: 0 };
+      expect((await two.start(entry, replay, marker.cut)).status).toBe("REFUSED");
+      const restart = starting(entry, marker.cut, "restart");
+      const result = await two.start(entry, restart, marker.cut);
+      if (result.status !== "ADMITTED") throw new Error("restart was not admitted");
+      const state = await one.mailbox(address, result.cut);
+      if (state.status !== "FOUND") throw new Error("missing restart position");
+      expect(state.position).toBe(marker.cut.head);
+      expect(state.records).toHaveLength(2);
+    });
+
+    test("concurrent reconciliation and restart have one resolution", async () => {
+      const { one, two } = await backend.make();
+      const before = await one.cut();
+      const marked = await one.classify(unresolved(), before);
+      if (marked.status !== "APPLIED") throw new Error("classification was not written");
+      const entry = presence();
+      const restart = starting(entry, marked.cut, "restart");
+      const reconcile: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: Bun.randomUUIDv7(),
+        address,
+        run: "recovered-run",
+        origin: "reconcile",
+        position: 0,
+      };
+      const [restarted, reconciled] = await Promise.all([
+        one.start(entry, restart, marked.cut),
+        two.import(reconcile, marked.cut),
+      ]);
+      expect(
+        [restarted.status, reconciled.status].filter(
+          (status) => status === "ADMITTED" || status === "APPLIED"
+        )
+      ).toHaveLength(1);
+      const cut = await one.cut();
+      const state = await two.mailbox(address, cut);
+      if (state.status !== "FOUND") throw new Error("missing winning resolution");
+      expect(state.records).toHaveLength(2);
+      const receipts = await Promise.all([
+        one.receipt(entry.id, cut),
+        one.receipt(reconcile.operation, cut),
+      ]);
+      expect(receipts.filter((value) => value.status === "FOUND")).toHaveLength(1);
+      const entries = (await one.read(marked.cut.head)).entries.filter(
+        (item) => item.message.id === entry.id
+      );
+      expect(entries).toHaveLength(restarted.status === "ADMITTED" ? 1 : 0);
+    });
+
+    test("classification, initial start and import cannot all win the same empty basis", async () => {
+      const { one, two } = await backend.make();
+      const basis = await one.cut();
+      const marker = unresolved();
+      const entry = presence();
+      const imported: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: Bun.randomUUIDv7(),
+        address,
+        run: "imported-run",
+        origin: "import",
+        position: 0,
+      };
+      const results = await Promise.all([
+        one.classify(marker, basis),
+        two.start(entry, starting(entry, basis), basis),
+        one.import(imported, basis),
+      ]);
+      expect(
+        results.filter((result) => result.status === "APPLIED" || result.status === "ADMITTED")
+      ).toHaveLength(1);
+      const cut = await one.cut();
+      const state = await one.mailbox(address, cut);
+      if (state.status === "ABSENT") throw new Error("winning fact is missing");
+      expect(state.records).toHaveLength(1);
+      const receipts = await Promise.all([
+        one.receipt(marker.operation, cut),
+        one.receipt(entry.id, cut),
+        one.receipt(imported.operation, cut),
+      ]);
+      expect(receipts.filter((value) => value.status === "FOUND")).toHaveLength(1);
+    });
+
+    test("a later presence alone fences a stale acknowledgement and import", async () => {
+      const { one, two } = await backend.make();
+      const initial = await one.cut();
+      const owner = presence();
+      expect((await one.start(owner, starting(owner, initial), initial)).status).toBe("ADMITTED");
+      await one.append(message());
+      const ackBasis = await one.cut();
+      const ack = acknowledgement(owner.id, initial.head, ackBasis.head, ackBasis);
+      const renewal = presence();
+      expect((await two.admit(renewal, ackBasis)).status).toBe("ADMITTED");
+      const afterRenewal = await one.cut();
+      expect((await one.ack(ack, ackBasis)).status).toBe("CONFLICT");
+      expect((await one.receipt(ack.operation, afterRenewal)).status).toBe("ABSENT");
+      const position = await one.mailbox(address, afterRenewal);
+      if (position.status !== "FOUND") throw new Error("missing original position");
+      expect(position.position).toBe(initial.head);
+
+      const other = "claude/import-target";
+      const importBasis = await one.cut();
+      const join = presence(other);
+      expect((await two.admit(join, importBasis)).status).toBe("ADMITTED");
+      const imported: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: Bun.randomUUIDv7(),
+        address: other,
+        run: "run",
+        origin: "import",
+        position: 0,
+      };
+      expect((await one.import(imported, importBasis)).status).toBe("CONFLICT");
+      expect((await one.receipt(imported.operation, await one.cut(), other)).status).toBe("ABSENT");
+      expect((await one.mailbox(other, await one.cut())).status).toBe("ABSENT");
+    });
+
+    test("another address's presence and classification do not fence an import", async () => {
+      const { one, two } = await backend.make();
+      const basis = await one.cut();
+      expect((await two.admit(presence("claude/neighbour"), basis)).status).toBe("ADMITTED");
+      expect((await two.classify(unresolved("claude/elsewhere"), basis)).status).toBe("APPLIED");
+      const imported: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: Bun.randomUUIDv7(),
+        address,
+        run: "run",
+        origin: "import",
+        position: 0,
+      };
+      expect((await one.import(imported, basis)).status).toBe("APPLIED");
+    });
+
+    test("a compact witness retains a 66 KB joined subscription by exact presence id", async () => {
+      const { one, two } = await backend.make();
+      const basis = await one.cut();
+      const original = presence();
+      if (original.presence === undefined) throw new Error("missing presence");
+      const topics = ["\u00e9".repeat(33_000), 'a"b\\c'];
+      const joined = new Message({
+        ...original,
+        presence: new Presence({ ...original.presence, topics }),
+      });
+      const first = await one.start(joined, starting(joined, basis), basis);
+      if (first.status !== "ADMITTED") throw new Error("large subscription was not joined");
+      await one.append(message());
+      const dataCut = await one.cut();
+      const value: MailboxAck = {
+        ...acknowledgement(joined.id, basis.head, dataCut.head, dataCut),
+        subscription: { presenceId: joined.id, topicsDigest: mailboxTopicsDigest(topics) },
+      };
+      const acked = await two.ack(value, dataCut);
+      if (acked.status !== "APPLIED") throw new Error("large subscription ack was refused");
+      const saved = await two.receipt(value.operation, acked.cut);
+      if (saved.status !== "FOUND" || saved.record.kind !== "ack") throw new Error("missing ack");
+      expect(saved.record.subscription).toEqual(value.subscription);
+      expect(await two.ack(value, dataCut)).toEqual(acked);
+      const historical = await one.readAt(basis.head, dataCut);
+      const recovered = historical.entries.find((item) => item.message.id === joined.id);
+      expect(recovered?.message.presence?.topics).toEqual(topics);
     });
 
     test("a staggered stale ack cannot overwrite the later position, even if it extends farther", async () => {
@@ -369,6 +679,10 @@ for (const backend of backends) {
       expect(
         (await one.ack(acknowledgement(owner.id, initial.head, basis.head, basis), basis)).status
       ).toBe("APPLIED");
+      const classifiedAt = await one.cut();
+      expect((await one.classify(unresolved("claude/unresolved"), classifiedAt)).status).toBe(
+        "APPLIED"
+      );
       const cut = await one.cut();
       expect((await one.read(initial.head)).entries.map((entry) => entry.message.id)).toEqual([
         owner.id,
@@ -449,7 +763,14 @@ for (const backend of backends) {
         { ...value, run: "other-run" },
         { ...value, from: value.from + 1 },
         { ...value, through: value.through + 1 },
-        { ...value, subscription: ["other-topic"] },
+        { ...value, subscription: { ...value.subscription, presenceId: "other-presence" } },
+        {
+          ...value,
+          subscription: {
+            ...value.subscription,
+            topicsDigest: mailboxTopicsDigest(["other-topic"]),
+          },
+        },
         { ...value, servedDigest: mailboxServedDigest(["other"]) },
         { ...value, carrierBytes: 43 },
       ])
@@ -518,6 +839,75 @@ for (const backend of backends) {
 }
 
 describe("mailbox Fluree boundaries", () => {
+  test("a no-start presence admission never claims a concurrent different presence", async () => {
+    const config = await freshLedger("presence-attribution");
+    let release = () => {};
+    let arrived = () => {};
+    const seen = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = false;
+    const proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0,
+      async fetch(request) {
+        const path = new URL(request.url);
+        const headers = new Headers(request.headers);
+        headers.delete("host");
+        const body = request.method === "GET" ? undefined : await request.arrayBuffer();
+        if (armed && path.pathname === "/v1/fluree/update") {
+          armed = false;
+          arrived();
+          await gate;
+        }
+        return fetch(`${config.url}${path.pathname}${path.search}`, {
+          method: request.method,
+          headers,
+          body,
+          signal: request.signal,
+        });
+      },
+    });
+    cleanups.push(() => proxy.stop(true));
+    const direct = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const slow = await handle(
+      layerFluree({ ...config, url: proxy.url.origin }).pipe(Layer.provide(platform)) as LedgerLayer
+    );
+    const basis = await direct.cut();
+    const entry = presence();
+    if (entry.presence === undefined) throw new Error("missing presence");
+    const different = new Message({
+      ...entry,
+      presence: new Presence({ ...entry.presence, topics: ["different"] }),
+    });
+    armed = true;
+    const pending = slow.admit(different, basis);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        seen,
+        pending.then(() => {
+          throw new Error("the delayed update did not reach the relay");
+        }),
+        new Promise<void>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("delayed update timed out")), 3000);
+        }),
+      ]);
+      expect((await direct.admit(entry, basis)).status).toBe("ADMITTED");
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline);
+      release();
+    }
+    expect((await pending).status).toBe("REFUSED");
+    const stored = await direct.read(basis.head);
+    expect(stored.entries).toHaveLength(1);
+    expect(stored.entries[0]?.message.presence?.topics).toEqual([]);
+  });
+
   test("a delayed start cannot claim another presence with the same operation and different intent", async () => {
     const config = await freshLedger("mailbox-start-intent");
     let release = () => {};
@@ -590,6 +980,87 @@ describe("mailbox Fluree boundaries", () => {
     const stored = await direct.read(basis.head);
     expect(stored.entries).toHaveLength(1);
     expect(stored.entries[0]?.message.presence?.topics).toEqual([]);
+  });
+
+  test("a foreign receipt winning after preflight is a collision, not a leaked receipt", async () => {
+    const config = await freshLedger("mailbox-foreign-race");
+    let release = () => {};
+    let arrived = () => {};
+    const seen = new Promise<void>((resolve) => {
+      arrived = resolve;
+    });
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let armed = false;
+    const proxy = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 0,
+      idleTimeout: 0,
+      async fetch(request) {
+        const path = new URL(request.url);
+        const headers = new Headers(request.headers);
+        headers.delete("host");
+        const body = request.method === "GET" ? undefined : await request.arrayBuffer();
+        if (armed && path.pathname === "/v1/fluree/update") {
+          armed = false;
+          arrived();
+          await gate;
+        }
+        return fetch(`${config.url}${path.pathname}${path.search}`, {
+          method: request.method,
+          headers,
+          body,
+          signal: request.signal,
+        });
+      },
+    });
+    cleanups.push(() => proxy.stop(true));
+    const direct = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const slow = await handle(
+      layerFluree({ ...config, url: proxy.url.origin }).pipe(Layer.provide(platform)) as LedgerLayer
+    );
+    const basis = await direct.cut();
+    const other = "claude/foreign-winner";
+    const marker = unresolved(other, "stale");
+    const imported: MailboxStart = {
+      version: 1,
+      kind: "start",
+      operation: marker.operation,
+      address,
+      run: "run",
+      origin: "import",
+      position: 0,
+    };
+    armed = true;
+    const pending = slow.import(imported, basis);
+    let deadline: ReturnType<typeof setTimeout> | undefined;
+    let winning: Awaited<ReturnType<typeof direct.classify>> | undefined;
+    try {
+      await Promise.race([
+        seen,
+        pending.then(() => {
+          throw new Error("the delayed update did not reach the relay");
+        }),
+        new Promise<void>((_, reject) => {
+          deadline = setTimeout(() => reject(new Error("delayed update timed out")), 3000);
+        }),
+      ]);
+      winning = await direct.classify(marker, basis);
+      expect(winning.status).toBe("APPLIED");
+    } finally {
+      if (deadline !== undefined) clearTimeout(deadline);
+      release();
+    }
+    if (winning?.status !== "APPLIED") throw new Error("foreign receipt did not win");
+    expect((await pending).status).toBe("IDENTITY_MISMATCH");
+    expect(await direct.cut()).toEqual(winning.cut);
+    expect((await direct.mailbox(address, winning.cut)).status).toBe("ABSENT");
+    expect((await direct.mailbox(other, winning.cut)).status).toBe("UNRESOLVED");
+    const hidden = await direct.receipt(marker.operation, winning.cut, address);
+    expect(hidden.status).toBe("ADDRESS_MISMATCH");
+    expect(hidden).not.toHaveProperty("record");
+    expect((await direct.receipt(marker.operation, winning.cut, other)).status).toBe("FOUND");
   });
 
   test("a position committed after preflight fences a delayed update inside the provider", async () => {
@@ -666,7 +1137,7 @@ describe("mailbox Fluree boundaries", () => {
     expect(state.records).toHaveLength(2);
   });
 
-  test("a lost successful update remains unknown until its immutable receipt is read", async () => {
+  test("a lost successful update is recovered from its immutable receipt", async () => {
     const config = await freshLedger("mailbox-unknown");
     const relay = boundary(config.url);
     cleanups.push(() => relay.stop());
@@ -681,13 +1152,164 @@ describe("mailbox Fluree boundaries", () => {
     const basis = await direct.cut();
     const value = acknowledgement(owner.id, initial.head, basis.head, basis);
     const forwarded = relay.loseNextUpdate();
-    expect((await unreliable.ack(value, basis)).status).toBe("UNKNOWN");
+    const settled = await unreliable.ack(value, basis);
+    expect(settled.status).toBe("APPLIED");
     expect(await forwarded).toEqual({ status: 200 });
     const committed = await direct.cut();
     expect((await direct.receipt(value.operation, committed)).status).toBe("FOUND");
-    expect((await unreliable.ack(value, basis)).status).toBe("APPLIED");
+    expect(await unreliable.ack(value, basis)).toEqual(settled);
     expect(await direct.cut()).toEqual(committed);
   });
+
+  test("lost successful join-start and import responses recover their original commits", async () => {
+    const config = await freshLedger("mailbox-lost-start");
+    const relay = boundary(config.url);
+    cleanups.push(() => relay.stop());
+    const direct = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const unreliable = await handle(
+      layerFluree({ ...config, url: relay.url }).pipe(Layer.provide(platform)) as LedgerLayer
+    );
+    const basis = await direct.cut();
+    const entry = presence();
+    const start = starting(entry, basis);
+    const forwarded = relay.loseNextUpdate();
+    const joined = await unreliable.start(entry, start, basis);
+    expect(joined.status).toBe("ADMITTED");
+    expect(await forwarded).toEqual({ status: 200 });
+    if (joined.status !== "ADMITTED") return;
+    expect((await direct.receipt(entry.id, joined.cut)).status).toBe("FOUND");
+    await direct.append(message("claude/neighbour"));
+    const afterJoin = await direct.cut();
+    expect(await unreliable.start(entry, start, basis)).toEqual(joined);
+    expect(await direct.cut()).toEqual(afterJoin);
+
+    const other = "claude/import-after-loss";
+    const imported: MailboxStart = {
+      version: 1,
+      kind: "start",
+      operation: Bun.randomUUIDv7(),
+      address: other,
+      run: "imported-run",
+      origin: "import",
+      position: 0,
+    };
+    const secondForwarded = relay.loseNextUpdate();
+    const saved = await unreliable.import(imported, afterJoin);
+    expect(saved.status).toBe("APPLIED");
+    expect(await secondForwarded).toEqual({ status: 200 });
+    if (saved.status !== "APPLIED") return;
+    await direct.append(message("claude/neighbour"));
+    const afterImport = await direct.cut();
+    expect(await unreliable.import(imported, afterJoin)).toEqual(saved);
+    expect(await direct.cut()).toEqual(afterImport);
+    const state = await direct.mailbox(other, afterImport);
+    if (state.status !== "FOUND") throw new Error("import was not retained");
+    expect(state.records).toHaveLength(1);
+  });
+
+  for (const mode of ["ack", "start"] as const) {
+    test(`an unanswered in-flight ${mode} stays unknown when its witness is not yet visible`, async () => {
+      const config = await freshLedger(`mailbox-in-flight-${mode}`);
+      let release = () => {};
+      let arrived = () => {};
+      const seen = new Promise<void>((resolve) => {
+        arrived = resolve;
+      });
+      const gate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let armed = false;
+      let forwarded: Promise<Response> | undefined;
+      const proxy = Bun.serve({
+        hostname: "127.0.0.1",
+        port: 0,
+        idleTimeout: 0,
+        async fetch(request) {
+          const path = new URL(request.url);
+          const headers = new Headers(request.headers);
+          headers.delete("host");
+          const body = request.method === "GET" ? undefined : await request.arrayBuffer();
+          const forward = () =>
+            fetch(`${config.url}${path.pathname}${path.search}`, {
+              method: request.method,
+              headers,
+              body,
+              signal: AbortSignal.timeout(3000),
+            });
+          if (armed && path.pathname === "/v1/fluree/update") {
+            armed = false;
+            forwarded = gate.then(forward);
+            arrived();
+            return new Response(null, { status: 504 });
+          }
+          return forward();
+        },
+      });
+      cleanups.push(() => proxy.stop(true));
+      const direct = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+      const unreliable = await handle(
+        layerFluree({ ...config, url: proxy.url.origin }).pipe(
+          Layer.provide(platform)
+        ) as LedgerLayer
+      );
+      const initial = await direct.cut();
+      const owner = presence();
+      if (mode === "ack") {
+        expect((await direct.start(owner, starting(owner, initial), initial)).status).toBe(
+          "ADMITTED"
+        );
+        await direct.append(message());
+      }
+      const basis = await direct.cut();
+      const ack = acknowledgement(owner.id, initial.head, basis.head, basis);
+      const start = starting(owner, basis);
+      const operation = mode === "ack" ? ack.operation : owner.id;
+      armed = true;
+      const pending =
+        mode === "ack" ? unreliable.ack(ack, basis) : unreliable.start(owner, start, basis);
+      let deadline: ReturnType<typeof setTimeout> | undefined;
+      let status = 0;
+      try {
+        await Promise.race([
+          seen,
+          pending.then(() => {
+            throw new Error("the update did not reach the relay");
+          }),
+          new Promise<void>((_, reject) => {
+            deadline = setTimeout(() => reject(new Error("in-flight update timed out")), 3000);
+          }),
+        ]);
+        const attempt = await pending;
+        expect(attempt.status).toBe("UNKNOWN");
+        expect((await direct.receipt(operation, await direct.cut())).status).toBe("ABSENT");
+      } finally {
+        if (deadline !== undefined) clearTimeout(deadline);
+        release();
+        if (forwarded === undefined) proxy.stop(true);
+        else {
+          const response = await forwarded;
+          status = response.status;
+          await response.arrayBuffer();
+        }
+      }
+      expect(status).toBe(200);
+      const committed = await direct.cut();
+      expect((await direct.receipt(operation, committed)).status).toBe("FOUND");
+      const retry =
+        mode === "ack"
+          ? await unreliable.ack(ack, basis)
+          : await unreliable.start(owner, start, basis);
+      expect(retry.status).toBe(mode === "ack" ? "APPLIED" : "ADMITTED");
+      if (mode === "start") {
+        const state = await direct.mailbox(address, committed);
+        if (state.status !== "FOUND") throw new Error("missing in-flight start");
+        expect(state.records).toHaveLength(1);
+        const entries = await direct.read(basis.head);
+        expect(entries.entries.filter((item) => item.message.id === owner.id)).toHaveLength(1);
+      }
+      expect(await direct.cut()).toEqual(committed);
+    });
+  }
 
   test("a malformed newer event and a dangling receipt each fail closed", async () => {
     const config = await freshLedger("mailbox-damage");
@@ -727,6 +1349,42 @@ describe("mailbox Fluree boundaries", () => {
     expect((await store.receipt(orphan.operation, await store.cut(), orphanAddress)).status).toBe(
       "MALFORMED"
     );
+    const wrong = await store.receipt(orphan.operation, await store.cut(), "claude/other");
+    expect(wrong.status).not.toBe("FOUND");
+    expect(wrong).not.toHaveProperty("record");
+  });
+
+  test("partial colliding message and receipt nodes leave a start outcome unknown", async () => {
+    const config = await freshLedger("mailbox-partial-collisions");
+    const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const firstBasis = await store.cut();
+    const first = presence("claude/partial-message");
+    await insertRaw(config, {
+      "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+      "@id": `urn:agent-bus:message:${first.id}`,
+      "bus:id": first.id,
+    });
+    const afterFirst = await store.cut();
+    expect((await store.start(first, starting(first, firstBasis), firstBasis)).status).toBe(
+      "UNKNOWN"
+    );
+    expect(await store.cut()).toEqual(afterFirst);
+    expect((await store.mailbox(first.from, afterFirst)).status).toBe("ABSENT");
+
+    const secondBasis = await store.cut();
+    const second = presence("claude/partial-receipt");
+    await insertRaw(config, {
+      "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+      "@id": mailboxReceiptIri(second.id),
+      "@type": "bus:MailboxStart",
+      "bus:mailboxRecord": "{}",
+    });
+    const afterSecond = await store.cut();
+    expect((await store.start(second, starting(second, secondBasis), secondBasis)).status).toBe(
+      "UNKNOWN"
+    );
+    expect(await store.cut()).toEqual(afterSecond);
+    expect((await store.mailbox(second.from, afterSecond)).status).toBe("ABSENT");
   });
 
   test("retracting a previously asserted position is damage at the later cut", async () => {
@@ -752,6 +1410,29 @@ describe("mailbox Fluree boundaries", () => {
     );
     expect(response.status).toBe(200);
     expect((await store.mailbox(address, admitted.cut)).status).toBe("FOUND");
+    await expect(store.mailbox(address, await store.cut())).rejects.toThrow();
+  });
+
+  test("retracting an unresolved import is damage, not a fresh mailbox", async () => {
+    const config = await freshLedger("unresolved-retraction");
+    const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const basis = await store.cut();
+    const result = await store.classify(unresolved(), basis);
+    if (result.status !== "APPLIED") throw new Error("classification was not written");
+    const response = await fetch(
+      `${config.url}/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${config.token}` },
+        body: JSON.stringify({
+          "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+          where: { "@id": mailboxIri(address), "bus:mailboxStart": "?value" },
+          delete: { "@id": mailboxIri(address), "bus:mailboxStart": "?value" },
+        }),
+      }
+    );
+    expect(response.status).toBe(200);
+    expect((await store.mailbox(address, result.cut)).status).toBe("UNRESOLVED");
     await expect(store.mailbox(address, await store.cut())).rejects.toThrow();
   });
 
