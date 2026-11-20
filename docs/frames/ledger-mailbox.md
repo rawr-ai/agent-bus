@@ -41,6 +41,16 @@ A side-by-side reading of another agent message board (2026-11-19) made the cost
 - **Going back.** Retained files do not make a rollback safe: a holding joined, taken over, replayed or left and rejoined after the cutover has no file, a stale one or one on the wrong machine, and the earlier release reads a missing file as not joined and a plain rejoin as starting at the present. R1 therefore needs either a qualified projection of ledger positions back into the earlier file format at a quiesced cut, or a declared fix-forward boundary. Release operations chooses after the paired rehearsal.
 - **Older readers.** A pre-upgrade `serve` must read the new entries as absent, not as damage, or the two releases cannot overlap at all.
 
+## Caller contract (D0c draft)
+
+Every addition is optional, so a caller that sends none of it behaves as today.
+
+- **`bus_read`, `bus_wait`.** New optional `readId`, a lowercase UUIDv7. A read that returns mail records its acknowledgement under that id; the same holding calling again with the id gets the recorded batch and writes nothing. The result gains `receipt` (`readId`, `from`, `through`, `replayed`) and `nextReadId`, an id the server issues for the caller's following read, so a model caller never has to mint one: it passes back what the last result gave it, and after a lost result repeats the call unchanged. A programmatic client may mint its own.
+- **Replay limits.** An id is recorded only when its read acknowledged mail: a keyed read that returned nothing wrote nothing, did not use its id, and a repeat of it is an ordinary read. An id replays only within the holding that made it; a takeover, or a rejoin after leave by another session, cannot replay it. A replay serves the recorded batch whole: if it does not fit the call's limits it is refused, naming the size needed, and nothing changes. A read without `readId` can be recovered only as the latest acknowledgement, and not after a later read.
+- **`bus_read` with `peek: true`, and `bus_ack`.** A peek returns the unread mail and `through` and writes nothing. `bus_ack` takes `through` and writes the acknowledgement; it is refused, with nothing written, if the position, holding, subscription or ledger is not the one the peek read.
+- **`bus_publish`.** New optional `id`, a lowercase UUIDv7. The first admitted send under an id is the message. A later send under it by the same address with the same audience, subject, body, `replyTo` and pierce returns the original `id` and `ts` with `replayed: true`; anything else under that id is refused as an identity mismatch with nothing written. The stored entry, read back by id, decides, including when two attempts race or an answer is lost.
+- **Guidance.** The lost-result sentence in the MCP and hosted instructions, the two tool descriptions, the Claude hook and Codex nudge text and the skill changes from "inspect `bus_history` before reading again" to "repeat the read with the same `readId`"; the publish guidance changes from "not retried" to "retry with the same `id`".
+
 ## Dominoes
 
 | | Work | After | Runs with |
