@@ -88,7 +88,7 @@ Still to measure before D2 is fixed: each acknowledgement re-runs every `serve`'
 | D1 | Ledger position and acknowledgement in the Fluree and test ledgers | Gate | D4 |
 | D2 | Bus on ledger positions; the one import; the in-memory scan hint | D1 | D4 |
 | D3 | Read and acknowledge across the tools, wait, wake, hook text, hosted mapping and skill | D2 | D4 |
-| D4 | Caller id on publish | Gate | D1 to D3 |
+| D4 | Caller id on publish. Reviewed on both sides with no open finding (PR #107); held to ship with D1 to D3 | Gate | D1 to D3 |
 | R1 | Paired-host rehearsal (interrupted import, interrupted acknowledgement, an older server refused every position-changing call after the import, going back, going forward, new joins, cross-machine takeover, replay, bounded reads), then both machines together | D3, D4 | |
 | D5 | Delete the file layer, converter, quiescence check, installer and rehearsal checks, their tests, procedures and limit rows. The point of no return: the projection back to files goes with it | R1 verified on both machines and the fix-forward boundary declared | |
 | D6 | Split `src/Bus.ts` by responsibility (ownership, mailbox, delivery, publish) as pure moves | D5, since both edit the file | |
@@ -125,7 +125,7 @@ What the checks require of D1 and D2:
 - **Authority is the application's.** An acknowledgement from an earlier run, sent on a fresh basis, commits if nothing first establishes the caller as the current holder. The store guard is not that check.
 - **Point reads check the stored entry.** A replay or a retried send reads the immutable attempted entry and compares its canonical intent, under the current holder's permission.
 - **Damage fails.** A query that selected only well-formed rows hid a deliberately malformed newer acknowledgement. Reading a position fails on such an entry; it never falls back to an older one.
-- **A served prefix is proved.** An acknowledgement's declared membership and byte prefix are pinned to the cut it read, not asserted.
+- **A served prefix is proved.** An acknowledgement's declared membership and byte prefix are pinned to the cut it read, not asserted. The store's raw slice returns encoded assertions only: on real Fluree a typed message with no `bus:json` vanished from it. D2 therefore checks completeness and damage at that same cut before it acknowledges, and leaves the position unchanged when relevant mail cannot be read.
 
 ### Gates still open before R1
 
