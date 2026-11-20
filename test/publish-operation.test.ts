@@ -17,7 +17,13 @@ import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Message } from "../src/domain.ts";
 import { type Admission, type EntryRead, Ledger } from "../src/Ledger.ts";
-import { MAX_ENTRY_CARRIER_BYTES, messageCarrierBytes } from "../src/message-carrier.ts";
+import {
+  MAX_ENTRY_CARRIER_BYTES,
+  MAX_STORED_ENTRY_BYTES,
+  messageCarrierBytes,
+  readableEntry,
+  storedReadBytes,
+} from "../src/message-carrier.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -60,7 +66,9 @@ const serve = (
   seams: Seams = {},
   host: Host = { name: "fixture-host" },
   /** Every serve made with it reads the same time, as two attempts in one millisecond do. */
-  frozen = false
+  frozen = false,
+  /** A lowered stored-entry budget, so its bound is reached without a 32 MiB entry. */
+  storedEntryBytes?: number
 ) => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-publish-op-"));
   const ledger = Layer.effect(
@@ -87,7 +95,7 @@ const serve = (
     )
   ).pipe(Layer.provideMerge(layerJsonl(file).pipe(Layer.provide(platform))));
   const runtime = ManagedRuntime.make(
-    Bus.layer("test-installation", () => host.name).pipe(
+    Bus.layer("test-installation", () => host.name, storedEntryBytes).pipe(
       Layer.provideMerge(ledger),
       Layer.provideMerge(frozen ? TestClock.layer() : Layer.empty),
       Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
@@ -153,9 +161,9 @@ const serve = (
 };
 
 /** A fresh file with the sender and receiver joined on one serve. */
-const world = async (seams: Seams = {}, host?: Host) => {
+const world = async (seams: Seams = {}, host?: Host, storedEntryBytes?: number) => {
   const file = join(mkdtempSync(join(tmpdir(), "agent-bus-publish-op-")), "ledger.jsonl");
-  const bus = serve(file, seams, host);
+  const bus = serve(file, seams, host, false, storedEntryBytes);
   for (const address of [sender, receiver]) {
     const joined = await bus.join(address, { topics: ["watch"] });
     if (!joined.ok) throw new Error(`join failed: ${joined.error.message}`);
@@ -678,4 +686,101 @@ describe("publish with an operation (jsonl)", () => {
     },
     TIMEOUT
   );
+  describe("a new send's stored entry fits the point read", () => {
+    const call = {
+      body: "sized \u00e9 \u{1f680}",
+      to: ["#watch"],
+      pierce: [receiver],
+    };
+    /** The stored-read bytes of the entry this call stores, from a probe's time and origin. */
+    const sizeOf = async (host: Host) => {
+      const { bus } = await world({}, host);
+      const probe = sent(await bus.publish({ body: "probe", operation: Bun.randomUUIDv7() }));
+      return storedReadBytes(
+        new Message({
+          id: Bun.randomUUIDv7(),
+          ts: probe.message.ts,
+          from: sender,
+          to: [...call.to],
+          kind: "message",
+          body: call.body,
+          ...(probe.message.origin === undefined ? {} : { origin: probe.message.origin }),
+          pierce: [...call.pierce],
+        })
+      );
+    };
+
+    test("the pierce set and the escaping a read applies both count", () => {
+      const base = new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: sender,
+        to: ["#watch"],
+        kind: "message",
+        body: "plain",
+      });
+      const pierced = new Message({ ...base, pierce: ["claude/a", "claude/b"] });
+      expect(storedReadBytes(pierced)).toBeGreaterThan(storedReadBytes(base));
+      // One non-ASCII character counts as a six-byte escape, not its two UTF-8 bytes.
+      const accented = new Message({ ...base, body: "plain\u00e9" });
+      expect(storedReadBytes(accented) - storedReadBytes(base)).toBe(6);
+      // A quote counts as the read escapes it: twice in the stored JSON's own string escape.
+      const quoted = new Message({ ...base, body: 'plain"' });
+      expect(storedReadBytes(quoted) - storedReadBytes(base)).toBe(4);
+      expect(MAX_STORED_ENTRY_BYTES).toBeLessThan(32 * 1024 * 1024);
+      const size = storedReadBytes(pierced);
+      expect(Effect.runSync(Effect.exit(readableEntry(pierced, size)))._tag).toBe("Success");
+      expect(Effect.runSync(Effect.exit(readableEntry(pierced, size - 1)))._tag).toBe("Failure");
+    });
+
+    for (const named of [true, false]) {
+      test(
+        `${named ? "with" : "without"} an operation: exactly at the budget it is sent; one byte over, nothing is written`,
+        async () => {
+          const host: Host = { name: "fixture-host" };
+          const size = await sizeOf(host);
+
+          const fits = await world({}, host, size);
+          const operation = Bun.randomUUIDv7();
+          const ok = sent(await fits.bus.publish({ ...call, ...(named ? { operation } : {}) }));
+          expect(ok.message.pierce).toEqual([receiver]);
+          expect(storedReadBytes(ok.message)).toBe(size);
+          expect(fits.stored(ok.message.id)).toBe(1);
+
+          const over = await world({}, host, size - 1);
+          const before = over.text();
+          const error = refused(
+            await over.bus.publish({ ...call, ...(named ? { operation } : {}) })
+          );
+          expect(error._tag).toBe("InvalidQuery");
+          expect(error.message).toContain(`would take ${size} bytes to read back`);
+          expect(error.message).toContain("Nothing was sent or written");
+          expect(over.text()).toBe(before);
+          if (named) expect(over.stored(operation)).toBe(0);
+        },
+        TIMEOUT
+      );
+    }
+
+    test(
+      "a stored send replays without being sized again",
+      async () => {
+        const host: Host = { name: "fixture-host" };
+        const size = await sizeOf(host);
+        const { file, bus, stored } = await world({}, host, size);
+        const operation = Bun.randomUUIDv7();
+        const first = sent(await bus.publish({ ...call, operation }));
+        // A serve whose budget no entry fits still answers the stored send.
+        const tight = serve(file, {}, host, false, 1);
+        const retry = sent(await tight.publish({ ...call, operation }));
+        expect(retry.replayed).toBe(true);
+        expect(retry.message.ts).toBe(first.message.ts);
+        expect(stored(operation)).toBe(1);
+        expect(refused(await tight.publish({ ...call, operation: Bun.randomUUIDv7() }))._tag).toBe(
+          "InvalidQuery"
+        );
+      },
+      TIMEOUT
+    );
+  });
 });
