@@ -1,5 +1,5 @@
-import { Effect } from "effect";
-import { InvalidQuery, type Message } from "./domain.ts";
+import { Effect, Schema } from "effect";
+import { InvalidQuery, type Message, MessageJson } from "./domain.ts";
 
 /**
  * The most bytes one new message's public read carrier may take: every creator of a message
@@ -53,6 +53,50 @@ export const storable = (message: Message) =>
           message: `This entry's body or subject is over the ${MAX_INDEXED_FIELD_BYTES}-byte limit for searchable text, so the ledger did not send it. Nothing was sent or written.`,
         })
       );
+
+/**
+ * The most bytes the ledger's point read of one entry reads (Fluree's whole-entry JSON-LD
+ * bound). A retried send is settled by that read, so an entry it can't read back can't be
+ * retried: every new send is sized against it before its write.
+ */
+export const ENTRY_READ_BYTES = 32 * 1024 * 1024;
+
+/** Room in that read for all but the stored encoding: the row's brackets, its commit t, framing. */
+const ENTRY_READ_ROW_BYTES = 1024;
+
+/** The most bytes one stored encoding may take in the point read's response. */
+export const MAX_STORED_ENTRY_BYTES = ENTRY_READ_BYTES - ENTRY_READ_ROW_BYTES;
+
+const encodeEntry = Schema.encodeSync(MessageJson);
+
+/**
+ * The bytes an entry's stored encoding takes in a read response: the whole entry as stored,
+ * pierce set included, written as a JSON string, with every non-ASCII UTF-16 unit counted as a
+ * six-byte `\uXXXX` escape, the most any JSON writer spends on it.
+ */
+export const storedReadBytes = (message: Message) => {
+  const quoted = JSON.stringify(encodeEntry(message));
+  let bytes = 0;
+  for (let index = 0; index < quoted.length; index++) {
+    bytes += quoted.charCodeAt(index) < 0x80 ? 1 : 6;
+  }
+  return bytes;
+};
+
+/**
+ * A new send's check before its first write, after its pierce set is resolved: the entry as
+ * stored must fit the point read that settles its retries, or nothing is written.
+ */
+export const readableEntry = (message: Message, limit = MAX_STORED_ENTRY_BYTES) => {
+  const bytes = storedReadBytes(message);
+  return bytes <= limit
+    ? Effect.void
+    : Effect.fail(
+        new InvalidQuery({
+          message: `This message's stored entry, with its pierce set, would take ${bytes} bytes to read back, over the ${limit}-byte limit. Nothing was sent or written. Pierce fewer recipients, or shorten the message and its audience.`,
+        })
+      );
+};
 
 /** The explicit public projection reads return: never presence, pierce or other internals. */
 export const publicMessages = (messages: ReadonlyArray<Message>) => ({

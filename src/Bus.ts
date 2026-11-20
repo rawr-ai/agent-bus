@@ -64,8 +64,10 @@ import {
   admitEntry,
   indexable,
   MAX_ORIGIN_CWD_BYTES,
+  MAX_STORED_ENTRY_BYTES,
   messageCarrierBytes,
   presenceText,
+  readableEntry,
   unjoinable,
   WAKE_LISTED_BYTES,
 } from "./message-carrier.ts";
@@ -569,7 +571,7 @@ type Concerns = Map<
   ReadonlyArray<{ readonly id: string; readonly topic: string }> | undefined
 >;
 
-const make = (installation: string, hostOf: () => string) =>
+const make = (installation: string, hostOf: () => string, storedEntryBytes: number) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger;
     const gateway = yield* QueryGateway;
@@ -1120,6 +1122,10 @@ const make = (installation: string, hostOf: () => string) =>
           return sendIntentOf(draft, named) === intent;
         };
         const store = Effect.fn("Bus.publish.store")(function* (message: Message) {
+          // Only a new send reaches here. Its entry as stored, pierce set included, must fit
+          // the point read that settles its retries, with or without an operation: one sent
+          // without is retried under the id an unconfirmed error names.
+          yield* readableEntry(message, storedEntryBytes);
           const admission = yield* ledger.admit(message, read.cut);
           if (admission.status === "REFUSED") {
             // The write is definitively refused even if the reason cannot be read back.
@@ -1928,5 +1934,12 @@ const make = (installation: string, hostOf: () => string) =>
     });
   });
 
-export const layer = (installation: string, hostOf = hostname) =>
-  Layer.effect(Bus, make(installation, hostOf));
+/**
+ * `storedEntryBytes` is the stored-entry budget a new send is sized against; only tests lower it,
+ * to reach the bound without a 32 MiB fixture.
+ */
+export const layer = (
+  installation: string,
+  hostOf = hostname,
+  storedEntryBytes = MAX_STORED_ENTRY_BYTES
+) => Layer.effect(Bus, make(installation, hostOf, storedEntryBytes));

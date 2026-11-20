@@ -22,7 +22,7 @@ import {
   type WitnessRead,
   witnessIri,
 } from "./Ledger.ts";
-import { storable } from "./message-carrier.ts";
+import { ENTRY_READ_BYTES, storable } from "./message-carrier.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
 
@@ -214,7 +214,9 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
 
       /**
        * A pinned query: at most `maxBytes` of response are read, and the request
-       * is interrupted after QUERY_TIMEOUT. Upstream error bodies are never read.
+       * is interrupted after QUERY_TIMEOUT. Upstream error bodies are never read. As in
+       * `guardedSend`, the request belongs to this call's scope, so an early refusal, an
+       * over-bound body or a timeout closes the connection instead of leaving the body flowing.
        */
       const sendBounded = (request: HttpClientRequest.HttpClientRequest, maxBytes: number) =>
         Effect.gen(function* () {
@@ -1054,13 +1056,11 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
        * The entry at one cut, by its id: whether its node has any fact first, so a partial node
        * is never an absent one, then its one stored encoding, which must decode to that id.
        *
-       * Both queries read whole stored entries, so they use the bound whole-entry JSON-LD reads
-       * already use (JSONLD_RESPONSE_BYTES, 32 MiB), not the guarded writes' 256 KiB. The public
-       * fields of an admissible entry fit MAX_ENTRY_CARRIER_BYTES (1 MiB) even counted twice
-       * with escaping; the stored JSON adds only `pierce`, and the response escapes the string
-       * once more, at most six bytes per input byte (a `\u00XX` escape). So the public part of
-       * a row stays under 6 MiB, leaving over 26 MiB for the pierce set: hundreds of addresses
-       * at the 32 KiB join limit, far more at real lengths. A larger set reads as UNAVAILABLE.
+       * Both queries read whole stored entries, bounded by ENTRY_READ_BYTES (32 MiB, the bound of
+       * whole-entry JSON-LD reads), not the guarded writes' 256 KiB. Every new send is sized
+       * against the same constant before its write (`readableEntry` in message-carrier.ts): its
+       * stored encoding, pierce set included and escaped as a response escapes it, fits this
+       * read. An older entry that doesn't reads as UNAVAILABLE.
        *
        * A transport failure, an over-bound response or a timeout fails the read (UNAVAILABLE).
        * Only a node read completely that is not one decodable entry of the id is MALFORMED.
@@ -1070,7 +1070,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           HttpClientRequest.post(pinned(t)).pipe(
             HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
           ),
-          JSONLD_RESPONSE_BYTES
+          ENTRY_READ_BYTES
         );
       const entryAt = (id: string, cut: Pin) =>
         Effect.gen(function* () {
