@@ -1,5 +1,6 @@
 import { Context, type Effect, type Stream } from "effect";
 import type { DirectScan, InvalidQuery, LedgerError, Logged, Message } from "./domain.ts";
+import type { MailboxAck, MailboxRecord, MailboxStart, MailboxState } from "./mailbox-model.ts";
 import type { Pin } from "./Query.ts";
 
 /** Server-selected namespaces: callers cannot name an arbitrary ledger subject. */
@@ -90,6 +91,25 @@ export type Admission =
   | { readonly status: "REFUSED"; readonly cut: Pin }
   | { readonly status: "UNKNOWN" };
 
+/** A raw operation witness at the caller's pinned cut; it does not authorize its reader. */
+export type MailboxReceiptRead =
+  | {
+      readonly status: "FOUND";
+      readonly record: MailboxRecord;
+      readonly t: number;
+      readonly cut: Pin;
+    }
+  | { readonly status: "ABSENT"; readonly cut: Pin }
+  | { readonly status: "MALFORMED"; readonly cut: Pin }
+  | { readonly status: "UNAVAILABLE" };
+
+/** APPLIED proves only the stored record, not that a holding or a served prefix was valid. */
+export type MailboxWrite =
+  | { readonly status: "APPLIED"; readonly cut: Pin }
+  | { readonly status: "CONFLICT"; readonly cut: Pin }
+  | { readonly status: "IDENTITY_MISMATCH"; readonly cut: Pin }
+  | { readonly status: "UNKNOWN" };
+
 export interface Slice {
   readonly entries: ReadonlyArray<Entry>;
   /** Cursor past every complete, decoded entry read. A failed read returns no slice. */
@@ -122,6 +142,11 @@ export class Ledger extends Context.Service<
       designation: Designation
     ) => Effect.Effect<DesignationResult, LedgerError | InvalidQuery>;
     readonly read: (from: number) => Effect.Effect<Slice, LedgerError>;
+    /**
+     * Encoded entry assertions in (from, cut.head], at one incarnation and commit. This does not
+     * discover a damaged entry with no encoding, or prove audience and served-prefix completeness.
+     */
+    readonly readAt: (from: number, cut: Pin) => Effect.Effect<Slice, LedgerError>;
     readonly end: Effect.Effect<number, LedgerError>;
     readonly changes: Stream.Stream<void>;
     /**
@@ -138,6 +163,41 @@ export class Ledger extends Context.Service<
       entry: Message,
       basis: Pin
     ) => Effect.Effect<Admission, LedgerError | InvalidQuery>;
+    /**
+     * All start and acknowledgement assertions for this address at one cut, with their
+     * operation witnesses and starting presences checked. This is an address-scoped history
+     * scan, not a constant-time lookup; damage, deadline or response-budget exhaustion fails
+     * instead of returning an older or partial position. Its cost is not yet qualified.
+     */
+    readonly mailboxAt: (address: string, cut: Pin) => Effect.Effect<MailboxState, LedgerError>;
+    /** A raw immutable receipt at the supplied cut. This is not an authorization check. */
+    readonly mailboxReceiptAt: (
+      address: string,
+      operation: string,
+      cut: Pin
+    ) => Effect.Effect<MailboxReceiptRead, LedgerError>;
+    /**
+     * Admit a presence and its initial or replay start in the same transaction, fenced against
+     * later presence and position facts. The caller decides whether that start is lawful.
+     */
+    readonly admitWithStart: (
+      entry: Message,
+      start: MailboxStart,
+      basis: Pin
+    ) => Effect.Effect<Admission, LedgerError | InvalidQuery>;
+    /** Import a position only into an absent mailbox; no presence is fabricated. */
+    readonly importMailbox: (
+      start: MailboxStart,
+      basis: Pin
+    ) => Effect.Effect<MailboxWrite, LedgerError>;
+    /**
+     * Fenced storage only. The caller must prove the holder, run, membership, prefix and carrier
+     * at the same basis before writing, and must authorize receipt access separately.
+     */
+    readonly appendMailboxAck: (
+      ack: MailboxAck,
+      basis: Pin
+    ) => Effect.Effect<MailboxWrite, LedgerError>;
     /**
      * Writes an address command as its own node, `commandIri(operation)`, only if that node
      * holds no command yet. A failure says nothing about whether it committed: read it back.
