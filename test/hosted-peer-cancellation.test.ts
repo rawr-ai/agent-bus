@@ -8,7 +8,7 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { Messages } from "../src/mcp-tools.ts";
+import { Messages, MIN_READ_RESULT_BYTES } from "../src/mcp-tools.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger } from "./fluree-server.ts";
@@ -62,8 +62,8 @@ test("wait applies byte admission on arrival and hosted cancellation reaches the
     Effect.map(Bus.Bus, (bus) =>
       Bus.Bus.of({
         ...bus,
-        wait: (...args) =>
-          bus.wait(...args).pipe(Effect.ensuring(Effect.sync(() => nativeSettled.release()))),
+        wait: (input) =>
+          bus.wait(input).pipe(Effect.ensuring(Effect.sync(() => nativeSettled.release()))),
       })
     )
   ).pipe(Layer.provideMerge(baseBus));
@@ -97,7 +97,7 @@ test("wait applies byte admission on arrival and hosted cancellation reaches the
       address: "chatgpt/wait-a",
       session: a.session,
       timeoutSeconds: 30,
-      maxResultBytes: 128,
+      maxResultBytes: MIN_READ_RESULT_BYTES,
     });
     await bounded(arrivalBranch.promise, 5_000);
     const beforeArrival = await getCursor();

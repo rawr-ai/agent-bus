@@ -370,7 +370,7 @@ const nudgeHead = (address: string) => `[agent-bus] New messages for ${JSON.stri
  * is still fine.
  */
 export const formatNudge = (address: string) =>
-  `${nudgeHead(address)} Read with bus_read as this address, using session from $CODEX_THREAD_ID in your shell. Don't use bus_join to recover the read; deliberate updates to an address you hold may use it. No mail, not joined, or another owner: end this turn quietly. If the read was definitely not sent, retry once. Any lost or uncertain result may have consumed mail: inspect bus_history before another read. If unresolved, report and end this turn.`;
+  `${nudgeHead(address)} Read with bus_read as this address, using session from $CODEX_THREAD_ID in your shell. Don't use bus_join to recover the read; deliberate updates to an address you hold may use it. No mail, not joined, or another owner: end this turn quietly. If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. A result without receipt came from a bus that ignored readId and consumed the mail. If unresolved, report and end this turn.`;
 
 /** An item waiting in a thread's queue: Codex's ids for it, which an edit keeps, and its text. */
 export interface Queued {

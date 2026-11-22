@@ -26,6 +26,7 @@ const specs = [
   [native.Orient, [], false],
   [native.Read, ["session", "maxResultBytes"], true],
   [native.Wait, ["session", "maxResultBytes"], true],
+  [native.Ack, ["session"], true],
   [native.Owned, ["session", "runtime"], true],
   [native.ListPeers, [], false],
   [native.History, [], false],
@@ -228,6 +229,22 @@ const wakeCapability = (tool: {
   );
 };
 
+/** Whether a Bus descriptor carries keyed reads, peek and bus_ack, which an older Bus lacks. */
+const keyedReads = (
+  tools: ReadonlyArray<{ readonly name: string; readonly inputSchema: unknown }>
+) => {
+  const declares = (name: string, keys: ReadonlyArray<string>) => {
+    const schema = tools.find((tool) => tool.name === name)?.inputSchema;
+    const properties = object(schema) ? schema.properties : undefined;
+    return object(properties) && keys.every((key) => object(properties[key]));
+  };
+  return (
+    declares("bus_read", ["readId", "peek"]) &&
+    declares("bus_wait", ["readId"]) &&
+    declares("bus_ack", ["receipt"])
+  );
+};
+
 /** Ownership parameters are never accepted from a caller, even as excess input. */
 export const peerTools = (exchange: Exchange, cwd: string) =>
   specs.map(([tool, hidden, sessionRequired]) => {
@@ -243,7 +260,7 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
             : (tool.description ?? "");
     const readLimit =
       name === "bus_read" || name === "bus_wait"
-        ? ` The oldest whole messages fitting a complete ${HOSTED_RESULT_BYTES / (1024 * 1024)} MiB result are consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor.`
+        ? ` The oldest whole messages fitting a complete ${HOSTED_RESULT_BYTES / (1024 * 1024)} MiB result are returned and, unless peeked, consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor.`
         : "";
     return {
       name,
@@ -311,7 +328,11 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
               "The Bus call was not sent; the connection or required tool is unavailable."
             );
           return failure(
-            "The Bus result is unavailable. The operation may have committed or consumed messages; inspect state and do not automatically retry an ambiguous write."
+            name === "bus_read" || name === "bus_wait"
+              ? "The Bus result is unavailable. The read may have consumed messages: repeat it with the same readId to get its batch back; without one, inspect bus_history before reading again."
+              : name === "bus_ack"
+                ? "The Bus result is unavailable. The acknowledgement may have committed: repeat bus_ack with the same receipt."
+                : "The Bus result is unavailable. The operation may have committed or consumed messages; inspect state and do not automatically retry an ambiguous write."
           );
         }
       },
@@ -425,8 +446,12 @@ export const busPeer = async (options: {
           mismatch = observed !== options.expectedBusVersion;
           if (mismatch) return yield* Effect.fail(new Error("Unexpected Bus version."));
           preflight.matched();
-          const tool = (yield* client.listTools()).find((candidate) => candidate.name === name);
+          const listed = yield* client.listTools();
+          const tool = listed.find((candidate) => candidate.name === name);
           if (!tool) return yield* Effect.fail(new Error("Bus tool unavailable."));
+          // An older Bus ignores readId and peek and consumes the mail: refuse before sending.
+          if ((name === "bus_ack" || "readId" in args || "peek" in args) && !keyedReads(listed))
+            return yield* Effect.fail(new Error("Bus keyed reads unavailable."));
           if (
             (name === "bus_observe_wake" || name === "bus_check_wake_binding") &&
             !wakeCapability(tool)

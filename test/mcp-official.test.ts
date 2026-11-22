@@ -275,6 +275,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       bus_orient: lookup,
       bus_read: changes,
       bus_wait: changes,
+      bus_ack: changes,
       bus_wake: changes,
       bus_observe_wake: lookup,
       bus_check_wake_binding: lookup,
@@ -340,16 +341,17 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
   test("lists the bus tools, with output schemas from 2025-06-18", async () => {
     const { tools } = await connect();
     const required = {
-      bus_join: ["address", "associations", "cursor"],
-      bus_takeover: ["address", "associations", "cursor"],
+      bus_join: ["address", "associations", "cursor", "nextReadId"],
+      bus_takeover: ["address", "associations", "cursor", "nextReadId"],
       // A NOT_SENT answer has no id or ts, so nothing is required.
       bus_publish: undefined,
       bus_activity: ["status", "operation"],
       bus_directory: ["status", "operation", "expected"],
       bus_bulletin: ["status", "operation", "expected"],
       bus_orient: ["status"],
-      bus_read: ["messages"],
-      bus_wait: ["messages"],
+      bus_read: ["messages", "nextReadId"],
+      bus_wait: ["messages", "nextReadId"],
+      bus_ack: ["receipt", "nextReadId"],
       bus_wake: ["addresses", "owns", "superseded"],
       bus_observe_wake: ["binding", "observationCut", "ready", "news"],
       bus_check_wake_binding: ["binding", "observationCut"],
@@ -401,6 +403,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       topics: [],
       associations: [],
       cursor: expect.any(Number),
+      nextReadId: expect.any(String),
     });
     await succeed("bus_join", joining(b));
     const body = `over ${version}`;
@@ -424,6 +427,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     });
     expect(await succeed("bus_wait", { address: a, session: sid(a), timeoutSeconds: 0 })).toEqual({
       messages: [],
+      nextReadId: expect.any(String),
     });
     const { peers } = await succeed("bus_peers", {});
     expect(peers.map((peer: { address: string }) => peer.address)).toEqual(
@@ -541,7 +545,8 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       });
       await server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.append(stored)));
       const result = await succeed(name, { address: reader, session: claim, timeoutSeconds: 0 });
-      expect(result).toEqual({ messages: [expected] });
+      expect(result).toMatchObject({ messages: [expected] });
+      expect(Object.keys(result).sort()).toEqual(["messages", "nextReadId", "receipt"]);
       expect(JSON.stringify(result)).not.toContain(privateMarker);
       const history = await succeed("bus_history", { participant: reader, limit: 1 });
       expect(history).toEqual({ messages: [expected] });
@@ -557,6 +562,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     expect(internal.map((message) => message.presence)).toEqual([privatePresence, privatePresence]);
     expect(await succeed("bus_read", { address: reader, session: claim })).toEqual({
       messages: [],
+      nextReadId: expect.any(String),
     });
     await succeed("bus_leave", { address: reader, session: claim });
   });
@@ -583,7 +589,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       /Each topic must have a non-empty name/
     );
     const rejoined = await succeed("bus_join", joining(reader));
-    expect(rejoined).toEqual(joined);
+    expect({ ...rejoined, nextReadId: "" }).toEqual({ ...joined, nextReadId: "" });
     expect(await succeed("bus_read", { address: reader, session: sid(reader) })).toMatchObject({
       messages: [{ id: sent.id }],
     });
@@ -645,6 +651,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       topics: [],
       associations: [],
       cursor: expect.any(Number),
+      nextReadId: expect.any(String),
     });
     await refused(
       "bus_read",
@@ -703,7 +710,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
 
     // A held wait that nothing reaches ends empty at its timeout.
     const before = Date.now();
-    expect(await wait(0.5)).toEqual({ messages: [] });
+    expect(await wait(0.5)).toEqual({ messages: [], nextReadId: expect.any(String) });
     expect(Date.now() - before).toBeGreaterThanOrEqual(400);
   });
 });

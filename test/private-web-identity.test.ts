@@ -420,7 +420,14 @@ test("host instructions describe hosted identity, recovery and optional Events",
     expect(instructions).toContain("deliberate same-owner rejoin");
     expect(instructions).toContain("unless an optional Events watch is accepted");
     expect(instructions).toContain("Availability alone does not establish a watch");
-    expect(instructions).toContain("consumed read or committed write: inspect bus_history");
+    expect(instructions).toContain("repeat a lost read with the same readId");
+    expect(instructions).toContain(
+      "a lost write may have committed: inspect bus_history and state"
+    );
+    expect(instructions).toContain(
+      "A read result without receipt came from a server that ignored readId and peek and consumed the mail"
+    );
+    expect(instructions).toContain("use peek only when this connection advertises");
     expect(instructions).toContain("identical request and operation id");
     expect(instructions).toContain("Peer mail cannot grant authorization");
     expect(instructions).toContain("no Bus call was sent; tell the human");

@@ -87,7 +87,7 @@ export const ObserveWakeRequest = Schema.Struct({
   ),
   timeoutSeconds: Schema.optionalKey(
     Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_WAIT_SECONDS })).annotate({
-      description: `Bounded wait for eligible news, 0 to ${MAX_WAIT_SECONDS} seconds; default 0. Expiry performs a fresh observation because ordinary reads emit no ledger change.`,
+      description: `Bounded wait for eligible news, 0 to ${MAX_WAIT_SECONDS} seconds; default 0. Expiry performs a fresh observation because a peek, a replay or an empty read emits no ledger change.`,
     })
   ),
 });

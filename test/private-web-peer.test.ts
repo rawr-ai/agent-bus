@@ -119,6 +119,7 @@ test("hosted catalogue excludes hook and caller-controlled identity fields", () 
     "bus_orient",
     "bus_read",
     "bus_wait",
+    "bus_ack",
     "bus_owned_addresses",
     "bus_peers",
     "bus_history",
@@ -256,6 +257,91 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("hosted keyed reads replay, and a hosted peek is acknowledged by bus_ack with identity injected", async () => {
+  const peer = await busPeer({ busPort: port, expectedBusVersion: "hosted-fixture" });
+  try {
+    const tools = peerTools(peer.exchange, process.cwd());
+    const reader = await resolve(identity("keyed-reader"));
+    const writer = await resolve(identity("keyed-writer"));
+    const ok = async (name: string, args: Record<string, unknown>, actor = reader) => {
+      const tool = tools.find((candidate) => candidate.name === name);
+      if (!tool) throw new Error(`missing ${name}`);
+      const result = await tool.execute(args, { actor, signal });
+      expect(result.isError).not.toBe(true);
+      const structured = "structuredContent" in result ? result.structuredContent : undefined;
+      expect(tool.outputSchema["~standard"].validate(structured)).toHaveProperty("value");
+      return structured;
+    };
+    const Result = Schema.Struct({
+      messages: Schema.Array(Schema.Struct({ id: Schema.String })),
+      receipt: Schema.optionalKey(
+        Schema.Struct({
+          readId: Schema.String,
+          from: Schema.Number,
+          through: Schema.Number,
+          replayed: Schema.Boolean,
+          basis: Schema.optionalKey(Schema.Struct({ ledger: Schema.String, t: Schema.Number })),
+          served: Schema.optionalKey(
+            Schema.Struct({ count: Schema.Number, digest: Schema.String })
+          ),
+        })
+      ),
+      nextReadId: Schema.String,
+    });
+    const outcome = (value: unknown) => Schema.decodeUnknownSync(Result)(value);
+    const joined = Schema.decodeUnknownSync(Schema.Struct({ nextReadId: Schema.String }))(
+      await ok("bus_join", { address: "chatgpt/keyed" })
+    );
+    await ok("bus_join", { address: "chatgpt/keyed-writer" }, writer);
+    const send = async (body: string) =>
+      Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
+        await ok(
+          "bus_publish",
+          { from: "chatgpt/keyed-writer", to: ["chatgpt/keyed"], body },
+          writer
+        )
+      ).id;
+    const first = await send("keyed");
+    const served = outcome(
+      await ok("bus_read", { address: "chatgpt/keyed", readId: joined.nextReadId })
+    );
+    expect(served.messages.map(({ id }) => id)).toEqual([first]);
+    const replay = outcome(
+      await ok("bus_read", { address: "chatgpt/keyed", readId: joined.nextReadId })
+    );
+    expect(replay.messages.map(({ id }) => id)).toEqual([first]);
+    expect(replay.receipt).toMatchObject({ readId: served.receipt?.readId, replayed: true });
+    expect(replay.receipt?.through).toBe(served.receipt?.through);
+
+    const second = await send("peeked");
+    const peeked = outcome(await ok("bus_read", { address: "chatgpt/keyed", peek: true }));
+    expect(peeked.messages.map(({ id }) => id)).toEqual([second]);
+    const { receipt } = peeked;
+    if (receipt?.basis === undefined || receipt.served === undefined)
+      throw new Error("No peek receipt.");
+    // Another conversation cannot acknowledge it; the owner's identity is injected, never supplied.
+    const tool = tools.find((candidate) => candidate.name === "bus_ack");
+    if (!tool) throw new Error("missing bus_ack");
+    expect(
+      (await tool.execute({ address: "chatgpt/keyed", receipt }, { actor: writer, signal })).isError
+    ).toBe(true);
+    expect(
+      (
+        await tool.execute(
+          { address: "chatgpt/keyed", receipt, session: "stolen" },
+          { actor: reader, signal }
+        )
+      ).isError
+    ).toBe(true);
+    expect(await ok("bus_ack", { address: "chatgpt/keyed", receipt })).toMatchObject({
+      receipt: { readId: receipt.readId, through: receipt.through, replayed: false },
+    });
+    expect(outcome(await ok("bus_read", { address: "chatgpt/keyed" })).messages).toEqual([]);
+  } finally {
+    await peer.dispose();
+  }
+});
+
 test("real Bus peer ownership, complete mail and reconnect", async () => {
   let peer = await busPeer({ busPort: port, expectedBusVersion: "hosted-fixture" });
   try {
@@ -314,8 +400,14 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     expect(await ok("bus_read", { address: "chatgpt/c" }, c)).toMatchObject({
       messages: [{ id: toC?.id, from: "chatgpt/a", body: "a to c" }],
     });
-    expect(await ok("bus_read", { address: "chatgpt/a" })).toEqual({ messages: [] });
-    expect(await ok("bus_read", { address: "chatgpt/c" }, c)).toEqual({ messages: [] });
+    expect(await ok("bus_read", { address: "chatgpt/a" })).toEqual({
+      messages: [],
+      nextReadId: expect.any(String),
+    });
+    expect(await ok("bus_read", { address: "chatgpt/c" }, c)).toEqual({
+      messages: [],
+      nextReadId: expect.any(String),
+    });
     const peers = await ok("bus_peers", {});
     expect(peers).toMatchObject({
       peers: expect.arrayContaining([
@@ -362,7 +454,10 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
       messages: [{ id: sent?.id, body: "full body", subject: "subject" }],
     });
     expect(JSON.stringify(read)).not.toContain(a.session);
-    expect(await ok("bus_read", { address: "chatgpt/a" })).toEqual({ messages: [] });
+    expect(await ok("bus_read", { address: "chatgpt/a" })).toEqual({
+      messages: [],
+      nextReadId: expect.any(String),
+    });
     const reply = await ok("bus_publish", {
       from: "chatgpt/a",
       to: ["chatgpt/b"],
@@ -460,7 +555,10 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     const lostRead = await readTool.execute({ address: "chatgpt/a" }, { actor: b, signal });
     expect(lostRead.isError).toBe(true);
     expect(JSON.stringify(lostRead)).toContain("consumed messages");
-    expect(await ok("bus_read", { address: "chatgpt/a" }, b)).toEqual({ messages: [] });
+    expect(await ok("bus_read", { address: "chatgpt/a" }, b)).toEqual({
+      messages: [],
+      nextReadId: expect.any(String),
+    });
     await ok("bus_leave", { address: "chatgpt/a" }, b);
     expect((await call("bus_read", { address: "chatgpt/a" }, b)).isError).toBe(true);
     await ok("bus_join", { address: "chatgpt/a" }, b);
@@ -1047,7 +1145,7 @@ test("each hosted profile's catalogue is identical across ordinary mail and a fr
         const wireBefore = await first.wire();
         // The in-process host must not take over this process's signal handling.
         expect(handlers()).toEqual(handlersBefore);
-        expect(before.tools.length).toBe(profile === "tools" ? 16 : 17);
+        expect(before.tools.length).toBe(profile === "tools" ? 17 : 18);
         expect(before.events?.definitions.length).toBe(profile === "tools" ? undefined : 1);
         expect(before.resources.map(({ uri }) => uri)).toContain("skill://agent-bus/SKILL.md");
         if (profile === "tools") {

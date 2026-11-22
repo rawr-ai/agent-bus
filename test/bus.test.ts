@@ -598,7 +598,12 @@ for (const backend of backends) {
             session: sid("claude/a"),
             cwd: process.cwd(),
           });
-          const waiting = yield* Effect.forkChild(bus.wait("claude/a", sid("claude/a"), 10));
+          const waiting = yield* Effect.forkChild(
+            Effect.map(
+              bus.wait({ address: "claude/a", session: sid("claude/a"), timeoutSeconds: 10 }),
+              ({ messages }) => messages
+            )
+          );
           yield* Effect.sleep("200 millis");
           yield* bus.publish({
             from: "codex/b",
@@ -607,7 +612,12 @@ for (const backend of backends) {
             body: "ping",
           });
           expect(bodies(yield* Fiber.join(waiting))).toEqual(["ping"]);
-          expect(yield* bus.wait("claude/a", sid("claude/a"), 0.3)).toEqual([]);
+          expect(
+            yield* Effect.map(
+              bus.wait({ address: "claude/a", session: sid("claude/a"), timeoutSeconds: 0.3 }),
+              ({ messages }) => messages
+            )
+          ).toEqual([]);
         })
       ));
   });
@@ -706,7 +716,10 @@ describe("fluree ledger", () => {
       Effect.provide(
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
-          return yield* bus.wait("codex/b", sid("codex/b"), 10);
+          return yield* Effect.map(
+            bus.wait({ address: "codex/b", session: sid("codex/b"), timeoutSeconds: 10 }),
+            ({ messages }) => messages
+          );
         }),
         second
       )
@@ -2807,7 +2820,13 @@ describe("one session per address", () => {
         expect(joining.message).toContain('note "story"');
         expect(joining.message).toContain("join one specific to this session");
         yield* unchanged("claude/site", bus.take("claude/site", "s2"));
-        yield* unchanged("claude/site", bus.wait("claude/site", "s2", 0.2));
+        yield* unchanged(
+          "claude/site",
+          Effect.map(
+            bus.wait({ address: "claude/site", session: "s2", timeoutSeconds: 0.2 }),
+            ({ messages }) => messages
+          )
+        );
         yield* unchanged(
           "claude/site",
           bus.publish({ from: "claude/site", session: "s2", to: ["codex/director"], body: "x" })
@@ -3108,7 +3127,14 @@ describe("one session per address", () => {
         const bus = yield* Bus.Bus;
         yield* bus.join({ address: "claude/a", runtime: "claude", session: "old", cwd });
         yield* bus.join({ address: "claude/b", runtime: "claude", session: "sb", cwd });
-        const waiting = yield* Effect.forkChild(Effect.flip(bus.wait("claude/a", "old", 10)));
+        const waiting = yield* Effect.forkChild(
+          Effect.flip(
+            Effect.map(
+              bus.wait({ address: "claude/a", session: "old", timeoutSeconds: 10 }),
+              ({ messages }) => messages
+            )
+          )
+        );
         yield* Effect.sleep("100 millis");
         const refused = yield* Effect.flip(
           bus.join({ address: "claude/a", runtime: "claude", session: "new", cwd })
@@ -3960,7 +3986,7 @@ describe("claude wake hook", () => {
       expect(text).toContain(`No mail, not joined, or another owner: ${end} quietly.`);
       const failure = text.slice(text.indexOf("If the read was definitely not sent"));
       expect(failure).toBe(
-        `If the read was definitely not sent, retry once. Any lost or uncertain result may have consumed mail: inspect bus_history before another read. If unresolved, report and ${end}.`
+        `If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. A result without receipt came from a bus that ignored readId and consumed the mail. If unresolved, report and ${end}.`
       );
       expect(text).not.toContain("Retry other failures once");
       // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
@@ -4168,7 +4194,13 @@ describe("mcp over http", () => {
           codexThreadId: thread,
         });
         const joined = yield* join("codex/a", codex("t-1"));
-        expect(Object.keys(joined).sort()).toEqual(["address", "associations", "cursor", "topics"]);
+        expect(Object.keys(joined).sort()).toEqual([
+          "address",
+          "associations",
+          "cursor",
+          "nextReadId",
+          "topics",
+        ]);
       }).pipe(Effect.provide(Layer.merge(layer, FetchHttpClient.layer)))
     );
   });

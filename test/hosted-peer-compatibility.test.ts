@@ -3,6 +3,7 @@ import { BunHttpServer } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/ai";
 import { HttpRouter } from "effect/http";
+import { MIN_READ_RESULT_BYTES } from "../src/mcp-tools.ts";
 import { clerkPeerResolver, PEER_PERMISSION } from "../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
 
@@ -27,7 +28,9 @@ const fakeBus = async (options: {
   const legacy = Schema.Struct({ address: Schema.String, session: Schema.String });
   const admitted = Schema.Struct({
     ...legacy.fields,
-    maxResultBytes: Schema.Int.check(Schema.isBetween({ minimum: 128, maximum: 64 * 1024 * 1024 })),
+    maxResultBytes: Schema.Int.check(
+      Schema.isBetween({ minimum: MIN_READ_RESULT_BYTES, maximum: 64 * 1024 * 1024 })
+    ),
   });
   const input = options.readAdmission === true ? admitted : legacy;
   const output = Schema.Struct({ messages: Schema.Array(Schema.Unknown) });
@@ -269,7 +272,7 @@ test("a failure after the call reached the Bus is unknown, never not sent", asyn
     const result = await pending;
     expect(result.isError).toBe(true);
     const text = publicText(result);
-    expect(text).toContain("may have committed or consumed messages");
+    expect(text).toContain("The read may have consumed messages: repeat it with the same readId");
     expect(text).not.toContain("not sent");
     expectNoSecrets(JSON.stringify(result));
     expect(bus.state.calls).toBe(1);
@@ -315,7 +318,7 @@ test("each refusal reason keeps its own budget and re-arms only on its own evide
     const held = read(abort.signal);
     for (let attempt = 0; attempt < 200 && bus.state.calls === 0; attempt++) await Bun.sleep(10);
     abort.abort();
-    expect(await held).toContain("may have committed");
+    expect(await held).toContain("may have consumed messages");
     await bus.dispose();
     expect(await read()).toContain("connection or required tool");
     expect(lines).toHaveLength(3);
@@ -452,5 +455,54 @@ test("a Bus that reports no version is refused as unconfirmed, not as a known di
   } finally {
     await peer.dispose();
     server.stop(true);
+  }
+});
+
+test("an older Bus descriptor without keyed reads refuses readId, peek and bus_ack before dispatch", async () => {
+  // The fixture is a Bus from before keyed reads: byte admission, but no readId, peek or
+  // bus_ack. It would ignore both fields and consume the mail, so nothing may reach it.
+  const bus = await fakeBus({ version: "native-old", readAdmission: true });
+  const peer = await busPeer({
+    busPort: bus.port,
+    expectedBusVersion: "native-old",
+    diagnostics: () => {},
+  });
+  try {
+    const tools = peerTools(peer.exchange, "/bridge");
+    const run = async (name: string, args: Record<string, unknown>) => {
+      const tool = tools.find((item) => item.name === name);
+      if (!tool) throw new Error("Missing hosted tool.");
+      return publicText(await tool.execute(args, { actor, signal }));
+    };
+    const readId = "01a20000-0000-7000-8000-000000000001";
+    for (const [name, args] of [
+      ["bus_read", { address: "chatgpt/reader", readId }],
+      ["bus_read", { address: "chatgpt/reader", peek: true }],
+      ["bus_wait", { address: "chatgpt/reader", readId, timeoutSeconds: 0 }],
+      [
+        "bus_ack",
+        {
+          address: "chatgpt/reader",
+          receipt: {
+            readId,
+            from: 1,
+            through: 2,
+            basis: { ledger: "fixture", t: 2 },
+            served: { count: 1, digest: "0".repeat(64) },
+          },
+        },
+      ],
+    ] as const) {
+      expect(await run(name, args)).toBe(
+        "The Bus call was not sent; the connection or required tool is unavailable."
+      );
+    }
+    expect(bus.state.calls).toBe(0);
+    // An ordinary read is unchanged on that Bus.
+    expect(await run("bus_read", { address: "chatgpt/reader" })).toBe('{"messages":[]}');
+    expect(bus.state.calls).toBe(1);
+  } finally {
+    await peer.dispose();
+    await bus.dispose();
   }
 });

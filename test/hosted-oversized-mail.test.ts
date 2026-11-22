@@ -25,6 +25,8 @@ import {
   MAX_INDEXED_FIELD_BYTES,
   MAX_ORIGIN_CWD_BYTES,
   messageCarrierBytes,
+  READ_METADATA_BYTES,
+  servedCarrierBytes,
 } from "../src/message-carrier.ts";
 import type { PeerActor } from "../src/private-web/identity.ts";
 import { busPeer, peerTools } from "../src/private-web/peer.ts";
@@ -40,7 +42,7 @@ const CAP = MAX_ENTRY_CARRIER_BYTES;
 const VERSION = "carrier-fixture";
 const HOST = "fixture-host";
 const READ_REFUSAL =
-  "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Use a reader with larger limits.";
+  "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced.";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-carrier-"));
 const senderCwd = join(dir, "sender");
@@ -283,23 +285,28 @@ test("publish admits a message at exactly the carrier cap and refuses one byte o
     expect(committed.map((message) => message.id)).toEqual([id]);
     expect(committed[0]?.body).toBe(exact.body);
     // The bound is on the exact public carrier of the stored entry, escaping included: the
-    // reader's actual result for it alone is CAP bytes, refused one byte short of that.
+    // reader's actual result for it alone is CAP bytes plus its receipt and nextReadId, at
+    // most READ_METADATA_BYTES more, refused one byte short of that.
     expect(messageCarrierBytes(committed)).toBe(CAP);
+    const full = servedCarrierBytes(committed, await cursor(recipient), await head());
+    expect(full - CAP).toBeGreaterThan(0);
+    expect(full - CAP).toBeLessThanOrEqual(READ_METADATA_BYTES);
     const short = await native("bus_read", {
       address: recipient,
       session: recipient,
-      maxResultBytes: CAP - 1,
+      maxResultBytes: full - 1,
     });
     expect(short.isError).toBe(true);
     expect(textOf(short)).toContain(READ_REFUSAL);
+    expect(textOf(short)).toContain(`Their first commit needs ${full} result bytes`);
     const read = await nativeOk("bus_read", {
       address: recipient,
       session: recipient,
-      maxResultBytes: CAP,
+      maxResultBytes: full,
     });
     expect(pageOf(read).map((message) => message.id)).toEqual([id]);
     const carried = { content: read.content, structuredContent: read.structuredContent };
-    expect(Buffer.byteLength(JSON.stringify({ ...carried, isError: false }), "utf8")).toBe(CAP);
+    expect(Buffer.byteLength(JSON.stringify({ ...carried, isError: false }), "utf8")).toBe(full);
 
     const over = fit(recipient, unit, CAP + 1);
     expect(messageCarrierBytes([shaped(over)])).toBe(CAP + 1);
@@ -529,8 +536,19 @@ test("the largest admitted hosted read fits 4 MiB as received over HTTP; one car
   if (typeof budget !== "number") throw new Error("No injected read budget.");
   expect(budget).toBeGreaterThanOrEqual(CAP);
 
+  // The receipt and nextReadId share the budget: their bytes at the positions the read will
+  // report, its cursor and the head after five one-commit sends.
+  const metadata = async (reader: string) => {
+    const through = (await head()) + 5;
+    return {
+      through,
+      bytes: servedCarrierBytes([], await cursor(reader), through) - messageCarrierBytes([]),
+    };
+  };
   // Exactly at the budget: all five messages in one complete result within the ceiling.
-  const exact = await fillTo(exactReader, budget);
+  const exactMetadata = await metadata(exactReader);
+  const exact = await fillTo(exactReader, budget - exactMetadata.bytes);
+  expect(await head()).toBe(exactMetadata.through);
   const largest = await hostedOk("bus_read", { address: exactReader }, session);
   expect(pageOf(largest.result).map((message) => Bun.hash(message.body))).toEqual(
     exact.map((message) => Bun.hash(message.body))
@@ -542,7 +560,9 @@ test("the largest admitted hosted read fits 4 MiB as received over HTTP; one car
   observations.resultKeys = Object.keys(largest.result).sort();
 
   // One byte over: the whole-prefix admission takes four and leaves the fifth unread.
-  const over = await fillTo(overReader, budget + 1);
+  const overMetadata = await metadata(overReader);
+  const over = await fillTo(overReader, budget - overMetadata.bytes + 1);
+  expect(await head()).toBe(overMetadata.through);
   const first = await hostedOk("bus_wait", { address: overReader, timeoutSeconds: 1 }, session);
   expect(pageOf(first.result).map((message) => message.id)).toEqual(
     over.slice(0, 4).map((message) => message.id)
