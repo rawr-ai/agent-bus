@@ -139,6 +139,129 @@ const take = (runtime: Machine, session = owner, limit?: number) =>
   runtime.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.take(inbox, session, limit)));
 
 test(
+  "a bounded mailbox reads past a proved large registration but not an unwitnessed carrier",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bus-registration-window-"));
+    const config = await freshLedger("registration-window");
+    const store = layerFluree(config, { mailboxHistoryBytes: 8192 }).pipe(Layer.provide(platform));
+    const a = machine(store, root, "installation-a");
+    try {
+      await joinInbox(a);
+      await joinSender(a);
+      const position = (await mailbox(a)).position;
+      await send(a, inbox, "before registration");
+      await a.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) =>
+          bus.join({
+            address: "fixture/large",
+            session: "large-owner",
+            runtime: "other",
+            cwd,
+            topics: ["x".repeat(12_000)],
+          })
+        )
+      );
+      await send(a, inbox, "after registration");
+      const cold = await a.runPromise(
+        Effect.flatMap(Ledger, (ledger) =>
+          Effect.flatMap(ledger.presenceAt(), ({ cut }) => ledger.readAt(position, { ...cut }))
+        )
+      );
+      expect(
+        cold.entries.some(({ message }) => message.presence?.topics[0]?.length === 12_000)
+      ).toBe(true);
+      expect((await take(a)).map(({ body }) => body)).toEqual([
+        "before registration",
+        "after registration",
+      ]);
+      const acknowledged = await mailbox(a);
+
+      const unknown = new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: "fixture/unknown",
+        to: ["*"],
+        body: "joined",
+        kind: "presence",
+        presence: new Presence({
+          runtime: "other",
+          status: "joined",
+          topics: ["y".repeat(12_000)],
+        }),
+      });
+      await insertRaw(config, {
+        "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+        "@id": `urn:agent-bus:message:${unknown.id}`,
+        "bus:json": Schema.encodeSync(MessageJson)(unknown),
+      });
+      await send(a, inbox, "beyond unproved registration");
+      await expect(take(a)).rejects.toThrow("exceeded 8192 bytes");
+      expect(await mailbox(a)).toEqual(acknowledged);
+    } finally {
+      await a.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT
+);
+
+test(
+  "a later singleton presence cannot hide two carriers asserted in one commit",
+  async () => {
+    const root = mkdtempSync(join(tmpdir(), "agent-bus-registration-duplicate-"));
+    const config = await freshLedger("registration-duplicate");
+    const store = layerFluree(config, { mailboxHistoryBytes: 8192 }).pipe(Layer.provide(platform));
+    const a = machine(store, root, "installation-a");
+    try {
+      await joinInbox(a);
+      await joinSender(a);
+      const before = await mailbox(a);
+      const entry = new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: "fixture/double",
+        to: ["*"],
+        body: "joined",
+        kind: "presence",
+        presence: new Presence({
+          runtime: "other",
+          status: "joined",
+          topics: ["p".repeat(12_000)],
+        }),
+      });
+      const carrier = Schema.encodeSync(MessageJson)(entry);
+      const node = toNode(entry, carrier);
+      const extra = "not a carrier";
+      await insertRaw(config, { ...node, "bus:json": [carrier, extra] });
+      const response = await fetch(
+        `${config.url}/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json", authorization: `Bearer ${config.token}` },
+          body: JSON.stringify({
+            "@context": node["@context"],
+            delete: { "@id": node["@id"], "bus:json": extra },
+          }),
+        }
+      );
+      expect(response.status).toBe(200);
+      expect(
+        (await a.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.presenceAt()))).entries.some(
+          (presence) => presence.id === entry.id
+        )
+      ).toBe(true);
+      await send(a, inbox, "must remain unread");
+      await expect(take(a)).rejects.toThrow("exceeded 8192 bytes");
+      expect(await mailbox(a)).toEqual(before);
+    } finally {
+      await a.dispose();
+      rmSync(root, { recursive: true, force: true });
+    }
+  },
+  TIMEOUT
+);
+
+test(
   "a cross-installation takeover inherits an acknowledgement that wins during the join",
   async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-bus-mailbox-runtime-"));

@@ -89,6 +89,7 @@ const presenceNodes = (
     {
       node: string;
       t: number | null;
+      entryT: number | null;
       id: string | null;
       json: string | null;
       from: string | null;
@@ -98,7 +99,7 @@ const presenceNodes = (
   for (const [node, entryT, idT, id, json, from] of rows) {
     const t = entryT ?? idT;
     const found = nodes.get(node);
-    if (found === undefined) nodes.set(node, { node, t, id, json, from, copies: 1 });
+    if (found === undefined) nodes.set(node, { node, t, entryT, id, json, from, copies: 1 });
     else found.copies += 1;
   }
   return [...nodes.values()];
@@ -145,6 +146,14 @@ export const PRESENCE_NODES = {
   orderBy: "?m",
 };
 
+export interface LocatedPresence {
+  readonly subject: string;
+  /** Only the JSON assertion can identify a historical carrier; t may fall back to the id. */
+  readonly entryT: number | null;
+  readonly t: number;
+  readonly message: Message;
+}
+
 /**
  * The presence entries of a `PRESENCE_NODES` response read at `t`, each at its own commit, in
  * commit order; or the read fails on the first node, in node order, no standing can rest on.
@@ -153,13 +162,13 @@ export const PRESENCE_NODES = {
 export const presencesOf = (response: unknown, t: number) =>
   Effect.gen(function* () {
     const rows = yield* decodeRows(PresenceRows)(response);
-    const entries: Array<{ readonly t: number; readonly message: Message }> = [];
+    const entries: Array<LocatedPresence> = [];
     for (const node of presenceNodes(rows)) {
       // A node with no dated value has no commit of its own to name: the read's commit stands in.
       if (node.t === null) return yield* undecodable(t);
       const message = presenceOf(node);
       if (Option.isNone(message)) return yield* undecodable(node.t);
-      entries.push({ t: node.t, message: message.value });
+      entries.push({ t: node.t, entryT: node.entryT, subject: node.node, message: message.value });
     }
     return entries.sort((a, b) => a.t - b.t);
   });
@@ -181,7 +190,11 @@ export const logAt = (gateway: Gateway, t: number) =>
         orderBy: "?c",
       })
       .pipe(Effect.flatMap(decodeRows(CommandRows)));
-    const log: Array<Logged> = presences.map((entry) => ({ kind: "presence" as const, ...entry }));
+    const log: Array<Logged> = presences.map(({ t, message }) => ({
+      kind: "presence",
+      t,
+      message,
+    }));
     const nodes = new Map<string, Array<readonly [string, number]>>();
     for (const [subject, json, at] of commands) {
       // A command node with no value has no commit of its own to name: the read's commit does.
