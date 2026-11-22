@@ -19,15 +19,20 @@ import {
   messageIri,
 } from "../src/Ledger.ts";
 import {
-  decodeMailboxRecord,
+  decodeMailboxFact,
+  encodeMailboxFact,
   type MailboxAck,
   type MailboxRecord,
-  MailboxRecordJson,
   MailboxRecord as MailboxRecordSchema,
   type MailboxStart,
+  type MailboxState,
   type MailboxUnresolved,
-  type RawMailboxRecord,
-  resolveMailbox,
+  mailboxFactOf,
+  mailboxIntentMatches,
+  mailboxIri,
+  mailboxRunRef,
+  type StoredMailboxRecord,
+  validMailboxFactAt,
 } from "../src/mailbox-model.ts";
 import { type Pin, QueryGateway } from "../src/Query.ts";
 
@@ -63,6 +68,70 @@ const StartLine = Schema.fromJsonString(
 );
 const AckLine = Schema.fromJsonString(Schema.Struct({ "@mailboxAck": Schema.String }));
 
+/** The double can scan its file to validate the whole predecessor chain at a byte cut. */
+const resolveMailbox = (
+  records: ReadonlyArray<StoredMailboxRecord>,
+  mailbox: string,
+  head: number,
+  incarnation: string
+) =>
+  Effect.gen(function* () {
+    let current: StoredMailboxRecord | undefined;
+    let position: number | undefined;
+    let unresolved: MailboxUnresolved["reason"] | undefined;
+    let previousT = 0;
+    const operations = new Set<string>();
+    for (const item of records) {
+      const { record, t } = item;
+      if (
+        !Number.isSafeInteger(t) ||
+        t <= previousT ||
+        t > head ||
+        operations.has(record.operation)
+      ) {
+        return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
+      }
+      previousT = t;
+      operations.add(record.operation);
+      if (record.mailbox !== mailbox) continue;
+      if (
+        !validMailboxFactAt(record, t, incarnation) ||
+        record.previous !== (current?.record.operation ?? null) ||
+        (record.kind !== "unresolved" && record.runRef === mailboxRunRef(""))
+      ) {
+        return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
+      }
+      if (record.kind === "unresolved") {
+        if (current !== undefined)
+          return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
+        unresolved = record.reason;
+      } else if (record.kind === "start") {
+        if (
+          (record.origin === "import" && current !== undefined) ||
+          ((record.origin === "reconcile" || record.origin === "restart") &&
+            unresolved === undefined) ||
+          ((record.origin === "join" || record.origin === "replay") && unresolved !== undefined) ||
+          (record.origin === "restart" && record.position < (current?.t ?? 0))
+        ) {
+          return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
+        }
+        position = record.position;
+        unresolved = undefined;
+      } else {
+        if (position === undefined || record.from !== position)
+          return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
+        position = record.through;
+      }
+      current = item;
+    }
+    if (current === undefined) return { status: "ABSENT" } satisfies MailboxState;
+    if (unresolved !== undefined) {
+      return { status: "UNRESOLVED", reason: unresolved, current } satisfies MailboxState;
+    }
+    if (position === undefined) return yield* ledgerError("A mailbox position is missing.");
+    return { status: "FOUND", position, current } satisfies MailboxState;
+  });
+
 /**
  * The tests' ledger: one JSONL file, read from a byte offset. Production uses
  * Fluree only, and queries need it: this store refuses them. Each append is
@@ -85,14 +154,26 @@ export const layerJsonl = (file: string) =>
       const decode = Schema.decodeUnknownEffect(MessageJson);
 
       const locked = lockFor(file);
-      const decodeCommandLine = Schema.decodeUnknownOption(CommandLine);
-      const decodeStartLine = Schema.decodeUnknownOption(StartLine, { onExcessProperty: "error" });
-      const decodeAckLine = Schema.decodeUnknownOption(AckLine, { onExcessProperty: "error" });
-      const encodeRecord = Schema.encodeEffect(MailboxRecordJson);
-      const encodeMailbox = (record: MailboxRecord) =>
-        Schema.decodeUnknownEffect(MailboxRecordSchema, { onExcessProperty: "error" })(record).pipe(
-          Effect.flatMap(encodeRecord)
+      const decodeCommandLine = Schema.decodeUnknownOption(CommandLine, {
+        onExcessProperty: "error",
+      });
+      const startLine = Schema.decodeUnknownOption(StartLine, { onExcessProperty: "error" });
+      const ackLine = Schema.decodeUnknownOption(AckLine, { onExcessProperty: "error" });
+      const decodeStartLine = (text: string) =>
+        Option.filter(
+          startLine(text),
+          (line) =>
+            JSON.stringify({ "@mailboxStart": line["@mailboxStart"], message: line.message }) ===
+            text
         );
+      const decodeAckLine = (text: string) =>
+        Option.filter(
+          ackLine(text),
+          (line) => JSON.stringify({ "@mailboxAck": line["@mailboxAck"] }) === text
+        );
+      const validateMailbox = Schema.decodeUnknownEffect(MailboxRecordSchema, {
+        onExcessProperty: "error",
+      });
       const write = (message: Message) =>
         Effect.gen(function* () {
           const line = yield* encode(message).pipe(Effect.mapError(ledgerError));
@@ -195,7 +276,12 @@ export const layerJsonl = (file: string) =>
       const admitAttempt = (message: Message, basis: Pin, start?: MailboxStart) =>
         Effect.gen(function* () {
           if (basis.incarnation !== instance) return yield* ledgerError("The ledger was replaced.");
-          if (start !== undefined) yield* mailboxLines(basis);
+          if (start !== undefined) {
+            yield* snapshotLines(basis);
+            if (Option.isNone(yield* Effect.option(mailboxLines(basis)))) {
+              return { status: "UNKNOWN" } satisfies Admission;
+            }
+          }
           let startJson: string | undefined;
           if (start !== undefined) {
             if (
@@ -209,7 +295,7 @@ export const layerJsonl = (file: string) =>
             ) {
               return yield* ledgerError("Invalid mailbox start.");
             }
-            startJson = yield* encodeMailbox(start).pipe(Effect.mapError(ledgerError));
+            yield* validateMailbox(start).pipe(Effect.mapError(ledgerError));
             const messageJson = yield* encode(message).pipe(Effect.mapError(ledgerError));
             const current = { head: yield* end, incarnation: instance };
             const already = yield* mailboxReceiptAt(start.address, start.operation, current);
@@ -225,15 +311,24 @@ export const layerJsonl = (file: string) =>
               (entry) => entry.message.id === message.id
             );
             if (already.status === "FOUND") {
-              const saved = yield* encodeMailbox(already.record).pipe(Effect.mapError(ledgerError));
-              if (saved !== startJson)
+              if (!mailboxIntentMatches(start, already.record))
                 return { status: "REFUSED", cut: current } satisfies Admission;
               const entry = entries.length === 1 ? entries[0] : undefined;
               if (entry === undefined || entry.end !== already.t) {
                 return { status: "UNKNOWN" } satisfies Admission;
               }
               const savedMessage = yield* encode(entry.message).pipe(Effect.mapError(ledgerError));
-              return savedMessage === messageJson
+              const original = (yield* lines(already.t)).at(-1);
+              const wrapped =
+                original === undefined ? Option.none() : decodeStartLine(original.text);
+              if (
+                original?.end !== already.t ||
+                Option.isNone(wrapped) ||
+                wrapped.value.message !== savedMessage
+              ) {
+                return { status: "UNKNOWN" } satisfies Admission;
+              }
+              return wrapped.value.message === messageJson
                 ? ({
                     status: "ADMITTED",
                     cut: { head: already.t, incarnation: instance },
@@ -245,16 +340,14 @@ export const layerJsonl = (file: string) =>
               return { status: "REFUSED", cut: current } satisfies Admission;
             if (start.position > basis.head) return yield* ledgerError("Invalid mailbox start.");
             yield* mailboxLines({ head: start.position, incarnation: basis.incarnation });
-            const prior = (yield* mailboxLines(basis)).filter(
-              (row) => row.address === start.address
-            );
-            const now = (yield* mailboxLines(current)).filter(
-              (row) => row.address === start.address
-            );
-            if (now.some((row) => row.t > basis.head)) {
+            const mailbox = mailboxIri(start.address);
+            const prior = yield* mailboxLines(basis);
+            const now = yield* mailboxLines(current);
+            const priorState = yield* resolveMailbox(prior, mailbox, basis.head, instance);
+            yield* resolveMailbox(now, mailbox, current.head, instance);
+            if (now.some((row) => row.t > basis.head && row.record.mailbox === mailbox)) {
               return { status: "REFUSED", cut: current } satisfies Admission;
             }
-            const priorState = yield* resolveMailbox(prior, start.address, basis.head, instance);
             if (
               (start.origin === "restart" &&
                 (priorState.status !== "UNRESOLVED" || start.position !== basis.head)) ||
@@ -262,9 +355,14 @@ export const layerJsonl = (file: string) =>
             ) {
               return { status: "REFUSED", cut: current } satisfies Admission;
             }
+            const fact = mailboxFactOf(
+              start,
+              priorState.status === "ABSENT" ? null : priorState.current.record.operation
+            );
+            startJson = encodeMailboxFact(fact);
             yield* resolveMailbox(
-              [...prior, { predicate: "start", json: startJson, t: basis.head + 1 }],
-              start.address,
+              [...prior, { record: fact, t: basis.head + 1 }],
+              mailbox,
               basis.head + 1,
               basis.incarnation
             );
@@ -291,7 +389,7 @@ export const layerJsonl = (file: string) =>
                 Option.isSome(wrapped) &&
                 Option.isSome(
                   Option.filter(
-                    decodeMailboxRecord(wrapped.value["@mailboxAck"]),
+                    decodeMailboxFact(wrapped.value["@mailboxAck"]),
                     (record) => record.kind === "ack"
                   )
                 )
@@ -303,7 +401,7 @@ export const layerJsonl = (file: string) =>
                 Option.isSome(wrapped) &&
                 Option.isSome(
                   Option.filter(
-                    decodeMailboxRecord(wrapped.value["@mailboxStart"]),
+                    decodeMailboxFact(wrapped.value["@mailboxStart"]),
                     (record) => record.kind === "start" || record.kind === "unresolved"
                   )
                 )
@@ -359,7 +457,7 @@ export const layerJsonl = (file: string) =>
           }
           return found;
         });
-      const mailboxLines = (at: Pin) =>
+      const snapshotLines = (at: Pin) =>
         Effect.gen(function* () {
           if (at.incarnation !== instance || !Number.isSafeInteger(at.head) || at.head < 0) {
             return yield* ledgerError("Invalid mailbox snapshot.");
@@ -371,20 +469,24 @@ export const layerJsonl = (file: string) =>
           if (at.head !== 0 && found.at(-1)?.end !== at.head) {
             return yield* ledgerError("The mailbox snapshot is not a complete commit.");
           }
+          return found;
+        });
+      const mailboxLines = (at: Pin) =>
+        Effect.gen(function* () {
+          const found = yield* snapshotLines(at);
           const commits = new Set([0, ...found.map((line) => line.end)]);
-          const records: Array<
-            RawMailboxRecord & { readonly address: string; readonly operation: string }
-          > = [];
+          const records: Array<StoredMailboxRecord> = [];
           for (const { text, end: t } of found) {
             if (text.startsWith(START_MARK)) {
               const line = decodeStartLine(text);
               const value = Option.flatMap(line, (item) =>
-                decodeMailboxRecord(item["@mailboxStart"])
+                decodeMailboxFact(item["@mailboxStart"])
               );
               if (
                 Option.isNone(line) ||
                 Option.isNone(value) ||
-                (value.value.kind !== "start" && value.value.kind !== "unresolved")
+                (value.value.kind !== "start" && value.value.kind !== "unresolved") ||
+                !validMailboxFactAt(value.value, t, instance)
               ) {
                 return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
               }
@@ -405,25 +507,27 @@ export const layerJsonl = (file: string) =>
                   message.value.kind !== "presence" ||
                   message.value.presence?.status !== "joined" ||
                   message.value.id !== value.value.operation ||
-                  message.value.from !== value.value.address ||
-                  (message.value.presence.rejoinOf ?? message.value.id) !== value.value.run
+                  mailboxIri(message.value.from) !== value.value.mailbox ||
+                  mailboxRunRef(message.value.presence.rejoinOf ?? message.value.id) !==
+                    value.value.runRef
                 ) {
                   return yield* ledgerError("A mailbox start does not match its presence.");
                 }
+                const canonical = yield* encode(message.value).pipe(Effect.mapError(ledgerError));
+                if (canonical !== line.value.message) {
+                  return yield* ledgerError("A mailbox start's presence is not canonical.");
+                }
               }
-              records.push({
-                predicate: "start",
-                json: line.value["@mailboxStart"],
-                t,
-                address: value.value.address,
-                operation: value.value.operation,
-              });
+              records.push({ record: value.value, t });
             } else if (text.startsWith(ACK_MARK)) {
               const line = decodeAckLine(text);
-              const value = Option.flatMap(line, (item) =>
-                decodeMailboxRecord(item["@mailboxAck"])
-              );
-              if (Option.isNone(line) || Option.isNone(value) || value.value.kind !== "ack") {
+              const value = Option.flatMap(line, (item) => decodeMailboxFact(item["@mailboxAck"]));
+              if (
+                Option.isNone(line) ||
+                Option.isNone(value) ||
+                value.value.kind !== "ack" ||
+                !validMailboxFactAt(value.value, t, instance)
+              ) {
                 return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
               }
               if (
@@ -436,25 +540,14 @@ export const layerJsonl = (file: string) =>
                   "A mailbox acknowledgement does not name complete commits."
                 );
               }
-              records.push({
-                predicate: "ack",
-                json: line.value["@mailboxAck"],
-                t,
-                address: value.value.address,
-                operation: value.value.operation,
-              });
+              records.push({ record: value.value, t });
             }
           }
           return records;
         });
       const mailboxAt = (address: string, at: Pin) =>
         Effect.flatMap(mailboxLines(at), (records) =>
-          resolveMailbox(
-            records.filter((record) => record.address === address),
-            address,
-            at.head,
-            at.incarnation
-          )
+          resolveMailbox(records, mailboxIri(address), at.head, at.incarnation)
         );
       const readAt = (from: number, at: Pin) =>
         Effect.gen(function* () {
@@ -496,46 +589,39 @@ export const layerJsonl = (file: string) =>
         }).pipe(Effect.withSpan("Ledger.mailboxCandidatesAt"));
       const mailboxReceiptAt = (address: string, operation: string, at: Pin) =>
         Effect.gen(function* () {
-          const records = (yield* mailboxLines(at)).filter(
-            (record) => record.operation === operation
-          );
+          const all = yield* mailboxLines(at);
+          const records = all.filter((item) => item.record.operation === operation);
           const [only] = records;
           if (only === undefined) {
-            yield* mailboxAt(address, at);
+            yield* resolveMailbox(all, mailboxIri(address), at.head, at.incarnation);
             return { status: "ABSENT", cut: at } satisfies MailboxReceiptRead;
           }
           if (records.length !== 1)
             return { status: "MALFORMED", cut: at } satisfies MailboxReceiptRead;
-          const record = decodeMailboxRecord(only.json);
-          if (Option.isNone(record))
+          const state = yield* resolveMailbox(all, only.record.mailbox, at.head, at.incarnation);
+          if (state.status === "ABSENT")
             return { status: "MALFORMED", cut: at } satisfies MailboxReceiptRead;
-          const state = yield* mailboxAt(record.value.address, at);
-          if (
-            state.status === "ABSENT" ||
-            !state.records.some((item) => item.t === only.t && item.record.operation === operation)
-          )
-            return { status: "MALFORMED", cut: at } satisfies MailboxReceiptRead;
-          if (record.value.address !== address) {
+          if (only.record.mailbox !== mailboxIri(address)) {
             return { status: "ADDRESS_MISMATCH", cut: at } satisfies MailboxReceiptRead;
           }
           return {
             status: "FOUND",
-            record: record.value,
+            record: only.record,
             t: only.t,
             cut: at,
           } satisfies MailboxReceiptRead;
         }).pipe(Effect.orElseSucceed((): MailboxReceiptRead => ({ status: "UNAVAILABLE" })));
       const writeMailbox = (record: MailboxRecord, basis: Pin) =>
         Effect.gen(function* () {
-          const json = yield* encodeMailbox(record).pipe(Effect.mapError(ledgerError));
-          yield* mailboxLines(basis);
+          yield* validateMailbox(record).pipe(Effect.mapError(ledgerError));
+          yield* snapshotLines(basis);
+          if (Option.isNone(yield* Effect.option(mailboxLines(basis)))) {
+            return { status: "UNKNOWN" } satisfies MailboxWrite;
+          }
           const current = { head: yield* end, incarnation: instance };
           const existing = yield* mailboxReceiptAt(record.address, record.operation, current);
           if (existing.status === "FOUND") {
-            const previous = yield* encodeMailbox(existing.record).pipe(
-              Effect.mapError(ledgerError)
-            );
-            return previous === json
+            return mailboxIntentMatches(record, existing.record)
               ? ({
                   status: "APPLIED",
                   cut: { head: existing.t, incarnation: instance },
@@ -545,20 +631,12 @@ export const layerJsonl = (file: string) =>
           if (existing.status === "ADDRESS_MISMATCH")
             return { status: "IDENTITY_MISMATCH", cut: current } satisfies MailboxWrite;
           if (existing.status !== "ABSENT") return { status: "UNKNOWN" } satisfies MailboxWrite;
-          const priorRows = (yield* mailboxLines(basis)).filter(
-            (row) => row.address === record.address
-          );
-          const currentRows = (yield* mailboxLines(current)).filter(
-            (row) => row.address === record.address
-          );
-          const prior = yield* resolveMailbox(
-            priorRows,
-            record.address,
-            basis.head,
-            basis.incarnation
-          );
-          yield* resolveMailbox(currentRows, record.address, current.head, current.incarnation);
-          if (currentRows.some((row) => row.t > basis.head)) {
+          const mailbox = mailboxIri(record.address);
+          const priorRows = yield* mailboxLines(basis);
+          const currentRows = yield* mailboxLines(current);
+          const prior = yield* resolveMailbox(priorRows, mailbox, basis.head, basis.incarnation);
+          yield* resolveMailbox(currentRows, mailbox, current.head, current.incarnation);
+          if (currentRows.some((row) => row.t > basis.head && row.record.mailbox === mailbox)) {
             return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
           }
           if (record.kind === "unresolved") {
@@ -585,12 +663,14 @@ export const layerJsonl = (file: string) =>
             yield* mailboxLines(record.dataCut);
             yield* mailboxLines({ head: record.through, incarnation: basis.incarnation });
           }
+          const fact = mailboxFactOf(
+            record,
+            prior.status === "ABSENT" ? null : prior.current.record.operation
+          );
+          const json = encodeMailboxFact(fact);
           yield* resolveMailbox(
-            [
-              ...priorRows,
-              { predicate: record.kind === "ack" ? "ack" : "start", json, t: basis.head + 1 },
-            ],
-            record.address,
+            [...priorRows, { record: fact, t: basis.head + 1 }],
+            mailbox,
             basis.head + 1,
             basis.incarnation
           );
@@ -689,7 +769,7 @@ export const layerJsonl = (file: string) =>
             if (text.startsWith(START_MARK)) {
               const wrapped = decodeStartLine(text);
               const record = Option.flatMap(wrapped, (line) =>
-                decodeMailboxRecord(line["@mailboxStart"])
+                decodeMailboxFact(line["@mailboxStart"])
               );
               if (
                 Option.isNone(wrapped) ||
@@ -703,7 +783,7 @@ export const layerJsonl = (file: string) =>
             } else if (text.startsWith(ACK_MARK)) {
               const wrapped = decodeAckLine(text);
               const record = Option.flatMap(wrapped, (line) =>
-                decodeMailboxRecord(line["@mailboxAck"])
+                decodeMailboxFact(line["@mailboxAck"])
               );
               if (Option.isNone(record) || record.value.kind !== "ack")
                 return yield* undecodable(t);

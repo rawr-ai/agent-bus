@@ -14,11 +14,19 @@ const start = (): MailboxStart => ({
   position: 0,
 });
 const transport = (): MailboxTransport => ({
+  ownership: { prepare: () => Effect.succeed("urn:slot"), proves: () => Effect.succeed(true) },
   instance: cut.incarnation,
   timeout: "20 millis",
   head: Effect.succeed(cut.head),
   incarnation: Effect.succeed(cut.incarnation),
-  at: () => Effect.succeed([]),
+  at: (_head, body) =>
+    Effect.succeed(
+      Array.isArray(body.select) && body.select.includes("?marker")
+        ? [[null, null, null, null, false, null, false, null]]
+        : Array.isArray(body.select) && body.select.includes("?predicate")
+          ? [[null, null, null, null, null, false, null, null, false]]
+          : []
+    ),
   history: () => Effect.succeed([]),
   update: () => Effect.succeed(cut.head),
   messageNode: () => ({}),
@@ -46,4 +54,9 @@ test("an update stalled after dispatch settles as UNKNOWN, never a definite no-o
   });
   expect((await Effect.runPromise(store.importMailbox(start(), cut))).status).toBe("UNKNOWN");
   expect(sent).toBe(1);
+});
+
+test("an update answer from before preflight cannot prove a conflict", async () => {
+  const store = makeFlureeMailbox({ ...transport(), update: () => Effect.succeed(0) });
+  expect((await Effect.runPromise(store.importMailbox(start(), cut))).status).toBe("UNKNOWN");
 });

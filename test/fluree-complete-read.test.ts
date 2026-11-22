@@ -6,6 +6,7 @@ import { PRESENCE_NODES } from "../src/activity-read.ts";
 import * as Bus from "../src/Bus.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger, messageIri } from "../src/Ledger.ts";
+import { mailboxFactOf } from "../src/mailbox-model.ts";
 import { ownedAddresses } from "../src/mcp.ts";
 
 const valid = (id: string, to = ["codex/a"]) =>
@@ -173,20 +174,21 @@ const fixture = () => {
             return {
               status: "FOUND" as const,
               position: cursor,
-              records: [
-                {
-                  t: 1,
-                  record: {
+              current: {
+                t: 1,
+                record: mailboxFactOf(
+                  {
                     version: 1,
                     kind: "start",
-                    operation: "fixture",
+                    operation: "00000000-0001-7000-8000-000000000001",
                     address,
                     run: "join",
                     origin: "join",
                     position: cursor,
                   },
-                },
-              ],
+                  null
+                ),
+              },
             };
           }),
         appendMailboxAck: (record, cut) =>

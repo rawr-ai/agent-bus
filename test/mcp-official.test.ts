@@ -152,8 +152,8 @@ const damagedPositionServer = async (name: string) => {
 };
 
 /**
- * Stores a malformed mailbox acknowledgement for `address`, carrying the private marker, the
- * way test/mailbox-ledger.test.ts damages a position. Swap this when the representation changes.
+ * Add a second current receipt reference. Neither this damaged value nor unread mail
+ * may reach the client, and refusing the read must not write another acknowledgement.
  */
 const injectMalformedPosition = (
   config: Awaited<ReturnType<typeof freshLedger>>,
@@ -162,7 +162,7 @@ const injectMalformedPosition = (
   insertRaw(config, {
     "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
     "@id": mailboxIri(address),
-    "bus:mailboxAck": JSON.stringify({ address, cursor: privateMarker }),
+    "bus:mailboxHead": privateMarker,
   });
 
 test("the public message schema excludes presence and unknown objects at every level", () => {
