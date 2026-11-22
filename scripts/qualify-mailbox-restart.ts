@@ -1,5 +1,5 @@
 /**
- * Starts the selected CLI twice on a new disposable Fluree ledger. No installed bus,
+ * Restarts the selected CLI on a new disposable Fluree ledger. No installed bus,
  * launchd job, operator credential or live mailbox is used. Invoke with the pinned Bun:
  *   bun --no-env-file scripts/qualify-mailbox-restart.ts [--cli path/to/app/cli.js]
  *   bun --no-env-file scripts/qualify-mailbox-restart.ts --file-baseline --cli old/app/cli.js
@@ -15,13 +15,15 @@ import { parseArgs } from "node:util";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
+import { Message, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
-import { boundary } from "../test/fluree-boundary.ts";
-import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
+import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
+import { freshLedger, insertRaw, stopFlureeServer } from "../test/fluree-server.ts";
 import { type Supervised, spawnSupervised } from "../test/supervised.ts";
 
 const { values } = parseArgs({
@@ -36,7 +38,8 @@ const sid = (address: string) => `synthetic:${address}`;
 const key = `urn:agent-bus:mailbox:${createHash("sha256").update(Buffer.from(reader, "utf16le")).digest("hex")}`;
 const receiptPrefix = "urn:agent-bus:mailbox-receipt:";
 const strings = Schema.decodeUnknownSync(Schema.Array(Schema.Array(Schema.String)));
-const object = Schema.decodeUnknownSync(Schema.Record(Schema.String, Schema.Unknown));
+const objectSchema = Schema.Record(Schema.String, Schema.Unknown);
+const object = Schema.decodeUnknownSync(objectSchema);
 const rows = Schema.decodeUnknownSync(Schema.Array(Schema.Struct({ id: Schema.String })));
 
 const run = async () => {
@@ -91,9 +94,12 @@ const run = async () => {
       processHandle = undefined;
     }
   };
-  const call = async (name: string, args: Record<string, unknown>) => {
+  const invoke = (name: string, args: Record<string, unknown>) => {
     assert(client);
-    const result = await client.callTool({ name, arguments: args });
+    return client.callTool({ name, arguments: args });
+  };
+  const call = async (name: string, args: Record<string, unknown>) => {
+    const result = await invoke(name, args);
     assert.notEqual(result.isError, true, `${name} returned an MCP tool error`);
     return object(result.structuredContent);
   };
@@ -132,32 +138,112 @@ const run = async () => {
     }
     throw new Error("Disposable serve did not initialize an MCP client.");
   };
+  const joining = (address: string, topics: string[]) => ({
+    address,
+    topics,
+    session: sid(address),
+    runtime: "other",
+    cwd: root,
+  });
   const joinPeer = (address: string, topics: string[]) =>
-    call("bus_join", { address, topics, session: sid(address), runtime: "other", cwd: root });
-  const send = async (body: string) => {
+    call("bus_join", joining(address, topics));
+  const send = async (body: string, to = reader) => {
     const { id } = await call("bus_publish", {
       from: author,
       session: sid(author),
-      to: [reader],
+      to: [to],
       body,
     });
     assert.equal(typeof id, "string");
     return id;
   };
-  const read = async () =>
-    rows((await call("bus_read", { address: reader, session: sid(reader) })).messages).map(
-      (m) => m.id
-    );
-  const joinAfterLostAnswer = async (topics: string[]) => {
-    const lost = proxy.loseNextUpdate();
-    const result = await joinPeer(reader, topics);
-    assert.equal(result.address, reader);
-    assert.deepEqual(result.topics, topics);
+  const read = async (address = reader) =>
+    rows((await call("bus_read", { address, session: sid(address) })).messages).map((m) => m.id);
+  const intercepted = async (lost: Promise<Forwarded>) => {
     // Only proves the proxy forwarded a response. State assertions below prove whose write landed.
     assert.deepEqual(
       await Promise.race([lost, Bun.sleep(1000).then(() => "update not intercepted")]),
       { status: 200 }
     );
+  };
+  const joinAfterLostAnswer = async (topics: string[]) => {
+    const lost = proxy.loseNextUpdate();
+    const result = await joinPeer(reader, topics);
+    assert.equal(result.address, reader);
+    assert.deepEqual(result.topics, topics);
+    await intercepted(lost);
+  };
+  const unknownJoin = async () => {
+    const address = "fixture/mailbox-unconfirmed";
+    const topics = ["unconfirmed", "recovery"];
+    const before = (await pin()).head;
+    const lost = proxy.loseNextUpdate({ disconnect: true });
+    try {
+      const result = CallToolResultSchema.parse(await invoke("bus_join", joining(address, topics)));
+      assert.equal(result.isError, true);
+      const entry = result.content[0];
+      assert(entry?.type === "text");
+      assert.match(entry.text, /could not confirm|unconfirmed/i);
+      await intercepted(lost);
+    } finally {
+      assert(proxy.reconnect() > 0, "no confirmation request was refused");
+    }
+    const after = (await pin()).head;
+    assert.equal(after, before + 1);
+    const owned = await call("bus_owned_addresses", { session: sid(address), runtime: "other" });
+    assert.deepEqual(owned.addresses, [address]);
+    const peers = Schema.decodeUnknownSync(Schema.Array(objectSchema))(
+      (await call("bus_peers", {})).peers
+    );
+    assert.deepEqual(peers.find((p) => p.address === address)?.topics, topics);
+    assert.equal((await pin()).head, after);
+    // Evidence of current ownership, not a historical receipt. No resubmitted join.
+    const id = await send("recover by inspecting current state", address);
+    assert.deepEqual(await read(address), [id]);
+    assert.deepEqual(await read(address), []);
+  };
+  const idleGap = async (installation: string) => {
+    const before = (await pin()).head;
+    const first = await send("before a long idle gap");
+    await stop();
+    const runs = new Map<string, string>();
+    for (let i = 0; i < 100; i++) {
+      const address = `fixture/idle-${i % 25}`;
+      const id = Bun.randomUUIDv7();
+      const prior = runs.get(address);
+      runs.set(address, prior ?? id);
+      const message = new Message({
+        id,
+        ts: new Date().toISOString(),
+        from: address,
+        to: ["*"],
+        kind: "presence",
+        body: "synthetic registration",
+        presence: new Presence({
+          status: "joined",
+          runtime: "other",
+          topics: ["infra", "releases", "observability"],
+          session: sid(address),
+          installation,
+          ...(prior === undefined ? {} : { rejoinOf: prior }),
+        }),
+      });
+      await witness.runPromise(Effect.flatMap(Ledger, (l) => l.append(message)));
+    }
+    for (let i = 0; i < 402; i++) {
+      await insertRaw(config, {
+        "@id": `urn:fixture:idle:${i}`,
+        "urn:fixture:idle-tag": "non-mail",
+      });
+    }
+    // A new process has no scan hint. The actual IDs are on opposite sides of one 500-commit window.
+    await start(roots[1]);
+    const next = await send("after the idle gap");
+    const through = (await pin()).head;
+    assert(through - before > 500);
+    assert.deepEqual(await read(), [first, next]);
+    assert.deepEqual(await read(), []);
+    assert.equal((await pin()).head, through + 1);
   };
   try {
     const installation = randomUUID();
@@ -226,6 +312,13 @@ const run = async () => {
     assert.deepEqual(await read(), []);
     assert.equal(readdirSync(roots[0]).includes("fluree-cursors"), files);
     assert.equal(readdirSync(roots[1]).includes("fluree-cursors"), false);
+    if (!files) {
+      await unknownJoin();
+      await idleGap(installation);
+      console.log(
+        "PASS: unconfirmed registration recovered without rejoining; cold read served exact IDs across the 500-commit boundary."
+      );
+    }
     console.log(
       `PASS: ${files ? "retained-file baseline" : "ledger pointer, lost join and renewal responses, no cursor files"}; process restart, exact mail IDs and zero-write empty read.`
     );
