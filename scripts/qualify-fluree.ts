@@ -15,10 +15,10 @@
  * 4. Guarded replacement, on a ledger of its own: a write that moves a scope's
  *    current-revision pointer only while the pointer still names the revision
  *    the writer read, and in the same commit records an immutable witness and
- *    one ordinary notification. Fluree 4.2.4's source evaluates the condition
- *    in transaction staging and restages when the head moves, so two writers
- *    cannot both match (fluree/db v4.2.4: routes/transact.rs, tx_builder.rs,
- *    commit.rs, consensus/local.rs). The run checks what a client can see: a
+ *    one ordinary notification. See docs/platforms/fluree.md#conditional-updates
+ *    for each reviewed release's staging and commit path. The reported version
+ *    selects that source citation; it does not attest the executable's build.
+ *    The run checks what a client can see: a
  *    stale writer writes nothing, a success status or a later t is not
  *    evidence of applying and the operation's own witness is, an operation id
  *    that already has a witness can't be reused for another request, a lost
@@ -467,7 +467,15 @@ const same = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) =>
 
 const qualifyGuardedReplacement = async () => {
   const version = command([fluree, "--version"]);
-  check("source citation matches the installed fluree", version.endsWith(" 4.2.4"), version);
+  const source = new Map([
+    ["fluree 4.2.4", "ba4a982ecb469e5d9d10321fdd92e93997368d58"],
+    ["fluree 4.2.9", "4b8fa30e4b20b7043751a4c41cc6218f4afce8c8"],
+  ]).get(version);
+  check(
+    "reported Fluree release has reviewed transaction source",
+    source !== undefined,
+    source === undefined ? version : `${version}; fluree/db ${source}`
+  );
 
   // The production layer creates the ledger, joins the reader and writes one ordinary entry,
   // which calibrates the history oracle before a zero from it is read as absence.
