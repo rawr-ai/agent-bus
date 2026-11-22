@@ -23,14 +23,19 @@ const fakeBus = async (options: {
   readonly readAdmission?: boolean;
   readonly hold?: boolean;
   readonly port?: number;
+  /** The released a18838d descriptor: maxResultBytes is an integer of at least 128, no maximum. */
+  readonly released?: boolean;
 }) => {
   const port = options.port ?? freePort();
   const legacy = Schema.Struct({ address: Schema.String, session: Schema.String });
   const admitted = Schema.Struct({
     ...legacy.fields,
-    maxResultBytes: Schema.Int.check(
-      Schema.isBetween({ minimum: MIN_READ_RESULT_BYTES, maximum: 64 * 1024 * 1024 })
-    ),
+    maxResultBytes:
+      options.released === true
+        ? Schema.Int.check(Schema.isGreaterThanOrEqualTo(128))
+        : Schema.Int.check(
+            Schema.isBetween({ minimum: MIN_READ_RESULT_BYTES, maximum: 64 * 1024 * 1024 })
+          ),
   });
   const input = options.readAdmission === true ? admitted : legacy;
   const output = Schema.Struct({ messages: Schema.Array(Schema.Unknown) });
@@ -458,9 +463,10 @@ test("a Bus that reports no version is refused as unconfirmed, not as a known di
   }
 });
 
-test("an older Bus descriptor without keyed reads refuses readId, peek and bus_ack before dispatch", async () => {
-  // The fixture is a Bus from before keyed reads: byte admission, but no readId, peek or
-  // bus_ack. It would ignore both fields and consume the mail, so nothing may reach it.
+test("a Bus with this read budget but no keyed reads refuses readId, peek and bus_ack before dispatch", async () => {
+  // A hybrid, not a released Bus: the current byte admission, but no readId, peek or bus_ack.
+  // It would ignore both fields and consume the mail, so nothing keyed may reach it. The
+  // released descriptor is the next test.
   const bus = await fakeBus({ version: "native-old", readAdmission: true });
   const peer = await busPeer({
     busPort: bus.port,
@@ -501,6 +507,42 @@ test("an older Bus descriptor without keyed reads refuses readId, peek and bus_a
     // An ordinary read is unchanged on that Bus.
     expect(await run("bus_read", { address: "chatgpt/reader" })).toBe('{"messages":[]}');
     expect(bus.state.calls).toBe(1);
+  } finally {
+    await peer.dispose();
+    await bus.dispose();
+  }
+});
+
+test("the released a18838d read descriptor is refused for every read before dispatch", async () => {
+  // The released Bus: byte admission with a minimum of 128 and no maximum, no readId, peek or
+  // bus_ack. This bridge budgets for the current minimum, so it cannot pair with that Bus even
+  // for an ordinary read; host and native release as one cohort.
+  expect(MIN_READ_RESULT_BYTES).not.toBe(128);
+  const bus = await fakeBus({ version: "native-a18838d", readAdmission: true, released: true });
+  const peer = await busPeer({
+    busPort: bus.port,
+    expectedBusVersion: "native-a18838d",
+    diagnostics: () => {},
+  });
+  try {
+    const tools = peerTools(peer.exchange, "/bridge");
+    const run = async (name: string, args: Record<string, unknown>) => {
+      const tool = tools.find((item) => item.name === name);
+      if (!tool) throw new Error("Missing hosted tool.");
+      return publicText(await tool.execute(args, { actor, signal }));
+    };
+    const readId = "01a20000-0000-7000-8000-000000000002";
+    for (const [name, args] of [
+      ["bus_read", { address: "chatgpt/reader" }],
+      ["bus_wait", { address: "chatgpt/reader", timeoutSeconds: 0 }],
+      ["bus_read", { address: "chatgpt/reader", readId }],
+      ["bus_read", { address: "chatgpt/reader", peek: true }],
+    ] as const) {
+      expect(await run(name, args)).toBe(
+        "The Bus call was not sent; the connection or required tool is unavailable."
+      );
+    }
+    expect(bus.state.calls).toBe(0);
   } finally {
     await peer.dispose();
     await bus.dispose();
