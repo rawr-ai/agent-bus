@@ -88,7 +88,9 @@ export interface Boundary {
    * resolves with Fluree's status, or with the failure if the update got no response within
    * the boundary's forward timeout.
    */
-  readonly loseNextUpdate: () => Promise<Forwarded>;
+  readonly loseNextUpdate: (options?: { readonly disconnect?: boolean }) => Promise<Forwarded>;
+  /** Restores contact after a lost answer with disconnect set; returns requests refused meanwhile. */
+  readonly reconnect: () => number;
   readonly stop: () => void;
 }
 
@@ -105,6 +107,8 @@ export const boundary = (
   const queued: Pending[] = [];
   const pins: Pending[] = [];
   const lostUpdates: Array<(forwarded: Forwarded) => void> = [];
+  let disconnected = false;
+  let refused = 0;
   let passed = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
@@ -112,6 +116,10 @@ export const boundary = (
     // A held request may be idle for as long as a test keeps it.
     idleTimeout: 0,
     async fetch(request) {
+      if (disconnected) {
+        refused++;
+        return new Response(null, { status: 503 });
+      }
       const url = new URL(request.url);
       const pinned = PINNED.exec(url.pathname);
       const t = Number(/@t:(\d+)$/.exec(decodeURIComponent(pinned?.[1] ?? ""))?.[1] ?? Number.NaN);
@@ -165,7 +173,20 @@ export const boundary = (
     next: (reply) => new Promise<Held>((arrived) => queued.push({ reply, arrived })),
     nextPin: (reply) => new Promise<Held>((arrived) => pins.push({ reply, arrived })),
     passed: () => passed,
-    loseNextUpdate: () => new Promise<Forwarded>((settled) => lostUpdates.push(settled)),
+    loseNextUpdate: (options) =>
+      new Promise<Forwarded>((settled) =>
+        lostUpdates.push((result) => {
+          if (options?.disconnect) {
+            refused = 0;
+            disconnected = true;
+          }
+          settled(result);
+        })
+      ),
+    reconnect: () => {
+      disconnected = false;
+      return refused;
+    },
     stop: () => server.stop(true),
   };
 };
