@@ -26,7 +26,7 @@ import { readMailboxSlice } from "../src/mailbox-read.ts";
 import type { Pin } from "../src/Query.ts";
 import { boundary } from "./fluree-boundary.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
-import { freshLedger, insertRaw } from "./fluree-server.ts";
+import { flureeFetch, freshLedger, insertRaw } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -44,6 +44,7 @@ const handle = async (layer: LedgerLayer) => {
     runtime.runPromise(Effect.flatMap(Ledger, f));
   return {
     cut: () => use((ledger) => Effect.map(ledger.presenceAt(), (value) => value.cut)),
+    era: (cut: Pin) => use((ledger) => ledger.ownershipEraAt(cut)),
     append: (message: Message) => use((ledger) => ledger.append(message)),
     admit: (message: Message, cut: Pin) => use((ledger) => ledger.admit(message, cut)),
     start: (message: Message, value: MailboxStart, cut: Pin) =>
@@ -911,11 +912,75 @@ for (const backend of backends) {
 }
 
 describe("mailbox Fluree boundaries", () => {
+  test("the ownership era read rejects incorrect pins and an actual replacement under the same alias", async () => {
+    const config = await freshLedger("ownership-era-replacement");
+    const open = () => handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const store = await open();
+    const cut = await store.cut();
+    expect(await store.era(cut)).toBe(1);
+    for (const invalid of [
+      { ...cut, incarnation: "wrong" },
+      { ...cut, head: cut.head + 1 },
+      { ...cut, head: 0 },
+    ]) {
+      await expect(store.era(invalid)).rejects.toMatchObject({ _tag: "LedgerError" });
+    }
+    expect(await store.cut()).toEqual(cut);
+    const drop = await flureeFetch("/v1/fluree/drop", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ledger: config.ledger.replace(/:main$/, ""), hard: true }),
+    });
+    expect(drop.ok).toBe(true);
+    const replacement = await open();
+    const replaced = await replacement.cut();
+    expect(replaced.incarnation).not.toBe(cut.incarnation);
+    await expect(store.era(cut)).rejects.toMatchObject({ _tag: "LedgerError" });
+    await expect(store.era(replaced)).rejects.toMatchObject({ _tag: "LedgerError" });
+    expect(await replacement.era(replaced)).toBe(1);
+    expect(await replacement.cut()).toEqual(replaced);
+  });
+
+  test("a transient competing ownership era invalidates later pins even when the original marker survives", async () => {
+    const config = await freshLedger("ownership-era-history");
+    const open = () => handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const store = await open();
+    const first = await store.cut();
+    expect(await store.era(first)).toBe(1);
+    const context = {
+      bus: "https://rawr.ai/ns/agent-bus#",
+      xsd: "http://www.w3.org/2001/XMLSchema#",
+    };
+    const other = {
+      ...ownershipEra,
+      "bus:presenceEra": { "@value": "unrecognized", "@type": "xsd:string" },
+    };
+    await insertRaw(config, { "@context": context, ...other });
+    const competing = await store.cut();
+    await expect(store.era(competing)).rejects.toMatchObject({ _tag: "LedgerError" });
+    const retracted = await flureeFetch(
+      `/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ "@context": context, where: other, delete: other }),
+      }
+    );
+    expect(retracted.ok).toBe(true);
+    const restored = await store.cut();
+    for (const reader of [store, await open()]) {
+      await expect(reader.era(restored)).rejects.toMatchObject({ _tag: "LedgerError" });
+      expect(await reader.era(first)).toBe(1);
+      expect(await reader.cut()).toEqual(restored);
+    }
+  });
+
   test("reasserting the ownership era cannot move the legacy boundary, including after reopening", async () => {
     const config = await freshLedger("changed-ownership-cut");
     const open = () => handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
     const store = await open();
     const original = await store.cut();
+    expect(await store.era(original)).toBe(1);
     expect((await store.admit(presence(), original)).status).toBe("ADMITTED");
     const context = {
       bus: "https://rawr.ai/ns/agent-bus#",
@@ -930,9 +995,16 @@ describe("mailbox Fluree boundaries", () => {
       }
     );
     expect(retracted.ok).toBe(true);
+    const missing = await store.cut();
+    for (const reader of [store, await open()]) {
+      await expect(reader.era(missing)).rejects.toMatchObject({ _tag: "LedgerError" });
+      expect(await reader.cut()).toEqual(missing);
+    }
     await insertRaw(config, { "@context": context, ...ownershipEra });
     const damaged = await store.cut();
     for (const reader of [store, await open()]) {
+      await expect(reader.era(damaged)).rejects.toMatchObject({ _tag: "LedgerError" });
+      expect(await reader.era(original)).toBe(1);
       await expect(reader.admit(presence(), damaged)).rejects.toThrow("ownership fence");
       expect(await reader.cut()).toEqual(damaged);
     }
@@ -973,7 +1045,9 @@ describe("mailbox Fluree boundaries", () => {
   });
 
   test("the ownership cut rejects earlier legacy decisions and adopts the last transition including leave", async () => {
-    const config = await freshLedger("legacy-ownership-cut");
+    const server = await startFileFlureeServer();
+    cleanups.push(server.stop);
+    const config = server.freshLedger("legacy-ownership-cut");
     const created = await fetch(`${config.url}/v1/fluree/create`, {
       method: "POST",
       headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
@@ -987,6 +1061,7 @@ describe("mailbox Fluree boundaries", () => {
     const next = presence(address, "replaced");
     await insertRaw(config, toNode(next, Schema.encodeSync(MessageJson)(next)));
     const legacy = await store.cut();
+    await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
     const send = () => new Message({ ...message(), from: address });
     await expect(store.admit(send(), legacy)).rejects.toThrow();
     expect(await store.cut()).toEqual(legacy);
@@ -998,12 +1073,17 @@ describe("mailbox Fluree boundaries", () => {
       ...ownershipEra,
     });
     const active = await store.cut();
+    expect(active.head).toBeGreaterThan(1);
+    expect(await store.era(active)).toBe(active.head);
+    await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
     await expect(store.admit(send(), before)).rejects.toThrow();
     await expect(store.admit(send(), legacy)).rejects.toThrow();
     expect(await store.cut()).toEqual(active);
     const fresh = await store.admit(send(), active);
     if (fresh.status !== "ADMITTED") throw new Error("active legacy holder refused");
     expect(fresh.cut.head).toBe(active.head + 1);
+    expect(await store.era(fresh.cut)).toBe(active.head);
+    expect(await store.cut()).toEqual(fresh.cut);
     const renewal = presence(address, "replaced");
     const renewed = await store.admit(renewal, fresh.cut);
     if (renewed.status !== "ADMITTED") throw new Error("renewal refused");

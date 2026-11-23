@@ -199,6 +199,8 @@ export class Ledger extends Context.Service<
      * per address is that peer's state. Damage fails the read.
      */
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
+    /** Original commit of the still-active ownership era at this exact pin. Never initializes it. */
+    readonly ownershipEraAt: (cut: Pin) => Effect.Effect<number, LedgerError>;
     /**
      * Appends an entry only if no presence for its sender was written after `basis`, the cut
      * its ownership decision read. One attempt with a fresh id, never resent: a resent id

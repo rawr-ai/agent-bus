@@ -34,6 +34,7 @@ export interface Transition {
   readonly t: number;
 }
 export interface Ownership {
+  readonly eraAt: (cut: Pin) => IO<number>;
   readonly prepare: (address: string, basis: Pin) => IO<string>;
   readonly proves: (
     address: string,
@@ -72,18 +73,17 @@ export const makeOwnership = (
         return yield* invalid();
       return { value: row[0], t: row[1] };
     });
-  let originalEra: number | undefined;
+  let proved: { readonly era: number; readonly through: number } | undefined;
   const eraAt = (cut: Pin) =>
     Effect.gen(function* () {
-      // The layer is scoped to one incarnation. After establishing the unique original
-      // assertion, pin future checks to its exact term and assertion commit.
-      if (originalEra !== undefined) {
-        const current = yield* term(eraSubject, "bus:presenceEra", cut);
-        if (current.value !== "successor-1" || current.t !== originalEra) return yield* invalid();
-        return originalEra;
-      }
-      // A reassertion must not move the cut forward and grandfather a bypassed writer.
-      const rows = yield* history(1, cut.head, {
+      // History alone is not evidence of an active fact. Conversely a valid snapshot alone
+      // cannot rule out a conflicting value that was added and removed between two reads.
+      const prior = proved;
+      const current = yield* term(eraSubject, "bus:presenceEra", cut);
+      if (current.value !== "successor-1" || (prior && current.t !== prior.era))
+        return yield* invalid();
+      if (prior && cut.head <= prior.through) return current.t;
+      const rows = yield* history(prior ? prior.through + 1 : 1, cut.head, {
         select: ["?value", "?t", "?asserted", "?datatype"],
         where: [
           {
@@ -96,17 +96,19 @@ export const makeOwnership = (
       }).pipe(Effect.flatMap(Schema.decodeUnknownEffect(Rows)), Effect.mapError(invalid));
       const row = rows[0];
       if (
-        rows.length !== 1 ||
-        !row ||
-        row[0] !== "successor-1" ||
-        row[1] < 1 ||
-        row[1] > cut.head ||
-        row[2] !== true ||
-        (row[3] !== "xsd:string" && row[3] !== "http://www.w3.org/2001/XMLSchema#string")
+        prior
+          ? rows.length !== 0
+          : rows.length !== 1 ||
+            !row ||
+            row[0] !== "successor-1" ||
+            row[1] !== current.t ||
+            row[2] !== true ||
+            (row[3] !== "xsd:string" && row[3] !== "http://www.w3.org/2001/XMLSchema#string")
       )
         return yield* invalid();
-      originalEra = row[1];
-      return row[1];
+      // Concurrent calls may finish in reverse pin order.
+      if (!proved || proved.through < cut.head) proved = { era: current.t, through: cut.head };
+      return current.t;
     });
   const matchesEdge: Ownership["proves"] = (address, id, t, cut, expected) =>
     Effect.gen(function* () {
@@ -122,6 +124,7 @@ export const makeOwnership = (
       return edge.value === hash(JSON.stringify(id)) && edge.t === t;
     });
   return {
+    eraAt,
     proves: (address, id, t, cut, expected) =>
       Effect.gen(function* () {
         if (t <= (yield* eraAt(cut))) return false;

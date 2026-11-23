@@ -14,7 +14,11 @@ const start = (): MailboxStart => ({
   position: 0,
 });
 const transport = (): MailboxTransport => ({
-  ownership: { prepare: () => Effect.succeed("urn:slot"), proves: () => Effect.succeed(true) },
+  ownership: {
+    eraAt: () => Effect.succeed(1),
+    prepare: () => Effect.succeed("urn:slot"),
+    proves: () => Effect.succeed(true),
+  },
   instance: cut.incarnation,
   timeout: "20 millis",
   head: Effect.succeed(cut.head),
