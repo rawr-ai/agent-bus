@@ -271,7 +271,8 @@ try {
     };
     const client = await connect();
     const names = (await client.listTools()).tools.map((tool) => tool.name);
-    assert.equal(names.length, 16);
+    assert.equal(names.length, 17);
+    assert(names.includes("bus_ack"));
     assert(!names.includes("bus_wake"));
     // The host's closed outputs name every field the serve's do, nested ones included. Inputs
     // differ by design (the host supplies session and runtime), so only outputs are compared.
@@ -450,6 +451,79 @@ try {
     assert.equal(largeRead.messages.length, 1);
     assert.equal(largeRead.messages[0].id, large.id);
     assert.equal(largeRead.messages[0].body, largeBody);
+    // Keyed reads, peek and bus_ack through the host's own transport. A peek leaves the mail
+    // unread, bus_ack marks exactly that batch, a repeat of either writes nothing, and a read
+    // repeated with its readId returns the same batch as a replay.
+    const object = (value: unknown): Record<string, unknown> => {
+      assert(typeof value === "object" && value !== null && !Array.isArray(value));
+      return Object.fromEntries(Object.entries(value));
+    };
+    const bodies = (value: unknown) => {
+      const messages = object(value).messages;
+      assert(Array.isArray(messages));
+      return messages.map((message) => object(message).body);
+    };
+    await success(
+      "bus_publish",
+      { from: "chatgpt/http-b", to: ["chatgpt/http-a"], body: "peeked fixture body" },
+      "chat-b"
+    );
+    const peeked = await success("bus_read", { address: "chatgpt/http-a", peek: true }, "chat-a");
+    assert.deepEqual(bodies(peeked), ["peeked fixture body"]);
+    const peekReceipt = object(object(peeked).receipt);
+    assert.equal(peekReceipt.replayed, false);
+    assert(typeof object(peekReceipt.basis).t === "number");
+    assert.equal(object(peekReceipt.served).count, 1);
+    assert.equal(typeof object(peeked).nextReadId, "string");
+    const peekedAgain = await success(
+      "bus_read",
+      { address: "chatgpt/http-a", peek: true },
+      "chat-a"
+    );
+    assert.deepEqual(bodies(peekedAgain), ["peeked fixture body"], "A peek consumed the mail.");
+    assert.equal(
+      (await call("bus_ack", { address: "chatgpt/http-a", receipt: peekReceipt }, "chat-b"))
+        .isError,
+      true
+    );
+    const acked = object(
+      await success("bus_ack", { address: "chatgpt/http-a", receipt: peekReceipt }, "chat-a")
+    );
+    assert.equal(object(acked.receipt).replayed, false);
+    assert.equal(object(acked.receipt).through, peekReceipt.through);
+    const ackedAgain = object(
+      await success("bus_ack", { address: "chatgpt/http-a", receipt: peekReceipt }, "chat-a")
+    );
+    assert.equal(object(ackedAgain.receipt).replayed, true);
+    const drained = object(await success("bus_read", { address: "chatgpt/http-a" }, "chat-a"));
+    assert.deepEqual(bodies(drained), [], "bus_ack did not mark the peeked batch read.");
+    assert.equal(drained.receipt, undefined);
+    const readId = drained.nextReadId;
+    assert.equal(typeof readId, "string");
+    await success(
+      "bus_publish",
+      { from: "chatgpt/http-b", to: ["chatgpt/http-a"], body: "keyed fixture body" },
+      "chat-b"
+    );
+    const keyed = object(
+      await success("bus_read", { address: "chatgpt/http-a", readId }, "chat-a")
+    );
+    assert.deepEqual(bodies(keyed), ["keyed fixture body"]);
+    assert.deepEqual(
+      { readId: object(keyed.receipt).readId, replayed: object(keyed.receipt).replayed },
+      { readId, replayed: false }
+    );
+    const replayed = object(
+      await success("bus_read", { address: "chatgpt/http-a", readId }, "chat-a")
+    );
+    assert.deepEqual(bodies(replayed), ["keyed fixture body"]);
+    assert.equal(object(replayed.receipt).replayed, true);
+    assert.notEqual(replayed.nextReadId, keyed.nextReadId);
+    assert.deepEqual(
+      bodies(await success("bus_read", { address: "chatgpt/http-a" }, "chat-a")),
+      [],
+      "A replay changed the read position."
+    );
     const beforePrivateArguments = executed.length;
     const privateArguments = await client.callTool({
       name: "bus_read",
