@@ -91,7 +91,7 @@ Still to measure before D2 is fixed: each acknowledgement re-runs every `serve`'
 | Gate | This frame revised to the measured design; reviewed by one Codex and one Claude reviewer | D0 | |
 | D1 | Ledger position and acknowledgement in the Fluree and test ledgers | Gate | D4 |
 | D2 | Bus on ledger positions; the one import; the in-memory scan hint | D1 | D4 |
-| D3 | Read and acknowledge across the tools, wait, wake, hook text, hosted mapping and skill. Committed on D2, full check green, under Codex review; restacks onto the integrated storage | D2 | D4 |
+| D3 | Read and acknowledge across the tools, wait, wake, hook text, hosted mapping and skill. Finished on D2 and handed back for integration, with the hosted qualifier extended to keyed reads, peek and bus_ack; host and native release together; restacks onto the integrated storage | D2 | D4 |
 | D4 | Caller id on publish. Reviewed on both sides with no open finding (PR #107); held to ship with D1 to D3 | Gate | D1 to D3 |
 | R1 | Paired-host rehearsal (interrupted import, interrupted acknowledgement, an older server refused every position-changing call after the import, going back, going forward, new joins, cross-machine takeover, replay, bounded reads), then both machines together | D3, D4 | |
 | D5 | Delete the file layer, converter, quiescence check, installer and rehearsal checks, their tests, procedures and limit rows. The point of no return: the projection back to files goes with it | R1 verified on both machines and the fix-forward boundary declared | |
