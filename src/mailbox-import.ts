@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import { Effect, Schema } from "effect";
 import { cursorFileName } from "./Cursors.ts";
 import { type CursorImportFile, cursorImportSnapshot } from "./cursor-layout.ts";
@@ -37,8 +38,22 @@ const refused = (message: string) => new LedgerError({ message: `Mailbox import:
 const sameCut = (one: Pin, two: Pin) =>
   one.incarnation === two.incarnation && one.head === two.head;
 
+const component = (value: string) =>
+  value !== "" &&
+  value !== "." &&
+  value !== ".." &&
+  !value.includes("/") &&
+  !value.includes("\\") &&
+  !value.includes("\0");
+
+/** The file writer encoded the ledger name, but used the incarnation verbatim. */
 export const legacyCursorPath = (root: string, ledger: string, incarnation: string) =>
-  join(root, "fluree-cursors", encodeURIComponent(ledger), encodeURIComponent(incarnation));
+  Effect.gen(function* () {
+    const invalid = () => refused("the ledger and incarnation must name safe cursor directories.");
+    const directory = yield* Effect.try({ try: () => encodeURIComponent(ledger), catch: invalid });
+    if (!component(directory) || !component(incarnation)) return yield* invalid();
+    return join(root, "fluree-cursors", directory, incarnation);
+  });
 
 /** Read-only evidence taken beside the original files, with that installation held. */
 export const captureMailboxSource = (
@@ -54,13 +69,10 @@ export const captureMailboxSource = (
       return yield* refused("the original ledger is not at the requested cut.");
     }
     const installation = yield* loadInstallation(root);
-    const { digest } = yield* cursorImportSnapshot(
-      legacyCursorPath(root, ledgerName, cut.incarnation)
-    );
+    const path = yield* legacyCursorPath(root, ledgerName, cut.incarnation);
+    const { digest } = yield* cursorImportSnapshot(path);
     yield* confirmHeld;
-    const confirmed = yield* cursorImportSnapshot(
-      legacyCursorPath(root, ledgerName, cut.incarnation)
-    );
+    const confirmed = yield* cursorImportSnapshot(path);
     if (confirmed.digest !== digest)
       return yield* refused("the cursor inventory changed during capture.");
     if (!sameCut(cut, (yield* ledger.presenceAt()).cut)) {
@@ -176,14 +188,14 @@ export const importMailboxPositions = (
         "two distinct installations, the configured ledger, and the same captured cut are required."
       );
     }
-    const currentCut = Effect.gen(function* () {
-      const current = (yield* ledger.presenceAt()).cut;
-      if (current.incarnation !== cut.incarnation || current.head < cut.head) {
+    const currentPresence = Effect.gen(function* () {
+      const current = yield* ledger.presenceAt();
+      if (current.cut.incarnation !== cut.incarnation || current.cut.head < cut.head) {
         return yield* refused("the original ledger cut is no longer available.");
       }
       return current;
     });
-    yield* currentCut;
+    yield* currentPresence;
     const read = yield* ledger.presenceAt(cut.head);
     if (!sameCut(read.cut, cut))
       return yield* refused("the original presence cut could not be established.");
@@ -193,7 +205,7 @@ export const importMailboxPositions = (
           return yield* refused("a copied installation does not match its retained receipt.");
         }
         const { digest, files } = yield* cursorImportSnapshot(
-          legacyCursorPath(copy.root, ledgerName, cut.incarnation)
+          yield* legacyCursorPath(copy.root, ledgerName, cut.incarnation)
         );
         if (digest !== copy.receipt.digest) {
           return yield* refused(
@@ -227,7 +239,8 @@ export const importMailboxPositions = (
     const rows: Array<ImportRow> = [];
     for (const record of planned) {
       const { address, operation } = record;
-      const current = yield* currentCut;
+      const now = yield* currentPresence;
+      const current = now.cut;
       const witness = yield* ledger.mailboxReceiptAt(address, operation, current);
       const recorded =
         record.kind === "start" ? { position: record.position } : { reason: record.reason };
@@ -255,10 +268,26 @@ export const importMailboxPositions = (
         rows.push({ address, operation, status: "UNCHANGED" });
         continue;
       }
+      // The files belong to the captured holding. A later import or writer-era
+      // marker may advance the ledger without changing that holding.
+      const relevant = now.entries.filter((entry) => entry.from === address);
+      if (
+        !isDeepStrictEqual(holdings.get(address), latestPresences(relevant).get(address)) ||
+        !isDeepStrictEqual(
+          owners.get(address),
+          latestPresences(relevant.filter((entry) => entry.presence?.status === "joined")).get(
+            address
+          )
+        )
+      ) {
+        return yield* refused(
+          `the holding for ${address} changed after capture; keep both old writers held.`
+        );
+      }
       yield* confirmHeld;
       const result = yield* record.kind === "start"
-        ? ledger.importMailbox(record, cut)
-        : ledger.classifyMailboxImport(record, cut);
+        ? ledger.importMailbox(record, current)
+        : ledger.classifyMailboxImport(record, current);
       if (result.status !== "APPLIED") {
         return yield* refused(
           `operation ${operation} returned ${result.status}; preserve both captures and keep both old writers held.`

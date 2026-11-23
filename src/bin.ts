@@ -426,7 +426,7 @@ const cursors = Command.make(
       const report = yield* Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
         return yield* cursorTransition(
-          legacyCursorPath(busDir, config.ledger, ledger.instance),
+          yield* legacyCursorPath(busDir, config.ledger, ledger.instance),
           installation,
           action,
           confirmCursorWriterOffline
