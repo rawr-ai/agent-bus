@@ -11,7 +11,7 @@ import { Message, MessageJson, Origin, Presence, runOf } from "../src/domain.ts"
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { mailboxServedDigest } from "../src/mailbox-model.ts";
-import { messageCarrierBytes } from "../src/message-carrier.ts";
+import { servedCarrierBytes } from "../src/message-carrier.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
@@ -383,7 +383,7 @@ test(
         from: before.position,
         through: admissionHead,
         servedDigest: mailboxServedDigest([sent.message.id]),
-        carrierBytes: messageCarrierBytes(served),
+        carrierBytes: servedCarrierBytes(served, before.position, admissionHead),
       });
     } finally {
       await Effect.runPromise(Deferred.succeed(hold.release, undefined));
@@ -396,7 +396,7 @@ test(
 );
 
 test.each(["committed", "never-sent"] as const)(
-  "an unconfirmed %s read does not give a false acknowledgement result",
+  "an unconfirmed %s read is reported acknowledged only once its id reads back",
   async (fault) => {
     const root = mkdtempSync(join(tmpdir(), "agent-bus-mailbox-unknown-"));
     const store = layerJsonl(join(root, "ledger.jsonl")).pipe(Layer.provide(platform));
@@ -409,7 +409,10 @@ test.each(["committed", "never-sent"] as const)(
       const before = await mailbox(a);
       const through = await head(a);
       probe.uncertainAck = fault;
-      await expect(take(a)).rejects.toThrow("may have committed");
+      const reading = take(a);
+      if (fault === "committed")
+        expect((await reading).map(({ id }) => id)).toEqual([sent.message.id]);
+      else await expect(reading).rejects.toThrow("may have committed");
       const observed = await mailbox(a);
       if (fault === "committed") {
         expect(observed.position).toBe(through);
@@ -623,7 +626,14 @@ test(
       );
       expect(nudges).toBe(0);
       expect(
-        await a.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.wait(inbox, owner, 0)))
+        await a.runPromise(
+          Effect.flatMap(Bus.Bus, (bus) =>
+            Effect.map(
+              bus.wait({ address: inbox, session: owner, timeoutSeconds: 0 }),
+              ({ messages }) => messages
+            )
+          )
+        )
       ).toEqual([]);
       expect(await head(a)).toBe(settledHead);
       expect((await mailbox(a)).current).toEqual(acknowledged.current);

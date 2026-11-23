@@ -131,7 +131,10 @@ test("SDK cancellation interrupts a pending wait before later mail is published"
   const sender = `upgrade/${id}/sender`;
   await succeed(client, "bus_join", joining(reader));
   await succeed(client, "bus_join", joining(sender));
-  expect(await succeed(client, "bus_read", readArgs(reader))).toEqual({ messages: [] });
+  expect(await succeed(client, "bus_read", readArgs(reader))).toEqual({
+    messages: [],
+    nextReadId: expect.any(String),
+  });
   const before = await cursor(reader);
   expect(before._tag).toBe("Some");
 
@@ -155,7 +158,10 @@ test("SDK cancellation interrupts a pending wait before later mail is published"
     expect(await succeed(client, "bus_read", readArgs(reader))).toMatchObject({
       messages: [{ id: sent.id, body }],
     });
-    expect(await succeed(client, "bus_read", readArgs(reader))).toEqual({ messages: [] });
+    expect(await succeed(client, "bus_read", readArgs(reader))).toEqual({
+      messages: [],
+      nextReadId: expect.any(String),
+    });
   } finally {
     controller.abort();
     await waiting.outcome;
@@ -178,7 +184,10 @@ test("session DELETE interrupts its wait without changing unrelated unread mail"
     to: [other],
     body: "unrelated unread mail",
   });
-  expect(await succeed(observer.client, "bus_read", readArgs(reader))).toEqual({ messages: [] });
+  expect(await succeed(observer.client, "bus_read", readArgs(reader))).toEqual({
+    messages: [],
+    nextReadId: expect.any(String),
+  });
   const before = await Promise.all([cursor(reader), cursor(sender), cursor(other)]);
   expect(before.map((position) => position._tag)).toEqual(["Some", "Some", "Some"]);
 

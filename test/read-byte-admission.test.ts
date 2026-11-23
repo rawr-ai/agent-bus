@@ -12,7 +12,7 @@ import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { Messages } from "../src/mcp-tools.ts";
+import { Messages, MIN_READ_RESULT_BYTES } from "../src/mcp-tools.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
 
@@ -85,8 +85,18 @@ const publicMessage = (message: Message) => ({
         },
       }),
 });
-const carrierBytes = (rows: ReadonlyArray<Message>) => {
-  const structuredContent = { messages: rows.map(publicMessage) };
+/**
+ * The documented size of a complete read result, computed independently of the server: the
+ * messages, a receipt (36-character id, the batch's positions, replayed false) and a
+ * 36-character nextReadId, as structured content and as its escaped text copy.
+ */
+const ID = "01a20000-0000-7000-8000-000000000000";
+const carrierBytes = (rows: ReadonlyArray<Message>, from: number, through: number) => {
+  const structuredContent = {
+    messages: rows.map(publicMessage),
+    receipt: { readId: ID, from, through, replayed: false },
+    nextReadId: ID,
+  };
   return Buffer.byteLength(
     JSON.stringify({
       content: [{ type: "text", text: JSON.stringify(structuredContent) }],
@@ -95,6 +105,14 @@ const carrierBytes = (rows: ReadonlyArray<Message>) => {
     }),
     "utf8"
   );
+};
+const head = () => server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end));
+const endOf = async (id: string) => {
+  const entry = (
+    await server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.read(0)))
+  ).entries.find(({ message }) => message.id === id);
+  if (entry === undefined) throw new Error("Missing fixture entry.");
+  return entry.end;
 };
 const joining = (address: string) => ({
   address,
@@ -121,10 +139,10 @@ test("byte admission takes only a whole prefix and never moves past an oversized
   expect(entries).toHaveLength(3);
   const [a, b, c] = entries;
   if (!a || !b || !c) throw new Error("Missing fixture messages.");
-  const firstSize = carrierBytes([a]);
-  expect(firstSize).toBeGreaterThan(128);
-  expect(firstSize).toBeGreaterThan(Buffer.byteLength(a.body, "utf8"));
   const before = await cursor(address);
+  const firstSize = carrierBytes([a], before, await endOf(a.id));
+  expect(firstSize).toBeGreaterThan(MIN_READ_RESULT_BYTES);
+  expect(firstSize).toBeGreaterThan(Buffer.byteLength(a.body, "utf8"));
   for (const name of ["bus_read", "bus_wait", "bus_read"]) {
     const result = await call(name, {
       address,
@@ -135,7 +153,11 @@ test("byte admission takes only a whole prefix and never moves past an oversized
     expect(result.isError).toBe(true);
     expect(await cursor(address)).toBe(before);
   }
-  const invalid = await call("bus_read", { address, session: address, maxResultBytes: 127 });
+  const invalid = await call("bus_read", {
+    address,
+    session: address,
+    maxResultBytes: MIN_READ_RESULT_BYTES - 1,
+  });
   expect(invalid.isError).toBe(true);
   expect(await cursor(address)).toBe(before);
   const first = await success("bus_read", {
@@ -151,14 +173,14 @@ test("byte admission takes only a whole prefix and never moves past an oversized
   const refused = await call("bus_read", {
     address,
     session: address,
-    maxResultBytes: carrierBytes([b]) - 1,
+    maxResultBytes: carrierBytes([b], afterFirst, await endOf(b.id)) - 1,
   });
   expect(refused.isError).toBe(true);
   expect(await cursor(address)).toBe(afterFirst);
   const rest = await success("bus_read", {
     address,
     session: address,
-    maxResultBytes: carrierBytes([b, c]),
+    maxResultBytes: carrierBytes([b, c], afterFirst, await head()),
   });
   expect(messages(rest.structuredContent).map((message) => message.body)).toEqual([b.body, c.body]);
   await send(sender, address, "legacy no budget");
@@ -200,16 +222,17 @@ test("same-commit rows cannot be split by either byte or count admission", async
   expect(all[1]?.end).toBe(all[2]?.end);
   const prior = all[0]?.message;
   if (!prior || !group[0] || !group[1]) throw new Error("Missing group fixtures.");
+  const groupEnd = all[1]?.end ?? 0;
   const first = await success("bus_read", {
     address,
     session: address,
-    maxResultBytes: carrierBytes([prior, group[0]]),
+    maxResultBytes: carrierBytes([prior, group[0]], await cursor(address), groupEnd),
   });
   expect(messages(first.structuredContent).map((message) => message.body)).toEqual(["prior"]);
   const saved = await cursor(address);
   for (const args of [
-    { limit: 1, maxResultBytes: carrierBytes(group) },
-    { maxResultBytes: carrierBytes([group[0]]) },
+    { limit: 1, maxResultBytes: carrierBytes(group, saved, await head()) },
+    { maxResultBytes: carrierBytes([group[0]], saved, groupEnd) },
   ]) {
     expect((await call("bus_read", { address, session: address, ...args })).isError).toBe(true);
     expect(await cursor(address)).toBe(saved);
@@ -217,7 +240,7 @@ test("same-commit rows cannot be split by either byte or count admission", async
   const both = await success("bus_read", {
     address,
     session: address,
-    maxResultBytes: carrierBytes(group),
+    maxResultBytes: carrierBytes(group, saved, await head()),
   });
   expect(messages(both.structuredContent).map((message) => message.body)).toEqual([
     "group-a",

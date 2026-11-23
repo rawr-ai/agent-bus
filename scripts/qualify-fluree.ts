@@ -871,7 +871,12 @@ try {
     Effect.provide(
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const waiting = yield* Effect.forkChild(bus.wait("codex/reader", READER, 60));
+        const waiting = yield* Effect.forkChild(
+          Effect.map(
+            bus.wait({ address: "codex/reader", session: READER, timeoutSeconds: 60 }),
+            ({ messages }) => messages
+          )
+        );
         yield* Effect.sleep("500 millis");
         yield* Effect.promise(stop);
         yield* Effect.promise(() => start());

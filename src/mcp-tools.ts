@@ -19,9 +19,11 @@ import {
   WakeStanding,
 } from "./domain.ts";
 import {
+  EMPTY_READ_RESULT_BYTES,
   MAX_ENTRY_CARRIER_BYTES,
   MAX_INDEXED_FIELD_BYTES,
   MAX_ORIGIN_CWD_BYTES,
+  READ_ID,
   WAKE_LISTED_BYTES,
 } from "./message-carrier.ts";
 import {
@@ -81,6 +83,60 @@ const PublicMessage = Schema.Struct({
 });
 export const Messages = Schema.Struct({ messages: Schema.Array(PublicMessage) });
 
+const ReadId = Schema.String.check(Schema.isPattern(READ_ID));
+const Position = Schema.Int.check(Schema.isGreaterThanOrEqualTo(0));
+const NextReadId = ReadId.annotate({
+  description:
+    "A fresh id for your next bus_read or bus_wait: pass it as readId, so a lost result can be recovered by repeating that call unchanged.",
+});
+const receiptFields = {
+  readId: ReadId.annotate({
+    description:
+      "The id the acknowledgement is recorded under: yours, or one the bus chose when you gave none.",
+  }),
+  from: Position.annotate({ description: "The read position the batch was read from." }),
+  through: Position.annotate({
+    description: "The read position just past the batch: where the next read starts.",
+  }),
+  replayed: Schema.Boolean.annotate({
+    description:
+      "true when this call returned an already recorded batch and wrote nothing; false when the batch is newly acknowledged, or, for a peek, not yet.",
+  }),
+};
+const peekFields = {
+  basis: Schema.Struct({
+    ledger: Schema.String.annotate({ description: "The ledger incarnation the peek read." }),
+    t: Position.annotate({ description: "The ledger position the peek read at." }),
+  }).annotate({ description: "Peek only: where the peek read, for bus_ack to check." }),
+  served: Schema.Struct({
+    count: Position.annotate({ description: "How many messages the peek returned." }),
+    digest: Schema.String.check(Schema.isPattern(/^[0-9a-f]{64}$/)).annotate({
+      description: "The SHA-256 of the JSON array of their ids, in order.",
+    }),
+  }).annotate({ description: "Peek only: exactly what the peek served, for bus_ack to check." }),
+};
+const ReadReceipt = Schema.Struct({
+  ...receiptFields,
+  basis: Schema.optionalKey(peekFields.basis),
+  served: Schema.optionalKey(peekFields.served),
+}).annotate({
+  description:
+    "Present whenever messages are: the batch's recorded or proposed acknowledgement. Absent from an older server, which ignores readId and peek and consumes the mail.",
+});
+export const ReadResult = Schema.Struct({
+  messages: Messages.fields.messages,
+  receipt: Schema.optionalKey(ReadReceipt),
+  nextReadId: NextReadId,
+});
+const PeekReceipt = Schema.Struct({
+  readId: receiptFields.readId,
+  from: receiptFields.from,
+  through: receiptFields.through,
+  replayed: Schema.optionalKey(receiptFields.replayed),
+  basis: peekFields.basis,
+  served: peekFields.served,
+}).annotate({ description: "The receipt a bus_read with peek: true returned, unchanged." });
+
 export const Joined = Schema.Struct({
   address: Schema.String.annotate({ description: "The address you joined." }),
   // Older servers did not echo topics; the CLI uses this schema to decode their results too.
@@ -110,6 +166,8 @@ export const Joined = Schema.Struct({
       description: "This session's wake hook (the agent-bus plugin) wakes it when mail arrives.",
     })
   ),
+  // Older servers did not issue one.
+  nextReadId: Schema.optionalKey(NextReadId),
 });
 // The CLI also decodes old servers with Joined. The current server always echoes this field,
 // so a fresh descriptor can prove association support before a mutating join.
@@ -118,6 +176,7 @@ const CurrentJoined = Schema.Struct({
   associations: Schema.Array(Association).annotate({
     description: "Your effective explicit directory and concern associations.",
   }),
+  nextReadId: NextReadId,
 });
 /**
  * Direct recipients whose registration the sender's own presence read, before the append, showed
@@ -365,7 +424,7 @@ export const Join = Tool.make("bus_join", {
 // Destructive: it replaces another session's hold, which is refused from then on.
 export const Takeover = Tool.make("bus_takeover", {
   description:
-    "Only to replace a session that has ended, when the human says so: joins an address another session holds, naming that holder's join id from bus_join's refusal. It uses this Bus machine's cursor for the address, or starts at the decision cut if there is none. Unread position does not transfer from another machine. The holder id is checked only while another session holds the address; on a free address, or your own, this joins as bus_join does. Otherwise join an address of your own with bus_join.",
+    "Only to replace a session that has ended, when the human says so: joins an address another session holds, naming that holder's join id from bus_join's refusal. It inherits the address's ledger read position and its unread mail, or starts at the decision cut if there is none. It begins a new run: the previous holder's readIds can be neither replayed nor acknowledged. The holder id is checked only while another session holds the address; on a free address, or your own, this joins as bus_join does. Otherwise join an address of your own with bus_join.",
   parameters: Schema.Struct({
     ...joinFields,
     holder: Schema.String.annotate({
@@ -482,15 +541,34 @@ export const Orient = Tool.make("bus_orient", {
   .annotateMerge(Lookup)
   .annotate(Tool.Strict, true);
 
-export const MIN_READ_RESULT_BYTES = 128;
+/** The smallest complete read result, an empty one with its nextReadId; computed, not chosen. */
+export const MIN_READ_RESULT_BYTES = EMPTY_READ_RESULT_BYTES;
 const ReadResultBytes = Schema.Int.check(Schema.isGreaterThanOrEqualTo(MIN_READ_RESULT_BYTES));
 
+const READ_RECOVERY =
+  "Pass readId (your last result's nextReadId): after a lost result, repeat the call with the same readId to get the same batch back, writing nothing. Without readId, a lost result may already have consumed mail; inspect bus_history before reading again. A result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail: it is neither a replay nor a peek. An empty result has no receipt.";
+
+const readFields = {
+  address: Address,
+  session: Session,
+  readId: Schema.optionalKey(
+    ReadId.annotate({
+      description:
+        "A lowercase UUIDv7 naming this read, normally the last result's nextReadId. A read that returns mail records its acknowledgement under it; the same holding calling again with it, in the same run, gets that batch back and writes nothing. A read that returns nothing does not use it. A readId recorded before a leave and rejoin, a replay or a takeover is refused.",
+    })
+  ),
+};
+
 export const Read = Tool.make("bus_read", {
-  description:
-    "Return your unread messages and mark them read. Returns immediately. A lost result may already have consumed mail; inspect bus_history before reading again. Messages include public content and origin metadata, never stored presence or session claims.",
+  description: `Return your unread messages and mark them read. Returns immediately. ${READ_RECOVERY} peek: true returns the mail and a receipt without marking it read; acknowledge it with bus_ack. Before using peek, confirm from a current tools/list that bus_read declares peek and that bus_ack exists; if not, this server has no read that leaves mail unread, so read normally. Messages include public content and origin metadata, never stored presence or session claims.`,
   parameters: Schema.Struct({
-    address: Address,
-    session: Session,
+    ...readFields,
+    peek: Schema.optionalKey(
+      Schema.Boolean.annotate({
+        description:
+          "Return the unread mail and a receipt, writing nothing: the mail stays unread until bus_ack acknowledges that receipt.",
+      })
+    ),
     limit: Schema.optionalKey(
       Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)).annotate({
         description:
@@ -499,19 +577,24 @@ export const Read = Tool.make("bus_read", {
     ),
     maxResultBytes: Schema.optionalKey(
       ReadResultBytes.annotate({
-        description: `Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte and count limits, the call is refused without advancing the cursor. Minimum ${MIN_READ_RESULT_BYTES}.`,
+        description: `Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content, the receipt and nextReadId. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte and count limits, the call is refused, naming what it needs, without advancing the cursor. Minimum ${MIN_READ_RESULT_BYTES}.`,
       })
     ),
   }),
-  success: Messages,
+  success: ReadResult,
   failure: Failure,
 }).annotateMerge(Local);
 
 export const Wait = Tool.make("bus_wait", {
-  description: `Wait for your next unread messages (marking them read), up to timeoutSeconds (default and maximum ${MAX_WAIT_SECONDS}). Use while you expect a reply; returns an empty list on timeout. A lost result may already have consumed mail; inspect bus_history before reading again. Returns the same public message fields as bus_read, without stored presence or session claims.`,
+  description: `Wait for your next unread messages (marking them read), up to timeoutSeconds (default and maximum ${MAX_WAIT_SECONDS}). Use while you expect a reply; returns an empty list on timeout. ${READ_RECOVERY} Returns the same public message fields as bus_read, without stored presence or session claims.`,
   parameters: Schema.Struct({
-    address: Address,
-    session: Session,
+    ...readFields,
+    peek: Schema.optionalKey(
+      Schema.Literal(false).annotate({
+        description:
+          "Not available on bus_wait, which always marks what it returns read; true is refused with nothing read. Use bus_read with peek: true instead.",
+      })
+    ),
     timeoutSeconds: Schema.optionalKey(
       Schema.Finite.check(Schema.isBetween({ minimum: 0, maximum: MAX_WAIT_SECONDS })).annotate({
         description: `Seconds to wait, 0 to ${MAX_WAIT_SECONDS}; defaults to ${MAX_WAIT_SECONDS}.`,
@@ -519,16 +602,27 @@ export const Wait = Tool.make("bus_wait", {
     ),
     maxResultBytes: Schema.optionalKey(
       ReadResultBytes.annotate({
-        description: `Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte limit, the call is refused without advancing the cursor. Minimum ${MIN_READ_RESULT_BYTES}.`,
+        description: `Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content, the receipt and nextReadId. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte limit, the call is refused, naming what it needs, without advancing the cursor. Minimum ${MIN_READ_RESULT_BYTES}.`,
       })
     ),
   }),
-  success: Messages,
+  success: ReadResult,
+  failure: Failure,
+}).annotateMerge(Local);
+
+export const Ack = Tool.make("bus_ack", {
+  description:
+    "Mark read exactly the mail a bus_read with peek: true returned, by passing its receipt back unchanged. Refused, with nothing written, if the read position, holding, subscription or ledger is no longer the one the peek read: any join, leave or read since the peek refuses it, so peek again. Repeating it with the same receipt returns replayed: true and writes nothing. If its result is lost, repeat it with the same receipt. Without bus_ack in your tool list, the server has no peek.",
+  parameters: Schema.Struct({ address: Address, session: Session, receipt: PeekReceipt }),
+  success: Schema.Struct({
+    receipt: ReadReceipt.annotate({ description: "The acknowledgement now recorded." }),
+    nextReadId: NextReadId,
+  }),
   failure: Failure,
 }).annotateMerge(Local);
 
 export const ObserveWake = Tool.make("bus_observe_wake", {
-  description: `Internal loopback wake-source observation, not a subscription or mail read. Returns native binding, cut, ready/news and complete proposed coverage. latestEligibleAt is the chronologically latest currently eligible recorded message time, not the observation clock; it is absent when not ready, and an invalid eligible timestamp refuses. Capture only when ready && news, atomically with coverage in the caller's store; serialize observation through capture or CAS a retained revision. Preserve coverage behind unresolved notices. Same-run renewals retain binding; leave, takeover, replay/new run or ledger replacement fence it. No cursor, activity, hook, waiter or native wake mark changes. Empty/suppressed observations preserve previous coverage. Arguments fit ${MAX_WAKE_OBSERVATION_BYTES} UTF-8 JSON bytes; complete results fit maxResultBytes (default/max ${MAX_WAKE_OBSERVATION_BYTES}), including duplicated text/structured channels, excluding JSON-RPC framing; at most ${MAX_WAKE_COVERAGE_IDS} rung ids, never truncated. Excess or primary message/presence damage refuses. Auxiliary activity/directory uncertainty follows the unchanged native wake law, not proof every auxiliary record was readable. Freshly observe on activation, restart, pending resolution and bounded-wait expiry, since reads emit no ledger change. Recheck binding/access at external send admission; this cut is not lasting authority. Not exposed by the hosted peer.`,
+  description: `Internal loopback wake-source observation, not a subscription or mail read. Returns native binding, cut, ready/news and complete proposed coverage. latestEligibleAt is the chronologically latest currently eligible recorded message time, not the observation clock; it is absent when not ready, and an invalid eligible timestamp refuses. Capture only when ready && news, atomically with coverage in the caller's store; serialize observation through capture or CAS a retained revision. Preserve coverage behind unresolved notices. Same-run renewals retain binding; leave, takeover, replay/new run or ledger replacement fence it. No cursor, activity, hook, waiter or native wake mark changes. Empty/suppressed observations preserve previous coverage. Arguments fit ${MAX_WAKE_OBSERVATION_BYTES} UTF-8 JSON bytes; complete results fit maxResultBytes (default/max ${MAX_WAKE_OBSERVATION_BYTES}), including duplicated text/structured channels, excluding JSON-RPC framing; at most ${MAX_WAKE_COVERAGE_IDS} rung ids, never truncated. Excess or primary message/presence damage refuses. Auxiliary activity/directory uncertainty follows the unchanged native wake law, not proof every auxiliary record was readable. Freshly observe on activation, restart, pending resolution and bounded-wait expiry, since a peek, a replay or an empty read emits no ledger change. Recheck binding/access at external send admission; this cut is not lasting authority. Not exposed by the hosted peer.`,
   parameters: ObserveWakeRequest,
   success: WakeObservation,
   failure: Failure,

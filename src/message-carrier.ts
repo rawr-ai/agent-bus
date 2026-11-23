@@ -4,7 +4,8 @@ import { InvalidQuery, type Message, MessageJson } from "./domain.ts";
 /**
  * The most bytes one new message's public read carrier may take: every creator of a message
  * entry (publish, directory and bulletin notices) checks it before its single write, so any one
- * commit fits a reader whose result budget is at least this. Stored entries are never re-checked.
+ * commit fits a reader whose result budget is at least this plus {@link READ_METADATA_BYTES} (a
+ * peek's receipt also names its ledger and served digest). Stored entries are never re-checked.
  */
 export const MAX_ENTRY_CARRIER_BYTES = 1_048_576;
 
@@ -122,10 +123,13 @@ export const publicMessages = (messages: ReadonlyArray<Message>) => ({
   })),
 });
 
-/** Exact JSON bytes of the duplicated public MCP result, excluding the JSON-RPC envelope. */
-export const messageCarrierBytes = (messages: ReadonlyArray<Message>) => {
-  const structuredContent = publicMessages(messages);
-  return Buffer.byteLength(
+/**
+ * Exact JSON bytes of a duplicated public MCP result, excluding the JSON-RPC envelope: the
+ * structured content once as itself and once as escaped text, both counted. Key order does not
+ * change the count.
+ */
+export const carrierBytes = (structuredContent: object) =>
+  Buffer.byteLength(
     JSON.stringify({
       content: [{ type: "text", text: JSON.stringify(structuredContent) }],
       structuredContent,
@@ -133,7 +137,87 @@ export const messageCarrierBytes = (messages: ReadonlyArray<Message>) => {
     }),
     "utf8"
   );
-};
+
+/** Exact JSON bytes of a carrier of messages alone: the single-message bound every writer checks. */
+export const messageCarrierBytes = (messages: ReadonlyArray<Message>) =>
+  carrierBytes(publicMessages(messages));
+
+/** A read id: a lowercase UUIDv7, always 36 ASCII characters. */
+export const READ_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+/** Stands in for any read id when a size is measured; every read id has its length. */
+const SIZING_ID = "00000000-0000-7000-8000-000000000000";
+
+/** What a read or peek acknowledged, or would. A peek's receipt adds what `bus_ack` checks. */
+export interface ReadReceipt {
+  readonly readId: string;
+  readonly from: number;
+  readonly through: number;
+  readonly replayed: boolean;
+  /** Peek only: the ledger incarnation and commit the peek read at. */
+  readonly basis?: { readonly ledger: string; readonly t: number };
+  /** Peek only: how many messages it served and the digest of their ordered ids. */
+  readonly served?: { readonly count: number; readonly digest: string };
+}
+
+/** The one public shape of a `bus_read`, `bus_wait` or peek result; sized and returned as is. */
+export const readResult = (
+  messages: ReadonlyArray<Message>,
+  receipt: ReadReceipt | undefined,
+  nextReadId: string
+) => ({
+  ...publicMessages(messages),
+  ...(receipt === undefined
+    ? {}
+    : {
+        receipt: {
+          readId: receipt.readId,
+          from: receipt.from,
+          through: receipt.through,
+          replayed: receipt.replayed,
+          ...(receipt.basis === undefined
+            ? {}
+            : { basis: { ledger: receipt.basis.ledger, t: receipt.basis.t } }),
+          ...(receipt.served === undefined
+            ? {}
+            : { served: { count: receipt.served.count, digest: receipt.served.digest } }),
+        },
+      }),
+  nextReadId,
+});
+
+/**
+ * The bytes an acknowledgement records as its carrier: the read-shaped public result of exactly
+ * that batch, with a receipt saying `replayed: false` and a 36-character `nextReadId`. A read
+ * returns that size and a replay two bytes less (`true`, in each copy), so a batch that fitted
+ * fits again. A peek's receipt is larger, but `bus_ack` records this same canonical size. It is
+ * compared on replay and never used to compute a position.
+ */
+export const servedCarrierBytes = (
+  messages: ReadonlyArray<Message>,
+  from: number,
+  through: number
+) =>
+  carrierBytes(
+    readResult(messages, { readId: SIZING_ID, from, through, replayed: false }, SIZING_ID)
+  );
+
+/** The smallest complete read result: no mail, only `nextReadId`. The read limits' minimum. */
+export const EMPTY_READ_RESULT_BYTES = carrierBytes(readResult([], undefined, SIZING_ID));
+
+/** The most a read receipt and `nextReadId` add to a carrier of messages, at the widest positions. */
+export const READ_METADATA_BYTES =
+  carrierBytes(
+    readResult(
+      [],
+      {
+        readId: SIZING_ID,
+        from: Number.MAX_SAFE_INTEGER,
+        through: Number.MAX_SAFE_INTEGER,
+        replayed: false,
+      },
+      SIZING_ID
+    )
+  ) - messageCarrierBytes([]);
 
 /**
  * Refuses, before anything is written, a new message whose read carrier exceeds its bound or

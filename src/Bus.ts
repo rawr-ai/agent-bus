@@ -54,20 +54,34 @@ import {
 import { type CommandRead, type Entry, Ledger, validEntryId } from "./Ledger.ts";
 import {
   type MailboxAck,
+  type MailboxFact,
   type MailboxStart,
   type MailboxUnresolved,
+  mailboxPresenceRef,
+  mailboxRunRef,
   mailboxServedDigest,
   mailboxTopicsDigest,
 } from "./mailbox-model.ts";
-import { incompleteMailbox, readMailboxSlice } from "./mailbox-read.ts";
+import {
+  incompleteMailbox,
+  longestPrefix,
+  type Prefix,
+  readMailboxSlice,
+  servedPrefix,
+} from "./mailbox-read.ts";
 import {
   admitEntry,
+  carrierBytes,
   indexable,
   MAX_ORIGIN_CWD_BYTES,
   MAX_STORED_ENTRY_BYTES,
   messageCarrierBytes,
   presenceText,
+  READ_ID,
+  type ReadReceipt,
   readableEntry,
+  readResult,
+  servedCarrierBytes,
   unjoinable,
   WAKE_LISTED_BYTES,
 } from "./message-carrier.ts";
@@ -89,8 +103,53 @@ import {
 
 export const ORIENTATION_JOIN_TOO_LARGE = "Orientation cannot fit alongside this committed join.";
 
-/** Selects a whole prefix before the read cursor advances, while the address is locked. */
-export type ReadAdmission = (messages: ReadonlyArray<Message>) => number;
+/** An owner's read of its unread mail; every field after the session is optional. */
+export interface ReadInput {
+  readonly address: string;
+  readonly session: string | undefined;
+  /**
+   * A lowercase UUIDv7 naming this read: a read that returns mail records its acknowledgement
+   * under it, and calling again with it in the same run returns that batch and writes nothing.
+   */
+  readonly readId?: string | undefined;
+  /** Return the unread mail and a receipt for `ack`, and write nothing. */
+  readonly peek?: boolean | undefined;
+  /** The most messages to return; a commit is never split. */
+  readonly limit?: number | undefined;
+  /** The most bytes of the complete public result carrier, receipt and nextReadId included. */
+  readonly maxResultBytes?: number | undefined;
+}
+
+/** A wait for mail: a read that is never a peek, repeated as mail arrives. */
+export interface WaitInput extends Omit<ReadInput, "peek"> {
+  readonly timeoutSeconds?: number | undefined;
+}
+
+/** What a read returns: the batch, its receipt when it has mail, and an id for the next read. */
+export interface ReadOutcome {
+  readonly messages: ReadonlyArray<Message>;
+  readonly receipt?: ReadReceipt;
+  readonly nextReadId: string;
+}
+
+/** A peek's receipt as its caller hands it back to acknowledge it. */
+export interface AckInput {
+  readonly address: string;
+  readonly session: string | undefined;
+  readonly receipt: {
+    readonly readId: string;
+    readonly from: number;
+    readonly through: number;
+    readonly basis: { readonly ledger: string; readonly t: number };
+    readonly served: { readonly count: number; readonly digest: string };
+  };
+}
+
+/** What an acknowledgement recorded: the read receipt, and an id for the next read. */
+export interface Acked {
+  readonly receipt: ReadReceipt;
+  readonly nextReadId: string;
+}
 
 export interface JoinInput {
   readonly address: string;
@@ -306,6 +365,8 @@ export class Bus extends Context.Service<
         readonly associations: ReadonlyArray<Association>;
         readonly cursor: number;
         readonly hooked?: true;
+        /** A fresh read id for the first keyed read. */
+        readonly nextReadId: string;
       },
       LedgerError | NotOwner | PresenceConflict | InvalidTopics | InvalidAssociations | InvalidQuery
     >;
@@ -362,24 +423,31 @@ export class Bus extends Context.Service<
       nudge: (pending: Pending) => Effect.Effect<A, E>,
       options?: DeliveryOptions<E2>
     ) => Effect.Effect<A | undefined, LedgerError | NotJoined | E | E2>;
-    /** Returns the owner's unread messages and marks them read. */
+    /**
+     * Returns the owner's unread messages and marks them read, or with `peek` writes nothing.
+     * A recorded `readId` of the same run returns its batch again and writes nothing.
+     */
+    readonly read: (
+      input: ReadInput
+    ) => Effect.Effect<ReadOutcome, LedgerError | NotJoined | NotOwner | InvalidQuery>;
+    /** An un-keyed read's messages alone. */
     readonly take: (
       address: string,
       session: string | undefined,
-      limit?: number,
-      admit?: ReadAdmission
+      limit?: number
     ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner | InvalidQuery>;
     /**
      * Waits until messages arrive, or until the timeout when one is given.
-     * Ownership is checked again on every read, so a wait outlived by its
+     * Ownership and the read id are checked again on every read, so a wait outlived by its
      * session's ownership is refused rather than taking the new owner's messages.
      */
     readonly wait: (
-      address: string,
-      session: string | undefined,
-      timeoutSeconds?: number,
-      admit?: ReadAdmission
-    ) => Effect.Effect<ReadonlyArray<Message>, LedgerError | NotJoined | NotOwner | InvalidQuery>;
+      input: WaitInput
+    ) => Effect.Effect<ReadOutcome, LedgerError | NotJoined | NotOwner | InvalidQuery>;
+    /** Acknowledges exactly what a peek served, if nothing has changed since it read. */
+    readonly ack: (
+      input: AckInput
+    ) => Effect.Effect<Acked, LedgerError | NotJoined | NotOwner | InvalidQuery>;
     /**
      * Waits until an address `session` owns has unread mail, first to newest,
      * other than what it was last woken for, or the timeout, and returns those
@@ -704,7 +772,13 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
 
     const unconfirmed = (operation: "join" | "leave", address: string) =>
       new LedgerError({
-        message: `The bus could not confirm whether this ${operation} of ${address} was recorded: it may or may not have committed, and nothing was undone. Calling it again is safe, since the bus decides against the address's current state, but that result doesn't show what this attempt did.`,
+        message: `The bus could not confirm whether this ${operation} of ${address} was recorded. It may have committed. When connected, check bus_owned_addresses for your session and bus_peers for the address's current topics. If the intended state is already in effect, do not repeat the change. These checks show current state, not what the earlier request did.`,
+      });
+
+    const invalidReadId = () =>
+      new InvalidQuery({
+        message:
+          "readId must be a lowercase UUIDv7, such as a result's nextReadId. Nothing was changed.",
       });
 
     const unresolvedMailbox = (reason: MailboxUnresolved["reason"]) =>
@@ -782,6 +856,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
             associations,
             cursor: Number.MAX_SAFE_INTEGER,
             hooked: true,
+            nextReadId: Bun.randomUUIDv7(),
             orientation: {
               status: "UNAVAILABLE",
               reason: "INADMISSIBLE",
@@ -891,6 +966,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           associations: presence.associations ?? [],
           cursor,
           ...(input.runtime === "claude" && hooked.has(session) ? { hooked: true as const } : {}),
+          nextReadId: Bun.randomUUIDv7(),
         };
       }).pipe(exclusive(input.address), claiming(input.address), Effect.withSpan("Bus.join"));
 
@@ -1392,53 +1468,160 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         )
       );
 
+    /**
+     * The comparators for a receipt's identity witnesses, its run and its served subscription:
+     * the one place that reads how a receipt records them.
+     */
+    type RecordedAck = Extract<MailboxFact, { kind: "ack" }>;
+    const sameRun = (record: RecordedAck, subscriber: Subscriber) =>
+      record.runRef === mailboxRunRef(runOf(subscriber));
+    const servedUnder = (record: RecordedAck, subscriber: Subscriber) =>
+      record.subscription.presenceRef === mailboxPresenceRef(subscriber.joinId) &&
+      record.subscription.topicsDigest === mailboxTopicsDigest(subscriber.presence.topics);
+
+    /** Writes one guarded acknowledgement of exactly `messages`; the caller settles the status. */
     const acknowledge = (
       { subscriber, cut, position }: MailboxBasis,
       { through, messages }: MailboxPlan,
-      operation: string,
-      carrierBytes: number
-    ) =>
-      Effect.gen(function* () {
-        const address = subscriber.address;
-        const record: MailboxAck = {
-          version: 1,
-          kind: "ack",
-          operation,
-          address,
-          mode: "read",
-          run: runOf(subscriber),
-          from: position,
-          through,
-          dataCut: cut,
-          subscription: {
-            presenceId: subscriber.joinId,
-            topicsDigest: mailboxTopicsDigest(subscriber.presence.topics),
-          },
-          servedCount: messages.length,
-          servedDigest: mailboxServedDigest(messages.map(({ id }) => id)),
-          carrierBytes,
-        };
-        const saved = yield* ledger.appendMailboxAck(record, cut);
-        switch (saved.status) {
-          case "APPLIED":
-            hints.delete(address);
-            return;
-          case "CONFLICT":
-            return yield* new LedgerError({
-              message:
-                "The holding or mailbox position changed during this read; nothing was acknowledged. Read again from its current position.",
-            });
-          case "IDENTITY_MISMATCH":
-            return yield* new LedgerError({
-              message: "This mailbox operation names a different recorded acknowledgement.",
-            });
-          case "UNKNOWN":
-            return yield* new LedgerError({
-              message:
-                "The bus could not confirm this acknowledgement; it may have committed. Inspect bus_history before reading again.",
-            });
-        }
+      operation: string
+    ) => {
+      const address = subscriber.address;
+      const record: MailboxAck = {
+        version: 1,
+        kind: "ack",
+        operation,
+        address,
+        mode: "read",
+        run: runOf(subscriber),
+        from: position,
+        through,
+        dataCut: cut,
+        subscription: {
+          presenceId: subscriber.joinId,
+          topicsDigest: mailboxTopicsDigest(subscriber.presence.topics),
+        },
+        servedCount: messages.length,
+        servedDigest: mailboxServedDigest(messages.map(({ id }) => id)),
+        carrierBytes: servedCarrierBytes(messages, position, through),
+      };
+      return Effect.map(ledger.appendMailboxAck(record, cut), (saved) => {
+        if (saved.status === "APPLIED") hints.delete(address);
+        return saved.status;
       });
+    };
+
+    const unestablished = () =>
+      new LedgerError({
+        message:
+          "The read recorded under this readId could not be established; nothing was served or changed.",
+      });
+
+    /**
+     * The read recorded under `readId` for `current`'s run, or undefined when none is. Anything
+     * else recorded under it, another address's, a position that served no batch or an earlier
+     * run's, is refused; a receipt the mailbox never referenced is not a recorded read.
+     */
+    const recordedRead = (current: Subscriber, readId: string, cut: Pin) =>
+      Effect.gen(function* () {
+        const found = yield* ledger.mailboxReceiptAt(current.address, readId, cut);
+        if (found.status === "ABSENT") return undefined;
+        if (found.status === "ADDRESS_MISMATCH") {
+          return yield* new InvalidQuery({
+            message:
+              "This readId is recorded for another address, so this address cannot use it. Read with a new readId, such as your latest nextReadId. Nothing was changed.",
+          });
+        }
+        if (found.status !== "FOUND") return yield* unestablished();
+        const { record } = found;
+        if (record.kind !== "ack" || record.mode !== "read") {
+          return yield* new InvalidQuery({
+            message:
+              "This readId names a mailbox position that served no batch, so it can be neither replayed nor acknowledged. Read with a new readId. Nothing was changed.",
+          });
+        }
+        if (!sameRun(record, current)) {
+          return yield* new InvalidQuery({
+            message:
+              "This readId was recorded in an earlier run of this holding (a leave and rejoin, a replay or a takeover since), so it can be neither replayed nor acknowledged. Read with your latest nextReadId, or without one. Nothing was changed.",
+          });
+        }
+        // The position at the receipt's commit matters, not which later reads moved the pointer.
+        const original = yield* ledger.mailboxAt(current.address, {
+          incarnation: cut.incarnation,
+          head: found.t,
+        });
+        if (
+          record.dataCut.incarnation !== cut.incarnation ||
+          original.status !== "FOUND" ||
+          original.current.t !== found.t ||
+          original.current.record.operation !== readId
+        ) {
+          return yield* unestablished();
+        }
+        return record;
+      });
+
+    /** The joined subscriber in force for the address at a receipt's own cut, as it recorded it. */
+    const servedSubscriber = (address: string, record: RecordedAck) =>
+      Effect.gen(function* () {
+        const read = yield* ledger.presenceAt(record.dataCut.head);
+        const subscriber = latestPresences(read.entries).get(address);
+        if (
+          read.cut.incarnation !== record.dataCut.incarnation ||
+          read.cut.head !== record.dataCut.head ||
+          subscriber?.presence.status !== "joined" ||
+          !servedUnder(record, subscriber)
+        ) {
+          return yield* unestablished();
+        }
+        return subscriber;
+      });
+
+    /**
+     * Serves a recorded batch again, whole, writing nothing: reconstructed at its original cut
+     * under the subscription it was served with, never from the scan hint, and matched exactly.
+     */
+    const replay = (record: RecordedAck, input: ReadInput, nextReadId: string) =>
+      Effect.gen(function* () {
+        const historical = yield* servedSubscriber(input.address, record);
+        const { entries } = yield* servedPrefix(
+          ledger,
+          record.from,
+          record.through,
+          record.dataCut,
+          historical
+        );
+        const messages = entries.map(({ message }) => message);
+        if (
+          messages.length !== record.servedCount ||
+          mailboxServedDigest(messages.map(({ id }) => id)) !== record.servedDigest ||
+          servedCarrierBytes(messages, record.from, record.through) !== record.carrierBytes
+        ) {
+          return yield* unestablished();
+        }
+        const receipt: ReadReceipt = {
+          readId: record.operation,
+          from: record.from,
+          through: record.through,
+          replayed: true,
+        };
+        const bytes = carrierBytes(readResult(messages, receipt, nextReadId));
+        if (
+          (input.limit !== undefined && messages.length > input.limit) ||
+          (input.maxResultBytes !== undefined && bytes > input.maxResultBytes)
+        ) {
+          return yield* new InvalidQuery({
+            message: `The batch recorded under this readId needs ${bytes} result bytes and a limit of at least ${messages.length}; repeat the read with the same readId and limits that fit. Nothing was changed.`,
+          });
+        }
+        return { messages, receipt, nextReadId } satisfies ReadOutcome;
+      });
+
+    /** The read recorded under `readId` after an uncertain write, read back at a fresh cut. */
+    const settledRead = (current: Subscriber, readId: string) =>
+      Effect.option(
+        Effect.flatMap(ledger.presenceAt(), ({ cut }) => recordedRead(current, readId, cut))
+      ).pipe(Effect.map(Option.getOrUndefined));
 
     const wakeHolding = (address: string, session: string | undefined, at?: number) =>
       Effect.gen(function* () {
@@ -1710,92 +1893,244 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         return undefined;
       }).pipe(exclusive(address), Effect.withSpan("Bus.deliver"));
 
-    /** The owner's read: its reader checks ownership under the lock, just before the cursor moves. */
-    const take = (
-      address: string,
-      session: string | undefined,
-      limit?: number,
-      admit?: ReadAdmission
-    ) =>
+    /** The owner's read: ownership, the read id and the position are decided under the lock. */
+    const readOnce = (input: ReadInput) =>
       Effect.gen(function* () {
+        const { address, session, readId, limit, maxResultBytes } = input;
         if (!validSession(session)) return yield* noSession(address);
+        if (readId !== undefined && !READ_ID.test(readId)) return yield* invalidReadId();
         const { entries: presence, cut } = yield* ledger.presenceAt();
         const subscriber = yield* ownedIn(latestPresences(presence), address, session);
         const basis = yield* mailboxBasis(subscriber, cut);
         yield* touch(address);
+        const nextReadId = Bun.randomUUIDv7();
+        if (readId !== undefined) {
+          const recorded = yield* recordedRead(subscriber, readId, cut);
+          if (recorded !== undefined) return yield* replay(recorded, input, nextReadId);
+        }
         const { entries, damage } = yield* pending(basis);
         if (entries.length === 0) {
           if (damage !== undefined) return yield* incompleteMailbox(damage);
           yield* rememberEmpty(basis);
-          return [];
+          return { messages: [], nextReadId } satisfies ReadOutcome;
         }
-        const offered = entries.slice(0, limit).map(({ message }) => message);
-        let count = admit === undefined ? offered.length : admit(offered);
-        if (!Number.isInteger(count) || count < 0 || count > offered.length)
-          return yield* Effect.die(new Error("The read admission returned an invalid prefix."));
-        // A Fluree cursor names a commit, not a row. Never consume only part of one commit.
-        while (
-          count > 0 &&
-          count < entries.length &&
-          entries[count - 1]?.end === entries[count]?.end
-        )
-          count--;
-        if (count === 0)
-          return yield* new InvalidQuery({
-            message:
-              "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Use a reader with larger limits.",
-          });
-        const exhausted = count === entries.length && (limit === undefined || count < limit);
-        if (exhausted && damage !== undefined) return yield* incompleteMailbox(damage);
-        const through = exhausted ? cut.head : entries[count - 1]?.end;
-        if (through === undefined)
-          return yield* Effect.die(new Error("The read prefix has no ledger position."));
-        const messages = offered.slice(0, count);
-        yield* acknowledge(
-          basis,
-          { through, messages },
-          Bun.randomUUIDv7(),
-          messageCarrierBytes(messages)
+        // A caller's id names the acknowledgement; the bus mints one only when none is given.
+        const operation = readId ?? Bun.randomUUIDv7();
+        const messagesOf = (prefix: Prefix) =>
+          entries.slice(0, prefix.count).map(({ message }) => message);
+        const receiptOf = (prefix: Prefix): ReadReceipt => {
+          const served = {
+            readId: operation,
+            from: basis.position,
+            through: prefix.through,
+            replayed: false,
+          };
+          return input.peek !== true
+            ? served
+            : {
+                ...served,
+                basis: { ledger: cut.incarnation, t: cut.head },
+                served: {
+                  count: prefix.count,
+                  digest: mailboxServedDigest(messagesOf(prefix).map(({ id }) => id)),
+                },
+              };
+        };
+        const bytesOf = (prefix: Prefix) =>
+          carrierBytes(readResult(messagesOf(prefix), receiptOf(prefix), nextReadId));
+        const { chosen, first } = longestPrefix(
+          entries,
+          cut.head,
+          limit,
+          (prefix) => maxResultBytes === undefined || bytesOf(prefix) <= maxResultBytes
         );
-        return messages;
-      }).pipe(exclusive(address), Effect.withSpan("Bus.take"));
+        // A Fluree cursor names a commit, not a row. Never consume only part of one commit.
+        if (chosen === undefined)
+          return yield* new InvalidQuery({
+            message: `The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Their first commit needs ${bytesOf(first)} result bytes and a limit of at least ${first.count}. Use a reader with larger limits.`,
+          });
+        if (chosen.exhausted && damage !== undefined) return yield* incompleteMailbox(damage);
+        const messages = messagesOf(chosen);
+        const receipt = receiptOf(chosen);
+        if (input.peek === true) return { messages, receipt, nextReadId } satisfies ReadOutcome;
+        const status = yield* acknowledge(basis, { through: chosen.through, messages }, operation);
+        if (status === "APPLIED") return { messages, receipt, nextReadId } satisfies ReadOutcome;
+        // The stored receipt decides: this read's own uncertain commit, or a racing call's.
+        const stored = yield* settledRead(subscriber, operation);
+        if (stored !== undefined) {
+          if (
+            stored.from === basis.position &&
+            stored.through === chosen.through &&
+            stored.dataCut.head === cut.head &&
+            stored.servedDigest === mailboxServedDigest(messages.map(({ id }) => id))
+          )
+            return { messages, receipt, nextReadId } satisfies ReadOutcome;
+          if (readId !== undefined) return yield* replay(stored, input, nextReadId);
+        }
+        switch (status) {
+          case "CONFLICT":
+            return yield* new LedgerError({
+              message:
+                "The holding or mailbox position changed during this read; nothing was acknowledged. Read again from its current position.",
+            });
+          case "IDENTITY_MISMATCH":
+            return yield* new LedgerError({
+              message: "This mailbox operation names a different recorded acknowledgement.",
+            });
+          case "UNKNOWN":
+            return yield* new LedgerError({
+              message: `The bus could not confirm this acknowledgement; it may have committed. Repeat the read with readId "${operation}": it returns this batch if it was recorded, or reads afresh if not.`,
+            });
+        }
+      });
 
-    const waitFor = Effect.fn("Bus.wait")(function* (
-      address: string,
-      session: string | undefined,
-      timeoutSeconds?: number,
-      admit?: ReadAdmission
-    ) {
-      const ready = yield* take(address, session, undefined, admit);
-      if (ready.length > 0) return ready;
+    const read = (input: ReadInput) =>
+      readOnce(input).pipe(exclusive(input.address), Effect.withSpan("Bus.read"));
+
+    const take = (address: string, session: string | undefined, limit?: number) =>
+      Effect.map(read({ address, session, limit }), ({ messages }) => messages);
+
+    const waitFor = Effect.fn("Bus.wait")(function* (input: WaitInput) {
+      // Each pass is a whole read, so a read id recorded meanwhile is replayed, not reused.
+      const once = read({
+        address: input.address,
+        session: input.session,
+        readId: input.readId,
+        limit: input.limit,
+        maxResultBytes: input.maxResultBytes,
+      });
+      const ready = yield* once;
+      if (ready.messages.length > 0) return ready;
       const arrival = ledger.changes.pipe(
-        Stream.mapEffect(() => take(address, session, undefined, admit)),
-        Stream.filter((messages) => messages.length > 0),
+        Stream.mapEffect(() => once),
+        Stream.filter((outcome) => outcome.messages.length > 0),
         Stream.runHead
       );
       const arrived =
-        timeoutSeconds === undefined
+        input.timeoutSeconds === undefined
           ? yield* arrival
-          : Option.flatten(yield* Effect.timeoutOption(arrival, `${timeoutSeconds} seconds`));
-      return Option.getOrElse(arrived, (): ReadonlyArray<Message> => []);
+          : Option.flatten(yield* Effect.timeoutOption(arrival, `${input.timeoutSeconds} seconds`));
+      return Option.getOrElse(arrived, () => ready);
     });
     // Open waits are counted so a refused join can say whether the holder is listening.
-    const wait = (
-      address: string,
-      session: string | undefined,
-      timeoutSeconds?: number,
-      admit?: ReadAdmission
-    ) =>
+    const wait = (input: WaitInput) =>
       Effect.acquireUseRelease(
         Effect.sync(() => {
-          seenOf(address).waits += 1;
+          seenOf(input.address).waits += 1;
         }),
-        () => waitFor(address, session, timeoutSeconds, admit),
+        () => waitFor(input),
         () =>
           Effect.sync(() => {
-            seenOf(address).waits -= 1;
+            seenOf(input.address).waits -= 1;
           })
       );
+
+    /**
+     * Acknowledges exactly what a peek served. The receipt is checked, not trusted: the batch
+     * is reconstructed at the peek's own cut, and the write is fenced on that cut, so any
+     * presence or position written since the peek refuses it.
+     */
+    const ackOnce = (input: AckInput) =>
+      Effect.gen(function* () {
+        const { address, session, receipt } = input;
+        if (!validSession(session)) return yield* noSession(address);
+        if (!READ_ID.test(receipt.readId)) return yield* invalidReadId();
+        const changed = () =>
+          new InvalidQuery({
+            message:
+              "The holding, subscription or mailbox position changed since this peek; nothing was acknowledged. Peek again.",
+          });
+        const mismatched = () =>
+          new InvalidQuery({
+            message:
+              "This receipt does not match the mail its peek served; nothing was acknowledged. Peek again.",
+          });
+        const { entries: presence, cut } = yield* ledger.presenceAt();
+        const subscriber = yield* ownedIn(latestPresences(presence), address, session);
+        const current = yield* mailboxBasis(subscriber, cut);
+        yield* touch(address);
+        const nextReadId = Bun.randomUUIDv7();
+        const done = (replayed: boolean): Acked => ({
+          receipt: {
+            readId: receipt.readId,
+            from: receipt.from,
+            through: receipt.through,
+            replayed,
+          },
+          nextReadId,
+        });
+        const records = (record: RecordedAck) =>
+          record.from === receipt.from &&
+          record.through === receipt.through &&
+          record.dataCut.head === receipt.basis.t &&
+          record.servedCount === receipt.served.count &&
+          record.servedDigest === receipt.served.digest;
+        if (receipt.basis.ledger !== cut.incarnation) {
+          return yield* new InvalidQuery({
+            message:
+              "This receipt was read from a replaced ledger; nothing was acknowledged. Peek again.",
+          });
+        }
+        const recorded = yield* recordedRead(subscriber, receipt.readId, cut);
+        if (recorded !== undefined) {
+          if (records(recorded)) return done(true);
+          return yield* new InvalidQuery({
+            message:
+              "This readId already records a different batch; nothing was acknowledged. Peek again.",
+          });
+        }
+        const peekCut: Pin = { incarnation: cut.incarnation, head: receipt.basis.t };
+        if (
+          !Number.isSafeInteger(peekCut.head) ||
+          peekCut.head < 0 ||
+          peekCut.head > cut.head ||
+          current.position !== receipt.from
+        )
+          return yield* changed();
+        const then = yield* ledger.presenceAt(peekCut.head);
+        const peeked = latestPresences(then.entries).get(address);
+        if (
+          then.cut.head !== peekCut.head ||
+          peeked?.presence.status !== "joined" ||
+          peeked.joinId !== subscriber.joinId
+        )
+          return yield* changed();
+        const basis = yield* mailboxBasis(peeked, peekCut);
+        if (basis.position !== receipt.from) return yield* changed();
+        const { entries, boundary } = yield* servedPrefix(
+          ledger,
+          receipt.from,
+          receipt.through,
+          peekCut,
+          peeked
+        );
+        const messages = entries.map(({ message }) => message);
+        if (
+          !boundary ||
+          messages.length === 0 ||
+          messages.length !== receipt.served.count ||
+          mailboxServedDigest(messages.map(({ id }) => id)) !== receipt.served.digest
+        )
+          return yield* mismatched();
+        const status = yield* acknowledge(
+          basis,
+          { through: receipt.through, messages },
+          receipt.readId
+        );
+        if (status === "APPLIED") return done(false);
+        const stored = yield* settledRead(subscriber, receipt.readId);
+        if (stored !== undefined && records(stored)) return done(status !== "UNKNOWN");
+        if (status === "UNKNOWN") {
+          return yield* new LedgerError({
+            message:
+              "The bus could not confirm this acknowledgement; it may have committed. Repeat bus_ack with the same receipt.",
+          });
+        }
+        return yield* changed();
+      });
+
+    const ack = (input: AckInput) =>
+      ackOnce(input).pipe(exclusive(input.address), Effect.withSpan("Bus.ack"));
 
     /** Per address, the join and the unread mail (first to newest) its owner was last woken for. */
     const woken = new Map<string, Mark>();
@@ -1927,8 +2262,10 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
       checkWakeBinding,
       observeWake,
       deliver,
+      read,
       take,
       wait,
+      ack,
       wake,
     });
   });

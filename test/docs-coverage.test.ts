@@ -308,10 +308,32 @@ describe("the served instructions", () => {
 
   test("native consuming calls and instructions explain lost results and wake eligibility", () => {
     for (const name of ["bus_read", "bus_wait"]) {
-      expect(toolNamed(name)?.description).toContain("lost result may already have consumed mail");
-      expect(toolNamed(name)?.description).toContain("inspect bus_history before reading again");
+      const description = toolNamed(name)?.description;
+      expect(description).toContain("repeat the call with the same readId");
+      expect(description).toContain("Without readId, a lost result may already have consumed mail");
+      expect(description).toContain("inspect bus_history before reading again");
+      expect(description).toContain(
+        "A result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail"
+      );
     }
-    expect(instructions).toContain("lost result may have consumed mail: inspect bus_history");
+    expect(toolNamed("bus_read")?.description).toContain(
+      "Before using peek, confirm from a current tools/list that bus_read declares peek and that bus_ack exists"
+    );
+    expect(toolNamed("bus_ack")?.description).toContain(
+      "Without bus_ack in your tool list, the server has no peek"
+    );
+    expect(instructions).toContain(
+      "after a lost read result, repeat the read with the same readId"
+    );
+    expect(instructions).toContain(
+      "A lost read without one may have consumed mail: inspect bus_history"
+    );
+    expect(instructions).toContain(
+      "A read result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail"
+    );
+    expect(instructions).toContain(
+      "Use peek only when a current tools/list shows bus_read declaring peek and bus_ack"
+    );
     expect(toolNamed("bus_activity")?.description).toContain("Waking depends on your runtime");
   });
 });
@@ -349,8 +371,17 @@ describe("the skill distinguishes hosted and native guidance", () => {
     expect(wake).toContain("Native callers also pass their `session`; hosted callers omit it");
     expect(wake).toContain("without joining to rescue the read");
     expect(wake).toContain("If the read was definitely not sent, retry once");
-    expect(wake).toContain("lost or uncertain result may have consumed mail");
+    expect(wake).toContain("Repeat a lost or uncertain read with its `readId`");
+    expect(wake).toContain("without one it may have consumed mail");
     expect(wake).toContain("inspect `bus_history` before another read");
+    expect(wake).toContain("Mail without `receipt`, or no `nextReadId`: an older bus consumed it");
+    const peek = section("plugin/skills/agent-bus/references/runtimes.md", "Peek");
+    expect(peek).toContain(
+      "Before using peek, confirm from a current tools/list that `bus_read` declares `peek` and that `bus_ack` exists"
+    );
+    expect(peek).toContain(
+      "its result has messages but no `receipt`, and no `nextReadId`, and is neither a peek nor a replay"
+    );
     expect(wake).toContain("hosted ChatGPT without an accepted watch");
   });
 
@@ -363,7 +394,9 @@ describe("the skill distinguishes hosted and native guidance", () => {
     expect(refusals).toContain("missing conversation correlation, no Bus call was sent");
     expect(refusals).toContain("do not invent or pass an identity");
     expect(refusals).toContain("Authorized session-free lookups remain available");
-    expect(refusals).toContain("do not blindly retry an ambiguous read or wait");
+    expect(refusals).toContain(
+      "do not blindly retry an ambiguous publish, or a read or wait without `readId`"
+    );
     expect(refusals).toContain("retry the identical call with the same `operation`");
     expect(refusals).toContain("same operation id and identical intent");
   });

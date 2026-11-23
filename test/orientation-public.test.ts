@@ -655,7 +655,7 @@ test("lost public reply and a newly built retry return the original notification
       notification: original,
     });
     const readAgain = await call(reader, "bus_read", { address: "reader", session: "reader" });
-    expect(readAgain.structuredContent).toEqual({ messages: [] });
+    expect(readAgain.structuredContent).toEqual({ messages: [], nextReadId: expect.any(String) });
     const all = await f.run(Effect.flatMap(Ledger, (ledger) => ledger.read(0)));
     expect(all.entries.filter(({ message }) => message.kind === "message")).toHaveLength(1);
   } finally {
