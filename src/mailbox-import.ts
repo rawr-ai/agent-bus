@@ -4,7 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { Effect, Schema } from "effect";
 import { cursorFileName } from "./Cursors.ts";
 import { type CursorImportFile, cursorImportSnapshot } from "./cursor-layout.ts";
-import { LedgerError, latestPresences, runOf } from "./domain.ts";
+import { LedgerError, latestPresences, type Message, runOf, type Subscriber } from "./domain.ts";
 import { loadInstallation } from "./installation.ts";
 import { Ledger } from "./Ledger.ts";
 import {
@@ -29,7 +29,7 @@ export const MailboxSourceJson = Schema.fromJsonString(
 );
 export type MailboxSource = typeof MailboxSourceJson.Type;
 
-interface PairedCopy {
+export interface PairedCopy {
   readonly root: string;
   readonly receipt: MailboxSource;
 }
@@ -163,15 +163,26 @@ interface ImportRow {
   readonly reason?: MailboxUnresolved["reason"];
 }
 
-/** Only quiesced, verified snapshots are considered; no startup or serving path imports. */
-export const importMailboxPositions = (
+const presenceIndex = (entries: ReadonlyArray<Message>) => ({
+  holdings: latestPresences(entries),
+  owners: latestPresences(entries.filter(({ presence }) => presence?.status === "joined")),
+});
+
+const currentPresence = (ledger: Ledger["Service"], cut: Pin) =>
+  Effect.gen(function* () {
+    const current = yield* ledger.presenceAt();
+    if (current.cut.incarnation !== cut.incarnation || current.cut.head < cut.head) {
+      return yield* refused("the original ledger cut is no longer available.");
+    }
+    return current;
+  });
+
+const planMailboxImport = (
   ledgerName: string,
   copies: readonly [PairedCopy, PairedCopy],
-  localInstallation: string,
-  confirmHeld: Effect.Effect<void, LedgerError>
+  localInstallation: string
 ) =>
   Effect.gen(function* () {
-    yield* confirmHeld;
     const ledger = yield* Ledger;
     const [a, b] = copies;
     const cut = a.receipt.cut;
@@ -188,14 +199,6 @@ export const importMailboxPositions = (
         "two distinct installations, the configured ledger, and the same captured cut are required."
       );
     }
-    const currentPresence = Effect.gen(function* () {
-      const current = yield* ledger.presenceAt();
-      if (current.cut.incarnation !== cut.incarnation || current.cut.head < cut.head) {
-        return yield* refused("the original ledger cut is no longer available.");
-      }
-      return current;
-    });
-    yield* currentPresence;
     const read = yield* ledger.presenceAt(cut.head);
     if (!sameCut(read.cut, cut))
       return yield* refused("the original presence cut could not be established.");
@@ -217,29 +220,50 @@ export const importMailboxPositions = (
     const verified = yield* Effect.all([verify(a), verify(b)]);
     const [one, two] =
       a.receipt.installation < b.receipt.installation ? verified : [verified[1], verified[0]];
-    const owners = latestPresences(
-      read.entries.filter(({ presence }) => presence?.status === "joined")
-    );
-    const holdings = latestPresences(read.entries);
+    const { holdings, owners } = presenceIndex(read.entries);
     const planned = [...holdings.values()]
       .sort((left, right) =>
         left.address < right.address ? -1 : left.address > right.address ? 1 : 0
       )
       .map((holding) => {
         const owner = owners.get(holding.address);
-        return decide(
+        const record = decide(
           holding.address,
           runOf(owner ?? holding),
           owner?.presence.installation,
           one,
           two
         );
+        return { holding, owner, record };
       });
+    return { cut, planned };
+  });
+
+const sameHolding = (
+  now: ReturnType<typeof presenceIndex>,
+  holding: Subscriber,
+  owner: Subscriber | undefined
+) =>
+  isDeepStrictEqual(holding, now.holdings.get(holding.address)) &&
+  isDeepStrictEqual(owner, now.owners.get(holding.address));
+
+/** Only quiesced, verified snapshots are considered; no startup or serving path imports. */
+export const importMailboxPositions = (
+  ledgerName: string,
+  copies: readonly [PairedCopy, PairedCopy],
+  localInstallation: string,
+  confirmHeld: Effect.Effect<void, LedgerError>
+) =>
+  Effect.gen(function* () {
+    yield* confirmHeld;
+    const ledger = yield* Ledger;
+    const { cut, planned } = yield* planMailboxImport(ledgerName, copies, localInstallation);
+    yield* currentPresence(ledger, cut);
     yield* confirmHeld;
     const rows: Array<ImportRow> = [];
-    for (const record of planned) {
+    for (const { holding, owner, record } of planned) {
       const { address, operation } = record;
-      const now = yield* currentPresence;
+      const now = yield* currentPresence(ledger, cut);
       const current = now.cut;
       const witness = yield* ledger.mailboxReceiptAt(address, operation, current);
       const recorded =
@@ -271,15 +295,7 @@ export const importMailboxPositions = (
       // The files belong to the captured holding. A later import or writer-era
       // marker may advance the ledger without changing that holding.
       const relevant = now.entries.filter((entry) => entry.from === address);
-      if (
-        !isDeepStrictEqual(holdings.get(address), latestPresences(relevant).get(address)) ||
-        !isDeepStrictEqual(
-          owners.get(address),
-          latestPresences(relevant.filter((entry) => entry.presence?.status === "joined")).get(
-            address
-          )
-        )
-      ) {
+      if (!sameHolding(presenceIndex(relevant), holding, owner)) {
         return yield* refused(
           `the holding for ${address} changed after capture; keep both old writers held.`
         );
@@ -301,4 +317,79 @@ export const importMailboxPositions = (
       });
     }
     return { cut, rows };
+  });
+
+type VerifiedImportRow = {
+  readonly address: string;
+  readonly operation: string;
+  readonly latestStatus: Subscriber["presence"]["status"];
+  readonly latestPresenceId: string;
+  readonly lastJoinId: string | null;
+} & (
+  | { readonly status: "VERIFIED_IMPORT"; readonly position: number }
+  | { readonly status: "VERIFIED_CLASSIFICATION"; readonly reason: MailboxUnresolved["reason"] }
+);
+
+export interface MailboxImportProof {
+  readonly cut: Pin;
+  readonly verifiedAt: Pin;
+  readonly rows: ReadonlyArray<VerifiedImportRow>;
+}
+
+/** Read-only paired release evidence at one cut. A historical import alone cannot verify a current mailbox. */
+export const verifyMailboxImport = (
+  ledgerName: string,
+  copies: readonly [PairedCopy, PairedCopy],
+  localInstallation: string
+) =>
+  Effect.gen(function* () {
+    const ledger = yield* Ledger;
+    const { cut, planned } = yield* planMailboxImport(ledgerName, copies, localInstallation);
+    const { cut: verifiedAt, entries } = yield* currentPresence(ledger, cut);
+    const now = presenceIndex(entries);
+    if (planned.length !== now.holdings.size) {
+      return yield* refused("the set of holdings changed after capture.");
+    }
+    const rows: Array<VerifiedImportRow> = [];
+    for (const { holding, owner, record } of planned) {
+      const { address, operation } = record;
+      if (!sameHolding(now, holding, owner)) {
+        return yield* refused(`the holding for ${address} changed after capture.`);
+      }
+      // mailboxAt validates the marker, sole pointer and its named receipt together.
+      const state = yield* ledger.mailboxAt(address, verifiedAt);
+      if (
+        state.status === "ABSENT" ||
+        state.current.t <= cut.head ||
+        state.current.t > verifiedAt.head ||
+        state.current.record.previous !== null ||
+        !mailboxIntentMatches(record, state.current.record)
+      ) {
+        return yield* refused(`no exact current receipt for ${address} at the verification cut.`);
+      }
+      const identity = {
+        address,
+        operation,
+        latestStatus: holding.presence.status,
+        latestPresenceId: holding.joinId,
+        lastJoinId: owner?.joinId ?? null,
+      };
+      if (
+        record.kind === "start" &&
+        state.status === "FOUND" &&
+        state.position === record.position &&
+        state.position <= cut.head
+      ) {
+        rows.push({ ...identity, status: "VERIFIED_IMPORT", position: state.position });
+      } else if (
+        record.kind === "unresolved" &&
+        state.status === "UNRESOLVED" &&
+        state.reason === record.reason
+      ) {
+        rows.push({ ...identity, status: "VERIFIED_CLASSIFICATION", reason: state.reason });
+      } else {
+        return yield* refused(`incorrect current position or classification for ${address}.`);
+      }
+    }
+    return { cut, verifiedAt, rows } satisfies MailboxImportProof;
   });

@@ -16,6 +16,7 @@ import {
   importMailboxPositions,
   legacyCursorPath,
   type MailboxSource,
+  verifyMailboxImport,
 } from "../src/mailbox-import.ts";
 import type { Pin } from "../src/Query.ts";
 import { freshLedger } from "./fluree-server.ts";
@@ -53,6 +54,7 @@ const fixture = async () => {
   let lose: string | undefined;
   const admissions: Array<{ address: string; head: number }> = [];
   let renewAtAdmission: Message | undefined;
+  let substitutePosition: number | undefined;
   const selected = layerFluree(config);
   const withFault = Layer.effect(Ledger)(
     Effect.map(Ledger, (ledger) =>
@@ -67,7 +69,12 @@ const fixture = async () => {
               const renewed = yield* ledger.admit(renewal, basis).pipe(Effect.orDie);
               expect(renewed.status).toBe("ADMITTED");
             }
-            const result = yield* ledger.importMailbox(record, basis);
+            const result = yield* ledger.importMailbox(
+              substitutePosition === undefined
+                ? record
+                : { ...record, position: substitutePosition },
+              basis
+            );
             if (record.address !== lose || result.status !== "APPLIED") return result;
             lose = undefined;
             return { status: "UNKNOWN" as const };
@@ -136,20 +143,41 @@ const fixture = async () => {
     if (a === undefined || b === undefined) throw new Error("fixture capture missing");
     return [a, b] as const;
   };
+  const copies = (receipts: readonly [MailboxSource, MailboxSource]) =>
+    [
+      { root: roots[0], receipt: receipts[0] },
+      { root: roots[1], receipt: receipts[1] },
+    ] as const;
   const run = (
     receipts: readonly [MailboxSource, MailboxSource],
     confirm: Effect.Effect<void, LedgerError> = stopped
+  ) => runtime.runPromise(importMailboxPositions(config.ledger, copies(receipts), one, confirm));
+  const verify = (
+    receipts: readonly [MailboxSource, MailboxSource],
+    beforeRead?: (
+      address: string,
+      cut: Pin,
+      ledger: Ledger["Service"]
+    ) => Effect.Effect<void, LedgerError>
   ) =>
     runtime.runPromise(
-      importMailboxPositions(
-        config.ledger,
-        [
-          { root: roots[0], receipt: receipts[0] },
-          { root: roots[1], receipt: receipts[1] },
-        ],
-        one,
-        confirm
-      )
+      Effect.gen(function* () {
+        const ledger = yield* Ledger;
+        const proof = verifyMailboxImport(config.ledger, copies(receipts), one);
+        if (beforeRead === undefined) return yield* proof;
+        return yield* proof.pipe(
+          Effect.provideService(
+            Ledger,
+            Ledger.of({
+              ...ledger,
+              mailboxAt: (address, cut) =>
+                beforeRead(address, cut, ledger).pipe(
+                  Effect.andThen(ledger.mailboxAt(address, cut))
+                ),
+            })
+          )
+        );
+      })
     );
   const state = async (address: string) => {
     const cut = await cutNow();
@@ -161,12 +189,16 @@ const fixture = async () => {
     stage,
     captures,
     run,
+    verify,
     state,
     cutNow,
     use,
     admissions,
     renewBeforeWrite: (entry: Message) => {
       renewAtAdmission = entry;
+    },
+    writeDifferentPosition: (value: number) => {
+      substitutePosition = value;
     },
     loseFirst: (address: string) => {
       lose = address;
@@ -244,7 +276,7 @@ test("paired import preserves exact local and left positions, classifies conflic
     writeFileSync(stage(0, "malformed", 0), "{}");
     stage(0, "mismatch", 0, "another-address");
     stage(0, "ahead", cut.head + 1);
-    stage(0, "already", 6);
+    stage(0, "already", 0);
     const originalBytes = readFileSync(retained);
     const captures = await f.captures(cut);
     await expect(f.run(captures, notStopped)).rejects.toThrow("old writer is not held");
@@ -275,6 +307,9 @@ test("paired import preserves exact local and left positions, classifies conflic
     expect(await f.state("left")).toMatchObject({ status: "FOUND", position: 3 });
     expect(await f.state("duplicate")).toMatchObject({ status: "UNRESOLVED", reason: "conflict" });
     expect(await f.state("already")).toMatchObject({ status: "FOUND", position: 0 });
+    const after = await f.cutNow();
+    await expect(f.verify(captures)).rejects.toThrow("no exact current receipt for already");
+    expect(await f.cutNow()).toEqual(after);
     expect(readFileSync(retained)).toEqual(originalBytes);
   } finally {
     await f.cleanup();
@@ -336,7 +371,8 @@ test("capture defines the source; a fresh admission cut may include earlier rows
   try {
     for (const address of ["a-first", "b-left", "c-missing"])
       await f.use((ledger) => ledger.append(presence(address, f.one)));
-    await f.use((ledger) => ledger.append(presence("b-left", undefined, "left")));
+    const left = presence("b-left", undefined, "left");
+    await f.use((ledger) => ledger.append(left));
     const source = await f.cutNow();
     const stage = f.stage(source);
     stage(0, "a-first", 0);
@@ -377,6 +413,118 @@ test("capture defines the source; a fresh admission cut may include earlier rows
       result.rows.map(({ operation }) => operation)
     );
     expect(f.admissions).toHaveLength(3);
+    expect(await f.cutNow()).toEqual(before);
+    const seen: Pin[] = [];
+    const proof = await f.verify(captures, (_, at) =>
+      Effect.sync(() => {
+        seen.push(at);
+      })
+    );
+    expect(proof).toMatchObject({
+      cut: source,
+      verifiedAt: before,
+      rows: [
+        { address: "a-first", status: "VERIFIED_IMPORT", position: 0, latestStatus: "joined" },
+        {
+          address: "b-left",
+          status: "VERIFIED_IMPORT",
+          position: 1,
+          latestStatus: "left",
+          latestPresenceId: left.id,
+          lastJoinId: expect.any(String),
+        },
+        { address: "c-missing", status: "VERIFIED_CLASSIFICATION", reason: "missing" },
+      ],
+    });
+    expect(proof.rows[1]?.lastJoinId).not.toBe(left.id);
+    expect(proof.rows.map(({ operation }) => operation)).toEqual(
+      result.rows.map(({ operation }) => operation)
+    );
+    expect(seen).toEqual([before, before, before]);
+    expect(await f.cutNow()).toEqual(before);
+    const renewal = presence("a-first", f.one, "joined", proof.rows[0]?.latestPresenceId);
+    expect((await f.use((ledger) => ledger.admit(renewal, before))).status).toBe("ADMITTED");
+    const renewed = await f.cutNow();
+    expect((await f.run(captures)).rows[0]?.status).toBe("VERIFIED_IMPORT");
+    await expect(f.verify(captures)).rejects.toThrow("holding for a-first changed after capture");
+    expect(await f.cutNow()).toEqual(renewed);
+  } finally {
+    await f.cleanup();
+  }
+}, 30_000);
+
+test("proof requires every classification to be current, not merely an immutable historical success", async () => {
+  const f = await fixture();
+  try {
+    for (const address of ["a-good", "b-missing"])
+      await f.use((ledger) => ledger.append(presence(address, f.one)));
+    const cut = await f.cutNow();
+    f.stage(cut)(0, "a-good", 0);
+    const captures = await f.captures(cut);
+    f.loseFirst("a-good");
+    await expect(f.run(captures)).rejects.toThrow("returned UNKNOWN");
+    const partial = await f.cutNow();
+    await expect(f.verify(captures)).rejects.toThrow("no exact current receipt for b-missing");
+    expect(await f.cutNow()).toEqual(partial);
+    const complete = await f.run(captures);
+    const expected = complete.rows[1];
+    if (expected === undefined) throw new Error("missing fixture classification");
+    const verified = await f.cutNow();
+    const proof = await f.verify(captures, (address, at, ledgerForRace) =>
+      address !== "b-missing"
+        ? Effect.void
+        : Effect.gen(function* () {
+            const result = yield* ledgerForRace.importMailbox(
+              {
+                version: 1,
+                kind: "start",
+                address,
+                operation: Bun.randomUUIDv7(),
+                origin: "reconcile",
+                run: "recovered",
+                position: 0,
+              },
+              at
+            );
+            expect(result.status).toBe("APPLIED");
+          })
+    );
+    expect(proof.verifiedAt).toEqual(verified);
+    expect(proof.rows[1]).toMatchObject({
+      status: "VERIFIED_CLASSIFICATION",
+      operation: expected.operation,
+    });
+    const advanced = await f.cutNow();
+    expect(advanced.head).toBe(verified.head + 1);
+    expect(
+      (await f.use((ledger) => ledger.mailboxReceiptAt("b-missing", expected.operation, advanced)))
+        .status
+    ).toBe("FOUND");
+    await expect(f.verify(captures)).rejects.toThrow("no exact current receipt for b-missing");
+    expect(await f.cutNow()).toEqual(advanced);
+  } finally {
+    await f.cleanup();
+  }
+}, 30_000);
+
+test("an exact operation id alone does not prove the captured position", async () => {
+  const f = await fixture();
+  try {
+    const original = presence("holding", f.one);
+    await f.use((ledger) => ledger.append(original));
+    const cut = await f.cutNow();
+    f.stage(cut)(0, "holding", 1);
+    const captures = await f.captures(cut);
+    f.writeDifferentPosition(0);
+    const reported = await f.run(captures);
+    expect(reported.rows[0]).toMatchObject({ status: "IMPORTED", position: 1 });
+    const before = await f.cutNow();
+    expect(await f.state("holding")).toMatchObject({
+      status: "FOUND",
+      position: 0,
+      current: { record: { operation: reported.rows[0]?.operation } },
+    });
+    await expect(f.verify(captures)).rejects.toThrow("no exact current receipt");
     expect(await f.cutNow()).toEqual(before);
   } finally {
     await f.cleanup();
