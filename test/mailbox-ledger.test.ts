@@ -45,6 +45,7 @@ const handle = async (layer: LedgerLayer) => {
   return {
     cut: () => use((ledger) => Effect.map(ledger.presenceAt(), (value) => value.cut)),
     era: (cut: Pin) => use((ledger) => ledger.ownershipEraAt(cut)),
+    sourceCommitAt: (cut: Pin) => use((ledger) => ledger.sourceCommitAt(cut)),
     activationAt: (source: Pin, operation: string) =>
       use((ledger) => ledger.ownershipActivationAt({ source, operation })),
     activate: (intent: OwnershipActivation) => use((ledger) => ledger.activateOwnershipEra(intent)),
@@ -1136,6 +1137,73 @@ describe("mailbox Fluree boundaries", () => {
         commit: (await native(legacy.head)).id,
         operation: Bun.randomUUIDv7(),
       };
+      expect(await operator.sourceCommitAt(legacy)).toBe(intent.commit);
+      if (answer === "answered") {
+        const first = { ...legacy, head: 1 };
+        expect(await operator.sourceCommitAt(first)).toBe(legacy.incarnation);
+        expect(legacy.incarnation).not.toBe(intent.commit);
+        for (const source of [
+          { ...legacy, incarnation: "different" },
+          { ...legacy, head: 0 },
+          { ...legacy, head: legacy.head + 1 },
+        ]) {
+          await expect(operator.sourceCommitAt(source)).rejects.toMatchObject({
+            _tag: "LedgerError",
+          });
+        }
+        for (const native of [
+          { id: intent.commit, t: legacy.head - 1 },
+          { t: legacy.head },
+          { id: "not a CID", t: legacy.head },
+        ]) {
+          const wrong = relay.nextPin(() => Response.json(native), legacy.head);
+          await expect(operator.sourceCommitAt(legacy)).rejects.toMatchObject({
+            _tag: "LedgerError",
+          });
+          await wrong;
+        }
+        const entered = relay.nextPin(() => Response.json({ id: legacy.incarnation }));
+        const falseGenesis = relay.nextPin(() => Response.json({ id: intent.commit, t: 1 }));
+        await expect(operator.sourceCommitAt(first)).rejects.toMatchObject({ _tag: "LedgerError" });
+        await Promise.all([entered, falseGenesis]);
+        const pins = [legacy.incarnation, intent.commit].map((id) =>
+          relay.nextPin(() => Response.json({ id }))
+        );
+        await expect(operator.sourceCommitAt(legacy)).rejects.toMatchObject({
+          _tag: "LedgerError",
+        });
+        await Promise.all(pins);
+        // Both bodies are valid JSON. Stream padding to the real boundary without storing a large transaction.
+        const ceiling = 32 * 1024 * 1024;
+        for (const bytes of [ceiling, ceiling + 1]) {
+          const answered = relay.nextPin(() => {
+            const value = new TextEncoder().encode(
+              JSON.stringify({ t: legacy.head, id: intent.commit })
+            );
+            const pad = new Uint8Array(64 * 1024).fill(32);
+            let remaining = bytes - value.byteLength;
+            return new Response(
+              new ReadableStream<Uint8Array>({
+                start(controller) {
+                  controller.enqueue(value);
+                },
+                pull(controller) {
+                  if (!remaining) return controller.close();
+                  const size = Math.min(remaining, pad.byteLength);
+                  controller.enqueue(pad.subarray(0, size));
+                  remaining -= size;
+                },
+              })
+            );
+          }, legacy.head);
+          if (bytes === ceiling) expect(await operator.sourceCommitAt(legacy)).toBe(intent.commit);
+          else
+            await expect(operator.sourceCommitAt(legacy)).rejects.toMatchObject({
+              _tag: "LedgerError",
+            });
+          await answered;
+        }
+      }
       await expect(operator.activationAt(legacy, intent.operation)).rejects.toMatchObject({
         _tag: "LedgerError",
       });
@@ -1182,7 +1250,7 @@ describe("mailbox Fluree boundaries", () => {
       if (answer === "answered") {
         // Isolate each native identity from the otherwise valid, untouched durable receipt.
         for (const [t, wrong] of [
-          [legacy.head, { t: legacy.head, id: "not-the-source" }],
+          [legacy.head, { t: legacy.head, id: legacy.incarnation }],
           [active.head, { ...born, parents: ["not-the-source"] }],
         ] as const) {
           const replaced = relay.nextPin(() => Response.json(wrong), t);
@@ -1191,9 +1259,12 @@ describe("mailbox Fluree boundaries", () => {
           });
           await replaced;
         }
-        const pins = [legacy.incarnation, legacy.incarnation, "different-at-finish"].map((id) =>
-          relay.nextPin(() => Response.json({ id }))
-        );
+        const pins = [
+          legacy.incarnation,
+          legacy.incarnation,
+          legacy.incarnation,
+          "different-at-finish",
+        ].map((id) => relay.nextPin(() => Response.json({ id })));
         await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
           _tag: "LedgerError",
         });
