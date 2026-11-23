@@ -877,6 +877,7 @@ export const layerJsonl = (file: string) =>
         changes,
         presenceAt,
         ownershipEraAt: () => ledgerError("A JSONL fixture has no Fluree ownership era."),
+        ownershipActivationAt: () => ledgerError("A JSONL fixture has no Fluree ownership era."),
         activateOwnershipEra: () => ledgerError("A JSONL fixture has no Fluree ownership era."),
         admit,
         mailboxAt,

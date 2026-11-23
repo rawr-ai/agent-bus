@@ -45,6 +45,8 @@ const handle = async (layer: LedgerLayer) => {
   return {
     cut: () => use((ledger) => Effect.map(ledger.presenceAt(), (value) => value.cut)),
     era: (cut: Pin) => use((ledger) => ledger.ownershipEraAt(cut)),
+    activationAt: (source: Pin, operation: string) =>
+      use((ledger) => ledger.ownershipActivationAt({ source, operation })),
     activate: (intent: OwnershipActivation) => use((ledger) => ledger.activateOwnershipEra(intent)),
     append: (message: Message) => use((ledger) => ledger.append(message)),
     admit: (message: Message, cut: Pin) => use((ledger) => ledger.admit(message, cut)),
@@ -919,6 +921,9 @@ describe("mailbox Fluree boundaries", () => {
     const store = await open();
     const cut = await store.cut();
     expect(await store.era(cut)).toBe(1);
+    await expect(store.activationAt(cut, Bun.randomUUIDv7())).rejects.toMatchObject({
+      _tag: "LedgerError",
+    });
     for (const invalid of [
       { ...cut, incarnation: "wrong" },
       { ...cut, head: cut.head + 1 },
@@ -1066,7 +1071,7 @@ describe("mailbox Fluree boundaries", () => {
     expect(await store.cut()).toEqual(damaged);
   });
 
-  test.each(["answered", "lost", "displaced"] as const)(
+  test.each(["answered", "lost", "displaced", "genesis"] as const)(
     "the %s ownership cut rejects earlier legacy decisions and adopts the last transition including leave",
     async (answer) => {
       const server = await startFileFlureeServer(process.env.AGENT_BUS_LEGACY_FLUREE_BIN);
@@ -1086,11 +1091,17 @@ describe("mailbox Fluree boundaries", () => {
       expect(created.ok).toBe(true);
       expect(await exists(config.token)).toBe(true);
       const original = presence();
-      await insertRaw(config, toNode(original, Schema.encodeSync(MessageJson)(original)));
+      await insertRaw(
+        config,
+        answer === "genesis"
+          ? { "@id": "urn:fixture:legacy", "urn:fixture:empty": "held" }
+          : toNode(original, Schema.encodeSync(MessageJson)(original))
+      );
       const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
       const before = await store.cut();
       const next = presence(address, "replaced");
-      await insertRaw(config, toNode(next, Schema.encodeSync(MessageJson)(next)));
+      if (answer !== "genesis")
+        await insertRaw(config, toNode(next, Schema.encodeSync(MessageJson)(next)));
       const executable = Bun.which("fluree");
       if (!executable) throw new Error("The selected provider is unavailable.");
       await server.restart(executable);
@@ -1125,17 +1136,25 @@ describe("mailbox Fluree boundaries", () => {
         commit: (await native(legacy.head)).id,
         operation: Bun.randomUUIDv7(),
       };
+      await expect(operator.activationAt(legacy, intent.operation)).rejects.toMatchObject({
+        _tag: "LedgerError",
+      });
+      expect(relay.creates()).toBe(0);
+      expect(relay.updates()).toBe(0);
+      expect((await native((await store.cut()).head)).id).toBe(intent.commit);
       await expect(store.activate(intent)).rejects.toMatchObject({ _tag: "LedgerError" });
-      expect((await operator.activate({ ...intent, commit: legacy.incarnation })).status).toBe(
+      expect((await operator.activate({ ...intent, commit: "not-the-source-cid" })).status).toBe(
         "CONFLICT"
       );
-      expect(
-        (await operator.activate({ ...intent, source: before, commit: before.incarnation })).status
-      ).toBe("CONFLICT");
+      if (answer !== "genesis")
+        expect(
+          (await operator.activate({ ...intent, source: before, commit: before.incarnation }))
+            .status
+        ).toBe("CONFLICT");
       expect(relay.updates()).toBe(0);
       const dropped = answer === "lost" ? relay.loseNextUpdate({ disconnect: true }) : undefined;
       expect((await operator.activate(intent)).status).toBe(
-        answer === "answered" ? "APPLIED" : "UNKNOWN"
+        answer === "answered" || answer === "genesis" ? "APPLIED" : "UNKNOWN"
       );
       if (dropped) {
         expect(await dropped).toEqual({ status: 200 });
@@ -1146,6 +1165,9 @@ describe("mailbox Fluree boundaries", () => {
         expect(active.head).toBe(legacy.head + 2);
         expect(await store.era(active)).toBe(active.head);
         expect((await (await openOperator()).activate(intent)).status).toBe("UNKNOWN");
+        await expect(operator.activationAt(legacy, intent.operation)).rejects.toMatchObject({
+          _tag: "LedgerError",
+        });
         expect(relay.updates()).toBe(1);
         expect(await store.cut()).toEqual(active);
         return;
@@ -1155,12 +1177,75 @@ describe("mailbox Fluree boundaries", () => {
       expect(born.parents).toEqual([intent.commit]);
       const exact = { status: "ALREADY_APPLIED", cut: active, commit: born.id } as const;
       const recovered = await openOperator();
+      const proof = { cut: active, commit: born.id, sourceCommit: intent.commit };
+      expect(await recovered.activationAt(legacy, intent.operation)).toEqual(proof);
+      if (answer === "answered") {
+        // Isolate each native identity from the otherwise valid, untouched durable receipt.
+        for (const [t, wrong] of [
+          [legacy.head, { t: legacy.head, id: "not-the-source" }],
+          [active.head, { ...born, parents: ["not-the-source"] }],
+        ] as const) {
+          const replaced = relay.nextPin(() => Response.json(wrong), t);
+          await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
+            _tag: "LedgerError",
+          });
+          await replaced;
+        }
+        const pins = [legacy.incarnation, legacy.incarnation, "different-at-finish"].map((id) =>
+          relay.nextPin(() => Response.json({ id }))
+        );
+        await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
+          _tag: "LedgerError",
+        });
+        await Promise.all(pins);
+      }
+      await expect(recovered.activationAt(legacy, Bun.randomUUIDv7())).rejects.toMatchObject({
+        _tag: "LedgerError",
+      });
+      await expect(recovered.activationAt(active, intent.operation)).rejects.toMatchObject({
+        _tag: "LedgerError",
+      });
+      await expect(
+        recovered.activationAt({ ...legacy, incarnation: "replaced" }, intent.operation)
+      ).rejects.toMatchObject({ _tag: "LedgerError" });
       expect(await recovered.activate(intent)).toEqual(exact);
       expect((await recovered.activate({ ...intent, operation: Bun.randomUUIDv7() })).status).toBe(
         "CONFLICT"
       );
       expect(relay.updates()).toBe(1);
       expect(active.head).toBeGreaterThan(1);
+      if (answer === "genesis") {
+        expect(legacy.head).toBe(1);
+        expect((await native(1)).parents).toBeUndefined();
+        await insertRaw(config, { "@id": "urn:fixture:after", "urn:fixture:state": "ordinary" });
+        expect(await (await openOperator()).activationAt(legacy, intent.operation)).toEqual(proof);
+        const receipt = { "@id": ownershipEra["@id"], "bus:ownershipActivation": "?record" };
+        const damaged = await fetch(
+          config.url + "/v1/fluree/update?ledger=" + encodeURIComponent(config.ledger),
+          {
+            method: "POST",
+            headers: {
+              authorization: `Bearer ${config.token}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+              where: receipt,
+              delete: receipt,
+            }),
+          }
+        );
+        expect(damaged.ok).toBe(true);
+        const later = await store.cut();
+        expect(await store.era(later)).toBe(active.head);
+        await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
+          _tag: "LedgerError",
+        });
+        expect(await store.cut()).toEqual(later);
+        expect(relay.updates()).toBe(1);
+        expect(relay.creates()).toBe(0);
+        return;
+      }
       expect(await store.era(active)).toBe(active.head);
       await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
       await expect(store.admit(send(), before)).rejects.toThrow();
@@ -1170,6 +1255,7 @@ describe("mailbox Fluree boundaries", () => {
       if (fresh.status !== "ADMITTED") throw new Error("active legacy holder refused");
       expect(fresh.cut.head).toBe(active.head + 1);
       expect(await store.era(fresh.cut)).toBe(active.head);
+      expect(await (await openOperator()).activationAt(legacy, intent.operation)).toEqual(proof);
       expect(await recovered.activate(intent)).toEqual(exact);
       expect(relay.updates()).toBe(1);
       expect(await store.cut()).toEqual(fresh.cut);
