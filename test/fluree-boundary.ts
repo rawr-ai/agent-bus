@@ -79,8 +79,8 @@ export interface Boundary {
   readonly url: string;
   /** Queues a reply for the next pinned query request; resolves when that request arrives. */
   readonly next: (reply: Reply) => Promise<Held>;
-  /** Queues a reply for the next ledger-incarnation pin, after store startup. */
-  readonly nextPin: (reply: Reply) => Promise<Held>;
+  /** Queues one native commit readback; t=1 is the usual ledger-incarnation check. */
+  readonly nextPin: (reply: Reply, t?: number) => Promise<Held>;
   /** Pinned query requests that passed through to Fluree. */
   readonly passed: () => number;
   /** All queries forwarded, including history ranges on the unqualified query path. */
@@ -102,7 +102,7 @@ export interface Boundary {
 }
 
 const PINNED = /^\/v1\/fluree\/query\/([^/]+)$/;
-const INCARNATION = /^\/v1\/fluree\/show\/[^/]+$/;
+const SHOW = /^\/v1\/fluree\/show\/[^/]+$/;
 const UPDATE = "/v1/fluree/update";
 
 export const boundary = (
@@ -117,7 +117,7 @@ export const boundary = (
 ): Boundary => {
   type Pending = { readonly reply: Reply; readonly arrived: (held: Held) => void };
   const queued: Pending[] = [];
-  const pins: Pending[] = [];
+  const pins = new Map<number, Pending[]>();
   const lostUpdates: Array<(forwarded: Forwarded) => void> = [];
   const lostCreates: Array<(forwarded: Forwarded) => void> = [];
   let disconnected = false;
@@ -139,8 +139,15 @@ export const boundary = (
       const url = new URL(request.url);
       const pinned = PINNED.exec(url.pathname);
       const t = Number(/@t:(\d+)$/.exec(decodeURIComponent(pinned?.[1] ?? ""))?.[1] ?? Number.NaN);
-      const pin = INCARNATION.test(url.pathname) && url.searchParams.get("commit") === "t:1";
-      const waiting = pin ? pins.shift() : pinned === null ? undefined : queued.shift();
+      const show = SHOW.test(url.pathname)
+        ? /^t:(\d+)$/.exec(url.searchParams.get("commit") ?? "")
+        : null;
+      const commit = show ? Number(show[1]) : t;
+      const waiting = show
+        ? pins.get(commit)?.shift()
+        : pinned === null
+          ? undefined
+          : queued.shift();
       if (waiting !== undefined) {
         let done = false;
         let ended = () => {};
@@ -151,7 +158,6 @@ export const boundary = (
           };
         });
         request.signal.addEventListener("abort", ended);
-        const commit = pin ? 1 : t;
         const response = waiting.reply(commit, ended);
         waiting.arrived({ t: commit, finalised, isFinalised: () => done });
         return response;
@@ -210,7 +216,12 @@ export const boundary = (
   return {
     url: server.url.origin,
     next: (reply) => new Promise<Held>((arrived) => queued.push({ reply, arrived })),
-    nextPin: (reply) => new Promise<Held>((arrived) => pins.push({ reply, arrived })),
+    nextPin: (reply, t = 1) =>
+      new Promise<Held>((arrived) => {
+        const queue = pins.get(t) ?? [];
+        queue.push({ reply, arrived });
+        pins.set(t, queue);
+      }),
     passed: () => passed,
     queries: () => queries,
     updates: () => updates,

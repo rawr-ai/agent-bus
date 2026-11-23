@@ -1,21 +1,25 @@
 import { Effect, Schema } from "effect";
 import { LedgerError } from "./domain.ts";
 import { ownershipEra } from "./FlureePresence.ts";
-import type { OwnershipActivation, OwnershipActivationResult } from "./Ledger.ts";
+import type {
+  OwnershipActivation,
+  OwnershipActivationLookup,
+  OwnershipActivationProof,
+  OwnershipActivationResult,
+} from "./Ledger.ts";
 import type { Pin } from "./Query.ts";
 
 type IO<A> = Effect.Effect<A, LedgerError>;
 type Query = Readonly<Record<string, unknown>>;
-interface Store {
+interface ReadStore {
   readonly tip: IO<{ readonly t: number; readonly id: string }>;
   readonly commitAt: (
     t: number
-  ) => IO<{ readonly id: string; readonly t: number; readonly parents: readonly [string] }>;
+  ) => IO<{ readonly id: string; readonly t: number; readonly parents?: ReadonlyArray<string> }>;
   readonly incarnation: IO<string>;
   readonly at: (t: number, query: Query) => IO<unknown>;
   readonly history: (from: number, through: number, query: Query) => IO<unknown>;
   readonly eraAt: (cut: Pin) => IO<number>;
-  readonly update: (body: Query) => IO<number>;
 }
 const subject = ownershipEra["@id"];
 const property = "bus:ownershipActivation";
@@ -35,22 +39,18 @@ const Receipt = Schema.Array(
   Schema.Tuple([Schema.String, Schema.Int, Schema.Boolean, Schema.String])
 );
 
-/** The operator excludes every other writer; Fluree's conditional update guards the era node, not global head. */
-export const makeOwnershipActivation =
-  (store: Store, instance: string) =>
-  (intent: OwnershipActivation): IO<OwnershipActivationResult> => {
-    const { source, commit, operation } = intent;
-    if (
-      !Number.isSafeInteger(source.head) ||
-      source.head < 1 ||
-      source.head >= Number.MAX_SAFE_INTEGER ||
-      !commit ||
-      !/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operation)
-    ) {
-      return Effect.fail(new LedgerError({ message: "Invalid ownership activation intent." }));
-    }
-    const record = JSON.stringify([operation, source.incarnation, source.head, commit]);
-    const inspect = Effect.gen(function* () {
+const validLookup = ({ source, operation }: OwnershipActivationLookup) =>
+  Number.isSafeInteger(source.head) &&
+  source.head >= 1 &&
+  source.head < Number.MAX_SAFE_INTEGER &&
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(operation);
+const activationRecord = ({ source, operation, commit }: OwnershipActivation) =>
+  JSON.stringify([operation, source.incarnation, source.head, commit]);
+
+export const makeOwnershipActivationReader = (store: ReadStore, instance: string) => {
+  const inspect = (intent: OwnershipActivation) =>
+    Effect.gen(function* () {
+      const { source, commit } = intent;
       if ((yield* store.incarnation) !== instance) return unknown;
       const tip = yield* store.tip;
       const cut = { incarnation: instance, head: tip.t };
@@ -92,10 +92,16 @@ export const makeOwnershipActivation =
         (row[3] !== "xsd:string" && row[3] !== "http://www.w3.org/2001/XMLSchema#string")
       )
         return unknown;
-      if (row[0] !== record) return conflict;
+      if (row[0] !== activationRecord(intent)) return conflict;
       if (era !== source.head + 1) return unknown;
       const native = yield* store.commitAt(era);
-      if (!native.id || native.t !== era || native.parents[0] !== commit) return unknown;
+      if (
+        !native.id ||
+        native.t !== era ||
+        native.parents?.length !== 1 ||
+        native.parents[0] !== commit
+      )
+        return unknown;
       return {
         status: "ALREADY_APPLIED",
         cut: { incarnation: instance, head: era },
@@ -106,20 +112,54 @@ export const makeOwnershipActivation =
         Effect.map(store.incarnation, (id) => (id === instance ? result : unknown))
       )
     );
+  const proofAt = (lookup: OwnershipActivationLookup): IO<OwnershipActivationProof> =>
+    Effect.gen(function* () {
+      if (
+        !validLookup(lookup) ||
+        lookup.source.incarnation !== instance ||
+        (yield* store.incarnation) !== instance
+      )
+        return yield* invalid();
+      // H=1 has no parent. The receipt needs H's own CID and E's single edge back to it.
+      const source = yield* store.commitAt(lookup.source.head);
+      if (
+        source.t !== lookup.source.head ||
+        !source.id ||
+        (source.t === 1 && source.id !== instance)
+      )
+        return yield* invalid();
+      const found = yield* inspect({ ...lookup, commit: source.id });
+      if (found.status !== "ALREADY_APPLIED") return yield* invalid();
+      return { cut: found.cut, commit: found.commit, sourceCommit: source.id };
+    });
+  return { inspect, proofAt };
+};
+
+/** The operator excludes every other writer; Fluree's conditional update guards the era node, not global head. */
+export const makeOwnershipActivation =
+  (
+    inspect: ReturnType<typeof makeOwnershipActivationReader>["inspect"],
+    update: (body: Query) => IO<number>
+  ) =>
+  (intent: OwnershipActivation): IO<OwnershipActivationResult> => {
+    if (!validLookup(intent) || !intent.commit) {
+      return Effect.fail(new LedgerError({ message: "Invalid ownership activation intent." }));
+    }
     return Effect.gen(function* () {
-      const before = yield* inspect;
+      const before = yield* inspect(intent);
       if (before.status !== "VACANT") return before;
       // One dispatch. Even a successful HTTP response is not a receipt; only re-observe the same intent.
-      yield* store
-        .update({
-          where: [
-            ["optional", { "@id": subject, "?occupied": "?object" }],
-            ["filter", "(not (bound ?object))"],
-          ],
-          insert: { ...ownershipEra, [property]: { "@value": record, "@type": "xsd:string" } },
-        })
-        .pipe(Effect.ignore);
-      const after = yield* inspect;
+      yield* update({
+        where: [
+          ["optional", { "@id": subject, "?occupied": "?object" }],
+          ["filter", "(not (bound ?object))"],
+        ],
+        insert: {
+          ...ownershipEra,
+          [property]: { "@value": activationRecord(intent), "@type": "xsd:string" },
+        },
+      }).pipe(Effect.ignore);
+      const after = yield* inspect(intent);
       if (after.status === "ALREADY_APPLIED") return { ...after, status: "APPLIED" } as const;
       return after.status === "VACANT" ? unknown : after;
     }).pipe(Effect.catch(() => Effect.succeed(unknown)));

@@ -10,7 +10,10 @@ import {
 } from "./activity-read.ts";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { makeFlureeMailbox } from "./FlureeMailbox.ts";
-import { makeOwnershipActivation } from "./FlureeOwnershipActivation.ts";
+import {
+  makeOwnershipActivation,
+  makeOwnershipActivationReader,
+} from "./FlureeOwnershipActivation.ts";
 import {
   makeOwnership,
   ownershipEra,
@@ -99,10 +102,10 @@ export const flureeLedgerExists = (config: FlureeConfig) =>
   );
 const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
 const Commit = Schema.Struct({ id: Schema.String });
-const ChildCommit = Schema.Struct({
+const NativeCommit = Schema.Struct({
   id: Schema.String,
   t: Schema.Int,
-  parents: Schema.Tuple([Schema.String]),
+  parents: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 const Tip = Schema.Struct({
   commits: Schema.Tuple([Schema.Struct({ t: Schema.Int, commit_id: Schema.String })]),
@@ -427,7 +430,10 @@ export const layerFluree = (
 
       // Unlike the general-purpose sender, every guarded request owns its transport until its
       // body is consumed or the enclosing scope is interrupted. Errors never expose upstream data.
-      const guardedSend = (request: HttpClientRequest.HttpClientRequest) =>
+      const guardedSend = (
+        request: HttpClientRequest.HttpClientRequest,
+        maxBytes = SPARQL_RESPONSE_BYTES
+      ) =>
         Effect.gen(function* () {
           const response = yield* HttpClient.withScope(client).execute(request);
           if (response.status < 200 || response.status >= 300) {
@@ -439,9 +445,7 @@ export const layerFluree = (
               (acc, chunk) => {
                 acc.parts.push(chunk);
                 acc.size += chunk.length;
-                return acc.size > SPARQL_RESPONSE_BYTES
-                  ? Effect.fail(invalidResponse())
-                  : Effect.succeed(acc);
+                return acc.size > maxBytes ? Effect.fail(invalidResponse()) : Effect.succeed(acc);
               }
             )
           );
@@ -1323,7 +1327,7 @@ export const layerFluree = (
             Effect.map((response) => response.t)
           )
         );
-      const activate = makeOwnershipActivation(
+      const activation = makeOwnershipActivationReader(
         {
           incarnation: bounded(guardedIncarnation),
           tip: bounded(guardedSend(HttpClientRequest.get(`${api}/log/${ledger}?limit=1`))).pipe(
@@ -1331,16 +1335,19 @@ export const layerFluree = (
             Effect.map(({ commits: [tip] }) => ({ t: tip.t, id: tip.commit_id }))
           ),
           commitAt: (t) =>
-            bounded(guardedSend(HttpClientRequest.get(`${api}/show/${ledger}?commit=t:${t}`))).pipe(
-              Effect.flatMap(decode(ChildCommit))
-            ),
+            bounded(
+              guardedSend(
+                HttpClientRequest.get(`${api}/show/${ledger}?commit=t:${t}`),
+                JSONLD_RESPONSE_BYTES
+              )
+            ).pipe(Effect.flatMap(decode(NativeCommit))),
           at,
           history: entryHistory,
           eraAt: ownership.eraAt,
-          update,
         },
         instance
       );
+      const activate = makeOwnershipActivation(activation.inspect, update);
       const mailbox = makeFlureeMailbox({
         ownership,
         instance,
@@ -1375,6 +1382,13 @@ export const layerFluree = (
                 return era;
               })
             ).pipe(Effect.withSpan("Ledger.ownershipEraAt")),
+          ownershipActivationAt: (lookup) =>
+            activation
+              .proofAt(lookup)
+              .pipe(
+                Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+                Effect.withSpan("Ledger.ownershipActivationAt")
+              ),
           activateOwnershipEra: (intent) =>
             options?.existingOnly === true
               ? activate(intent).pipe(

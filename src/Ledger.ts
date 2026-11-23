@@ -86,6 +86,13 @@ export interface OwnershipActivation {
   /** Stable lowercase UUIDv7 persisted by the operator before dispatch. */
   readonly operation: string;
 }
+export type OwnershipActivationLookup = Pick<OwnershipActivation, "source" | "operation">;
+export interface OwnershipActivationProof {
+  /** The original activation commit (E), not the observed head. */
+  readonly cut: Pin;
+  readonly commit: string;
+  readonly sourceCommit: string;
+}
 export type OwnershipActivationResult =
   | { readonly status: "APPLIED" | "ALREADY_APPLIED"; readonly cut: Pin; readonly commit: string }
   | { readonly status: "CONFLICT"; readonly cut: Pin }
@@ -213,6 +220,11 @@ export class Ledger extends Context.Service<
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
     /** Original commit of the still-active ownership era at this exact pin. Never initializes it. */
     readonly ownershipEraAt: (cut: Pin) => Effect.Effect<number, LedgerError>;
+    /** Recover the original cutover only. Compare sourceCommit with the retained external CID;
+     * neither a born-new era nor an empty import plan is evidence that a migration occurred. */
+    readonly ownershipActivationAt: (
+      lookup: OwnershipActivationLookup
+    ) => Effect.Effect<OwnershipActivationProof, LedgerError>;
     /** Existing-store cutover only. All other writers must already be drained and held. */
     readonly activateOwnershipEra: (
       intent: OwnershipActivation
