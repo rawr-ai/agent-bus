@@ -14,6 +14,8 @@ import { initializeInstallation } from "../src/installation.ts";
 import * as Ledger from "../src/Ledger.ts";
 import {
   MAILBOX_BOOTSTRAP_COMPLETE_FILE,
+  MAILBOX_BOOTSTRAP_GRANT_FILE,
+  MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE,
   MAILBOX_BOOTSTRAP_SPENT_FILE,
   reserveMailboxBootstrap,
 } from "../src/mailbox-bootstrap.ts";
@@ -396,6 +398,90 @@ test("a new grant creates once, binds the real incarnation and restarts existing
   } finally {
     await proxy.close();
     await root.close();
+  }
+}, 40_000);
+
+test("an identity-only remote attachment never creates an absent ledger and can later attach to an existing one", async () => {
+  const actual = await freshLedger("bootstrap-remote-attach");
+  const root = await newRoot();
+  let proxy: Awaited<ReturnType<typeof createProxy>> | undefined;
+  const owned = ownership();
+  const exists = async () => {
+    const response = await fetch(
+      `${actual.url}/v1/fluree/exists/${encodeURIComponent(actual.ledger)}`,
+      { headers: { authorization: `Bearer ${actual.token}` } }
+    );
+    if (!response.ok) throw new Error("The disposable ledger existence check failed.");
+    return Schema.decodeUnknownSync(Schema.Struct({ exists: Schema.Boolean }))(
+      await response.json()
+    ).exists;
+  };
+  try {
+    proxy = await createProxy(actual.url, () => undefined);
+    const initialized = await refusal(root.bus, root.home, ["initialize-installation"]);
+    expect(initialized.code).toBe(0);
+    const identity = await readFile(join(root.bus, "installation-id"));
+    expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE)).exists()).toBe(
+      true
+    );
+    expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
+    const config = JSON.stringify({ fluree: { url: proxy.url, ledger: actual.ledger } });
+    await writeFile(join(root.bus, "config.json"), config, { mode: 0o600 });
+    await writeFile(join(root.bus, "fluree-token"), actual.token, { mode: 0o600 });
+    expect(await exists()).toBe(false);
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const result = await refusal(root.bus, root.home);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("no unspent creation grant");
+      expect(await exists()).toBe(false);
+      expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
+      expect(await readFile(join(root.bus, "installation-id"))).toEqual(identity);
+      expect(await readFile(join(root.bus, "config.json"), "utf8")).toBe(config);
+      expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE)).exists()).toBe(false);
+      expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE)).exists()).toBe(false);
+    }
+    expect(proxy.calls.some((call) => call.startsWith("GET /v1/fluree/exists/"))).toBe(true);
+
+    // Provision the remote ledger independently; attaching still must not create or update it.
+    const incarnation = await prepareLedger(actual);
+    const head = await actualHead(actual);
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const port = Number(probe.url.port);
+    probe.stop(true);
+    const candidate = owned.supervisor(start(root.bus, root.home, port));
+    let healthy = false;
+    for (let attempt = 0; attempt < 100 && candidate.exitCode === null; attempt++) {
+      healthy = await fetch(`http://127.0.0.1:${port}/health`).then(
+        (r) => r.ok,
+        () => false
+      );
+      if (healthy) break;
+      await Bun.sleep(100);
+    }
+    expect(healthy).toBe(true);
+    expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
+    expect(await actualHead(actual)).toBe(head);
+    expect(await readFile(join(root.bus, "installation-id"))).toEqual(identity);
+    expect(await readFile(join(root.bus, "config.json"), "utf8")).toBe(config);
+    expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
+    const completed: unknown = JSON.parse(
+      await readFile(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE), "utf8")
+    );
+    expect(
+      Schema.decodeUnknownSync(
+        Schema.Struct({ origin: Schema.String, incarnation: Schema.String })
+      )(completed)
+    ).toEqual({ origin: "existing", incarnation });
+  } finally {
+    try {
+      await owned.stop();
+    } finally {
+      try {
+        await proxy?.close();
+      } finally {
+        await root.close();
+      }
+    }
   }
 }, 40_000);
 
@@ -793,6 +879,8 @@ const emptyLegacyFixture = async () => {
   const secondCopy = join(root.root, "second-copy");
   const badLocal = join(root.root, "bad-local");
   const badPeer = join(root.root, "bad-peer");
+  const goodLocal = join(root.root, "good-local");
+  const goodPeer = join(root.root, "good-peer");
   const proxy = await createProxy(actual.url, () => undefined);
   try {
     const ledgerLayer = Fluree.layerFluree(actual, { existingOnly: true });
@@ -885,6 +973,8 @@ const emptyLegacyFixture = async () => {
     }
     await cp(root.bus, badLocal, { recursive: true });
     await cp(peer, badPeer, { recursive: true });
+    await cp(root.bus, goodLocal, { recursive: true });
+    await cp(peer, goodPeer, { recursive: true });
     const proof = await Effect.runPromise(
       verifyMailboxImport(actual.ledger, copies, firstSource.installation).pipe(
         Effect.provide(ledgerLayer),
@@ -923,9 +1013,12 @@ const emptyLegacyFixture = async () => {
       peer,
       badLocal,
       badPeer,
+      goodLocal,
+      goodPeer,
       firstSource,
       secondSource,
       sources,
+      copies,
       proof,
       cut,
       operation,
@@ -944,15 +1037,17 @@ const forgeEmptyAdmissions = async (
   fixture: Awaited<ReturnType<typeof emptyLegacyFixture>>,
   left: string,
   right: string,
-  sourceCommit: string
+  sourceCommit: string,
+  verifiedCommit: string,
+  proof = { ...fixture.proof, verifiedAt: { ...fixture.cut, head: 2 } }
 ) => {
   // The production ready CLI cannot issue this K=H+1 proof before era activation.
-  const proof = { ...fixture.proof, verifiedAt: { ...fixture.cut, head: 2 } };
   const checks = { confirmLocalHeld: () => Effect.void, verifyLocalFence: () => Effect.void };
   const one = {
     busDir: left,
     operation: fixture.operation,
     sourceCommit,
+    verifiedCommit,
     sources: fixture.sources,
     localInstallation: fixture.firstSource.installation,
     proof,
@@ -961,6 +1056,7 @@ const forgeEmptyAdmissions = async (
     busDir: right,
     operation: fixture.operation,
     sourceCommit,
+    verifiedCommit,
     sources: fixture.sources,
     localInstallation: fixture.secondSource.installation,
     proof,
@@ -1026,8 +1122,7 @@ test("an empty legacy plan cannot import, ready or serve without the exact activ
       expect(await actualHead(f.actual)).toBe(1);
       expect(writeCounts(f.proxy.calls)).toEqual({ creates: 0, updates: 0 });
     }
-    await forgeEmptyAdmissions(f, f.root.bus, f.peer, f.sourceCommit);
-    await forgeEmptyAdmissions(f, f.badLocal, f.badPeer, "foreign-source-cid");
+    await forgeEmptyAdmissions(f, f.root.bus, f.peer, f.sourceCommit, "unverified-k-commit");
     const beforeEra = await refusal(f.root.bus, f.root.home);
     expect(beforeEra.code).toBe(1);
     expect(await actualHead(f.actual)).toBe(1);
@@ -1043,7 +1138,32 @@ test("an empty legacy plan cannot import, ready or serve without the exact activ
       }).pipe(Effect.provide(f.ledgerLayer), Effect.provide(platform))
     );
     expect(activation.status).toBe("APPLIED");
+    if (activation.status !== "APPLIED") throw new Error("The fixture era was not applied.");
     expect(await actualHead(f.actual)).toBe(2);
+    const actualProof = await Effect.runPromise(
+      verifyMailboxImport(f.actual.ledger, f.copies, f.firstSource.installation).pipe(
+        Effect.provide(f.ledgerLayer),
+        Effect.provide(platform)
+      )
+    );
+    expect(actualProof.verifiedAt.head).toBe(2);
+    await forgeEmptyAdmissions(
+      f,
+      f.badLocal,
+      f.badPeer,
+      "foreign-source-cid",
+      activation.commit,
+      actualProof
+    );
+    await forgeEmptyAdmissions(
+      f,
+      f.goodLocal,
+      f.goodPeer,
+      f.sourceCommit,
+      activation.commit,
+      actualProof
+    );
+    expect((await refusal(f.root.bus, f.root.home)).code).toBe(1);
     const wrongCommit = [...f.common];
     wrongCommit[wrongCommit.indexOf("--source-commit") + 1] = "foreign-source-cid";
     for (const args of [
@@ -1065,7 +1185,7 @@ test("an empty legacy plan cannot import, ready or serve without the exact activ
     const port = Number(probe.url.port);
     probe.stop(true);
     const owned = ownership();
-    const candidate = owned.supervisor(start(f.root.bus, f.root.home, port));
+    const candidate = owned.supervisor(start(f.goodLocal, f.root.home, port));
     try {
       let healthy = false;
       for (let attempt = 0; attempt < 100 && candidate.exitCode === null; attempt++) {

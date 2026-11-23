@@ -1,8 +1,32 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  cpSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAILBOX_TRANSITION_EVIDENCE_FILES } from "../src/mailbox-transition-admission.ts";
+import { BunServices } from "@effect/platform-bun";
+import { Effect, Layer, Schema } from "effect";
+import { FetchHttpClient } from "effect/http";
+import * as Fluree from "../src/Fluree.ts";
+import { initializeInstallation } from "../src/installation.ts";
+import { Ledger } from "../src/Ledger.ts";
+import { captureMailboxSource, verifyMailboxImport } from "../src/mailbox-import.ts";
+import {
+  acceptMailboxTransitionPeer,
+  MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE,
+  MAILBOX_TRANSITION_EVIDENCE_FILES,
+  permitMailboxTransitionServe,
+  recordMailboxTransitionReady,
+} from "../src/mailbox-transition-admission.ts";
+import { installMailboxTransitionGuard } from "../src/mailbox-transition-guard.ts";
+import { QueryGateway } from "../src/Query.ts";
+import { freshLedger } from "./fluree-server.ts";
 import { ownership } from "./processes.ts";
 import { spawnSupervised } from "./supervised.ts";
 
@@ -396,3 +420,266 @@ test("a missing ledger is never created for an identity without a grant", async 
     fixture.close();
   }
 });
+
+test("serve requires the historical verification commit even after the head advances", async () => {
+  const actual = await freshLedger("transition-verified-commit");
+  const root = mkdtempSync(join(tmpdir(), "agent-bus-transition-commit-"));
+  const local = join(root, "local");
+  const peer = join(root, "peer");
+  const localCopy = join(root, "local-copy");
+  const peerCopy = join(root, "peer-copy");
+  mkdirSync(local);
+  mkdirSync(peer);
+  const platform = Layer.mergeAll(BunServices.layer, FetchHttpClient.layer);
+  const ledgerLayer = Fluree.layerFluree(actual, { existingOnly: true });
+  const headers = { authorization: `Bearer ${actual.token}`, "content-type": "application/json" };
+  const post = (path: string, body: unknown) =>
+    fetch(`${actual.url}/v1/fluree${path}`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+  const update = (id: string) =>
+    post(`/update?ledger=${encodeURIComponent(actual.ledger)}`, {
+      "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+      insert: { "@id": id, "bus:value": "fixture" },
+    });
+  const pin = () =>
+    Effect.runPromise(
+      Effect.flatMap(QueryGateway, (gateway) => gateway.pin).pipe(
+        Effect.provide(ledgerLayer),
+        Effect.provide(platform)
+      )
+    );
+  let mode: "normal" | "missing" | "changed" | "behind" | "after-behind" = "normal";
+  const requests: string[] = [];
+  let verificationHead = 0;
+  let historicalReads = 0;
+  let sawHistoricalRead = false;
+  const proxy = Bun.serve({
+    hostname: "127.0.0.1",
+    port: 0,
+    async fetch(request) {
+      const url = new URL(request.url);
+      requests.push(`${request.method} ${url.pathname}${url.search}`);
+      const historical =
+        url.pathname.startsWith("/v1/fluree/show/") &&
+        url.searchParams.get("commit") === `t:${verificationHead}`;
+      if (historical) {
+        historicalReads++;
+        sawHistoricalRead = true;
+      }
+      if (historical && mode === "missing") return new Response(null, { status: 404 });
+      const forwarded = new Headers(request.headers);
+      forwarded.delete("host");
+      forwarded.delete("content-length");
+      const upstream = await fetch(`${actual.url}${url.pathname}${url.search}`, {
+        method: request.method,
+        headers: forwarded,
+        ...(request.method === "GET" || request.method === "HEAD"
+          ? {}
+          : { body: await request.arrayBuffer() }),
+      });
+      if (upstream.ok && historical && mode === "changed") {
+        const commit = Schema.decodeUnknownSync(
+          Schema.Struct({ id: Schema.String, t: Schema.Int, parents: Schema.Array(Schema.String) })
+        )(await upstream.json());
+        const changed = `b${"a".repeat(55)}`;
+        return Response.json({
+          ...commit,
+          id: commit.id === changed ? `b${"b".repeat(55)}` : changed,
+        });
+      }
+      if (
+        upstream.ok &&
+        url.pathname.startsWith("/v1/fluree/info/") &&
+        (mode === "behind" || (mode === "after-behind" && sawHistoricalRead))
+      ) {
+        return Response.json({ ledger: { t: verificationHead - 1 } });
+      }
+      return new Response(upstream.body, { status: upstream.status, headers: upstream.headers });
+    },
+  });
+  try {
+    expect((await post("/create", { ledger: actual.ledger })).status).toBe(201);
+    expect((await update("urn:fixture:before-era")).status).toBe(200);
+    const source = await pin();
+    expect(source.head).toBe(1);
+    const sourceCommit = await Effect.runPromise(
+      Effect.flatMap(Ledger, (ledger) => ledger.sourceCommitAt(source)).pipe(
+        Effect.provide(ledgerLayer),
+        Effect.provide(platform)
+      )
+    );
+    for (const dir of [local, peer]) {
+      await Effect.runPromise(initializeInstallation(dir).pipe(Effect.provide(platform)));
+      const legacy = join(
+        dir,
+        "fluree-cursors",
+        encodeURIComponent(actual.ledger),
+        source.incarnation
+      );
+      mkdirSync(`${legacy}.v2`, { recursive: true });
+      writeFileSync(
+        join(`${legacy}.v2`, "layout"),
+        JSON.stringify({
+          generation: Bun.randomUUIDv7(),
+          legacy: Bun.CryptoHasher.hash("sha256", "[]", "hex"),
+        })
+      );
+    }
+    const capture = (dir: string) =>
+      Effect.runPromise(
+        captureMailboxSource(dir, actual.ledger, source, Effect.void).pipe(
+          Effect.provide(ledgerLayer),
+          Effect.provide(platform)
+        )
+      );
+    const first = await capture(local);
+    const second = await capture(peer);
+    const sources =
+      first.installation < second.installation
+        ? ([first, second] as const)
+        : ([second, first] as const);
+    cpSync(local, localCopy, { recursive: true });
+    cpSync(peer, peerCopy, { recursive: true });
+    for (const [dir, receipt] of [
+      [local, first],
+      [peer, second],
+    ] as const) {
+      await Effect.runPromise(
+        installMailboxTransitionGuard(
+          dir,
+          actual.ledger,
+          sources,
+          receipt.installation,
+          operation,
+          Effect.void
+        ).pipe(Effect.provide(platform))
+      );
+    }
+    const activation = await Effect.runPromise(
+      Effect.flatMap(Ledger, (ledger) =>
+        ledger.activateOwnershipEra({ source, commit: sourceCommit, operation })
+      ).pipe(Effect.provide(ledgerLayer), Effect.provide(platform))
+    );
+    expect(activation.status).toBe("APPLIED");
+    expect((await update("urn:fixture:verification-cut")).status).toBe(200);
+    const proof = await Effect.runPromise(
+      verifyMailboxImport(
+        actual.ledger,
+        [
+          { root: localCopy, receipt: first },
+          { root: peerCopy, receipt: second },
+        ],
+        first.installation
+      ).pipe(Effect.provide(ledgerLayer), Effect.provide(platform))
+    );
+    expect(proof.rows).toEqual([]);
+    verificationHead = proof.verifiedAt.head;
+    expect(verificationHead).toBe(3);
+    const verifiedCommit = await Effect.runPromise(
+      Effect.flatMap(Ledger, (ledger) => ledger.sourceCommitAt(proof.verifiedAt)).pipe(
+        Effect.provide(ledgerLayer),
+        Effect.provide(platform)
+      )
+    );
+    const checks = { confirmLocalHeld: () => Effect.void, verifyLocalFence: () => Effect.void };
+    const base = { operation, sourceCommit, verifiedCommit, sources, proof };
+    const one = { ...base, busDir: local, localInstallation: first.installation };
+    const two = { ...base, busDir: peer, localInstallation: second.installation };
+    const readyOne = await Effect.runPromise(
+      recordMailboxTransitionReady(one, checks).pipe(Effect.provide(platform))
+    );
+    const readyTwo = await Effect.runPromise(
+      recordMailboxTransitionReady(two, checks).pipe(Effect.provide(platform))
+    );
+    await Effect.runPromise(
+      acceptMailboxTransitionPeer(one, readyTwo, checks).pipe(Effect.provide(platform))
+    );
+    await Effect.runPromise(
+      acceptMailboxTransitionPeer(two, readyOne, checks).pipe(Effect.provide(platform))
+    );
+    const peerAdmission = readFileSync(
+      join(peer, MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE),
+      "utf8"
+    );
+    await Effect.runPromise(
+      permitMailboxTransitionServe(
+        {
+          busDir: local,
+          ledgerName: actual.ledger,
+          incarnation: source.incarnation,
+          localInstallation: first.installation,
+        },
+        peerAdmission,
+        checks
+      ).pipe(Effect.provide(platform))
+    );
+    writeFileSync(
+      join(local, "config.json"),
+      JSON.stringify({ fluree: { url: proxy.url.origin, ledger: actual.ledger } })
+    );
+    writeFileSync(join(local, "fluree-token"), actual.token, { mode: 0o600 });
+    expect((await update("urn:fixture:after-verification")).status).toBe(200);
+    const advanced = await pin();
+    expect(advanced.head).toBeGreaterThan(verificationHead);
+
+    for (const failure of ["missing", "changed", "behind", "after-behind"] as const) {
+      mode = failure;
+      sawHistoricalRead = false;
+      const before = historicalReads;
+      const result = await cli(["serve"], local);
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("admission evidence");
+      if (failure === "behind") expect(historicalReads).toBe(before);
+      else expect(historicalReads).toBeGreaterThan(before);
+      expect(await pin()).toEqual(advanced);
+      expect(requests.some((entry) => /^POST \/v1\/fluree\/(create|update)/.test(entry))).toBe(
+        false
+      );
+    }
+
+    mode = "normal";
+    const readsBeforeStart = historicalReads;
+    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
+    const port = Number(probe.url.port);
+    probe.stop(true);
+    const owned = ownership();
+    const child = owned.supervisor(
+      spawnSupervised([process.execPath, join(import.meta.dir, "../src/bin.ts"), "serve"], {
+        stdout: "ignore",
+        stderr: "ignore",
+        env: {
+          HOME: root,
+          PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
+          NO_COLOR: "1",
+          AGENT_BUS_DIR: local,
+          AGENT_BUS_PORT: String(port),
+        },
+      })
+    );
+    try {
+      let healthy = false;
+      for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
+        healthy = await fetch(`http://127.0.0.1:${port}/health`).then(
+          (response) => response.ok,
+          () => false
+        );
+        if (healthy) break;
+        await Bun.sleep(100);
+      }
+      expect(healthy).toBe(true);
+      expect(historicalReads).toBeGreaterThanOrEqual(readsBeforeStart + 2);
+      expect(await pin()).toEqual(advanced);
+      expect(requests.some((entry) => /^POST \/v1\/fluree\/(create|update)/.test(entry))).toBe(
+        false
+      );
+    } finally {
+      await owned.stop();
+    }
+  } finally {
+    proxy.stop(true);
+    rmSync(root, { recursive: true, force: true });
+  }
+}, 60_000);

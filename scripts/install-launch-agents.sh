@@ -287,6 +287,7 @@ validate_launcher() {
 validate_launcher
 if [ -z "$release" ]; then
   (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" \
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 \
     "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" --help >/dev/null) || fail "Selected runtime cannot run $repo_dir/src/bin.ts --help"
 fi
 
@@ -630,6 +631,28 @@ if [ ! -f "$bus_dir/config.json" ] && [ ! -e "$bus_dir/installation-id" ] &&
   fail "Retained cursors but no config.json or installation-id. Restore this installation's state before reinstalling."
 fi
 
+# A former remote attempt may have left a targeted creation grant. Validate any
+# retained bootstrap evidence without changing it before touching credentials or jobs.
+if [ -n "$remote" ]; then
+  bootstrap_evidence=false
+  for name in .mailbox-bootstrap-init-v1 .mailbox-bootstrap-identity-complete-v1 \
+    .mailbox-bootstrap-grant-v1 .mailbox-bootstrap-spent-v1 .mailbox-bootstrap-complete-v1; do
+    if [ -e "$bus_dir/$name" ] || [ -L "$bus_dir/$name" ]; then
+      bootstrap_evidence=true
+      break
+    fi
+  done
+  if [ "$bootstrap_evidence" = true ]; then
+    AGENT_BUS_DIR="$bus_dir" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 "$bun_bin" --no-env-file \
+      "$repo_dir/src/bin.ts" initialize-installation >/dev/null 2>&1 ||
+      fail "Remote attachment refused: bootstrap evidence is incomplete or invalid; preserve it for recovery."
+    if [ -e "$bus_dir/.mailbox-bootstrap-grant-v1" ] || [ -L "$bus_dir/.mailbox-bootstrap-grant-v1" ]; then
+      [ -f "$bus_dir/.mailbox-bootstrap-complete-v1" ] && [ ! -L "$bus_dir/.mailbox-bootstrap-complete-v1" ] ||
+        fail "Remote attachment refused: an uncompleted creation grant must be recovered; preserve all bootstrap evidence."
+    fi
+  fi
+fi
+
 mkdir -p "$bus_dir" "$agents"
 
 if [ -e "$bus_dir/config.json" ] || [ -L "$bus_dir/config.json" ]; then
@@ -638,8 +661,12 @@ if [ -e "$bus_dir/config.json" ] || [ -L "$bus_dir/config.json" ]; then
   valid_identity "$bus_dir/installation-id" ||
     fail "Existing config but no valid installation-id. Restore the original identity before reinstalling."
 else
-  AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation \
-    --fluree-url "$url" --fluree-ledger "$ledger"
+  if [ -n "$remote" ]; then
+    AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation
+  else
+    AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation \
+      --fluree-url "$url" --fluree-ledger "$ledger"
+  fi
 fi
 
 if [ -z "$remote" ]; then

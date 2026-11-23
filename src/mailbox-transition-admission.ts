@@ -27,7 +27,7 @@ const digest = /^[0-9a-f]{64}$/;
 
 const NonEmpty = Schema.String.check(Schema.isMinLength(1));
 // The native provider proves this exact identifier; do not guess its CID grammar here.
-const SourceCommit = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
+const Commit = Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(4096));
 const Installation = Schema.String.check(Schema.isPattern(uuidV4));
 const Operation = Schema.String.check(Schema.isPattern(uuidV7));
 const Digest = Schema.String.check(Schema.isPattern(digest));
@@ -47,7 +47,8 @@ const Sources = Schema.Tuple([Source, Source]);
 const Ready = Schema.Struct({
   version: Schema.Literal(1),
   operation: Operation,
-  sourceCommit: SourceCommit,
+  sourceCommit: Commit,
+  verifiedCommit: Commit,
   sources: Sources,
   cut: Cut,
   verifiedAt: Cut,
@@ -94,11 +95,13 @@ type StartPermit = typeof StartPermit.Type;
 export interface MailboxTransitionBinding {
   readonly operation: string;
   readonly sourceCommit: string;
+  readonly verifiedCommit: string;
+  readonly verifiedAt: Pin;
   readonly sources: readonly [MailboxSource, MailboxSource];
   readonly localInstallation: string;
 }
 
-export interface MailboxTransitionInput extends MailboxTransitionBinding {
+export interface MailboxTransitionInput extends Omit<MailboxTransitionBinding, "verifiedAt"> {
   readonly busDir: string;
   readonly proof: {
     readonly cut: Pin;
@@ -141,6 +144,7 @@ const canonicalReady = (ready: Ready): Ready => ({
   version: 1,
   operation: ready.operation,
   sourceCommit: ready.sourceCommit,
+  verifiedCommit: ready.verifiedCommit,
   sources: [canonicalSource(ready.sources[0]), canonicalSource(ready.sources[1])],
   cut: canonicalCut(ready.cut),
   verifiedAt: canonicalCut(ready.verifiedAt),
@@ -351,6 +355,8 @@ const publish = (busDir: string, name: string, bytes: string) =>
 const bindingFor = (ready: Ready, localInstallation: string): MailboxTransitionBinding => ({
   operation: ready.operation,
   sourceCommit: ready.sourceCommit,
+  verifiedCommit: ready.verifiedCommit,
+  verifiedAt: ready.verifiedAt,
   sources: ready.sources,
   localInstallation,
 });
@@ -383,6 +389,7 @@ const expectedReady = (input: MailboxTransitionInput) =>
       version: 1,
       operation: input.operation,
       sourceCommit: input.sourceCommit,
+      verifiedCommit: input.verifiedCommit,
       sources,
       cut: summary.cut,
       verifiedAt: summary.verifiedAt,
@@ -395,7 +402,9 @@ const expectedReady = (input: MailboxTransitionInput) =>
 
 /**
  * The verifier must produce identical, host-independent JSON on both installations,
- * including the same K and strictly address-ordered rows. The full JSON is hashed.
+ * including the same K and strictly address-ordered rows. The full JSON is hashed;
+ * callbacks establish that the supplied native commit is K on the original ledger.
+ * The K binding does not prove that later commits have survived a restore.
  * A completion record follows the candidate's postcheck; a crash or failed check
  * leaves the candidate unusable. Local evidence is not an authenticated remote fence
  * or a power-loss durability claim.

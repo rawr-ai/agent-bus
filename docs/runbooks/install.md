@@ -154,7 +154,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
 
 ### Rerun the installer
 
-A full rerun keeps the key, token, `config.json`, `installation-id` and messages, but rewrites both plists and restarts both servers. A rerun with existing config does not initialize a missing identity: use the [first upgrade procedure](deploy.md#switch-to-stable-native-delivery) or [recover an established identity](recover.md#the-installation-identity-is-missing-or-invalid). Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
+A full rerun keeps the key, token, `config.json`, `installation-id` and messages, but rewrites both plists and restarts both servers. A rerun with existing config does not initialize a missing identity. Restore a lost established identity from that installation's backup; a nonempty pre-identity root cannot be upgraded directly by the current initializer. See [identity recovery](recover.md#the-installation-identity-is-missing-or-invalid). Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
 
 ```sh
 bun run install:launch-agents
@@ -309,7 +309,9 @@ first commit. Adding a different installation to a migrated ledger whose era
 was introduced later is not yet supported; the paired transition admits only
 its two recorded installations. [Additional-installation enrollment](https://github.com/rawr-ai/agent-bus/issues/123)
 is tracked separately. Do not regenerate an existing identity or copy a permit
-to work around this limit. *Unverified as a new-machine procedure.*
+to work around this limit. A fresh remote installation can attach only to an
+existing supported ledger; it receives no grant to create a ledger on the
+remote provider. *Unverified as a new-machine procedure.*
 
 1. **Prepare the approved canonical checkout, check [the prerequisites](#before-you-start)** (it needs no `fluree`), **and install the dependencies:**
 

@@ -31,6 +31,7 @@ import {
 import {
   acceptMailboxTransitionPeer,
   MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE,
+  type MailboxTransitionBinding,
   type MailboxTransitionChecks,
   permitMailboxTransitionServe,
   recordMailboxTransitionReady,
@@ -757,6 +758,10 @@ qualify(
       expect(proof.cut).toEqual(cut);
       expect(proof.verifiedAt.incarnation).toBe(incarnation);
       expect(proof.verifiedAt.head).toBeGreaterThan(cut.head);
+      const verifiedCommit = await activeRuntime.runPromise(
+        Effect.flatMap(Ledger, (ledger) => ledger.sourceCommitAt(proof.verifiedAt))
+      );
+      expect((await readCommit(proof.verifiedAt.head)).id).toBe(verifiedCommit);
       expect(proof.rows.map((row) => row.address)).toEqual(expectedAddresses);
       expect(proof.rows).toEqual(
         expect.arrayContaining([
@@ -792,6 +797,7 @@ qualify(
           busDir: roots[0],
           operation,
           sourceCommit,
+          verifiedCommit,
           sources: orderedSources,
           localInstallation: identities[0],
           proof,
@@ -800,6 +806,7 @@ qualify(
           busDir: roots[1],
           operation,
           sourceCommit,
+          verifiedCommit,
           sources: orderedSources,
           localInstallation: identities[1],
           proof,
@@ -820,6 +827,20 @@ qualify(
         },
       ] as const;
       const proofBytes = JSON.stringify(proof);
+      const verifyK = (binding: MailboxTransitionBinding) =>
+        Effect.tryPromise({
+          try: async () => {
+            const reachable = (current: { readonly incarnation: string; readonly head: number }) =>
+              current.incarnation === binding.verifiedAt.incarnation &&
+              current.head >= binding.verifiedAt.head;
+            if (!reachable(await cutNow())) throw new Error();
+            const commit = await activeRuntime.runPromise(
+              Effect.flatMap(Ledger, (ledger) => ledger.sourceCommitAt(binding.verifiedAt))
+            );
+            if (commit !== binding.verifiedCommit || !reachable(await cutNow())) throw new Error();
+          },
+          catch: () => new LedgerError({ message: "The disposable verification commit changed." }),
+        });
       const checks = (index: 0 | 1): MailboxTransitionChecks => ({
         confirmLocalHeld: () => guardedHeld,
         verifyLocalFence: (binding) =>
@@ -828,6 +849,7 @@ qualify(
             if (binding.sourceCommit !== sourceCommit) {
               return yield* new LedgerError({ message: "The disposable source commit changed." });
             }
+            yield* verifyK(binding);
             yield* verifyMailboxTransitionGuard(
               roots[index],
               config.ledger,
@@ -873,6 +895,7 @@ qualify(
             if (binding.sourceCommit !== sourceCommit) {
               return yield* new LedgerError({ message: "The disposable source commit changed." });
             }
+            yield* verifyK(binding);
             yield* verifyMailboxTransitionGuard(
               roots[index],
               config.ledger,

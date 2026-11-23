@@ -40,6 +40,8 @@ const operation = "00000000-0000-7000-8000-000000000001";
 const otherOperation = "00000000-0000-7000-8000-000000000002";
 const sourceCommit = "fluree:commit:independently-retained-source";
 const otherSourceCommit = "fluree:commit:foreign-source";
+const verifiedCommit = "fluree:commit:verified-k";
+const otherVerifiedCommit = "fluree:commit:foreign-k";
 const cut = { incarnation: "ledger-instance", head: 14 };
 const verifiedAt = { incarnation: "ledger-instance", head: 17 };
 const sources: readonly [MailboxSource, MailboxSource] = [
@@ -100,6 +102,7 @@ const fixture = () => {
     busDir: roots[index],
     operation,
     sourceCommit,
+    verifiedCommit,
     sources,
     localInstallation: index === 0 ? one : two,
     proof,
@@ -187,8 +190,15 @@ test("both independent installations require complete matching readiness and adm
           })
       )
     );
-    expect(observed).toEqual({ operation, sourceCommit, sources, localInstallation: one });
-    // Serve does not query or compare a current head; ordinary traffic may advance it beyond K.
+    expect(observed).toEqual({
+      operation,
+      sourceCommit,
+      verifiedCommit,
+      verifiedAt,
+      sources,
+      localInstallation: one,
+    });
+    // The CLI checks K is reachable but does not require the current head to equal K.
     const restartedAtHead = {
       busDir: f.roots[0],
       ledgerName: "team:main",
@@ -210,6 +220,8 @@ test("invalid source pair, proof bounds, row ordering, operation and identity ne
       { ...base, operation: "not-a-v7" },
       { ...base, sourceCommit: "" },
       { ...base, sourceCommit: "x".repeat(4097) },
+      { ...base, verifiedCommit: "" },
+      { ...base, verifiedCommit: "x".repeat(4097) },
       { ...base, localInstallation: third },
       { ...base, sources: [sources[1], sources[0]] },
       { ...base, sources: [sources[0], sources[0]] },
@@ -241,6 +253,9 @@ test("peer and local attestations are strict, ordered, complete and bound to ide
     "identity",
     "source-commit",
     "source-missing",
+    "verified-commit",
+    "verified-missing",
+    "verified-invalid",
     "candidate",
     "wrong-kind",
     "extra",
@@ -256,6 +271,8 @@ test("peer and local attestations are strict, ordered, complete and bound to ide
       if (variant === "operation") peerInput = { ...peerInput, operation: otherOperation };
       if (variant === "source-commit")
         peerInput = { ...peerInput, sourceCommit: otherSourceCommit };
+      if (variant === "verified-commit")
+        peerInput = { ...peerInput, verifiedCommit: otherVerifiedCommit };
       if (variant === "receipt")
         peerInput = { ...peerInput, sources: [sources[0], { ...sources[1], capturedAt: 3 }] };
       if (variant === "proof") {
@@ -285,6 +302,10 @@ test("peer and local attestations are strict, ordered, complete and bound to ide
       if (variant === "identity") peer = local;
       if (variant === "source-missing")
         peer = peer.replace(`"sourceCommit":"${sourceCommit}",`, "");
+      if (variant === "verified-missing")
+        peer = peer.replace(`"verifiedCommit":"${verifiedCommit}",`, "");
+      if (variant === "verified-invalid")
+        peer = peer.replace(`"verifiedCommit":"${verifiedCommit}"`, '"verifiedCommit":null');
       if (variant === "candidate")
         peer = readFileSync(join(f.roots[1], MAILBOX_TRANSITION_READY_FILE), "utf8");
       if (variant === "wrong-kind")
@@ -493,6 +514,70 @@ test("the externally retained H commit binds ready, admit, permit and serve", as
   }
 });
 
+test("the retained native K commit is rechecked after the ledger head advances", async () => {
+  const f = fixture();
+  try {
+    let currentHead = verifiedAt.head;
+    let nativeKCommit = otherVerifiedCommit;
+    const seen: Array<MailboxTransitionBinding> = [];
+    const native: MailboxTransitionChecks = {
+      confirmLocalHeld: checks.confirmLocalHeld,
+      verifyLocalFence: (binding) =>
+        Effect.suspend(() => {
+          seen.push(binding);
+          return binding.sourceCommit === sourceCommit &&
+            binding.verifiedAt.incarnation === cut.incarnation &&
+            binding.verifiedAt.head === verifiedAt.head &&
+            currentHead >= binding.verifiedAt.head &&
+            binding.verifiedCommit === nativeKCommit
+            ? Effect.void
+            : Effect.fail(error());
+        }),
+    };
+    await expect(f.ready(0, native)).rejects.toThrow();
+    expect(existsSync(join(f.roots[0], MAILBOX_TRANSITION_READY_FILE))).toBe(false);
+    nativeKCommit = verifiedCommit;
+    const firstReady = await f.ready(0, native);
+    const secondReady = await f.ready(1, native);
+    expect(firstReady).toContain(`"verifiedCommit":"${verifiedCommit}"`);
+    expect(secondReady).toContain(`"verifiedCommit":"${verifiedCommit}"`);
+    await f.admit(0, secondReady, native);
+    await f.admit(1, firstReady, native);
+    expect(f.admitted(0)).toContain(`"verifiedCommit":"${verifiedCommit}"`);
+    await f.permit(0, f.admitted(1), native);
+    await run(assertMailboxTransitionAdmitted(f.context(0), native.verifyLocalFence));
+
+    // H, K and the incarnation remain unchanged, but a restored history now has another K CID.
+    currentHead += 20;
+    nativeKCommit = otherVerifiedCommit;
+    await expect(f.permit(1, f.admitted(0), native)).rejects.toThrow();
+    expect(existsSync(join(f.roots[1], MAILBOX_TRANSITION_START_PERMIT_FILE))).toBe(false);
+    await expect(
+      run(assertMailboxTransitionAdmitted(f.context(0), native.verifyLocalFence))
+    ).rejects.toThrow();
+    nativeKCommit = verifiedCommit;
+    await f.permit(1, f.admitted(0), native);
+    await run(assertMailboxTransitionAdmitted(f.context(1), native.verifyLocalFence));
+    expect(
+      seen.every(
+        (binding) =>
+          binding.verifiedCommit === verifiedCommit && binding.verifiedAt.head === verifiedAt.head
+      )
+    ).toBe(true);
+    const permitPath = join(f.roots[1], MAILBOX_TRANSITION_START_PERMIT_FILE);
+    const original = readFileSync(permitPath, "utf8");
+    const oldPermit = original.replaceAll(`"verifiedCommit":"${verifiedCommit}",`, "");
+    expect(oldPermit).not.toBe(original);
+    writeFileSync(permitPath, oldPermit);
+    await expect(
+      run(assertMailboxTransitionAdmitted(f.context(1), native.verifyLocalFence))
+    ).rejects.toThrow();
+    expect(readFileSync(permitPath, "utf8")).toBe(oldPermit);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("start permit requires the other completed admission with identical pair, K and proof", async () => {
   const variants = [
     "missing",
@@ -504,6 +589,9 @@ test("start permit requires the other completed admission with identical pair, K
     "wrong-operation",
     "wrong-source",
     "old-missing-source",
+    "wrong-verified-commit",
+    "old-missing-verified-commit",
+    "malformed-verified-commit",
     "extra",
     "partial",
     "noncanonical",
@@ -541,11 +629,26 @@ test("start permit requires the other completed admission with identical pair, K
                         ? secondAdmission.replaceAll(sourceCommit, otherSourceCommit)
                         : variant === "old-missing-source"
                           ? secondAdmission.replaceAll(`"sourceCommit":"${sourceCommit}",`, "")
-                          : variant === "extra"
-                            ? secondAdmission.replace('{"version":1', '{"extra":true,"version":1')
-                            : variant === "partial"
-                              ? secondAdmission.slice(0, -1)
-                              : `${secondAdmission}\n`;
+                          : variant === "wrong-verified-commit"
+                            ? secondAdmission.replaceAll(verifiedCommit, otherVerifiedCommit)
+                            : variant === "old-missing-verified-commit"
+                              ? secondAdmission.replaceAll(
+                                  `"verifiedCommit":"${verifiedCommit}",`,
+                                  ""
+                                )
+                              : variant === "malformed-verified-commit"
+                                ? secondAdmission.replaceAll(
+                                    `"verifiedCommit":"${verifiedCommit}"`,
+                                    '"verifiedCommit":null'
+                                  )
+                                : variant === "extra"
+                                  ? secondAdmission.replace(
+                                      '{"version":1',
+                                      '{"extra":true,"version":1'
+                                    )
+                                  : variant === "partial"
+                                    ? secondAdmission.slice(0, -1)
+                                    : `${secondAdmission}\n`;
       await expect(f.permit(0, bytes)).rejects.toThrow();
       await expect(run(f.serve(0))).rejects.toThrow();
       expect(existsSync(join(f.roots[0], MAILBOX_TRANSITION_START_PERMIT_FILE))).toBe(false);

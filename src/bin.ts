@@ -730,6 +730,29 @@ const verifyTransitionActivation = (source: Pin, operation: string, sourceCommit
     }
   });
 
+const verifiedCommitAt = (verifiedAt: Pin) =>
+  Effect.gen(function* () {
+    const ledger = yield* Ledger.Ledger;
+    const gateway = yield* QueryGateway;
+    const reachable = (current: Pin) =>
+      current.incarnation === verifiedAt.incarnation && current.head >= verifiedAt.head;
+    if (!reachable(yield* gateway.pin)) {
+      return yield* transitionRefusal("the verified import cut is no longer reachable.");
+    }
+    const commit = yield* ledger.sourceCommitAt(verifiedAt);
+    if (!reachable(yield* gateway.pin)) {
+      return yield* transitionRefusal("the verified import cut is no longer reachable.");
+    }
+    return commit;
+  });
+
+const verifyTransitionCommit = (verifiedAt: Pin, verifiedCommit: string) =>
+  Effect.gen(function* () {
+    if ((yield* verifiedCommitAt(verifiedAt)) !== verifiedCommit) {
+      return yield* transitionRefusal("the verified import commit has changed.");
+    }
+  });
+
 const verifyCapturedSource = (source: Pin, sourceCommit: string) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger.Ledger;
@@ -803,6 +826,7 @@ const checkTransitionAdmission = (
 ) =>
   Effect.gen(function* () {
     const ledger = yield* Ledger.Ledger;
+    const gateway = yield* QueryGateway;
     yield* assertMailboxTransitionAdmitted(
       { busDir, ledgerName: config.ledger, incarnation, localInstallation: installation },
       (binding) =>
@@ -819,7 +843,11 @@ const checkTransitionAdmission = (
             binding.operation,
             binding.sourceCommit
           );
-        }).pipe(Effect.provideService(Ledger.Ledger, ledger))
+          yield* verifyTransitionCommit(binding.verifiedAt, binding.verifiedCommit);
+        }).pipe(
+          Effect.provideService(Ledger.Ledger, ledger),
+          Effect.provideService(QueryGateway, gateway)
+        )
     );
   });
 
@@ -1372,6 +1400,7 @@ const mailboxTransition = Command.make(
         const peerBytes = yield* readEvidence(peerAdmitted, 1024 * 1024);
         yield* Effect.gen(function* () {
           const ledger = yield* Ledger.Ledger;
+          const gateway = yield* QueryGateway;
           yield* permitMailboxTransitionServe(
             {
               busDir,
@@ -1409,10 +1438,14 @@ const mailboxTransition = Command.make(
                     binding.operation,
                     binding.sourceCommit
                   );
+                  yield* verifyTransitionCommit(binding.verifiedAt, binding.verifiedCommit);
                   if ((yield* readEvidence(peerAdmitted, 1024 * 1024)) !== peerBytes) {
                     return yield* transitionRefusal("the transferred peer admission changed.");
                   }
-                }).pipe(Effect.provideService(Ledger.Ledger, ledger)),
+                }).pipe(
+                  Effect.provideService(Ledger.Ledger, ledger),
+                  Effect.provideService(QueryGateway, gateway)
+                ),
             }
           );
         }).pipe(Effect.provide(Fluree.layerFluree(config, { existingOnly: true })));
@@ -1442,6 +1475,7 @@ const mailboxTransition = Command.make(
         peerReady === undefined ? undefined : yield* readEvidence(peerReady, 1024 * 1024);
       const proof = yield* Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
+        const gateway = yield* QueryGateway;
         yield* verifyHeldTransition(
           config.ledger,
           sources,
@@ -1454,6 +1488,7 @@ const mailboxTransition = Command.make(
         );
         yield* verifyTransitionActivation(sources[0].cut, input.operation, sourceCommit);
         const verified = yield* verifyMailboxImport(config.ledger, copies, installation);
+        const verifiedCommit = yield* verifiedCommitAt(verified.verifiedAt);
         const expected = JSON.stringify(verified);
         const checks = {
           confirmLocalHeld: () => confirmCursorWriterOffline,
@@ -1462,11 +1497,16 @@ const mailboxTransition = Command.make(
             readonly localInstallation: string;
             readonly operation: string;
             readonly sourceCommit: string;
+            readonly verifiedAt: Pin;
+            readonly verifiedCommit: string;
           }) =>
             Effect.gen(function* () {
               if (
                 binding.operation !== input.operation ||
                 binding.sourceCommit !== sourceCommit ||
+                binding.verifiedCommit !== verifiedCommit ||
+                binding.verifiedAt.incarnation !== verified.verifiedAt.incarnation ||
+                binding.verifiedAt.head !== verified.verifiedAt.head ||
                 binding.localInstallation !== installation ||
                 !sameMailboxSource(binding.sources[0], sources[0]) ||
                 !sameMailboxSource(binding.sources[1], sources[1])
@@ -1489,6 +1529,7 @@ const mailboxTransition = Command.make(
                 binding.operation,
                 binding.sourceCommit
               );
+              yield* verifyTransitionCommit(binding.verifiedAt, binding.verifiedCommit);
               if (
                 peerReady !== undefined &&
                 (yield* readEvidence(peerReady, 1024 * 1024)) !== peerBytes
@@ -1507,13 +1548,15 @@ const mailboxTransition = Command.make(
               Effect.catchTag("InstallationError", () =>
                 Effect.fail(transitionRefusal("a copied installation could not be verified."))
               ),
-              Effect.provideService(Ledger.Ledger, ledger)
+              Effect.provideService(Ledger.Ledger, ledger),
+              Effect.provideService(QueryGateway, gateway)
             ),
         };
         const transition = {
           busDir,
           operation: input.operation,
           sourceCommit,
+          verifiedCommit,
           sources,
           localInstallation: installation,
           proof: verified,

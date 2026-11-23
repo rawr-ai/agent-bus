@@ -51,9 +51,18 @@ While the cause stands, the job stays in `state = spawn scheduled` and launchd t
 
 ### The installation identity is missing or invalid
 
-Use the [one-time upgrade](deploy.md#switch-to-stable-native-delivery) only if this `serve` has never had an identity. Otherwise, check access to `installation-id` in this machine's bus state directory. Restore a lost or damaged file from this installation's own backup; do not copy another machine's file. Then [check that `serve` restarted](deploy.md#check-that-serve-restarted). Expect startup without an identity error and the same addresses still eligible for wake. *Unverified as an installed recovery procedure; startup refusal is tested on a disposable state directory.*
+If this installation previously had an identity, check access to
+`installation-id` in its bus state directory and restore a lost or damaged file
+from this installation's own backup; do not generate a replacement or copy
+another machine's file. Then [check that `serve` restarted](deploy.md#check-that-serve-restarted).
+If the original cannot be recovered, keep the job held for reviewed repair.
+*Unverified as an installed recovery procedure; startup refusal is tested on a disposable state directory.*
 
-For the earlier file-based rollout only, and only if the identity is irretrievably lost: stop `serve`, retain any damaged file outside the active path, then run the initialization step with that rollout's approved source and this installation's state directory. Follow the same-owner renewal and native wake checks in the upgrade procedure. Do not replace the cursor files. *Unverified as an installed recovery procedure.*
+For a genuinely pre-identity installation, the [one-time upgrade](deploy.md#switch-to-stable-native-delivery)
+describes the earlier file-based rollout and its approved source. The current
+initializer refuses a nonempty pre-identity root; a direct upgrade from that
+state is not supported by this procedure. Preserve the root and use a reviewed
+upgrade path rather than treating it as a fresh installation.
 
 For a paired ledger-mailbox transition, a replacement identity does not have
 the original installation's admission. Keep the job held and use reviewed

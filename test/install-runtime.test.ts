@@ -24,6 +24,13 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { releaseLauncher, removeOwned } from "../scripts/release.ts";
+import {
+  MAILBOX_BOOTSTRAP_COMPLETE_FILE,
+  MAILBOX_BOOTSTRAP_GRANT_FILE,
+  MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE,
+  MAILBOX_BOOTSTRAP_INIT_FILE,
+  MAILBOX_BOOTSTRAP_SPENT_FILE,
+} from "../src/mailbox-bootstrap.ts";
 import { fakeRelease, mutate, replaceSealed, reseal } from "./release-fixture.ts";
 
 const installer = resolve(import.meta.dir, "../scripts/install-launch-agents.sh");
@@ -431,6 +438,235 @@ if (process.argv[2] === "initialize-installation") {
     await f.dispose();
   }
 });
+
+test("fresh remote attachment initializes identity only and keeps identity and config on retry", async () => {
+  const f = await fixture();
+  try {
+    const config = join(f.bus, "config.json");
+    const identity = join(f.bus, "installation-id");
+    await rm(config);
+    await rm(identity);
+    await writeFile(
+      f.entry,
+      `import { readFile, writeFile } from "node:fs/promises";
+if (process.argv[2] === "initialize-installation") {
+  const file = process.env.AGENT_BUS_DIR + "/installation-id";
+  await writeFile(process.env.AGENT_BUS_DIR + "/initialize-args.json", JSON.stringify(process.argv.slice(3)));
+  await writeFile(process.env.AGENT_BUS_DIR + "/initialize-order.json", JSON.stringify(await readFile(${JSON.stringify(f.toolLog)}, "utf8")));
+  try { await writeFile(file, crypto.randomUUID(), { flag: "wx" }); }
+  catch (error) { if (error.code !== "EEXIST") throw error; }
+  if (process.env.FAIL_INITIALIZE === "1") process.exit(42);
+}
+`
+    );
+    await executable(
+      join(f.tools, "scp"),
+      `printf 'scp %s\\n' "$*" >> ${quote(f.toolLog)}\nfor last; do :; done\nprintf 'fixture.token.signature\\n' > "$last"`
+    );
+    const args = ["--remote", "fixture-host", "--bun", f.bunA];
+    expect(await f.install(args, { FAIL_INITIALIZE: "1" })).toMatchObject({ exitCode: 42 });
+    expect(JSON.parse(await readFile(join(f.bus, "initialize-args.json"), "utf8"))).toEqual([]);
+    expect(JSON.parse(await readFile(join(f.bus, "initialize-order.json"), "utf8"))).toBe("");
+    expect(await Bun.file(config).exists()).toBe(false);
+    expect(await readFile(f.toolLog, "utf8")).toBe("");
+    const first = await readFile(identity, "utf8");
+    expect(await f.install(args)).toMatchObject({ exitCode: 0, stderr: "" });
+    const establishedConfig = await readFile(config, "utf8");
+    expect(JSON.parse(establishedConfig)).toEqual({
+      fluree: { url: "http://127.0.0.1:47890", ledger: "agent-bus:main" },
+    });
+    expect(await readFile(identity, "utf8")).toBe(first);
+    expect(await f.install(args, { FAIL_INITIALIZE: "1" })).toMatchObject({
+      exitCode: 0,
+      stderr: "",
+    });
+    expect(await readFile(identity, "utf8")).toBe(first);
+    expect(await readFile(config, "utf8")).toBe(establishedConfig);
+  } finally {
+    await f.dispose();
+  }
+});
+
+test(
+  "remote preflight preserves incomplete or damaged bootstrap evidence before any installation writes",
+  async () => {
+    for (const variant of [
+      "unspent",
+      "partial",
+      "malformed-grant",
+      "public-grant",
+      "grant-link",
+      "complete-link",
+      "identity-partial",
+      "missing-identity",
+    ] as const) {
+      const f = await fixture();
+      try {
+        const record = {
+          version: 1,
+          installation: IDENTITY,
+          url: "http://127.0.0.1:47890",
+          ledger: "agent-bus:main",
+        };
+        const write = (name: string, value: object) =>
+          writeFile(join(f.bus, name), JSON.stringify(value), { mode: 0o600 });
+        if (variant === "identity-partial") {
+          await write(MAILBOX_BOOTSTRAP_INIT_FILE, {
+            version: 1,
+            installation: IDENTITY,
+            kind: "identity-only-initializing",
+          });
+        } else {
+          await write(MAILBOX_BOOTSTRAP_INIT_FILE, { ...record, kind: "initializing" });
+          const grant = { ...record, kind: "grant" };
+          if (variant === "grant-link") {
+            const target = join(f.root, "foreign-grant");
+            await writeFile(target, JSON.stringify(grant), { mode: 0o600 });
+            await symlink(target, join(f.bus, MAILBOX_BOOTSTRAP_GRANT_FILE));
+          } else if (variant === "malformed-grant") {
+            await writeFile(join(f.bus, MAILBOX_BOOTSTRAP_GRANT_FILE), "{", { mode: 0o600 });
+          } else {
+            await write(MAILBOX_BOOTSTRAP_GRANT_FILE, grant);
+            if (variant === "public-grant")
+              chmodSync(join(f.bus, MAILBOX_BOOTSTRAP_GRANT_FILE), 0o644);
+          }
+          if (variant !== "unspent") {
+            await write(MAILBOX_BOOTSTRAP_SPENT_FILE, {
+              ...record,
+              kind: "spent",
+              observed: "present",
+            });
+            const complete = {
+              ...record,
+              kind: "complete",
+              origin: "grant",
+              incarnation: "fixture-incarnation",
+            };
+            if (variant === "complete-link") {
+              const target = join(f.root, "foreign-completion");
+              await writeFile(target, JSON.stringify(complete), { mode: 0o600 });
+              await symlink(target, join(f.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE));
+            } else if (variant === "partial") {
+              await writeFile(join(f.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE), "{", { mode: 0o600 });
+            } else {
+              await write(MAILBOX_BOOTSTRAP_COMPLETE_FILE, complete);
+            }
+          }
+        }
+        if (variant === "missing-identity") await rm(join(f.bus, "installation-id"));
+        const digest = async () =>
+          Bun.CryptoHasher.hash("sha256", JSON.stringify(await snapshot(f.root)), "hex");
+        const before = await digest();
+        const result = await f.install(["--remote", "fixture-host", "--bun", f.bunA], {
+          AGENT_BUS_REPO: resolve(import.meta.dir, ".."),
+        });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("Remote attachment refused");
+        expect(await digest()).toBe(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      } finally {
+        await f.dispose();
+      }
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
+
+test(
+  "remote preflight keeps an established completed grant binding intact",
+  async () => {
+    const f = await fixture();
+    try {
+      const record = {
+        version: 1,
+        installation: IDENTITY,
+        url: "http://127.0.0.1:47890",
+        ledger: "agent-bus:main",
+      };
+      for (const [name, value] of [
+        [MAILBOX_BOOTSTRAP_INIT_FILE, { ...record, kind: "initializing" }],
+        [MAILBOX_BOOTSTRAP_GRANT_FILE, { ...record, kind: "grant" }],
+        [MAILBOX_BOOTSTRAP_SPENT_FILE, { ...record, kind: "spent", observed: "present" }],
+        [
+          MAILBOX_BOOTSTRAP_COMPLETE_FILE,
+          { ...record, kind: "complete", origin: "grant", incarnation: "fixture-incarnation" },
+        ],
+      ] as const) {
+        await writeFile(join(f.bus, name), JSON.stringify(value), { mode: 0o600 });
+      }
+      await executable(
+        join(f.tools, "scp"),
+        `printf 'scp %s\\n' "$*" >> ${quote(f.toolLog)}\nfor last; do :; done\nprintf 'existing.token.signature\\n' > "$last"`
+      );
+      const identity = await readFile(join(f.bus, "installation-id"));
+      const config = await readFile(join(f.bus, "config.json"));
+      const evidence = await Promise.all(
+        [
+          MAILBOX_BOOTSTRAP_INIT_FILE,
+          MAILBOX_BOOTSTRAP_GRANT_FILE,
+          MAILBOX_BOOTSTRAP_SPENT_FILE,
+          MAILBOX_BOOTSTRAP_COMPLETE_FILE,
+        ].map((name) => readFile(join(f.bus, name)))
+      );
+      expect(
+        await f.install(["--remote", "fixture-host", "--bun", f.bunA], {
+          AGENT_BUS_REPO: resolve(import.meta.dir, ".."),
+        })
+      ).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(await readFile(join(f.bus, "installation-id"))).toEqual(identity);
+      expect(await readFile(join(f.bus, "config.json"))).toEqual(config);
+      expect(
+        await Promise.all(
+          [
+            MAILBOX_BOOTSTRAP_INIT_FILE,
+            MAILBOX_BOOTSTRAP_GRANT_FILE,
+            MAILBOX_BOOTSTRAP_SPENT_FILE,
+            MAILBOX_BOOTSTRAP_COMPLETE_FILE,
+          ].map((name) => readFile(join(f.bus, name)))
+        )
+      ).toEqual(evidence);
+    } finally {
+      await f.dispose();
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
+
+test(
+  "remote preflight accepts a completed identity-only initialization without granting creation",
+  async () => {
+    const f = await fixture();
+    try {
+      for (const [name, kind] of [
+        [MAILBOX_BOOTSTRAP_INIT_FILE, "identity-only-initializing"],
+        [MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE, "identity-only-complete"],
+      ] as const) {
+        await writeFile(
+          join(f.bus, name),
+          JSON.stringify({ version: 1, installation: IDENTITY, kind }),
+          { mode: 0o600 }
+        );
+      }
+      await executable(
+        join(f.tools, "scp"),
+        `printf 'scp %s\\n' "$*" >> ${quote(f.toolLog)}\nfor last; do :; done\nprintf 'existing.token.signature\\n' > "$last"`
+      );
+      const identity = await readFile(join(f.bus, "installation-id"));
+      const config = await readFile(join(f.bus, "config.json"));
+      expect(
+        await f.install(["--remote", "fixture-host", "--bun", f.bunA], {
+          AGENT_BUS_REPO: resolve(import.meta.dir, ".."),
+        })
+      ).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(await readFile(join(f.bus, "installation-id"))).toEqual(identity);
+      expect(await readFile(join(f.bus, "config.json"))).toEqual(config);
+      expect(await Bun.file(join(f.bus, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
 
 test("full install adopts a managed launcher and uses the same binding, with optional PATH selection", async () => {
   const f = await fixture();

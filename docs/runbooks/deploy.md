@@ -389,8 +389,9 @@ installed procedure; local and disposable checks are recorded separately.*
 
    Run that on each original host. Expect a completed ready file naming the
    same operation, independently retained source commit, sources, proof and
-   verification cut on both hosts. A partial or failed candidate file is not
-   a ready attestation. Then, on **each** host,
+   verification cut `K` on both hosts. The ready evidence also binds the native
+   commit ID at `K`; a partial or failed candidate file is not a ready
+   attestation. Then, on **each** host,
    pass the other host's completed ready file as `peer_ready`:
 
    ```sh
@@ -423,10 +424,12 @@ installed procedure; local and disposable checks are recorded separately.*
    that the ledger head still equal the old verification cut: one permitted
    host may already have processed normal mail. Readiness, permit and the
    candidate's serve check revalidate the read-only activation receipt against
-   the retained source commit; serve also revalidates its local evidence and
-   sentinel before starting HTTP or delivery. None of these checks activates
-   the era, writes a replacement receipt or proves the remote host remains
-   held. A verified unresolved
+   the retained source commit. Permit and serve also require the same native
+   commit ID at `K`, without requiring the current head to remain at `K`; this
+   detects a missing or replaced import commit, not every possible later
+   restore. Serve also revalidates its local evidence and sentinel before
+   starting HTTP or delivery. None of these checks activates the era, writes a
+   replacement receipt or proves the remote host remains held. A verified unresolved
    classification is a durable refusal, not proof that an active holding can
    read or that it has no unread mail. Reconcile it, or explicitly account for
    it under the agreed policy, before claiming a fully successful migration.
