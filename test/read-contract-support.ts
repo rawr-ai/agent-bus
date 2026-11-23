@@ -4,7 +4,7 @@ import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
-import { Ledger, type MailboxReceiptRead } from "../src/Ledger.ts";
+import { Ledger, type MailboxReceiptRead, type PresenceRead } from "../src/Ledger.ts";
 import type { MailboxFact, MailboxState } from "../src/mailbox-model.ts";
 import type { QueryGateway } from "../src/Query.ts";
 
@@ -44,6 +44,8 @@ export interface Probe {
   holdAck?: Hold;
   /** The next acknowledgement answers UNKNOWN: after writing it, or without sending it. */
   uncertainAck?: "committed" | "never-sent";
+  /** One current presence snapshot reported to the caller settling a committed, uncertain ack. */
+  settlementView?: (read: PresenceRead) => PresenceRead;
   /** How many following receipt lookups answer UNAVAILABLE. */
   unavailableLookups?: number;
   /** Rewrites a receipt lookup's answer. */
@@ -67,8 +69,18 @@ export const busLayer = (store: Store, root: string, installation: string, probe
   const observed = Layer.effect(Ledger)(
     Effect.gen(function* () {
       const ledger = yield* Ledger;
+      let settlementView: Probe["settlementView"];
       return Ledger.of({
         ...ledger,
+        presenceAt: (at) =>
+          ledger.presenceAt(at).pipe(
+            Effect.map((view) => {
+              if (at !== undefined || settlementView === undefined) return view;
+              const adjust = settlementView;
+              settlementView = undefined;
+              return adjust(view);
+            })
+          ),
         appendMailboxAck: (record, basis) =>
           Effect.gen(function* () {
             const held = probe.holdAck;
@@ -87,7 +99,9 @@ export const busLayer = (store: Store, root: string, installation: string, probe
               yield* Deferred.succeed(after.reached, undefined);
               yield* Deferred.await(after.release);
             }
-            return uncertain === "committed" ? { status: "UNKNOWN" as const } : outcome;
+            if (uncertain !== "committed") return outcome;
+            settlementView = probe.settlementView;
+            return { status: "UNKNOWN" as const };
           }),
         mailboxReceiptAt: (address, operation, cut) =>
           Effect.gen(function* () {

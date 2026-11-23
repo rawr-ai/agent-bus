@@ -1617,11 +1617,22 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         return { messages, receipt, nextReadId } satisfies ReadOutcome;
       });
 
-    /** The read recorded under `readId` after an uncertain write, read back at a fresh cut. */
-    const settledRead = (current: Subscriber, readId: string) =>
-      Effect.option(
-        Effect.flatMap(ledger.presenceAt(), ({ cut }) => recordedRead(current, readId, cut))
-      ).pipe(Effect.map(Option.getOrUndefined));
+    /** A receipt can settle the earlier write only for a still-authorized caller at its lookup cut. */
+    const settledRead = (basis: MailboxBasis, session: string | undefined, readId: string) =>
+      Effect.gen(function* () {
+        const { entries, cut } = yield* ledger.presenceAt();
+        if (cut.incarnation !== basis.cut.incarnation || cut.head < basis.cut.head)
+          return undefined;
+        const prior = basis.subscriber;
+        const current = yield* ownedIn(latestPresences(entries), prior.address, session);
+        if (
+          !local(current) ||
+          current.presence.runtime !== prior.presence.runtime ||
+          runOf(current) !== runOf(prior)
+        )
+          return undefined;
+        return yield* recordedRead(current, readId, cut);
+      }).pipe(Effect.option, Effect.map(Option.getOrUndefined));
 
     const wakeHolding = (address: string, session: string | undefined, at?: number) =>
       Effect.gen(function* () {
@@ -1956,7 +1967,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         const status = yield* acknowledge(basis, { through: chosen.through, messages }, operation);
         if (status === "APPLIED") return { messages, receipt, nextReadId } satisfies ReadOutcome;
         // The stored receipt decides: this read's own uncertain commit, or a racing call's.
-        const stored = yield* settledRead(subscriber, operation);
+        const stored = yield* settledRead(basis, session, operation);
         if (stored !== undefined) {
           if (
             stored.from === basis.position &&
@@ -2118,7 +2129,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           receipt.readId
         );
         if (status === "APPLIED") return done(false);
-        const stored = yield* settledRead(subscriber, receipt.readId);
+        const stored = yield* settledRead(current, session, receipt.readId);
         if (stored !== undefined && records(stored)) return done(status !== "UNKNOWN");
         if (status === "UNKNOWN") {
           return yield* new LedgerError({

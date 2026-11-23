@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Deferred, Effect, Layer } from "effect";
 import type * as Bus from "../src/Bus.ts";
-import { runOf } from "../src/domain.ts";
+import { Message, Presence, runOf } from "../src/domain.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { type MailboxAck, mailboxServedDigest, mailboxTopicsDigest } from "../src/mailbox-model.ts";
 import { carrierBytes, EMPTY_READ_RESULT_BYTES, readResult } from "../src/message-carrier.ts";
@@ -92,6 +92,69 @@ const peekReceipt = (outcome: Bus.ReadOutcome): Bus.AckInput["receipt"] => {
     served: receipt.served,
   };
 };
+
+test.each([
+  ["read", "renewal"],
+  ["ack", "renewal"],
+  ["read", "left"],
+  ["ack", "session"],
+  ["read", "installation"],
+  ["ack", "new run"],
+  ["read", "runtime"],
+  ["ack", "replaced ledger"],
+  ["read", "earlier cut"],
+] as const)(
+  "uncertain %s uses the settlement snapshot: %s",
+  (operation, binding) =>
+    fixture(async ({ a, probe }) => {
+      await joinInbox(a, { topics: ["initial"] });
+      await joinSender(a);
+      const message = await send(a, "#initial", "original subscription");
+      const peek = peekReceipt(await read(a, { peek: true }));
+      const before = await head(a);
+      let views = 0;
+      let lookups = 0;
+      probe.settlementView = (view) => {
+        views++;
+        if (binding === "replaced ledger")
+          return { ...view, cut: { ...view.cut, incarnation: "replacement" } };
+        if (binding === "earlier cut") return { ...view, cut: { ...view.cut, head: before - 1 } };
+        const last = view.entries.filter((entry) => entry.from === inbox).at(-1);
+        if (last?.presence === undefined) throw new Error("fixture holding missing");
+        const entry = new Message({
+          ...last,
+          id: Bun.randomUUIDv7(),
+          presence: new Presence({
+            ...last.presence,
+            ...(binding === "new run" ? {} : { rejoinOf: last.id }),
+            topics: ["renewed"],
+            ...(binding === "left" ? { status: "left" } : {}),
+            ...(binding === "session" ? { session: successor } : {}),
+            ...(binding === "installation" ? { installation: "installation-b" } : {}),
+            ...(binding === "runtime" ? { runtime: "human" } : {}),
+          }),
+        });
+        return { ...view, entries: [...view.entries, entry] };
+      };
+      probe.forgeReceipt = (receipt) => {
+        if (views > 0) lookups++;
+        return receipt;
+      };
+      probe.uncertainAck = "committed";
+      if (binding === "renewal") {
+        if (operation === "read")
+          expect(ids(await read(a, { readId: peek.readId }))).toEqual([message.id]);
+        else expect((await ack(a, peek)).receipt.readId).toBe(peek.readId);
+      } else {
+        const outcome = operation === "read" ? read(a, { readId: peek.readId }) : ack(a, peek);
+        expect(await failure(outcome)).toContain("may have committed");
+      }
+      expect(views).toBe(1);
+      expect(lookups).toBe(binding === "renewal" ? 1 : 0);
+      expect((await acks(a)).map(({ operation }) => operation)).toEqual([peek.readId]);
+    }),
+  TIMEOUT
+);
 
 test.each(["bus_read", "bus_wait"] as const)(
   "a lost result is recovered by repeating %s with its readId after later reads, writing nothing",
