@@ -24,7 +24,6 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { CodexError, type Daemon, type Queue, type Queued } from "../src/codex.ts";
 import * as Fluree from "../src/Fluree.ts";
 import * as Ledger from "../src/Ledger.ts";
@@ -42,7 +41,7 @@ export const uuid = () => Bun.randomUUIDv7();
 export const bodies = (messages: ReadonlyArray<{ readonly body: string }>) =>
   messages.map((message) => message.body);
 
-export type Services = Bus.Bus | Ledger.Ledger | Cursors.Cursors | QueryGateway;
+export type Services = Bus.Bus | Ledger.Ledger | QueryGateway;
 type Store = Layer.Layer<Ledger.Ledger | QueryGateway, unknown, never>;
 
 export interface FlureeConfig {
@@ -51,21 +50,17 @@ export interface FlureeConfig {
   readonly token: string;
 }
 
-/** One serve: a Bus over a store, with its own cursors directory. */
+/** One serve over a shared store. Its mailbox positions are ledger facts. */
 export interface Serve {
   readonly run: <A, E>(effect: Effect.Effect<A, E, Services>) => Promise<A>;
   readonly dispose: () => Promise<void>;
 }
 
-export const busOn = (store: Store, cursorsDir: string) =>
-  Bus.layer("test-installation").pipe(
-    Layer.provideMerge(store),
-    Layer.provideMerge(Cursors.layerFiles(join(cursorsDir, "cursors"))),
-    Layer.provide(platform)
-  );
+export const busOn = (store: Store) =>
+  Bus.layer("test-installation").pipe(Layer.provideMerge(store), Layer.provide(platform));
 
-export const serveOn = async (store: Store, cursorsDir = tempDir()): Promise<Serve> => {
-  const runtime = ManagedRuntime.make(busOn(store, cursorsDir));
+export const serveOn = async (store: Store): Promise<Serve> => {
+  const runtime = ManagedRuntime.make(busOn(store));
   await runtime.runPromise(Effect.void);
   return { run: (effect) => runtime.runPromise(effect), dispose: () => runtime.dispose() };
 };
@@ -84,7 +79,7 @@ export const backends = [
     name: "jsonl",
     open: () => {
       const dir = tempDir();
-      return serveOn(jsonlStore(join(dir, "ledger.jsonl")), dir);
+      return serveOn(jsonlStore(join(dir, "ledger.jsonl")));
     },
   },
   { name: "fluree", open: async () => serveOn(flureeStore(await freshFluree())) },

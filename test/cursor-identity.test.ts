@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer } from "effect";
 import * as Bus from "../src/Bus.ts";
-import { layerFiles } from "../src/Cursors.ts";
+import { Ledger } from "../src/Ledger.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
@@ -27,13 +27,13 @@ for (const [idle, recipient] of [
         expect(caseInsensitive).toBe(true);
       }
       const layer = Bus.layer("fixture").pipe(
-        Layer.provide(layerFiles(join(dir, "cursors"))),
-        Layer.provide(layerJsonl(join(dir, "ledger.jsonl"))),
+        Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
         Layer.provide(platform)
       );
       const published = await Effect.runPromise(
         Effect.gen(function* () {
           const bus = yield* Bus.Bus;
+          const ledger = yield* Ledger;
           for (const owner of [upper, lower, sender]) {
             yield* bus.join({ ...owner, runtime: "other", cwd: dir });
           }
@@ -44,6 +44,18 @@ for (const [idle, recipient] of [
             body: "only for the exact recipient",
             pierce: undefined,
           });
+          const cut = (yield* ledger.presenceAt()).cut;
+          const before = yield* Effect.forEach([upper, lower, sender], ({ address }) =>
+            ledger.mailboxAt(address, cut)
+          );
+          expect(before.map((state) => state.status)).toEqual(["FOUND", "FOUND", "FOUND"]);
+          expect(
+            new Set(
+              before.flatMap((state) =>
+                state.status === "FOUND" ? state.records.map(({ record }) => record.operation) : []
+              )
+            ).size
+          ).toBe(3);
           let scanned = false;
           yield* bus.deliver(idle.address, () => Effect.die("Unexpected wake"), {
             idle: () =>
@@ -52,6 +64,7 @@ for (const [idle, recipient] of [
               }),
           });
           expect(scanned).toBe(true);
+          expect(yield* ledger.end).toBe(cut.head);
           return message.id;
         }).pipe(Effect.provide(layer))
       );
@@ -62,11 +75,7 @@ for (const [idle, recipient] of [
           )
         );
 
-      const names = readdirSync(join(dir, "cursors"));
-      // Also distinguish the old name scheme on a case-sensitive filesystem.
-      expect(names).toHaveLength(3);
-      expect(new Set(names.map((name) => name.toLowerCase())).size).toBe(3);
-      // Each call reopens the same persisted ledger and cursors with a new Bus.
+      // Each call reopens the same persisted ledger positions with a new Bus.
       expect((await read(recipient)).map(({ id }) => id)).toEqual([published]);
       expect(await read(idle)).toEqual([]);
       expect(await read(recipient)).toEqual([]);

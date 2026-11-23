@@ -12,7 +12,6 @@ import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { deliverOnce, type Holds } from "../src/codex.ts";
 import { activityAt, type Standing } from "../src/domain.ts";
 import * as Ledger from "../src/Ledger.ts";
@@ -41,6 +40,7 @@ import {
   uuid,
   withSentinel,
 } from "./activity-support.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const x = "claude/x";
 const y = "codex/y";
@@ -73,17 +73,17 @@ for (const backend of backends) {
       () =>
         run(
           Effect.gen(function* () {
-            const cursors = yield* Cursors.Cursors;
             yield* joinAs(x, { topics: ["t"] });
             yield* withSentinel(x, y);
             yield* takeAll(x);
             applied(yield* act(x, { activity: "inactive" }));
             yield* takeAll(x);
-            const before = yield* cursors.get(x);
+            const before = yield* mailboxPosition(x);
+            expect(Option.isSome(before)).toBe(true);
             yield* say(y, ["*"], "programme");
             yield* say(y, ["#t"], "topic");
             expect(yield* rung(x, y)).not.toContain(x);
-            expect(yield* cursors.get(x)).toEqual(before);
+            expect(yield* mailboxPosition(x)).toEqual(before);
             expect(bodies(yield* takeAll(x))).toEqual(["programme", "topic"]);
           })
         ),
@@ -605,31 +605,30 @@ describe("reachable inactivity: Codex delivery", () => {
   });
   /** As `run`, with the ledger file at hand for writing damage into it. */
   const runOnFile = <A, E>(
-    body: (file: string) => Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>
+    body: (file: string) => Effect.Effect<A, E, Bus.Bus | Ledger.Ledger>
   ) => {
     const dir = tempDir();
     const file = `${dir}/ledger.jsonl`;
     return Effect.runPromise(
-      Effect.provide(body(file), Layer.mergeAll(busOn(jsonlStore(file), dir), TestClock.layer()))
+      Effect.provide(body(file), Layer.mergeAll(busOn(jsonlStore(file)), TestClock.layer()))
     );
   };
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger>) =>
     runOnFile(() => effect);
 
   test("L. an inactive Codex address gets no nudge and no coverage record; a direct message nudges once", () =>
     run(
       Effect.gen(function* () {
-        const cursors = yield* Cursors.Cursors;
         const { waiting, holds, deliver } = yield* setup;
         applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
         yield* Effect.flatMap(Bus.Bus, (bus) => bus.take(codexAddress, thread));
-        const before = yield* cursors.get(codexAddress);
+        const before = yield* mailboxPosition(codexAddress);
         yield* say(sender, ["*"], "programme");
         yield* say(sender, ["#t"], "topic");
         yield* deliver;
         expect(waiting(thread)).toEqual([]);
         expect(holds.get(codexAddress)?.covered).toBeUndefined();
-        expect(yield* cursors.get(codexAddress)).toEqual(before);
+        expect(yield* mailboxPosition(codexAddress)).toEqual(before);
         expect(Option.isSome(before)).toBe(true);
 
         yield* say(sender, [codexAddress], "direct");
@@ -802,7 +801,7 @@ describe("reachable inactivity: Codex delivery", () => {
     runOnFile((file) =>
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
-        const cursors = yield* Cursors.Cursors;
+        const ledger = yield* Ledger.Ledger;
         const codex = yield* setup;
         applied(yield* act(codexAddress, { activity: "inactive", session: thread }));
         yield* takeAll(codexAddress, thread);
@@ -810,7 +809,7 @@ describe("reachable inactivity: Codex delivery", () => {
         expect(yield* nudged(codex, codex.deliver)).toBe(false);
         yield* Effect.sync(() => appendFileSync(file, TORN_COMMAND));
 
-        const before = yield* cursors.get(codexAddress);
+        const before = yield* mailboxPosition(codexAddress);
         expect(yield* nudged(codex, codex.deliver)).toBe(false);
         const direct = String(plain(yield* say(sender, [codexAddress], "direct")).id);
         const pending = yield* bus.deliver(codexAddress, (found) =>
@@ -826,16 +825,20 @@ describe("reachable inactivity: Codex delivery", () => {
           cursor: Option.getOrThrow(before),
         });
         expect(yield* nudged(codex, codex.deliver)).toBe(true);
-        expect(yield* cursors.get(codexAddress)).toEqual(before);
+        expect(yield* mailboxPosition(codexAddress)).toEqual(before);
         // The same damage and no new mail: no second nudge.
         expect(yield* nudged(codex, codex.deliver)).toBe(false);
 
-        // The owner's read needs no standing: both messages, in order, and the cursor moves on.
+        // The owner's read needs no standing: both messages, in order, and the position moves to
+        // the cut that read was taken at, the head just before it.
+        const readCut = yield* ledger.end;
         expect(bodies(yield* takeAll(codexAddress, thread))).toEqual(["ambient", "direct"]);
-        const after = yield* cursors.get(codexAddress);
-        expect(Option.getOrThrow(after)).toBeGreaterThan(Option.getOrThrow(before));
+        const after = yield* mailboxPosition(codexAddress);
+        expect(after).toEqual(Option.some(readCut));
         expect(yield* nudged(codex, codex.deliver)).toBe(false);
-        expect(yield* cursors.get(codexAddress)).toEqual(after);
+        expect(yield* mailboxPosition(codexAddress)).toEqual(after);
+        // Acknowledged mail is not handed out again.
+        expect(bodies(yield* takeAll(codexAddress, thread))).toEqual([]);
       })
     ));
 });
@@ -851,7 +854,7 @@ describe("a damaged standing fails the read (jsonl)", () => {
       async () => {
         const dir = tempDir();
         const file = join(dir, "ledger.jsonl");
-        const serve = await serveOn(jsonlStore(file), dir);
+        const serve = await serveOn(jsonlStore(file));
         try {
           await serve.run(
             Effect.gen(function* () {
@@ -1131,7 +1134,7 @@ describe("bus_activity over MCP: strict input (jsonl)", () => {
     probe.stop(true);
     const runtime = ManagedRuntime.make(
       ServeHttp.layerHttp({ port, version: "test" }).pipe(
-        Layer.provideMerge(busOn(jsonlStore(join(dir, "ledger.jsonl")), dir))
+        Layer.provideMerge(busOn(jsonlStore(join(dir, "ledger.jsonl"))))
       )
     );
     const client = new Client({ name: "activity-strict-test", version: "1" });

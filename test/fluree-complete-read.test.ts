@@ -1,12 +1,11 @@
 import { describe, expect, test } from "bun:test";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Effect, Exit, Fiber, Layer, Logger, Option } from "effect";
+import { Effect, Exit, Fiber, Layer, Logger } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { PRESENCE_NODES } from "../src/activity-read.ts";
 import * as Bus from "../src/Bus.ts";
-import { Cursors } from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
-import { Ledger } from "../src/Ledger.ts";
+import { Ledger, messageIri } from "../src/Ledger.ts";
 import { ownedAddresses } from "../src/mcp.ts";
 
 const valid = (id: string, to = ["codex/a"]) =>
@@ -36,6 +35,15 @@ const presence = (id: string, session: string) =>
   });
 const malformed = '{"secret":"DO-NOT-LEAK"';
 const invalid = JSON.stringify({ id: "DO-NOT-LEAK", kind: "message" });
+
+const messageRow = (json: string, t: number) => {
+  try {
+    const row = JSON.parse(json) as { id?: string; from?: string; to?: Array<string> };
+    return { ...row, subject: messageIri(row.id ?? `unreadable-${t}`) };
+  } catch {
+    return { subject: messageIri(`unreadable-${t}`) };
+  }
+};
 
 /**
  * A stored presence as the pinned read returns it (`PRESENCE_NODES`): its node, the entry's and
@@ -106,7 +114,41 @@ const fixture = () => {
         windows.push(`${start}-${end}`);
         afterWindow?.();
         afterWindow = undefined;
-        return Response.json(entries.filter(([, t]) => t >= start && t <= end));
+        const selected = entries.filter(([, t]) => t >= start && t <= end);
+        const fields =
+          typeof query === "object" && query !== null && "select" in query
+            ? JSON.stringify(query.select)
+            : "";
+        if (fields === '["?m","?json","?t"]') {
+          return Response.json(selected.map(([json, t]) => [messageRow(json, t).subject, json, t]));
+        }
+        if (fields === '["?m","?t","?op"]') {
+          return Response.json(selected.map(([json, t]) => [messageRow(json, t).subject, t, true]));
+        }
+        if (fields === '["?m","?p","?value","?t","?op","?datatype"]') {
+          return Response.json(
+            selected.flatMap(([json, t]) => {
+              const { subject, id, from, to } = messageRow(json, t);
+              if (
+                !body.includes(subject) ||
+                id === undefined ||
+                from === undefined ||
+                to === undefined
+              )
+                return [];
+              const values = [["id", id], ["from", from], ...to.map((to) => ["to", to])];
+              return values.map(([predicate, value]) => [
+                subject,
+                `bus:${predicate}`,
+                value,
+                t,
+                true,
+                "xsd:string",
+              ]);
+            })
+          );
+        }
+        return Response.json(selected);
       }
       if (path.endsWith("/events"))
         return new Response("", { headers: { "content-type": "text/event-stream" } });
@@ -120,26 +162,43 @@ const fixture = () => {
   let cursor = 0;
   let writes = 0;
   let cursorReads = 0;
-  const cursors = Layer.succeed(
-    Cursors,
-    Cursors.of({
-      get: () =>
-        Effect.sync(() => {
-          cursorReads++;
-          return Option.some(cursor);
-        }),
-      set: (_address, next) =>
-        Effect.sync(() => {
-          cursor = next;
-          writes += 1;
-        }),
-      clear: () => Effect.void,
-    })
-  );
-  const bus = Bus.layer("test-installation").pipe(
-    Layer.provideMerge(ledger),
-    Layer.provideMerge(cursors)
-  );
+  // Control the current position and its writes independently of the production HTTP scan.
+  const positioned = Layer.effect(Ledger)(
+    Effect.map(Ledger, (actual) =>
+      Ledger.of({
+        ...actual,
+        mailboxAt: (address, _cut) =>
+          Effect.sync(() => {
+            cursorReads++;
+            return {
+              status: "FOUND" as const,
+              position: cursor,
+              records: [
+                {
+                  t: 1,
+                  record: {
+                    version: 1,
+                    kind: "start",
+                    operation: "fixture",
+                    address,
+                    run: "join",
+                    origin: "join",
+                    position: cursor,
+                  },
+                },
+              ],
+            };
+          }),
+        appendMailboxAck: (record, cut) =>
+          Effect.sync(() => {
+            cursor = record.through;
+            writes += 1;
+            return { status: "APPLIED", cut };
+          }),
+      })
+    )
+  ).pipe(Layer.provideMerge(ledger));
+  const bus = Bus.layer("test-installation").pipe(Layer.provideMerge(positioned));
   return {
     ledger,
     bus,

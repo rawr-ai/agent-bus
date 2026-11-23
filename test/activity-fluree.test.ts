@@ -11,7 +11,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Option, Schema } from "effect";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { orientationAssociations, peers } from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import { toNode } from "../src/Fluree.ts";
@@ -48,12 +47,12 @@ import {
   sid,
   sortedMutes,
   takeAll,
-  tempDir,
   topic,
   uuid,
   withSentinel,
 } from "./activity-support.ts";
 import { insertRaw } from "./fluree-server.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const x = "claude/x";
 const y = "codex/y";
@@ -77,9 +76,9 @@ const scoped = async (
 const open = async (
   track: <T>(resource: T, close: () => unknown) => T,
   config: FlureeConfig,
-  options: { readonly url?: string; readonly dir?: string } = {}
+  options: { readonly url?: string } = {}
 ) => {
-  const serve = await serveOn(flureeStore(config, options.url), options.dir);
+  const serve = await serveOn(flureeStore(config, options.url));
   return track(serve, serve.dispose);
 };
 
@@ -213,7 +212,7 @@ describe("bus_activity: the command applicability race", () => {
         probe.stop(true);
         const runtime = ManagedRuntime.make(
           Serve.layerHttp({ port, version: "test" }).pipe(
-            Layer.provideMerge(busOn(flureeStore(config, relay.url), tempDir()))
+            Layer.provideMerge(busOn(flureeStore(config, relay.url)))
           )
         );
         track(runtime, () => runtime.dispose());
@@ -584,20 +583,38 @@ describe("a damaged standing fails the read", () => {
     expect(await serve.run(end)).toBe(head);
   };
 
-  const cursorOf = (serve: BusServe, address: string) =>
-    serve.run(Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(address)));
+  /**
+   * The address's mailbox position at a fresh pin of the head, or the failure reading it. Pinned
+   * through the query gateway, since past presence damage the presence read itself fails.
+   */
+  const positionOf = (serve: BusServe, address: string) =>
+    serve.run(
+      Effect.gen(function* () {
+        const ledger = yield* Ledger.Ledger;
+        const pin = yield* Effect.flatMap(QueryGateway, (gateway) => gateway.pin);
+        return yield* ledger.mailboxAt(address, pin);
+      }).pipe(
+        Effect.match({
+          onFailure: (error) => ({ read: false as const, message: error.message }),
+          onSuccess: (state) => ({
+            read: true as const,
+            position: state.status === "FOUND" ? state.position : undefined,
+          }),
+        })
+      )
+    );
   const leaveAs = (address: string, session = sid(address)) =>
     Effect.flatMap(Bus.Bus, (bus) => bus.leave(address, session));
 
   /**
    * No ownership is decided past the damage either: the holder's peers lookup, rejoin and leave,
    * the session given joining, and an unrelated address's first join all fail, as the activity
-   * read does, writing nothing and leaving x's cursor where it was. With `at`, the failure names
+   * read does, writing nothing and leaving x's mailbox position where it was. With `at`, the failure names
    * that commit.
    */
   const ownershipUnreadable = async (serve: BusServe, session?: string, at?: number) => {
     const head = await serve.run(end);
-    const cursor = await cursorOf(serve, x);
+    const position = await positionOf(serve, x);
     const named = (message: string) =>
       at === undefined
         ? expect(message).toContain(DAMAGE)
@@ -608,7 +625,7 @@ describe("a damaged standing fails the read", () => {
     named(await failure(serve.run(leaveAs(x))));
     named(await failure(serve.run(joinAs("claude/z"))));
     expect(await serve.run(end)).toBe(head);
-    expect(await cursorOf(serve, x)).toEqual(cursor);
+    expect(await positionOf(serve, x)).toEqual(position);
   };
 
   /** One update at a new commit: `remove` retracted from a node, `add` asserted on it. */
@@ -1049,7 +1066,7 @@ describe("a damaged standing fails the read", () => {
         probe.stop(true);
         const runtime = ManagedRuntime.make(
           Serve.layerHttp({ port, version: "test" }).pipe(
-            Layer.provideMerge(busOn(flureeStore(config, config.url), tempDir()))
+            Layer.provideMerge(busOn(flureeStore(config, config.url)))
           )
         );
         track(runtime, () => runtime.dispose());
@@ -1101,7 +1118,7 @@ describe("a damaged standing fails the read", () => {
 
   /**
    * x and its sentinel held by one session, y sending, x's standing set by `call`; then helpers
-   * to damage and repair the ledger and to watch x's cursor and pending mail.
+   * to damage and repair the ledger and to watch x's mailbox position and pending mail.
    */
   const wakeFixture = async (track: Track, call: Parameters<typeof act>[1]) => {
     const config = await freshFluree("damage-wake");
@@ -1141,7 +1158,7 @@ describe("a damaged standing fails the read", () => {
         await a.run(takeAll(sentinel, sid(x)));
         return id;
       },
-      cursor: () => a.run(Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(x))),
+      position: () => a.run(mailboxPosition(x)),
       /** What a delivery pass would hand x's nudge now, without acknowledging anything. */
       pending: () =>
         a.run(
@@ -1167,7 +1184,7 @@ describe("a damaged standing fails the read", () => {
         expect(await w.a.run(rung(x, y))).not.toContain(x);
         await w.damage();
         // Ambient mail alone needs the standing: nothing wakes, nothing is acknowledged.
-        const before = await w.cursor();
+        const before = await w.position();
         expect(await w.a.run(rung(x, y))).not.toContain(x);
         const direct = await w.send([x], "direct");
 
@@ -1179,7 +1196,7 @@ describe("a damaged standing fails the read", () => {
           cursor: Option.getOrThrow(before),
         });
         expect(await w.a.run(rung(x, y))).toContain(x);
-        expect(await w.cursor()).toEqual(before);
+        expect(await w.position()).toEqual(before);
         // The same damage and no new mail: nothing rings again.
         expect(await w.a.run(rung(x, y))).not.toContain(x);
 
@@ -1211,17 +1228,17 @@ describe("a damaged standing fails the read", () => {
         await w.a.run(takeAll(x));
 
         // Muted ambient mail needs the standing: nothing wakes, and nothing is acknowledged.
-        const before = await w.cursor();
+        const before = await w.position();
         const muted = await w.ambient("ambient");
         expect(await w.a.run(rung(x, y))).not.toContain(x);
-        expect(await w.cursor()).toEqual(before);
+        expect(await w.position()).toEqual(before);
         expect(await failure(peerRow(w.a, x))).toContain(DAMAGE);
         // With direct mail beside it, the direct mail alone wakes.
         const mixed = await w.send([x], "mixed");
         expect(await w.pending()).toMatchObject({ messages: [mixed], unread: [muted, mixed] });
         expect(await w.a.run(rung(x, y))).toContain(x);
         expect(await w.a.run(rung(x, y))).not.toContain(x);
-        expect(await w.cursor()).toEqual(before);
+        expect(await w.position()).toEqual(before);
 
         // Repaired, the mute still holds: nothing new is eligible, so nothing rings.
         await w.repair();
@@ -1358,8 +1375,7 @@ describe("restart and store pins", () => {
     () =>
       scoped(async (track) => {
         const config = await freshFluree("restart");
-        const dir = tempDir();
-        const first = await serveOn(flureeStore(config), dir);
+        const first = await serveOn(flureeStore(config));
         try {
           await first.run(
             Effect.gen(function* () {
@@ -1376,7 +1392,7 @@ describe("restart and store pins", () => {
         } finally {
           await first.dispose();
         }
-        const second = await open(track, config, { dir });
+        const second = await open(track, config);
         const rebuilt = await peerRow(second, x);
         expect(rebuilt).toMatchObject({ activity: "inactive" });
         expect(sortedMutes(rebuilt?.mutes)).toEqual(sortedMutes([topic("t")]));
@@ -1398,7 +1414,7 @@ describe("restart and store pins", () => {
           })
         );
         await second.dispose();
-        const third = await open(track, config, { dir });
+        const third = await open(track, config);
         expect(await peerRow(third, x)).toMatchObject({ activity: "active" });
         await third.run(
           Effect.gen(function* () {

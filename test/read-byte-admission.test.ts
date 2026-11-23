@@ -56,10 +56,14 @@ const success = async (name: string, args: Record<string, unknown>) => {
 const messages = (value: unknown) => Schema.decodeUnknownSync(Messages)(value).messages;
 const cursor = async (address: string) => {
   const result = await server.runPromise(
-    Effect.flatMap(Cursors.Cursors, (cursors) => cursors.get(address))
+    Effect.gen(function* () {
+      const ledger = yield* Ledger;
+      const cut = (yield* ledger.presenceAt()).cut;
+      return yield* ledger.mailboxAt(address, cut);
+    })
   );
-  if (result._tag !== "Some") throw new Error("Missing cursor.");
-  return result.value;
+  if (result.status !== "FOUND") throw new Error("Missing mailbox position.");
+  return result.position;
 };
 const publicMessage = (message: Message) => ({
   id: message.id,

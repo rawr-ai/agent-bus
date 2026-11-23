@@ -6,17 +6,22 @@ import { Console, Effect, FileSystem, Layer, Logger, Option, Schema } from "effe
 import { Command, Flag } from "effect/cli";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "./Bus.ts";
-import * as Cursors from "./Cursors.ts";
 import { claudeWake } from "./claude.ts";
 import * as Client from "./client.ts";
 import { defaultCodex } from "./codex.ts";
 import { compactRecovery, readCompactInput } from "./compact.ts";
-import { cursorTransition, openCursorDirectory } from "./cursor-layout.ts";
+import { cursorTransition } from "./cursor-layout.ts";
 import { cursorWriterIsStopped } from "./cursor-quiescence.ts";
 import { Association, LedgerError, Runtime } from "./domain.ts";
 import * as Fluree from "./Fluree.ts";
 import { initializeInstallation, loadInstallation } from "./installation.ts";
 import * as Ledger from "./Ledger.ts";
+import {
+  captureMailboxSource,
+  importMailboxPositions,
+  legacyCursorPath,
+  MailboxSourceJson,
+} from "./mailbox-import.ts";
 import { Peers, Published } from "./mcp-tools.ts";
 import { OrientationResult } from "./orientation-model.ts";
 import * as Serve from "./serve.ts";
@@ -48,22 +53,6 @@ const loadToken = Effect.gen(function* () {
   return (yield* fs.readFileString(file)).trim();
 });
 
-/** Cursors are positions in one ledger's history, so each ledger instance keeps its own. */
-const legacyCursorPath = (ledgerId: string, instance: string) =>
-  join(busDir, "fluree-cursors", encodeURIComponent(ledgerId), instance);
-
-const cursorsFor = (ledgerId: string, installation: string) =>
-  Layer.unwrap(
-    Effect.gen(function* () {
-      const ledger = yield* Ledger.Ledger;
-      const dir = yield* openCursorDirectory(
-        legacyCursorPath(ledgerId, ledger.instance),
-        installation
-      );
-      return Cursors.layerFiles(dir);
-    })
-  );
-
 /** `config.json` names no Fluree ledger, so the store can't open. */
 class NoStore extends Schema.TaggedError<NoStore>()("NoStore", { message: Schema.String }) {}
 
@@ -82,10 +71,7 @@ const BusLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* flureeConfig;
     const installation = yield* loadInstallation(busDir);
-    return Bus.layer(installation).pipe(
-      Layer.provideMerge(cursorsFor(config.ledger, installation)),
-      Layer.provideMerge(Fluree.layerFluree(config))
-    );
+    return Bus.layer(installation).pipe(Layer.provideMerge(Fluree.layerFluree(config)));
   })
 );
 
@@ -431,7 +417,7 @@ const cursors = Command.make(
       const report = yield* Effect.gen(function* () {
         const ledger = yield* Ledger.Ledger;
         return yield* cursorTransition(
-          legacyCursorPath(config.ledger, ledger.instance),
+          legacyCursorPath(busDir, config.ledger, ledger.instance),
           installation,
           action,
           confirmCursorWriterOffline
@@ -445,11 +431,101 @@ const cursors = Command.make(
   )
 );
 
+const mailboxSource = Command.make("mailbox-source", {}, () =>
+  Effect.gen(function* () {
+    yield* confirmCursorWriterOffline;
+    const config = yield* flureeConfig;
+    const proof = yield* Effect.gen(function* () {
+      const ledger = yield* Ledger.Ledger;
+      const { cut } = yield* ledger.presenceAt();
+      return yield* captureMailboxSource(busDir, config.ledger, cut, confirmCursorWriterOffline);
+    }).pipe(Effect.provide(Fluree.layerFluree(config, { existingOnly: true })));
+    yield* Console.log(JSON.stringify(proof));
+  }).pipe(Effect.catchTag("LedgerError", fail))
+).pipe(
+  Command.withDescription(
+    "Capture the stopped local installation's exact cursor inventory at the current ledger cut, without writing"
+  )
+);
+
+const invalidMailboxSource = () =>
+  new LedgerError({ message: "Mailbox import requires readable, valid retained source receipts." });
+
+const readMailboxSource = (file: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const info = yield* fs.lstat(file);
+    if (info.type !== "File" || info.size > 4096) return yield* invalidMailboxSource();
+    return yield* Schema.decodeUnknownEffect(MailboxSourceJson, { onExcessProperty: "error" })(
+      yield* fs.readFileString(file)
+    );
+  }).pipe(Effect.mapError(invalidMailboxSource));
+
+const mailboxImport = Command.make(
+  "mailbox-import",
+  {
+    firstState: Flag.String("first-state").pipe(
+      Flag.withDescription("The first held installation's copied state root")
+    ),
+    firstReceipt: Flag.String("first-receipt").pipe(
+      Flag.withDescription("The first installation's independently retained mailbox-source receipt")
+    ),
+    secondState: Flag.String("second-state").pipe(
+      Flag.withDescription("The second held installation's copied state root")
+    ),
+    secondReceipt: Flag.String("second-receipt").pipe(
+      Flag.withDescription(
+        "The second installation's independently retained mailbox-source receipt"
+      )
+    ),
+    pairedHoldsConfirmed: Flag.Boolean("paired-holds-confirmed").pipe(
+      Flag.withDescription(
+        "Attest both old serve jobs are held through reconciliation and activation"
+      )
+    ),
+  },
+  ({ firstState, firstReceipt, secondState, secondReceipt, pairedHoldsConfirmed }) =>
+    Effect.gen(function* () {
+      if (!pairedHoldsConfirmed)
+        return yield* new LedgerError({
+          message:
+            "Mailbox import refused: verify both old writers are held and pass --paired-holds-confirmed.",
+        });
+      yield* confirmCursorWriterOffline;
+      const config = yield* flureeConfig;
+      const installation = yield* loadInstallation(busDir);
+      const first = yield* readMailboxSource(firstReceipt);
+      const second = yield* readMailboxSource(secondReceipt);
+      const report = yield* importMailboxPositions(
+        config.ledger,
+        [
+          { root: firstState, receipt: first },
+          { root: secondState, receipt: second },
+        ],
+        installation,
+        confirmCursorWriterOffline
+      ).pipe(Effect.provide(Fluree.layerFluree(config, { existingOnly: true })));
+      yield* Console.log(
+        JSON.stringify({
+          localHold: "checked-disabled-unloaded-and-off-port",
+          pairedHolds: "operator-attested",
+          ...report,
+        })
+      );
+    }).pipe(Effect.catchTag("LedgerError", fail))
+).pipe(
+  Command.withDescription(
+    "Import verified exact cursor copies into absent ledger mailboxes once, with both old writers held"
+  )
+);
+
 const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
   Command.withSubcommands([
     serve,
     cursors,
+    mailboxSource,
+    mailboxImport,
     initialize,
     joinCommand,
     orientCommand,

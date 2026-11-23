@@ -1,5 +1,5 @@
 import { basename, dirname, join } from "node:path";
-import { Effect, FileSystem, Schema } from "effect";
+import { Effect, FileSystem, Option, Schema } from "effect";
 import { CursorJson, CursorPosition, cursorFileName, cursorText } from "./Cursors.ts";
 import { LedgerError, latestPresences } from "./domain.ts";
 import { Ledger } from "./Ledger.ts";
@@ -309,6 +309,54 @@ const exactRecords = (snapshot: Snapshot, head: number) =>
       records.push(record);
     }
     return records;
+  });
+
+export type CursorImportFile =
+  | { readonly status: "read"; readonly record: Record }
+  | { readonly status: "unreadable" };
+
+/**
+ * Fingerprint the actual active generation, not just its manifest's retained-legacy digest.
+ * An unreadable tree refuses capture. Readable bytes that fail cursor decoding can be
+ * attested, but are never a missing file or a numeric read position.
+ */
+export const cursorImportSnapshot = (legacy: string) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const exact = exactPath(legacy);
+    const snapshot = yield* readSnapshot(fs, exact, manifestName);
+    const old = yield* readLegacy(fs, legacy);
+    const files = new Map<string, CursorImportFile>();
+    if (snapshot === undefined) {
+      if (old.receipt !== undefined || old.files.length > 0) {
+        return yield* refused(
+          "no attributable active exact generation; do not import legacy bytes by guesswork."
+        );
+      }
+    } else {
+      if (snapshot.marker === undefined) return yield* fileError();
+      if (yield* pendingExport(fs, exact)) return yield* exportUnfinished();
+      const manifest = yield* fromBytes(Manifest, snapshot.marker, "the exact cursor manifest");
+      yield* checkRetained(old, manifest);
+      for (const [name, bytes] of snapshot.files) {
+        if (!/^[0-9a-f]{64}\.json$/.test(name)) {
+          return yield* refused(
+            "the active exact generation contains an unexpected entry; verify the snapshot."
+          );
+        }
+        const record = yield* Effect.option(fromBytes(CursorJson, bytes, "an exact cursor file"));
+        files.set(
+          name,
+          Option.isSome(record)
+            ? { status: "read", record: record.value }
+            : { status: "unreadable" }
+        );
+      }
+    }
+    return {
+      digest: sha256(JSON.stringify([snapshotIdentity(snapshot), old.identity])),
+      files,
+    };
   });
 
 const legacyOutput = (

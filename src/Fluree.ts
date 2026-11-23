@@ -11,6 +11,8 @@ import {
   type Designation,
   type DesignationResult,
   Ledger,
+  type LocatedSlice,
+  type MailboxCandidate,
   messageIri,
   type PresenceRead,
   revisionIri,
@@ -60,6 +62,18 @@ const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
 const Commit = Schema.Struct({ id: Schema.String });
 const Rows = Schema.Array(
   Schema.Tuple([Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))])
+);
+const LocatedRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.Int]));
+const CandidateRows = Schema.Array(Schema.Tuple([Schema.String, Schema.Int, Schema.Boolean]));
+const RoutingRows = Schema.Array(
+  Schema.Tuple([
+    Schema.String,
+    Schema.String,
+    Schema.Unknown,
+    Schema.Int,
+    Schema.Boolean,
+    Schema.Unknown,
+  ])
 );
 const JsonRows = Schema.Array(Schema.Tuple([Schema.String]));
 const Strings = Schema.Array(Schema.String);
@@ -666,57 +680,148 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
         return { entries, next: head } satisfies Slice;
       });
 
+      const checkEntryCut = (from: number, cut: Pin) =>
+        Effect.gen(function* () {
+          if (
+            cut.incarnation !== instance ||
+            !Number.isSafeInteger(cut.head) ||
+            !Number.isSafeInteger(from) ||
+            from < 0 ||
+            from > cut.head ||
+            (yield* guardedIncarnation) !== instance ||
+            (yield* guardedHead) < cut.head
+          ) {
+            return yield* new LedgerError({
+              message: "The entry snapshot is unavailable or the ledger was replaced.",
+            });
+          }
+        });
+
+      const entryHistory = (start: number, stop: number, body: Record<string, unknown>) =>
+        sendBounded(
+          HttpClientRequest.post(`${api}/query`).pipe(
+            HttpClientRequest.bodyJsonUnsafe({
+              "@context": context,
+              from: `${config.ledger}@t:${start}`,
+              to: `${config.ledger}@t:${stop}`,
+              ...body,
+            })
+          ),
+          JSONLD_RESPONSE_BYTES
+        );
+
       const readAt = (from: number, cut: Pin) =>
         bounded(
           Effect.gen(function* () {
-            if (
-              cut.incarnation !== instance ||
-              !Number.isSafeInteger(cut.head) ||
-              !Number.isSafeInteger(from) ||
-              from < 0 ||
-              from > cut.head ||
-              (yield* guardedIncarnation) !== instance ||
-              (yield* guardedHead) < cut.head
-            ) {
-              return yield* new LedgerError({
-                message: "The entry snapshot is unavailable or the ledger was replaced.",
-              });
-            }
-            const entries: Array<Slice["entries"][number]> = [];
+            yield* checkEntryCut(from, cut);
+            const entries: Array<LocatedSlice["entries"][number]> = [];
             for (let start = from + 1; start <= cut.head; start += READ_WINDOW) {
               const stop = Math.min(cut.head, start + READ_WINDOW - 1);
-              const rows = yield* sendBounded(
-                HttpClientRequest.post(`${api}/query`).pipe(
-                  HttpClientRequest.bodyJsonUnsafe({
-                    "@context": context,
-                    from: `${config.ledger}@t:${start}`,
-                    to: `${config.ledger}@t:${stop}`,
-                    select: ["?json", "?t"],
-                    where: [
-                      { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t", "@op": true } },
-                    ],
-                  })
-                ),
-                JSONLD_RESPONSE_BYTES
-              ).pipe(Effect.flatMap(decode(Rows)));
-              for (const [text, t] of rows) {
+              const rows = yield* entryHistory(start, stop, {
+                select: ["?m", "?json", "?t"],
+                where: [
+                  { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t", "@op": true } },
+                ],
+              }).pipe(Effect.flatMap(decode(LocatedRows)));
+              for (const [subject, text, t] of rows) {
                 if (t < start || t > stop) return yield* invalidResponse();
-                entries.push({ message: yield* decodeMessage(text, t), end: t });
+                entries.push({ message: yield* decodeMessage(text, t), end: t, subject });
               }
             }
-            if ((yield* guardedIncarnation) !== instance || (yield* guardedHead) < cut.head) {
-              return yield* new LedgerError({
-                message: "The entry snapshot is unavailable or the ledger was replaced.",
-              });
-            }
+            yield* checkEntryCut(from, cut);
             entries.sort(
               (a, b) =>
                 a.end - b.end ||
                 (a.message.id < b.message.id ? -1 : a.message.id > b.message.id ? 1 : 0)
             );
-            return { entries, next: cut.head } satisfies Slice;
+            return { entries, next: cut.head } satisfies LocatedSlice;
           })
         ).pipe(Effect.withSpan("Ledger.readAt"));
+
+      const mailboxCandidatesAt = (from: number, cut: Pin) =>
+        bounded(
+          Effect.gen(function* () {
+            yield* checkEntryCut(from, cut);
+            const candidates: Array<MailboxCandidate> = [];
+            for (let start = from + 1; start <= cut.head; start += READ_WINDOW) {
+              const stop = Math.min(cut.head, start + READ_WINDOW - 1);
+              // Filtering a matched type preserves @t and @op; prebinding ?type with VALUES does not.
+              const typed = yield* entryHistory(start, stop, {
+                select: ["?m", "?t", "?op"],
+                where: [
+                  {
+                    "@id": "?m",
+                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": {
+                      "@type": "@id",
+                      "@value": "?type",
+                      "@t": "?t",
+                      "@op": "?op",
+                    },
+                  },
+                  ["filter", `(= ?type <${BUS}Message>)`],
+                ],
+              }).pipe(Effect.flatMap(decode(CandidateRows)));
+              for (let offset = 0; offset < typed.length; offset += 100) {
+                const batch = typed.slice(offset, offset + 100);
+                const iri = (value: string) => ({ "@type": "@id", "@value": value });
+                const subjects = [...new Set(batch.map(([subject]) => subject))];
+                // A generic snapshot predicate can report t=0 for freshly guarded writes. History exposes
+                // the actual routing assertions and any later retraction up to the same cut.
+                const rows = yield* entryHistory(start, cut.head, {
+                  select: ["?m", "?p", "?value", "?t", "?op", "?datatype"],
+                  values: [["?m"], subjects.map((subject) => [iri(subject)])],
+                  where: [
+                    ["values", ["?p", ["id", "from", "to"].map((p) => iri(`bus:${p}`))]],
+                    { "@id": "?m", "?p": { "@value": "?value", "@t": "?t", "@op": "?op" } },
+                    ["bind", "?datatype", "(datatype ?value)"],
+                  ],
+                }).pipe(Effect.flatMap(decode(RoutingRows)));
+                for (const [subject, end, asserted] of batch) {
+                  if (end < start || end > stop) return yield* invalidResponse();
+                  const projection = rows.filter(([node]) => node === subject);
+                  const fields = new Map<string, Array<string>>();
+                  let intact = asserted;
+                  for (const [, p, value, t, assertion, datatype] of projection) {
+                    if (
+                      !assertion ||
+                      t !== end ||
+                      typeof value !== "string" ||
+                      (datatype !== "xsd:string" &&
+                        datatype !== "http://www.w3.org/2001/XMLSchema#string")
+                    ) {
+                      intact = false;
+                      break;
+                    }
+                    const key = p.startsWith(BUS)
+                      ? p.slice(BUS.length)
+                      : p.startsWith("bus:")
+                        ? p.slice("bus:".length)
+                        : undefined;
+                    if (key !== "id" && key !== "from" && key !== "to") {
+                      intact = false;
+                      break;
+                    }
+                    const values = fields.get(key) ?? [];
+                    values.push(value);
+                    fields.set(key, values);
+                  }
+                  const ids = fields.get("id") ?? [];
+                  const senders = fields.get("from") ?? [];
+                  const to = fields.get("to") ?? [];
+                  const id = ids.length === 1 ? ids[0] : undefined;
+                  const sender = senders.length === 1 ? senders[0] : undefined;
+                  const routing =
+                    intact && id !== undefined && sender !== undefined
+                      ? { id, from: sender, to }
+                      : undefined;
+                  candidates.push({ subject, end, ...optional("routing", routing) });
+                }
+              }
+            }
+            yield* checkEntryCut(from, cut);
+            return candidates;
+          })
+        ).pipe(Effect.withSpan("Ledger.mailboxCandidatesAt"));
 
       const replaced = () =>
         new LedgerError({
@@ -1012,6 +1117,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           designate,
           read,
           readAt,
+          mailboxCandidatesAt,
           end,
           changes,
           presenceAt,

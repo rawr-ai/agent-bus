@@ -43,6 +43,7 @@ What agent-bus rests on in Fluree, observed on Fluree 4.2.4 on the bus host (the
 
 ## Query limits
 
+- **History exposes real assertion commits for mailbox routing.** On a just-committed guarded message, a pinned JSON-LD snapshot with a variable predicate and `@t` returned `0` for its routing fields; the bounded history form with `@t` and `@op` returned the actual commit. For type history, a variable object followed by a filter for the message type gave each typed subject's commit and operation, including a subject with no carrier or routing. Binding that type with `values` instead returned null commit and operation metadata (verified live on disposable Fluree 4.2.4, 2026-11-20 UTC; maintained proof and guarded-write tests in `test/mailbox-ledger.test.ts`).
 - **HTTP 507 means the query's in-memory joins or aggregates outgrew the query memory budget,** and an unchanged retry fails the same way (documented, `api/errors.md`). The docs name no per-query memory setting (documented, `operations/README.md`).
 - **A correlated `exists` after the full-text scoring made every participant-filtered search fail.**
   - Search used to apply its participant filter as a correlated `exists` over `bus:from`/`bus:to`, placed after the body/subject union and `fulltext()` scoring. The 4.2.4 explain plan placed it, deferred, inside each text branch (observed in the plan; the plan alone does not show how the correlation is evaluated).

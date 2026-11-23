@@ -118,7 +118,8 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | State | Where | Written by | What it is |
 | --- | --- | --- | --- |
 | The ledger | Bus host: `~/.agent-bus/fluree/storage`, with the Fluree project in `~/.agent-bus/fluree/.fluree` | The Fluree server, for every machine's `serve` | Every message and presence entry, append-only, in ledger `agent-bus:main`. [Messaging](messaging.md) gives its model |
-| Cursors | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>.v2/` | That machine's `serve` | One per exact address joined from that machine: the last commit `t` read. A replaced ledger has a new first commit, so its subscribers start over. The old format lacks the `.v2` suffix; use the [transition procedure](../runbooks/deploy.md#change-the-cursor-format), not a manual rename |
+| Mailbox positions | The ledger | The installation holding each address; operator-controlled import | The latest start or acknowledgement for each exact address, in the same history as its presence and mail ([messaging](messaging.md#rules)) |
+| Retained cursor files | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>.v2/` | Offline cursor tools for the previous release | Cutover evidence, not live positions. The older file format lacks the `.v2` suffix; use its [transition procedure](../runbooks/deploy.md#change-the-cursor-format), not a manual rename |
 | Native delivery identity | Each machine: `~/.agent-bus/installation-id` | That machine's `serve` | Random identity initialized once and retained across restarts. Keep it with that installation's state and do not copy it to another installation |
 | `config.json` | Each machine: `~/.agent-bus/config.json` | The installer, only when absent | The Fluree URL and ledger. `serve` won't start without it |
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |
@@ -136,20 +137,20 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 
 ## Rules
 
-1. **One `serve` per machine.** It is the only process that reads or writes the store for that machine's sessions, and it keeps their cursors and locks. Sessions, the CLI, the Claude hook and any hosted peer are MCP clients of it and never open the store.
+1. **One `serve` per machine.** It is the only running service that reads or writes the store for that machine's sessions, and it keeps the locks and empty-scan hints. Sessions, ordinary CLI calls, the Claude hook and any hosted peer are MCP clients of it and never open the store.
 2. **One ledger, on one Fluree transaction server on the bus host.** Every machine's `serve` writes to it over HTTP. Other machines run no Fluree.
 3. **Servers listen on loopback only.** Fluree is on `127.0.0.1:8095` and `serve` on `127.0.0.1:8096`. Nothing listens on a network address. A hosted peer also binds loopback only; any external HTTPS front is the installation's own, not installed by the bus.
 4. **Another machine reaches Fluree only through an SSH tunnel,** on the same local port, so its `config.json` names the same URL as the bus host's.
 5. **Native queues and hooks stay local to their installation.** The wake-selection rule is in [delivery](delivery.md#rules).
 6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail; a held search ranking holds entry ids, scores and node names, and every page reads its messages from the ledger.
 7. **`serve` and the hook use the same managed launcher.** Source and runtime changes are controlled together at deploy ([deploy](../runbooks/deploy.md)). A release binds exact immutable files, not a moving `current` link. Already-running hooks retain their loaded code and runtime until they rearm; keep every release still named by a process, binding or rollback record.
-8. **Each ledger instance has its own cursor directory.** The path names the ledger and its first commit ([messaging rule 11](messaging.md#rules) says what follows).
+8. **Each ledger instance contains its own mailbox positions.** A replaced history does not inherit them ([messaging rule 11](messaging.md#rules)).
 9. **`serve` won't start without a `config.json` that names a Fluree ledger.** There is no fallback store.
 
 ## Why
 
 - **One ledger on one transaction server.** The server orders every commit, so all machines share one log and a cursor is the last commit `t` read. Internal readers use commit history; queries read a pinned commit through a read-only gateway ([interfaces](interfaces.md#bus_queries)). The other machine needs only a tunnel.
-- **One `serve` per machine.** Locks and the marks of what was last woken live in the process, and the deliverer can move a cursor past mail that isn't the subscriber's. A second `serve` on the same machine and ledger could add duplicate nudges or move a cursor back, so the design has one.
+- **One `serve` per machine.** Locks, hints and the marks of what was last woken live in the process. The ledger fences conflicting acknowledgements, not duplicate local nudges, so the design still has one.
 - **Loopback and a tunnel.** Nothing needs to listen beyond its own machine, so nothing does. SSH authenticates the other machine, and the Fluree token still applies on top ([connections](connections.md)).
 - **One explicit installed binding.** Source installation supports bootstrap and development; a release removes the running bus's dependence on a checkout or its dependencies. Both use one launcher, independent of ambient `PATH`. Release verification anchors the complete cohort to an externally recorded manifest digest, not merely to its own claims.
 - **Rejected: JSONL, or SQLite, as a second production store.** Once every machine ran on Fluree, a fallback store doubled what had to stay correct, for a fallback nothing used. JSONL stays only as test support (see Limits).

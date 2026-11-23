@@ -23,8 +23,8 @@ Use this when the bus misbehaves: each symptom, how to check it, the fix and how
 | `Could not wake …: … no answer within 15s` for several threads | The daemon's process and log | [The Codex daemon is wedged](#the-codex-daemon-is-wedged) | The next cycle logs `Waking <address>` |
 | Borrowed turns fail with "out of credits", or run as the earlier user | Whether the Codex login changed since the daemon started | [Borrowed turns run as an earlier user](#borrowed-turns-run-as-an-earlier-user) | A borrowed turn succeeds |
 | A join is refused with "held by another session" | The refusal's facts about the holder | [Held by another session](#held-by-another-session) | `agent-bus peers` shows the address with the right owner |
-| A read fails with "Cursor t=… is ahead of …" | The address's cursor file | [A cursor is ahead of the ledger](#a-cursor-is-ahead-of-the-ledger) | The read returns, and the warnings stop |
-| `cursors` or `serve` refuses a cursor format transition | The current installation, exact/legacy generation, and the refusal | [Cursor format transition refused](#cursor-format-transition-refused) | A reviewed conversion or export completes, or the installation stays held |
+| A retained file-based release says "Cursor t=… is ahead of …" | The address's cursor file | [A cursor is ahead of the ledger](#a-cursor-is-ahead-of-the-ledger) | The read returns, and the warnings stop |
+| The offline `cursors` tool refuses a cursor format transition | The current installation, exact/legacy generation, and the refusal | [Cursor format transition refused](#cursor-format-transition-refused) | A reviewed conversion or export completes, or the installation stays held |
 | `bus_read` or `bus_wait` says the oldest unread commit cannot fit | The reader limits and original holding | [The oldest unread mail does not fit](#the-oldest-unread-mail-does-not-fit) | The same owner reads the complete group, or it stays unread |
 | A read or ownership operation fails with "A ledger entry at t=… could not be decoded." | The stored entry at the named commit | [An entry cannot be decoded](#an-entry-cannot-be-decoded) | The affected operation succeeds after the underlying damage is resolved |
 | A command run over SSH on the other machine can't find `bun` | `command -v bun` over SSH | [`bun` not found over SSH](#bun-not-found-over-ssh-on-the-other-machine) | The command runs |
@@ -389,7 +389,7 @@ The refusal reads `<address> is held by another session (runtime …; on …; jo
    agent-bus join --address <address> --runtime <runtime> --takeover <holder's join id>
    ```
 
-   Unread mail carries over, and the former holder is refused from then on ("belongs to another session"). A takeover from another machine uses that machine's cursor ([messaging limits](../architecture/messaging.md#limits)). *Rehearsed 2026-10-28.*
+   Unread mail carries over, and the former holder is refused from then on ("belongs to another session"). In the ledger mailbox, takeover from either machine inherits the same acknowledged position. *Checked on disposable ledgers; paired installed rehearsal is unverified.*
 
 4. After `/clear` or a fork, Claude Code has a new session id and the old address is still held by the old one. Join a new address; don't take over.
 
@@ -408,6 +408,8 @@ Tell the human the named commit `t` and preserve the ledger and cursors for inve
 What follows a refusal: the first live one comes here. A bus maintainer establishes whether it was a fault in one response or damage stored in the ledger, and finds a source for the original entry independent of the damaged store before proposing any repair. Appending a corrected copy is not a repair, because history is read by position: a repaired takeover appended after a later valid leave would make the departed owner current again. Confirmed stored damage starts a separately qualified procedure that restores the entry at its original position. A concrete need to keep delivering while damage stays unresolved starts the larger design of cursors that can pass unreadable entries and of unknown ownership. Until one of those exists, the refusal is a known limit, and nothing here authorizes rewriting live history.
 
 ## A cursor is ahead of the ledger
+
+This procedure is for a retained file-based release. For the current ledger mailbox, preserve the ledger and the source files, and investigate unavailable history or a refused import before any owner restarts the holding. Do not edit a legacy cursor to change the running Bus position.
 
 A read fails with `Cursor t=<n> is ahead of agent-bus:main (t=<m>): the ledger was restored from an earlier copy, or the cursor was edited. A plain rejoin keeps this cursor; a rejoin with replay restarts it at 0, delivering all the address's past mail again.`, and `serve`'s log has `Not waking <address> this pass: Cursor …` for a Claude address. Cursors are kept per incarnation of the ledger ([messaging](../architecture/messaging.md#rules), rule 11), so a plain replacement starts every address over, and this error shows only when the ledger went back in its own history (restored from an earlier copy) or a cursor file was edited. An agent that meets it tells the human and doesn't rejoin: a plain rejoin changes nothing, and a rejoin with `replay` re-delivers every message ever sent to the address, which is the human's choice.
 
@@ -500,6 +502,10 @@ Follow the [deployment gate](deploy.md#change-the-cursor-format). Keep the owned
    Both commands must succeed and report the same **new** exact generation. Held-bind and verify the exact package even if its launcher appeared unchanged, then enable and start the owned job. If the legacy writer did run, hold it again and use ordinary stopped migration from its latest positions; the old export receipt is not current evidence.
 
 6. **If retained legacy state changed after migration, preserve the exact generation.** The startup and check refusal prevents treating uncertain legacy activity as harmless. Restore the original legacy files and any original receipt only from authenticated, same-generation retained bytes, after ruling out an advanced legacy writer. Then run `check` while held and verify the intended exact binding before resuming. Do not edit the manifest digest, restore an empty directory as a reset or choose a new baseline by guesswork. If original bytes or genuine legacy activity cannot be reconciled, keep the job held for reviewed repair. A concise serve refusal does not disable launchd's KeepAlive; hold the job explicitly rather than letting it retry.
+
+## Mailbox import cannot be established
+
+Keep both old writers held. Preserve the original cursor directories, both independent receipts and copies, and the reported operation or classification. A truncated or unreadable copy is not evidence a cursor was absent. For an uncertain write, rerun the [paired import](deploy.md#import-file-positions-into-the-ledger) with the same captures: it verifies its own stored operation before proceeding. Do not ask `bus_join` to settle a classified unresolved position. Fix the evidence and reconcile through the owner-approved procedure before selecting a release. There is no qualified file rollback after later ledger reads or joins. *Unverified on the paired installed hosts.*
 
 ## `bun` not found over SSH on the other machine
 

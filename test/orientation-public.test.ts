@@ -21,6 +21,7 @@ import { bulletinAt, directoryAt } from "../src/orientation-read.ts";
 import { QueryGateway } from "../src/Query.ts";
 import * as Serve from "../src/serve.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 let server: ReturnType<typeof startFileFlureeServer> | undefined;
 const fileServer = () => (server ??= startFileFlureeServer());
@@ -35,7 +36,6 @@ test("an inadmissible association unit offers a new query at the same cut withou
       Effect.gen(function* () {
         const bus = yield* Bus.Bus;
         const ledger = yield* Ledger;
-        const cursors = yield* Cursors.Cursors;
         yield* bus.join(joining("publisher"));
         yield* updateDirectory({
           from: "publisher",
@@ -53,7 +53,7 @@ test("an inadmissible association unit offers a new query at the same cut withou
           ...joining("associated"),
           associations: [{ directory: "project", concerns }],
         });
-        const before = { head: yield* ledger.end, cursor: yield* cursors.get("associated") };
+        const before = { head: yield* ledger.end, cursor: yield* mailboxPosition("associated") };
         const constrained = yield* orient({ directory: "project" }, 3_000);
         expect(constrained).toMatchObject({
           status: "UNAVAILABLE",
@@ -78,7 +78,7 @@ test("an inadmissible association unit offers a new query at the same cut withou
           { address: "associated", association: { directory: "project", concerns } },
         ]);
         expect(yield* ledger.end).toBe(before.head);
-        expect(yield* cursors.get("associated")).toEqual(before.cursor);
+        expect(yield* mailboxPosition("associated")).toEqual(before.cursor);
       })
     );
   } finally {
@@ -306,8 +306,7 @@ test("one public orientation composes selected context, guidance and explicit as
     const before = await f.run(
       Effect.gen(function* () {
         const ledger = yield* Ledger;
-        const cursors = yield* Cursors.Cursors;
-        return { head: yield* ledger.end, cursor: yield* cursors.get("reader") };
+        return { head: yield* ledger.end, cursor: yield* mailboxPosition("reader") };
       })
     );
     const selected = await call("bus_orient", { directory: "project", concern: "delivery" });
@@ -412,8 +411,7 @@ test("one public orientation composes selected context, guidance and explicit as
     const after = await f.run(
       Effect.gen(function* () {
         const ledger = yield* Ledger;
-        const cursors = yield* Cursors.Cursors;
-        return { head: yield* ledger.end, cursor: yield* cursors.get("reader") };
+        return { head: yield* ledger.end, cursor: yield* mailboxPosition("reader") };
       })
     );
     expect(after).toEqual(before);

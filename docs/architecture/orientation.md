@@ -48,7 +48,6 @@ Explicit current designation lets a participant find the handoff without ranking
 - **Oversized legacy presence can obstruct a full association page.** The membership projection is a separate traversal at the original cut; it does not advance the failed full cursor.
 - **Reads are bounded in time and scan work.** Candidate discovery inspects at most 200 directory scopes per page with a ten-second deadline; the whole orientation read has a twenty-second deadline. A deadline is unavailable, not a complete empty result. No provider latency guarantee follows from those bounds.
 - **Expiry has millisecond precision.** Bulletin expiry accepts UTC instants with zero to three fractional digits. It rejects unsupported precision instead of rounding; query timestamp semantics are separate.
-- **The association address bound is not a filesystem acceptance guarantee.** Existing cursor files use the encoded address as a filename, so a filesystem may reject a shorter address when its encoded name exceeds the component limit. This change does not migrate cursor paths.
 
 ## Rests on
 

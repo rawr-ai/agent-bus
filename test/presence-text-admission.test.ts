@@ -1,22 +1,23 @@
 // Every join and leave writes a presence entry whose full-text-indexed body is
 // `<address> <status>`, held like any searchable text to 32,768 UTF-8 bytes (message-carrier.ts).
-// A join, renewal or takeover is refused before it stages a cursor or writes when its presence
-// body would be over the limit; ordinary holdings keep renewing and leaving, and a holding from
-// before the limit can still leave. Use the production exact-address cursor files.
+// A join, renewal or takeover is refused before it writes a presence or a mailbox start when its
+// presence body would be over the limit; ordinary holdings keep renewing and leaving, and a
+// holding from before the limit can still leave.
 import { afterAll, expect, test } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
-import { Effect, Layer, ManagedRuntime, Schema } from "effect";
+import { Effect, Layer, ManagedRuntime, Option } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { latestPresences, Message, Origin, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
+import type { MailboxStart } from "../src/mailbox-model.ts";
 import { MAX_INDEXED_FIELD_BYTES } from "../src/message-carrier.ts";
 import { flureeFetch, freshLedger } from "./fluree-server.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const L = MAX_INDEXED_FIELD_BYTES;
 /** The longest address a join admits: `<address> joined` (7 more bytes) at the limit. */
@@ -26,22 +27,17 @@ const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpCli
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-presence-text-"));
 const cwd = dir;
 
-const cursorFile = (cursors: string, address: string) =>
-  join(cursors, Cursors.cursorFileName(address));
-
 const busOn = async (name: string) => {
   const config = await freshLedger(name);
-  const cursors = join(dir, name);
   const runtime = ManagedRuntime.make(
     Bus.layer("fixture", () => HOST).pipe(
       Layer.provideMerge(layerFluree(config).pipe(Layer.provide(platform))),
-      Layer.provideMerge(Cursors.layerFiles(cursors)),
       Layer.provide(platform)
     )
   );
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger | Cursors.Cursors>) =>
-    runtime.runPromise(effect);
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger>) => runtime.runPromise(effect);
   const head = () => run(Effect.flatMap(Ledger, (ledger) => ledger.end));
+  const position = (address: string) => run(mailboxPosition(address));
   const presences = async () =>
     latestPresences((await run(Effect.flatMap(Ledger, (ledger) => ledger.presenceAt()))).entries);
   const joinAs = (address: string, session: string, takeover?: string) =>
@@ -52,14 +48,11 @@ const busOn = async (name: string) => {
     );
   const leave = (address: string, session: string) =>
     run(Effect.flatMap(Bus.Bus, (bus) => bus.leave(address, session)));
-  /** Replay would stage zero if admitted; a refusal must not replace even a retained cursor. */
+  /** Replay would start at zero if admitted; a refusal must not replace even a retained position. */
   const refused = async (address: string, session: string, takeover?: string) => {
     const before = await head();
     const holding = (await presences()).get(address)?.joinId;
-    const path = cursorFile(cursors, address);
-    const cursor = existsSync(path)
-      ? { bytes: readFileSync(path), inode: statSync(path).ino }
-      : undefined;
+    const retained = await position(address);
     const error = await run(
       Effect.flip(
         Effect.flatMap(Bus.Bus, (bus) =>
@@ -76,15 +69,11 @@ const busOn = async (name: string) => {
     );
     expect(error._tag).toBe("InvalidQuery");
     expect(await head()).toBe(before);
-    if (cursor === undefined) expect(existsSync(path)).toBe(false);
-    else {
-      expect(readFileSync(path)).toEqual(cursor.bytes);
-      expect(statSync(path).ino).toBe(cursor.inode);
-    }
+    expect(await position(address)).toEqual(retained);
     expect((await presences()).get(address)?.joinId).toBe(holding);
     return error.message;
   };
-  return { config, cursors, runtime, run, head, presences, joinAs, leave, refused };
+  return { config, runtime, run, head, position, presences, joinAs, leave, refused };
 };
 type Fixture = Awaited<ReturnType<typeof busOn>>;
 const fixtures: Array<Fixture> = [];
@@ -103,7 +92,7 @@ const addressOf = (bytes: number, fill = "a") => `probe/${fill.repeat(bytes - "p
 const refusal = (bytes: number) =>
   `This address takes ${bytes} UTF-8 bytes, so the presence every join and leave records for it would be over the 32768-byte limit for searchable text. Nothing was changed. Join under a shorter address.`;
 
-test("a join is refused before any cursor or presence when its presence is over the limit", async () => {
+test("a join is refused before any position or presence when its presence is over the limit", async () => {
   const bus = await fixture("presence-text");
   expect(A).toBe(32_761);
   expect(await bus.refused(addressOf(A + 1), "s-over")).toBe(refusal(A + 1));
@@ -113,16 +102,13 @@ test("a join is refused before any cursor or presence when its presence is over 
   expect(wide.length).toBeLessThan(A);
   expect(await bus.refused(wide, "s-wide")).toBe(refusal(A + 1));
 
-  // At the limit the join is admitted, with its digest-named cursor and its presence.
+  // At the limit the join is admitted, starting its position at its cut, with its presence.
   const address = addressOf(A);
   const before = await bus.head();
+  expect(await bus.position(address)).toEqual(Option.none());
   await bus.joinAs(address, "s-limit");
   expect(await bus.head()).toBe(before + 1);
-  expect(
-    Schema.decodeUnknownSync(Cursors.CursorJson)(
-      readFileSync(cursorFile(bus.cursors, address), "utf8")
-    )
-  ).toEqual({ address, cursor: before });
+  expect(await bus.position(address)).toEqual(Option.some(before));
   expect((await bus.presences()).get(address)?.presence.status).toBe("joined");
 }, 120_000);
 
@@ -145,24 +131,29 @@ const seedHolding = (bus: Fixture, address: string, session: string) =>
     Effect.gen(function* () {
       const ledger = yield* Ledger;
       const read = yield* ledger.presenceAt();
-      const admitted = yield* ledger.admit(
-        new Message({
-          id: Bun.randomUUIDv7(),
-          ts: new Date().toISOString(),
-          from: address,
-          to: ["*"],
-          kind: "presence",
-          body: "seeded holding joined",
-          origin: new Origin({ host: HOST, cwd }),
-          presence: new Presence({ runtime: "other", status: "joined", topics: [], session }),
-        }),
-        read.cut
-      );
+      const message = new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: address,
+        to: ["*"],
+        kind: "presence",
+        body: "seeded holding joined",
+        origin: new Origin({ host: HOST, cwd }),
+        presence: new Presence({ runtime: "other", status: "joined", topics: [], session }),
+      });
+      // The seeded holding starts its position with its presence, as a join from then would.
+      const start: MailboxStart = {
+        version: 1,
+        kind: "start",
+        operation: message.id,
+        address,
+        run: message.id,
+        origin: "join",
+        position: read.cut.head,
+      };
+      const admitted = yield* ledger.admitWithStart(message, start, read.cut);
       if (admitted.status !== "ADMITTED") throw new Error("Seeded presence not admitted.");
-      const cursor = read.cut.head;
-      const cursors = yield* Cursors.Cursors;
-      yield* cursors.set(address, cursor);
-      return cursor;
+      return read.cut.head;
     })
   );
 
@@ -180,8 +171,9 @@ test("ordinary holders renew and leave; an older over-limit holding can only lea
   // over it (and `<address> joined` more), seeded into this disposable ledger.
   const legacy = addressOf(A + 3, "b");
   expect(Buffer.byteLength(`${legacy} left`, "utf8")).toBe(L + 1);
-  const legacyCursor = await seedHolding(bus, legacy, "s-old");
-  expect(legacyCursor).toBeGreaterThan(0);
+  const legacyPosition = await seedHolding(bus, legacy, "s-old");
+  expect(legacyPosition).toBeGreaterThan(0);
+  expect(await bus.position(legacy)).toEqual(Option.some(legacyPosition));
   const holder = (await bus.presences()).get(legacy)?.joinId;
   if (holder === undefined) throw new Error("Seeded legacy holding not readable.");
   // Its renewal and a takeover would each record the address again: refused, nothing written.

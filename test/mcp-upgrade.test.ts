@@ -13,9 +13,9 @@ import {
 } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import * as Serve from "../src/serve.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
+import { mailboxPosition } from "./mailbox-position.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-mcp-upgrade-"));
 const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
@@ -27,7 +27,6 @@ const server = ManagedRuntime.make(
     Layer.provideMerge(
       Bus.layer("test-installation").pipe(
         Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))
       )
     )
@@ -78,8 +77,7 @@ const joining = (address: string, owner = session(address)) => ({
   cwd: process.cwd(),
 });
 const readArgs = (address: string) => ({ address, session: session(address) });
-const cursor = (address: string) =>
-  Bun.file(join(dir, "cursors", Cursors.cursorFileName(address))).text();
+const cursor = (address: string) => server.runPromise(mailboxPosition(address));
 const text = (result: CallToolResult) => {
   const [first] = result.content;
   return first?.type === "text" ? first.text : "";
@@ -135,6 +133,7 @@ test("SDK cancellation interrupts a pending wait before later mail is published"
   await succeed(client, "bus_join", joining(sender));
   expect(await succeed(client, "bus_read", readArgs(reader))).toEqual({ messages: [] });
   const before = await cursor(reader);
+  expect(before._tag).toBe("Some");
 
   const controller = new AbortController();
   const waiting = pendingWait(client, reader, controller);
@@ -144,7 +143,7 @@ test("SDK cancellation interrupts a pending wait before later mail is published"
     controller.abort();
     expect(await waiting.outcome).toBe("rejected");
     await observeWait(client, reader, false);
-    expect(await cursor(reader)).toBe(before);
+    expect(await cursor(reader)).toEqual(before);
 
     const body = "mail after cancellation";
     const sent = await succeed(client, "bus_publish", {
@@ -181,6 +180,7 @@ test("session DELETE interrupts its wait without changing unrelated unread mail"
   });
   expect(await succeed(observer.client, "bus_read", readArgs(reader))).toEqual({ messages: [] });
   const before = await Promise.all([cursor(reader), cursor(sender), cursor(other)]);
+  expect(before.map((position) => position._tag)).toEqual(["Some", "Some", "Some"]);
 
   const controller = new AbortController();
   const waiting = pendingWait(owner.client, reader, controller);
