@@ -79,6 +79,40 @@ const httpFailure = (status: number) =>
 
 const Exists = Schema.Struct({ exists: Schema.Boolean });
 const apiFor = (config: FlureeConfig) => `${config.url.replace(/\/$/, "")}/v1/fluree`;
+// Fetch reads RequestInit at execution time, including after a layer has opened. Bind this
+// policy to every request from the provider, rather than the fiber which happened to open it.
+const noRedirects = (base: HttpClient.HttpClient) =>
+  HttpClient.transformResponse(base, (effect) =>
+    Effect.flatMap(Effect.serviceOption(FetchHttpClient.RequestInit), (options) =>
+      effect.pipe(
+        Effect.provideService(FetchHttpClient.RequestInit, {
+          ...Option.getOrElse(options, () => ({})),
+          redirect: "manual",
+        })
+      )
+    )
+  );
+const withoutEventAuthorization = (base: HttpClient.HttpClient) =>
+  HttpClient.mapRequest(base, HttpClientRequest.removeHeader("authorization")).pipe(
+    HttpClient.transformResponse((effect) =>
+      Effect.flatMap(Effect.serviceOption(FetchHttpClient.RequestInit), (options) => {
+        if (Option.isNone(options) || options.value.headers === undefined) return effect;
+        const headers = new Headers(options.value.headers);
+        headers.delete("authorization");
+        return effect.pipe(
+          Effect.provideService(FetchHttpClient.RequestInit, { ...options.value, headers })
+        );
+      })
+    )
+  );
+const successful = (base: HttpClient.HttpClient) =>
+  HttpClient.transformResponse(base, (effect) =>
+    Effect.flatMap(effect, (response) =>
+      response.status >= 200 && response.status < 300
+        ? Effect.succeed(response)
+        : Effect.fail(httpFailure(response.status))
+    )
+  );
 const authenticated = (base: HttpClient.HttpClient, config: FlureeConfig) =>
   config.token === undefined
     ? base
@@ -87,7 +121,7 @@ const authenticated = (base: HttpClient.HttpClient, config: FlureeConfig) =>
 /** Pre-open observation only: an error, unknown response or unauthorized caller never means absent. */
 export const flureeLedgerExists = (config: FlureeConfig) =>
   Effect.gen(function* () {
-    const client = authenticated(yield* HttpClient.HttpClient, config);
+    const client = authenticated(noRedirects(yield* HttpClient.HttpClient), config);
     const response = yield* HttpClient.withScope(client).execute(
       HttpClientRequest.get(`${apiFor(config)}/exists/${encodeURIComponent(config.ledger)}`)
     );
@@ -97,7 +131,6 @@ export const flureeLedgerExists = (config: FlureeConfig) =>
   }).pipe(
     Effect.mapError((error) => (error instanceof LedgerError ? error : invalidResponse())),
     Effect.scoped,
-    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
     Effect.timeoutOrElse({ duration: QUERY_TIMEOUT, orElse: () => Effect.fail(invalidResponse()) })
   );
 const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
@@ -243,7 +276,9 @@ export const createFlureeLedgerOnce = (
 ): Effect.Effect<FlureeCreation, never, HttpClient.HttpClient> => {
   const unknown = { status: "UNKNOWN" } as const;
   return Effect.gen(function* () {
-    const client = HttpClient.withScope(authenticated(yield* HttpClient.HttpClient, config));
+    const client = HttpClient.withScope(
+      authenticated(noRedirects(yield* HttpClient.HttpClient), config)
+    );
     const post = (path: string, body: unknown) =>
       client.execute(
         HttpClientRequest.post(apiFor(config) + path).pipe(HttpClientRequest.bodyJsonUnsafe(body))
@@ -274,7 +309,6 @@ export const createFlureeLedgerOnce = (
     }).pipe(Effect.provide(layerFluree({ ...config, ledger: normalized }, { existingOnly: true })));
   }).pipe(
     Effect.scoped,
-    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
     Effect.timeoutOrElse({ duration: QUERY_TIMEOUT, orElse: () => Effect.succeed(unknown) }),
     Effect.catch(() => Effect.succeed(unknown))
   );
@@ -296,18 +330,16 @@ export const layerFluree = (
 ) =>
   Layer.effectContext(
     Effect.gen(function* () {
-      const base = yield* HttpClient.HttpClient;
-      const client = authenticated(base, config);
+      const base = noRedirects(yield* HttpClient.HttpClient);
+      const client = successful(authenticated(base, config));
+      const eventsClient = successful(withoutEventAuthorization(base));
       const api = apiFor(config);
       const ledger = encodeURIComponent(config.ledger);
 
       /** Upstream bodies and transport details are never safe tool error messages. */
       const send = (request: HttpClientRequest.HttpClientRequest) =>
         Effect.gen(function* () {
-          const response = yield* client.execute(request);
-          if (response.status >= 400) {
-            return yield* httpFailure(response.status);
-          }
+          const response = yield* HttpClient.withScope(client).execute(request);
           return yield* response.json;
         }).pipe(
           Effect.catchTag("HttpClientError", (error) =>
@@ -337,9 +369,6 @@ export const layerFluree = (
       ) =>
         Effect.gen(function* () {
           const response = yield* HttpClient.withScope(client).execute(request);
-          if (response.status >= 400) {
-            return yield* httpFailure(response.status);
-          }
           const chunks = yield* response.stream.pipe(
             Stream.runFoldEffect(
               () => ({ parts: [] as Array<Uint8Array>, size: 0 }),
@@ -436,9 +465,6 @@ export const layerFluree = (
       ) =>
         Effect.gen(function* () {
           const response = yield* HttpClient.withScope(client).execute(request);
-          if (response.status < 200 || response.status >= 300) {
-            return yield* httpFailure(response.status);
-          }
           const chunks = yield* response.stream.pipe(
             Stream.runFoldEffect(
               () => ({ parts: [] as Array<Uint8Array>, size: 0 }),
@@ -1111,9 +1137,12 @@ export const layerFluree = (
 
       // Each (re)connection wakes readers once, since commits may have landed while disconnected.
       const events = HttpClientResponse.stream(
-        // The event stream needs no token (it only carries change notices), so none is sent.
-        base.execute(HttpClientRequest.get(`${api}/events?ledger=${ledger}`))
+        // The event stream needs no Authorization header; strip it even from ambient options.
+        HttpClient.withScope(eventsClient).execute(
+          HttpClientRequest.get(`${api}/events?ledger=${ledger}`)
+        )
       ).pipe(
+        Stream.scoped,
         Stream.decodeText(),
         Stream.pipeThroughChannel(Sse.decode()),
         Stream.map((): void => undefined),
@@ -1383,25 +1412,12 @@ export const layerFluree = (
               })
             ).pipe(Effect.withSpan("Ledger.ownershipEraAt")),
           ownershipActivationAt: (lookup) =>
-            activation
-              .proofAt(lookup)
-              .pipe(
-                Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
-                Effect.withSpan("Ledger.ownershipActivationAt")
-              ),
+            activation.proofAt(lookup).pipe(Effect.withSpan("Ledger.ownershipActivationAt")),
           sourceCommitAt: (source) =>
-            activation
-              .sourceCommitAt(source)
-              .pipe(
-                Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
-                Effect.withSpan("Ledger.sourceCommitAt")
-              ),
+            activation.sourceCommitAt(source).pipe(Effect.withSpan("Ledger.sourceCommitAt")),
           activateOwnershipEra: (intent) =>
             options?.existingOnly === true
-              ? activate(intent).pipe(
-                  Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
-                  Effect.withSpan("Ledger.activateOwnershipEra")
-                )
+              ? activate(intent).pipe(Effect.withSpan("Ledger.activateOwnershipEra"))
               : Effect.fail(
                   new LedgerError({
                     message: "Ownership activation requires an existing-only ledger binding.",

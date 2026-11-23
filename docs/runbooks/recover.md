@@ -51,9 +51,22 @@ While the cause stands, the job stays in `state = spawn scheduled` and launchd t
 
 ### The installation identity is missing or invalid
 
-Use the [one-time upgrade](deploy.md#switch-to-stable-native-delivery) only if this `serve` has never had an identity. Otherwise, check access to `installation-id` in this machine's bus state directory. Restore a lost or damaged file from this installation's own backup; do not copy another machine's file. Then [check that `serve` restarted](deploy.md#check-that-serve-restarted). Expect startup without an identity error and the same addresses still eligible for wake. *Unverified as an installed recovery procedure; startup refusal is tested on a disposable state directory.*
+If this installation previously had an identity, check access to
+`installation-id` in its bus state directory and restore a lost or damaged file
+from this installation's own backup; do not generate a replacement or copy
+another machine's file. Then [check that `serve` restarted](deploy.md#check-that-serve-restarted).
+If the original cannot be recovered, keep the job held for reviewed repair.
+*Unverified as an installed recovery procedure; startup refusal is tested on a disposable state directory.*
 
-Only if the identity is irretrievably lost: stop `serve`, retain any damaged file outside the active path, then run the initialization step with this installation's state directory. Follow the same-owner renewal and native wake checks in the upgrade procedure. Do not replace the cursor files. *Unverified as an installed recovery procedure.*
+For a genuinely pre-identity installation, the [one-time upgrade](deploy.md#switch-to-stable-native-delivery)
+describes the earlier file-based rollout and its approved source. The current
+initializer refuses a nonempty pre-identity root; a direct upgrade from that
+state is not supported by this procedure. Preserve the root and use a reviewed
+upgrade path rather than treating it as a fresh installation.
+
+For a paired ledger-mailbox transition, a replacement identity does not have
+the original installation's admission. Keep the job held and use reviewed
+recovery rather than generating or copying an identity to bypass that evidence.
 
 ### The port is held
 
@@ -77,6 +90,9 @@ Only if the identity is irretrievably lost: stop `serve`, retain any damaged fil
 ### The config file is bad
 
 `~/.agent-bus/config.json` must name the Fluree ledger. `serve` won't start without it.
+If the problem followed first bootstrap or an interrupted first installer, use
+[first-bootstrap recovery](#first-bootstrap-is-unconfirmed) before the
+general procedure below; keep its exact target and all bootstrap evidence.
 
 1. Read it. It should be:
 
@@ -503,9 +519,50 @@ Follow the [deployment gate](deploy.md#change-the-cursor-format). Keep the owned
 
 6. **If retained legacy state changed after migration, preserve the exact generation.** The startup and check refusal prevents treating uncertain legacy activity as harmless. Restore the original legacy files and any original receipt only from authenticated, same-generation retained bytes, after ruling out an advanced legacy writer. Then run `check` while held and verify the intended exact binding before resuming. Do not edit the manifest digest, restore an empty directory as a reset or choose a new baseline by guesswork. If original bytes or genuine legacy activity cannot be reconciled, keep the job held for reviewed repair. A concise serve refusal does not disable launchd's KeepAlive; hold the job explicitly rather than letting it retry.
 
+## First bootstrap is unconfirmed
+
+Keep the owned `serve` job held and preserve the installation identity,
+configuration and all bootstrap reservation, grant, spent and completion
+evidence. A spent grant without completed proof may follow a provider request
+that committed despite a lost response. Do not rerun creation, delete the
+spent record, issue a new identity or point at a replacement ledger. Inspect the
+intended provider and its exact ledger incarnation read-only, then use a
+separately reviewed setup recovery; there is no automatic repair from an
+ambiguous attempt. Do not print credentials or complete private configuration.
+*Unverified as an installed recovery procedure.*
+
+An interrupted first installer can also leave a partial `config.json`. A rerun
+does not repair an existing regular file. With the job held, restore the exact
+intended configuration from a trusted backup or use a reviewed repair against
+independently recorded values; do not delete the identity or bootstrap evidence
+to make the installer start over. Preserve the token separately.
+*Unverified as an installed recovery procedure.*
+
 ## Mailbox import cannot be established
 
-Keep both old writers held. Preserve the original cursor directories, both independent receipts and copies, and the reported operation or classification. A truncated or unreadable copy is not evidence a cursor was absent. For an uncertain write, rerun the [paired import](deploy.md#import-file-positions-into-the-ledger) with the same captures: it verifies its own stored operation before proceeding. Do not ask `bus_join` to settle a classified unresolved position. Fix the evidence and reconcile through the owner-approved procedure before selecting a release. There is no qualified file rollback after later ledger reads or joins. *Unverified on the paired installed hosts.*
+Keep both old writers held. Preserve the original cursor directories, both
+sentinels, all paired admission evidence, both independent receipts and copies,
+and the reported operation or classification. A truncated or unreadable copy
+is not evidence a cursor was absent. For an uncertain era or import write,
+follow the [paired procedure](deploy.md#import-file-positions-into-the-ledger)
+with the same operation and captures; an absent read does not prove a
+dispatched request cannot still commit. Do not ask `bus_join` to settle a
+classified unresolved position. Fix the evidence and reconcile through the
+owner-approved procedure before selecting a release. After the first sentinel,
+the selected transition is fix-forward: do not remove the marker to resume an
+old file writer. There is no qualified file rollback after later ledger reads
+or joins. *Unverified on the paired installed hosts.*
+
+If only one sentinel was installed, keep both jobs held. Resume with the same
+operation and receipts only after the other original generation satisfies its
+fence checks; restore that generation only from independently verified captured
+bytes. An irreparable mismatch needs reviewed repair, not marker removal. If a
+reported failure establishes that the provider is unreachable, restore its
+availability under the authorized provider procedure; if it establishes that
+evidence is invalid, reconcile or restore the exact retained evidence instead.
+Do not discard either kind of evidence or substitute one diagnosis for the
+other. The retained originals, sentinels and completed paired records remain
+startup dependencies until explicit retirement. *Unverified on the paired installed hosts.*
 
 ## `bun` not found over SSH on the other machine
 

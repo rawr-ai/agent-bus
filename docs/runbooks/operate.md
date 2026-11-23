@@ -312,14 +312,17 @@ A bus of your own lets you call tools, join addresses and break things without t
    fluree server run --memory --listen-addr 127.0.0.1:18095 &
    fluree_pid=$!
    dir=$(mktemp -d)
+   AGENT_BUS_DIR="$dir" bun --no-env-file src/bin.ts initialize-installation \
+     --fluree-url http://127.0.0.1:18095 --fluree-ledger check:main
    echo '{ "fluree": { "url": "http://127.0.0.1:18095", "ledger": "check:main" } }' > "$dir/config.json"
-   AGENT_BUS_DIR="$dir" bun src/bin.ts initialize-installation
    AGENT_BUS_DIR=$dir AGENT_BUS_PORT=8196 bun src/bin.ts serve &
    serve_pid=$!
    curl -fsS http://127.0.0.1:8196/health
    ```
 
-   Expect `ok`. *Rehearsed 2026-10-28* without the initialization step; the revised startup is covered by disposable qualification for the stable-delivery upgrade.
+   Expect `ok`. The target-bound initialization must run before writing the
+   disposable config; an identity-only initialization cannot authorize a new
+   ledger. *Unverified with the target-bound initializer.*
 
 2. List the tools and call one with the [MCP Inspector](https://github.com/modelcontextprotocol/inspector). Its CLI mode prints each result as JSON.
 

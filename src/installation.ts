@@ -1,5 +1,11 @@
 import { join } from "node:path";
 import { Effect, FileSystem, Schema } from "effect";
+import {
+  checkExistingMailboxBootstrap,
+  initializeIdentityOnly,
+  initializeTargetedMailboxIdentity,
+  type MailboxBootstrapTarget,
+} from "./mailbox-bootstrap.ts";
 
 export class InstallationError extends Schema.TaggedError<InstallationError>()(
   "InstallationError",
@@ -22,6 +28,11 @@ const invalid = () =>
   });
 const cannotCreate = () =>
   new InstallationError({ message: "Could not initialize installation-id." });
+const cannotBootstrap = () =>
+  new InstallationError({
+    message:
+      "Installation bootstrap evidence is incomplete or invalid; operator recovery is required.",
+  });
 
 const read = (dir: string) =>
   Effect.gen(function* () {
@@ -48,25 +59,20 @@ export const loadInstallation = (dir: string) =>
   );
 
 /** Publish a complete ID once, even if two operators initialize concurrently. */
-export const initializeInstallation = (dir: string) =>
+export const initializeInstallation = (dir: string, target?: MailboxBootstrapTarget) =>
   Effect.gen(function* () {
-    if ((yield* read(dir)) !== undefined) return;
+    const existing = yield* read(dir);
+    if (existing !== undefined) {
+      yield* checkExistingMailboxBootstrap(dir, existing, target).pipe(
+        Effect.mapError(cannotBootstrap)
+      );
+      return;
+    }
     const fs = yield* FileSystem.FileSystem;
     yield* fs.makeDirectory(dir, { recursive: true }).pipe(Effect.mapError(cannotCreate));
-    const temporary = yield* fs
-      .makeTempFileScoped({ directory: dir, prefix: ".installation-" })
-      .pipe(Effect.mapError(cannotCreate));
-    yield* fs.chmod(temporary, 0o600).pipe(Effect.mapError(cannotCreate));
-    yield* fs
-      .writeFileString(temporary, `${crypto.randomUUID()}\n`)
-      .pipe(Effect.mapError(cannotCreate));
-    yield* fs
-      .link(temporary, join(dir, fileName))
-      .pipe(
-        Effect.catch((error) =>
-          error.reason._tag === "AlreadyExists"
-            ? Effect.asVoid(loadInstallation(dir))
-            : Effect.fail(cannotCreate())
-        )
-      );
+    yield* (
+      target === undefined
+        ? initializeIdentityOnly(dir)
+        : initializeTargetedMailboxIdentity(dir, target)
+    ).pipe(Effect.mapError(cannotBootstrap));
   }).pipe(Effect.scoped);
