@@ -8,13 +8,17 @@ export interface FileFlureeServer {
   readonly url: string;
   readonly token: string;
   readonly freshLedger: (name?: string) => FlureeConfig & { readonly token: string };
+  /** Reopen this disposable store with the selected executable, preserving its files and endpoint. */
+  readonly restart: (executable: string) => Promise<void>;
   readonly stop: () => Promise<void>;
 }
 
 let serverNumber = 0;
 
 /** One owned, authenticated file-backed server. Stop it in the owning suite's afterAll. */
-export const startFileFlureeServer = async (): Promise<FileFlureeServer> => {
+export const startFileFlureeServer = async (
+  initialExecutable?: string
+): Promise<FileFlureeServer> => {
   const work = mkdtempSync(join(tmpdir(), "agent-bus-file-fluree-"));
   const number = ++serverNumber;
   let child: Supervised | undefined;
@@ -40,7 +44,7 @@ export const startFileFlureeServer = async (): Promise<FileFlureeServer> => {
     return result.stdout.toString().trim();
   };
   try {
-    const fluree = Bun.which("fluree");
+    const fluree = initialExecutable ?? Bun.which("fluree");
     if (fluree === null) throw new Error("The qualified fluree is not on PATH");
     const key = JSON.parse(command([fluree, "token", "keygen", "--format", "json"])) as {
       readonly privateKey: { readonly hex: string };
@@ -66,48 +70,59 @@ export const startFileFlureeServer = async (): Promise<FileFlureeServer> => {
       `--${scope}-auth-trusted-issuer`,
       key.did,
     ]);
-    child = spawnSupervised(
-      [
-        fluree,
-        "server",
-        "run",
-        "--config",
-        join(work, ".fluree", "config.toml"),
-        "--storage-path",
-        join(work, "storage"),
-        "--listen-addr",
-        `127.0.0.1:${port}`,
-        "--",
-        "--cors-enabled=false",
-        ...auth,
-      ],
-      { cwd: work, stdout: "ignore", stderr: "ignore" }
-    );
-    const status = (headers: Record<string, string>) =>
-      fetch(`${url}/v1/fluree/ledgers`, { headers, signal: AbortSignal.timeout(500) }).then(
-        (response) => response.status,
-        () => 0
+    const launch = async (executable: string) => {
+      child = spawnSupervised(
+        [
+          executable,
+          "server",
+          "run",
+          "--config",
+          join(work, ".fluree", "config.toml"),
+          "--storage-path",
+          join(work, "storage"),
+          "--listen-addr",
+          `127.0.0.1:${port}`,
+          "--",
+          "--cors-enabled=false",
+          ...auth,
+        ],
+        { cwd: work, stdout: "ignore", stderr: "ignore" }
       );
-    for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
-      if (
-        (await status({ authorization: `Bearer ${token}` })) === 200 &&
-        (await status({})) === 401
-      ) {
-        let ledgers = 0;
-        return {
-          url,
-          token,
-          freshLedger: (name = "bus-test") => ({
-            url,
-            token,
-            ledger: `${name}-${process.pid}-${number}-${++ledgers}:main`,
-          }),
-          stop,
-        };
+      const status = (headers: Record<string, string>) =>
+        fetch(`${url}/v1/fluree/ledgers`, { headers, signal: AbortSignal.timeout(500) }).then(
+          (response) => response.status,
+          () => 0
+        );
+      for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
+        if (
+          (await status({ authorization: `Bearer ${token}` })) === 200 &&
+          (await status({})) === 401
+        ) {
+          return;
+        }
+        await Bun.sleep(100);
       }
-      await Bun.sleep(100);
-    }
-    throw new Error("The disposable authenticated Fluree fixture did not start");
+      throw new Error("The disposable authenticated Fluree fixture did not start");
+    };
+    await launch(fluree);
+    let ledgers = 0;
+    return {
+      url,
+      token,
+      freshLedger: (name = "bus-test") => ({
+        url,
+        token,
+        ledger: `${name}-${process.pid}-${number}-${++ledgers}:main`,
+      }),
+      restart: async (executable) => {
+        if (child && child.exitCode === null) {
+          child.kill();
+          await child.exited;
+        }
+        await launch(executable);
+      },
+      stop,
+    };
   } catch (error) {
     await stop();
     throw error;

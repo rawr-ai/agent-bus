@@ -1,6 +1,6 @@
 import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import {
   directAt,
   type LocatedPresence,
@@ -10,6 +10,7 @@ import {
 } from "./activity-read.ts";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { makeFlureeMailbox } from "./FlureeMailbox.ts";
+import { makeOwnershipActivation } from "./FlureeOwnershipActivation.ts";
 import {
   makeOwnership,
   ownershipEra,
@@ -74,8 +75,38 @@ const httpFailure = (status: number) =>
   new LedgerError({ message: `Fluree request failed (HTTP ${status}).` });
 
 const Exists = Schema.Struct({ exists: Schema.Boolean });
+const apiFor = (config: FlureeConfig) => `${config.url.replace(/\/$/, "")}/v1/fluree`;
+const authenticated = (base: HttpClient.HttpClient, config: FlureeConfig) =>
+  config.token === undefined
+    ? base
+    : HttpClient.mapRequest(base, HttpClientRequest.bearerToken(config.token));
+
+/** Pre-open observation only: an error, unknown response or unauthorized caller never means absent. */
+export const flureeLedgerExists = (config: FlureeConfig) =>
+  Effect.gen(function* () {
+    const client = authenticated(yield* HttpClient.HttpClient, config);
+    const response = yield* HttpClient.withScope(client).execute(
+      HttpClientRequest.get(`${apiFor(config)}/exists/${encodeURIComponent(config.ledger)}`)
+    );
+    if (response.status < 200 || response.status >= 300) return yield* httpFailure(response.status);
+    const value = yield* response.json;
+    return (yield* Schema.decodeUnknownEffect(Exists)(value)).exists;
+  }).pipe(
+    Effect.mapError((error) => (error instanceof LedgerError ? error : invalidResponse())),
+    Effect.scoped,
+    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+    Effect.timeoutOrElse({ duration: QUERY_TIMEOUT, orElse: () => Effect.fail(invalidResponse()) })
+  );
 const Info = Schema.Struct({ ledger: Schema.Struct({ t: Schema.Number }) });
 const Commit = Schema.Struct({ id: Schema.String });
+const ChildCommit = Schema.Struct({
+  id: Schema.String,
+  t: Schema.Int,
+  parents: Schema.Tuple([Schema.String]),
+});
+const Tip = Schema.Struct({
+  commits: Schema.Tuple([Schema.Struct({ t: Schema.Int, commit_id: Schema.String })]),
+});
 const Rows = Schema.Array(
   Schema.Tuple([Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))])
 );
@@ -208,11 +239,8 @@ export const layerFluree = (
   Layer.effectContext(
     Effect.gen(function* () {
       const base = yield* HttpClient.HttpClient;
-      const client =
-        config.token === undefined
-          ? base
-          : HttpClient.mapRequest(base, HttpClientRequest.bearerToken(config.token));
-      const api = `${config.url.replace(/\/$/, "")}/v1/fluree`;
+      const client = authenticated(base, config);
+      const api = apiFor(config);
       const ledger = encodeURIComponent(config.ledger);
 
       /** Upstream bodies and transport details are never safe tool error messages. */
@@ -299,10 +327,7 @@ export const layerFluree = (
         postJson("/query", { "@context": context, from: config.ledger, ...body });
 
       const ensureLedger = Effect.gen(function* () {
-        const { exists } = yield* send(HttpClientRequest.get(`${api}/exists/${ledger}`)).pipe(
-          Effect.flatMap(decode(Exists))
-        );
-        if (exists) return;
+        if (yield* flureeLedgerExists(config)) return;
         const created = yield* postJson("/create", { ledger: config.ledger }).pipe(
           Effect.as(true),
           // Another process created it first; that process writes the config.
@@ -1232,6 +1257,35 @@ export const layerFluree = (
           return map.get(address);
         })
       );
+      const update = (body: Readonly<Record<string, unknown>>) =>
+        bounded(
+          guardedSend(
+            HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
+              HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
+            )
+          ).pipe(
+            Effect.flatMap(decode(UpdateResponse)),
+            Effect.map((response) => response.t)
+          )
+        );
+      const activate = makeOwnershipActivation(
+        {
+          incarnation: bounded(guardedIncarnation),
+          tip: bounded(guardedSend(HttpClientRequest.get(`${api}/log/${ledger}?limit=1`))).pipe(
+            Effect.flatMap(decode(Tip)),
+            Effect.map(({ commits: [tip] }) => ({ t: tip.t, id: tip.commit_id }))
+          ),
+          commitAt: (t) =>
+            bounded(guardedSend(HttpClientRequest.get(`${api}/show/${ledger}?commit=t:${t}`))).pipe(
+              Effect.flatMap(decode(ChildCommit))
+            ),
+          at,
+          history: entryHistory,
+          eraAt: ownership.eraAt,
+          update,
+        },
+        instance
+      );
       const mailbox = makeFlureeMailbox({
         ownership,
         instance,
@@ -1240,17 +1294,7 @@ export const layerFluree = (
         incarnation: bounded(guardedIncarnation),
         at,
         history: entryHistory,
-        update: (body) =>
-          bounded(
-            guardedSend(
-              HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
-                HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
-              )
-            ).pipe(
-              Effect.flatMap(decode(UpdateResponse)),
-              Effect.map((response) => response.t)
-            )
-          ),
+        update,
         messageNode: toGuardedNode,
       });
 
@@ -1276,6 +1320,17 @@ export const layerFluree = (
                 return era;
               })
             ).pipe(Effect.withSpan("Ledger.ownershipEraAt")),
+          activateOwnershipEra: (intent) =>
+            options?.existingOnly === true
+              ? activate(intent).pipe(
+                  Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+                  Effect.withSpan("Ledger.activateOwnershipEra")
+                )
+              : Effect.fail(
+                  new LedgerError({
+                    message: "Ownership activation requires an existing-only ledger binding.",
+                  })
+                ),
           admit: (entry, basis) => admitEntry(entry, basis, false),
           ...mailbox,
           appendCommand,
