@@ -546,7 +546,7 @@ export const MIN_READ_RESULT_BYTES = EMPTY_READ_RESULT_BYTES;
 const ReadResultBytes = Schema.Int.check(Schema.isGreaterThanOrEqualTo(MIN_READ_RESULT_BYTES));
 
 const READ_RECOVERY =
-  "Pass readId (your last result's nextReadId): after a lost result, repeat the call with the same readId to get the same batch back, writing nothing. Without readId, a lost result may already have consumed mail; inspect bus_history before reading again. A result without receipt came from a server that ignored readId and peek and consumed the mail: it is neither a replay nor a peek.";
+  "Pass readId (your last result's nextReadId): after a lost result, repeat the call with the same readId to get the same batch back, writing nothing. Without readId, a lost result may already have consumed mail; inspect bus_history before reading again. A result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail: it is neither a replay nor a peek. An empty result has no receipt.";
 
 const readFields = {
   address: Address,

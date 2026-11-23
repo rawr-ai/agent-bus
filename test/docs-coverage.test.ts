@@ -313,7 +313,7 @@ describe("the served instructions", () => {
       expect(description).toContain("Without readId, a lost result may already have consumed mail");
       expect(description).toContain("inspect bus_history before reading again");
       expect(description).toContain(
-        "A result without receipt came from a server that ignored readId and peek and consumed the mail"
+        "A result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail"
       );
     }
     expect(toolNamed("bus_read")?.description).toContain(
@@ -329,7 +329,7 @@ describe("the served instructions", () => {
       "A lost read without one may have consumed mail: inspect bus_history"
     );
     expect(instructions).toContain(
-      "A read result without receipt came from a server that ignored readId and peek and consumed the mail"
+      "A read result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail"
     );
     expect(instructions).toContain(
       "Use peek only when a current tools/list shows bus_read declaring peek and bus_ack"
@@ -374,12 +374,14 @@ describe("the skill distinguishes hosted and native guidance", () => {
     expect(wake).toContain("Repeat a lost or uncertain read with its `readId`");
     expect(wake).toContain("without one it may have consumed mail");
     expect(wake).toContain("inspect `bus_history` before another read");
-    expect(wake).toContain("No `receipt` means it consumed");
+    expect(wake).toContain("Mail without `receipt`, or no `nextReadId`: an older bus consumed it");
     const peek = section("plugin/skills/agent-bus/references/runtimes.md", "Peek");
     expect(peek).toContain(
       "Before using peek, confirm from a current tools/list that `bus_read` declares `peek` and that `bus_ack` exists"
     );
-    expect(peek).toContain("its result has no `receipt`, and is neither a peek nor a replay");
+    expect(peek).toContain(
+      "its result has messages but no `receipt`, and no `nextReadId`, and is neither a peek nor a replay"
+    );
     expect(wake).toContain("hosted ChatGPT without an accepted watch");
   });
 

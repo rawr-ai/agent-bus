@@ -425,7 +425,7 @@ test("host instructions describe hosted identity, recovery and optional Events",
       "a lost write may have committed: inspect bus_history and state"
     );
     expect(instructions).toContain(
-      "A read result without receipt came from a server that ignored readId and peek and consumed the mail"
+      "A read result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail"
     );
     expect(instructions).toContain("use peek only when this connection advertises");
     expect(instructions).toContain("identical request and operation id");

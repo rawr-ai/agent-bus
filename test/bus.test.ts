@@ -3986,7 +3986,7 @@ describe("claude wake hook", () => {
       expect(text).toContain(`No mail, not joined, or another owner: ${end} quietly.`);
       const failure = text.slice(text.indexOf("If the read was definitely not sent"));
       expect(failure).toBe(
-        `If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. A result without receipt came from a bus that ignored readId and consumed the mail. If unresolved, report and ${end}.`
+        `If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. Messages without a receipt, or a result without nextReadId, came from a bus that ignored readId and consumed the mail. If unresolved, report and ${end}.`
       );
       expect(text).not.toContain("Retry other failures once");
       // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
