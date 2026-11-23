@@ -184,6 +184,8 @@ const run = async () => {
       const entry = result.content[0];
       assert(entry?.type === "text");
       assert.match(entry.text, /could not confirm|unconfirmed/i);
+      assert.match(entry.text, /bus_owned_addresses/);
+      assert.match(entry.text, /bus_peers/);
       await intercepted(lost);
     } finally {
       assert(proxy.reconnect() > 0, "no confirmation request was refused");
@@ -196,8 +198,9 @@ const run = async () => {
       (await call("bus_peers", {})).peers
     );
     assert.deepEqual(peers.find((p) => p.address === address)?.topics, topics);
-    const registrations = (await witness.runPromise(Effect.flatMap(Ledger, (l) => l.presenceAt())))
-      .entries.filter((entry) => entry.from === address);
+    const registrations = (
+      await witness.runPromise(Effect.flatMap(Ledger, (l) => l.presenceAt()))
+    ).entries.filter((entry) => entry.from === address);
     assert.equal(registrations.length, 1);
     assert.deepEqual(registrations[0]?.presence?.topics, topics);
     assert.equal((await pin()).head, after);

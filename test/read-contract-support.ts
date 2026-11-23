@@ -5,7 +5,7 @@ import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
 import * as Cursors from "../src/Cursors.ts";
 import { Ledger, type MailboxReceiptRead } from "../src/Ledger.ts";
-import type { MailboxState } from "../src/mailbox-model.ts";
+import type { MailboxFact, MailboxState } from "../src/mailbox-model.ts";
 import type { QueryGateway } from "../src/Query.ts";
 
 export const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
@@ -187,13 +187,26 @@ export const receiptOf = (runtime: Machine, operation: string, address = inbox) 
       return yield* ledger.mailboxReceiptAt(address, operation, (yield* ledger.presenceAt()).cut);
     })
   );
-/** Every acknowledgement recorded for the inbox. */
-export const acks = async (runtime: Machine) => {
-  const state = await mailbox(runtime);
-  return state.status === "ABSENT"
-    ? []
-    : state.records.flatMap(({ record }) => (record.kind === "ack" ? [record] : []));
-};
+/** Walk the fixture's immutable predecessors at one pin; a current position is not a history. */
+export const acks = (runtime: Machine) =>
+  runtime.runPromise(
+    Effect.gen(function* () {
+      const ledger = yield* Ledger;
+      const { cut } = yield* ledger.presenceAt();
+      const state = yield* ledger.mailboxAt(inbox, cut);
+      const records: Array<Extract<MailboxFact, { kind: "ack" }>> = [];
+      if (state.status === "ABSENT") return records;
+      let { record, t } = state.current;
+      for (;;) {
+        if (record.kind === "ack") records.push(record);
+        if (record.previous === null) return records.reverse();
+        const prior = yield* ledger.mailboxReceiptAt(inbox, record.previous, cut);
+        if (prior.status !== "FOUND" || prior.t >= t)
+          throw new Error("Invalid fixture predecessor.");
+        ({ record, t } = prior);
+      }
+    })
+  );
 /** A receipt as its replay returns it. */
 export const replayedReceipt = <R extends { readonly replayed: boolean }>(
   receipt: R | undefined

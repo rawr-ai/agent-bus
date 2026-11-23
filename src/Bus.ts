@@ -77,9 +77,9 @@ import {
   MAX_STORED_ENTRY_BYTES,
   messageCarrierBytes,
   presenceText,
-  readableEntry,
   READ_ID,
   type ReadReceipt,
+  readableEntry,
   readResult,
   servedCarrierBytes,
   unjoinable,
@@ -772,7 +772,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
 
     const unconfirmed = (operation: "join" | "leave", address: string) =>
       new LedgerError({
-        message: `The bus could not confirm whether this ${operation} of ${address} was recorded: it may or may not have committed, and nothing was undone. Calling it again is safe, since the bus decides against the address's current state, but that result doesn't show what this attempt did.`,
+        message: `The bus could not confirm whether this ${operation} of ${address} was recorded. It may have committed. When connected, check bus_owned_addresses for your session and bus_peers for the address's current topics. If the intended state is already in effect, do not repeat the change. These checks show current state, not what the earlier request did.`,
       });
 
     const invalidReadId = () =>
@@ -1550,8 +1550,12 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           incarnation: cut.incarnation,
           head: found.t,
         });
-        if (record.dataCut.incarnation !== cut.incarnation || original.status !== "FOUND" ||
-            original.current.t !== found.t || original.current.record.operation !== readId) {
+        if (
+          record.dataCut.incarnation !== cut.incarnation ||
+          original.status !== "FOUND" ||
+          original.current.t !== found.t ||
+          original.current.record.operation !== readId
+        ) {
           return yield* unestablished();
         }
         return record;

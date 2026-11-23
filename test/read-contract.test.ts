@@ -276,6 +276,10 @@ test(
     fixture(async ({ a, probe }) => {
       const other = "fixture/read-contract-other";
       await joinInbox(a);
+      const initial = await mailbox(a);
+      if (initial.status !== "FOUND" || initial.current.record.kind !== "start")
+        throw new Error("Missing the join's start.");
+      const start = initial.current.record.operation;
       await joinSender(a);
       await bus(a, (service) =>
         service.join({ address: other, runtime: "other", session: "session:other", cwd })
@@ -320,9 +324,6 @@ test(
           expect((yield* ledger.appendMailboxAck(record, basis)).status).toBe("APPLIED");
         })
       );
-      const state = await mailbox(a);
-      const start = state.status === "FOUND" ? state.records[0]?.record.operation : undefined;
-      if (start === undefined) throw new Error("Missing the join's start.");
       const unreferenced = Bun.randomUUIDv7();
       const rows: ReadonlyArray<readonly [string, string, Probe["forgeReceipt"]?]> = [
         [othersRead, "is recorded for another address"],
