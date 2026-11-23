@@ -1389,6 +1389,13 @@ export const layerFluree = (
                 Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
                 Effect.withSpan("Ledger.ownershipActivationAt")
               ),
+          sourceCommitAt: (source) =>
+            activation
+              .sourceCommitAt(source)
+              .pipe(
+                Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+                Effect.withSpan("Ledger.sourceCommitAt")
+              ),
           activateOwnershipEra: (intent) =>
             options?.existingOnly === true
               ? activate(intent).pipe(

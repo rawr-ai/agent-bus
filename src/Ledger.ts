@@ -220,6 +220,8 @@ export class Ledger extends Context.Service<
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
     /** Original commit of the still-active ownership era at this exact pin. Never initializes it. */
     readonly ownershipEraAt: (cut: Pin) => Effect.Effect<number, LedgerError>;
+    /** Native CID of this exact source commit. Compare with the retained external CID before cutover. */
+    readonly sourceCommitAt: (source: Pin) => Effect.Effect<string, LedgerError>;
     /** Recover the original cutover only. Compare sourceCommit with the retained external CID;
      * neither a born-new era nor an empty import plan is evidence that a migration occurred. */
     readonly ownershipActivationAt: (

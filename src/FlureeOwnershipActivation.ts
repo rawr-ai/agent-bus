@@ -112,27 +112,37 @@ export const makeOwnershipActivationReader = (store: ReadStore, instance: string
         Effect.map(store.incarnation, (id) => (id === instance ? result : unknown))
       )
     );
-  const proofAt = (lookup: OwnershipActivationLookup): IO<OwnershipActivationProof> =>
+  const sourceCommitAt = (source: Pin): IO<string> =>
     Effect.gen(function* () {
+      const unavailable = () =>
+        new LedgerError({ message: "Cannot establish the native source commit at this pin." });
       if (
-        !validLookup(lookup) ||
-        lookup.source.incarnation !== instance ||
+        !Number.isSafeInteger(source.head) ||
+        source.head < 1 ||
+        source.incarnation !== instance ||
         (yield* store.incarnation) !== instance
       )
-        return yield* invalid();
-      // H=1 has no parent. The receipt needs H's own CID and E's single edge back to it.
-      const source = yield* store.commitAt(lookup.source.head);
+        return yield* unavailable();
+      const native = yield* store.commitAt(source.head);
+      // /show names H itself. A genesis has no parent and must be this binding's incarnation.
       if (
-        source.t !== lookup.source.head ||
-        !source.id ||
-        (source.t === 1 && source.id !== instance)
+        native.t !== source.head ||
+        !/^b[a-z2-7]+$/.test(native.id) ||
+        (native.t === 1 && native.id !== instance) ||
+        (yield* store.incarnation) !== instance
       )
-        return yield* invalid();
-      const found = yield* inspect({ ...lookup, commit: source.id });
-      if (found.status !== "ALREADY_APPLIED") return yield* invalid();
-      return { cut: found.cut, commit: found.commit, sourceCommit: source.id };
+        return yield* unavailable();
+      return native.id;
     });
-  return { inspect, proofAt };
+  const proofAt = (lookup: OwnershipActivationLookup): IO<OwnershipActivationProof> =>
+    Effect.gen(function* () {
+      if (!validLookup(lookup)) return yield* invalid();
+      const sourceCommit = yield* sourceCommitAt(lookup.source);
+      const found = yield* inspect({ ...lookup, commit: sourceCommit });
+      if (found.status !== "ALREADY_APPLIED") return yield* invalid();
+      return { cut: found.cut, commit: found.commit, sourceCommit };
+    });
+  return { inspect, proofAt, sourceCommitAt };
 };
 
 /** The operator excludes every other writer; Fluree's conditional update guards the era node, not global head. */
