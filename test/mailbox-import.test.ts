@@ -23,7 +23,12 @@ import { freshLedger } from "./fluree-server.ts";
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 const stopped = Effect.void;
 const notStopped = Effect.fail(new LedgerError({ message: "old writer is not held" }));
-const presence = (address: string, installation?: string, status: "joined" | "left" = "joined") =>
+const presence = (
+  address: string,
+  installation?: string,
+  status: "joined" | "left" = "joined",
+  rejoinOf?: string
+) =>
   new Message({
     id: Bun.randomUUIDv7(),
     ts: new Date().toISOString(),
@@ -37,6 +42,7 @@ const presence = (address: string, installation?: string, status: "joined" | "le
       topics: [],
       status,
       ...(installation === undefined ? {} : { installation }),
+      ...(rejoinOf === undefined ? {} : { rejoinOf }),
     }),
   });
 
@@ -45,19 +51,31 @@ const fixture = async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bus-mailbox-import-"));
   const roots = [join(root, "copy-a"), join(root, "copy-b")] as const;
   let lose: string | undefined;
+  const admissions: Array<{ address: string; head: number }> = [];
+  let renewAtAdmission: Message | undefined;
   const selected = layerFluree(config);
   const withFault = Layer.effect(Ledger)(
     Effect.map(Ledger, (ledger) =>
       Ledger.of({
         ...ledger,
         importMailbox: (record, basis) =>
-          ledger.importMailbox(record, basis).pipe(
-            Effect.map((result) => {
-              if (record.address !== lose || result.status !== "APPLIED") return result;
-              lose = undefined;
-              return { status: "UNKNOWN" as const };
-            })
-          ),
+          Effect.gen(function* () {
+            admissions.push({ address: record.address, head: basis.head });
+            if (renewAtAdmission?.from === record.address) {
+              const renewal = renewAtAdmission;
+              renewAtAdmission = undefined;
+              const renewed = yield* ledger.admit(renewal, basis).pipe(Effect.orDie);
+              expect(renewed.status).toBe("ADMITTED");
+            }
+            const result = yield* ledger.importMailbox(record, basis);
+            if (record.address !== lose || result.status !== "APPLIED") return result;
+            lose = undefined;
+            return { status: "UNKNOWN" as const };
+          }),
+        classifyMailboxImport: (record, basis) => {
+          admissions.push({ address: record.address, head: basis.head });
+          return ledger.classifyMailboxImport(record, basis);
+        },
       })
     )
   ).pipe(Layer.provideMerge(selected));
@@ -85,7 +103,13 @@ const fixture = async () => {
   const cutNow = () => use((ledger) => ledger.presenceAt().pipe(Effect.map(({ cut }) => cut)));
   const stage = (cut: Pin) => {
     const paths = roots.map((dir) => {
-      const path = legacyCursorPath(dir, config.ledger, cut.incarnation) + ".v2";
+      // Build the files where the released writer put them, independently of the importer.
+      const path = join(
+        dir,
+        "fluree-cursors",
+        encodeURIComponent(config.ledger),
+        cut.incarnation + ".v2"
+      );
       mkdirSync(path, { recursive: true });
       writeFileSync(
         join(path, "layout"),
@@ -140,12 +164,39 @@ const fixture = async () => {
     state,
     cutNow,
     use,
+    admissions,
+    renewBeforeWrite: (entry: Message) => {
+      renewAtAdmission = entry;
+    },
     loseFirst: (address: string) => {
       lose = address;
     },
     cleanup,
   };
 };
+
+test("the released layout encodes the ledger, preserves the raw incarnation, and rejects escaping components", async () => {
+  const root = join(tmpdir(), "mailbox-layout-fixture");
+  expect(await Effect.runPromise(legacyCursorPath(root, "inbox/test:main", "gen:#%2F"))).toBe(
+    join(root, "fluree-cursors", "inbox%2Ftest%3Amain", "gen:#%2F")
+  );
+  for (const incarnation of [
+    "",
+    ".",
+    "..",
+    "/escape",
+    "nested/../escape",
+    "bad\\path",
+    "bad\0path",
+  ]) {
+    await expect(
+      Effect.runPromise(legacyCursorPath(root, "inbox:main", incarnation))
+    ).rejects.toThrow("safe cursor directories");
+  }
+  await expect(Effect.runPromise(legacyCursorPath(root, "..", "generation"))).rejects.toThrow(
+    "safe cursor directories"
+  );
+});
 
 test("paired import preserves exact local and left positions, classifies conflicting sources, and never overwrites a foreign fact", async () => {
   const f = await fixture();
@@ -272,9 +323,80 @@ test("a later presence fences the old installation's snapshot at the original cu
     // A rogue earlier writer moved this holding after the source capture, with no ledger start.
     await f.use((ledger) => ledger.append(presence("moved", f.two)));
     const moved = await f.cutNow();
-    await expect(f.run(captures)).rejects.toThrow("returned CONFLICT");
+    await expect(f.run(captures)).rejects.toThrow("changed after capture");
     expect(await f.cutNow()).toEqual(moved);
     expect(await f.state("moved")).toEqual({ status: "ABSENT" });
+  } finally {
+    await f.cleanup();
+  }
+}, 30_000);
+
+test("capture defines the source; a fresh admission cut may include earlier rows of the same import", async () => {
+  const f = await fixture();
+  try {
+    for (const address of ["a-first", "b-left", "c-missing"])
+      await f.use((ledger) => ledger.append(presence(address, f.one)));
+    await f.use((ledger) => ledger.append(presence("b-left", undefined, "left")));
+    const source = await f.cutNow();
+    const stage = f.stage(source);
+    stage(0, "a-first", 0);
+    stage(0, "b-left", 1);
+    const captures = await f.captures(source);
+    await f.use((ledger) =>
+      ledger.append(
+        new Message({
+          id: Bun.randomUUIDv7(),
+          ts: new Date().toISOString(),
+          from: "other/sender",
+          to: ["other/reader"],
+          kind: "message",
+          body: "after the paired capture",
+        })
+      )
+    );
+    const result = await f.run(captures);
+    expect(result.cut).toEqual(source);
+    expect(f.admissions).toEqual([
+      { address: "a-first", head: source.head + 1 },
+      { address: "b-left", head: source.head + 2 },
+      { address: "c-missing", head: source.head + 3 },
+    ]);
+    expect(result.rows[1]).toMatchObject({ address: "b-left", status: "IMPORTED", position: 1 });
+    expect(result.rows[2]).toMatchObject({ address: "c-missing", status: "CLASSIFIED" });
+    expect(await f.state("a-first")).toMatchObject({ status: "FOUND", position: 0 });
+    expect(await f.state("b-left")).toMatchObject({ status: "FOUND", position: 1 });
+    expect(await f.state("c-missing")).toMatchObject({ status: "UNRESOLVED", reason: "missing" });
+    const before = await f.cutNow();
+    const replayed = await f.run(captures);
+    expect(replayed.rows.map(({ status }) => status)).toEqual([
+      "VERIFIED_IMPORT",
+      "VERIFIED_IMPORT",
+      "VERIFIED_CLASSIFICATION",
+    ]);
+    expect(replayed.rows.map(({ operation }) => operation)).toEqual(
+      result.rows.map(({ operation }) => operation)
+    );
+    expect(f.admissions).toHaveLength(3);
+    expect(await f.cutNow()).toEqual(before);
+  } finally {
+    await f.cleanup();
+  }
+}, 30_000);
+
+test("a renewal after authorization but before the import write leaves the position absent", async () => {
+  const f = await fixture();
+  try {
+    const old = presence("held", f.one);
+    await f.use((ledger) => ledger.append(old));
+    const source = await f.cutNow();
+    f.stage(source)(0, "held", 0);
+    const captures = await f.captures(source);
+    f.renewBeforeWrite(presence("held", f.one, "joined", old.id));
+    await expect(f.run(captures)).rejects.toThrow("returned CONFLICT");
+    expect((await f.cutNow()).head).toBe(source.head + 1);
+    expect(await f.state("held")).toEqual({ status: "ABSENT" });
+    await expect(f.run(captures)).rejects.toThrow("changed after capture");
+    expect(f.admissions).toHaveLength(1);
   } finally {
     await f.cleanup();
   }
