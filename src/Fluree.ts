@@ -1267,6 +1267,15 @@ export const layerFluree = (
           end,
           changes,
           presenceAt,
+          ownershipEraAt: (cut) =>
+            bounded(
+              Effect.gen(function* () {
+                yield* checkEntryCut(1, cut);
+                const era = yield* ownership.eraAt(cut);
+                yield* checkEntryCut(1, cut);
+                return era;
+              })
+            ).pipe(Effect.withSpan("Ledger.ownershipEraAt")),
           admit: (entry, basis) => admitEntry(entry, basis, false),
           ...mailbox,
           appendCommand,
