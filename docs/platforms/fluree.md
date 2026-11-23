@@ -4,6 +4,7 @@ What agent-bus rests on in Fluree. The bus host runs Fluree 4.2.4 (the other mac
 
 ## The transaction server
 
+- **Verify the native parent of an activation commit.** On the disposable 4.2.9 candidate, `GET /v1/fluree/log/{ledger}?limit=1` returned the exact head number and CID as `commits[0].t` and `commits[0].commit_id`. For a linear child, `GET /v1/fluree/show/{ledger}?commit=t:E` returned `id`, `t` and `parents: [CID]`, not the scalar `previous` shown by the bundled `api/endpoints.md` example. Verified live, 2026-11-23 UTC, after reopening disposable 4.2.4-written files under 4.2.9; `test/mailbox-ledger.test.ts` also checks that an intervening commit prevents confirmation.
 - **One server orders the commits.** Every bus process writes to one transaction server over HTTP, and each `/insert` is one commit with its own `t` (inferred from the transaction model, and relied on by every cursor; `qualify:fluree` exercises it).
 - **Restart and catch-up.** On a durable, file-backed server, a reader holding a `t` from before a restart reads every commit after it once the server is back (verified live, by `bun run qualify:fluree`).
 - **Authentication.** With `--data-auth-mode required` and `--admin-auth-mode required`, the data and admin APIs refuse requests without the bearer token (documented, `operations/README.md`).

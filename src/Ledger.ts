@@ -79,6 +79,18 @@ export type DesignationResult =
   | { readonly status: "CONFLICT"; readonly current: string | null; readonly cut: Pin }
   | { readonly status: "UNKNOWN" };
 
+export interface OwnershipActivation {
+  readonly source: Pin;
+  /** Full native commit CID at the held source head. */
+  readonly commit: string;
+  /** Stable lowercase UUIDv7 persisted by the operator before dispatch. */
+  readonly operation: string;
+}
+export type OwnershipActivationResult =
+  | { readonly status: "APPLIED" | "ALREADY_APPLIED"; readonly cut: Pin; readonly commit: string }
+  | { readonly status: "CONFLICT"; readonly cut: Pin }
+  | { readonly status: "UNKNOWN" };
+
 /**
  * One entry, read by its id at one cut: the immutable attempted entry a retried send compares
  * against. A node with facts but no single decodable entry of that id is MALFORMED, never ABSENT;
@@ -201,6 +213,10 @@ export class Ledger extends Context.Service<
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
     /** Original commit of the still-active ownership era at this exact pin. Never initializes it. */
     readonly ownershipEraAt: (cut: Pin) => Effect.Effect<number, LedgerError>;
+    /** Existing-store cutover only. All other writers must already be drained and held. */
+    readonly activateOwnershipEra: (
+      intent: OwnershipActivation
+    ) => Effect.Effect<OwnershipActivationResult, LedgerError>;
     /**
      * Appends an entry only if no presence for its sender was written after `basis`, the cut
      * its ownership decision read. One attempt with a fresh id, never resent: a resent id
