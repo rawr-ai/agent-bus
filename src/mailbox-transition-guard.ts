@@ -108,6 +108,29 @@ const confirmInventory = (legacy: string, sentinel: MailboxTransitionSentinel, g
     }
   });
 
+const inspectLocalSource = (
+  root: string,
+  sentinel: MailboxTransitionSentinel,
+  allowOccupied: boolean
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const legacy = yield* localPath(root, sentinel);
+    const marker = join(`${legacy}.v2`, ".export-pending");
+    yield* confirmInstallation(root, sentinel.installation);
+    const occupied = (yield* infoAt(fs, marker)) !== undefined;
+    if (occupied && !allowOccupied) {
+      return yield* refused("the local restart sentinel is already occupied.");
+    }
+    yield* confirmInventory(legacy, sentinel, occupied);
+    yield* confirmInstallation(root, sentinel.installation);
+    yield* localPath(root, sentinel);
+    if (!allowOccupied && (yield* infoAt(fs, marker)) !== undefined) {
+      return yield* refused("the local restart sentinel is already occupied.");
+    }
+    return { legacy, occupied };
+  });
+
 const verifyMarker = (root: string, sentinel: MailboxTransitionSentinel) =>
   Effect.gen(function* () {
     const legacy = yield* localPath(root, sentinel);
@@ -166,6 +189,29 @@ const publish = (fs: FileSystem.FileSystem, exact: string, sentinel: MailboxTran
       );
   }).pipe(Effect.scoped);
 
+/** Check the original local source without publishing or accepting a restart sentinel. */
+export const preflightMailboxTransitionGuard = (
+  root: string,
+  ledger: string,
+  sources: readonly [MailboxSource, MailboxSource],
+  installation: string,
+  operation: string,
+  confirmHeld: Effect.Effect<void, LedgerError>
+) =>
+  Effect.gen(function* () {
+    const sentinel = yield* buildMailboxTransitionSentinel(
+      ledger,
+      sources,
+      installation,
+      operation
+    );
+    yield* confirmHeld;
+    yield* inspectLocalSource(root, sentinel, false);
+    yield* confirmHeld;
+    yield* inspectLocalSource(root, sentinel, false);
+    return sentinel;
+  });
+
 /** Guard one held installation; this cannot stop a legacy process that is already running. */
 export const installMailboxTransitionGuard = (
   root: string,
@@ -182,14 +228,9 @@ export const installMailboxTransitionGuard = (
       installation,
       operation
     );
-    const legacy = yield* localPath(root, sentinel);
     const fs = yield* FileSystem.FileSystem;
     yield* confirmHeld;
-    yield* confirmInstallation(root, installation);
-    const occupied = (yield* infoAt(fs, join(`${legacy}.v2`, ".export-pending"))) !== undefined;
-    yield* confirmInventory(legacy, sentinel, occupied);
-    yield* confirmInstallation(root, installation);
-    yield* localPath(root, sentinel);
+    const { legacy, occupied } = yield* inspectLocalSource(root, sentinel, true);
     yield* (occupied ? Effect.void : publish(fs, `${legacy}.v2`, sentinel)).pipe(
       Effect.andThen(confirmHeld),
       Effect.onExit(() => verify(root, sentinel))

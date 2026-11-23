@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
   cpSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
   symlinkSync,
@@ -62,6 +64,7 @@ const cli = async (args: ReadonlyArray<string>, dir?: string) => {
         HOME: home,
         PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
         NO_COLOR: "1",
+        BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
         AGENT_BUS_DIR: home,
         AGENT_BUS_PORT: "0",
       },
@@ -287,6 +290,47 @@ const gateFixture = () => {
     },
   };
 };
+
+test("the serve-admission capability is an exact read-only compatibility declaration", async () => {
+  const fixture = gateFixture();
+  try {
+    const config = join(fixture.dir, "config.json");
+    writeFileSync(config, "invalid config");
+    symlinkSync("missing-token", join(fixture.dir, "fluree-token"));
+    const before = readdirSync(fixture.dir).sort();
+    const result = await cli(["serve-admission-capability"], fixture.dir);
+    expect(result.code).toBe(0);
+    expect(result.output).toBe("r1-h-k-peer-v1\n");
+    expect(readdirSync(fixture.dir).sort()).toEqual(before);
+    expect(readFileSync(config, "utf8")).toBe("invalid config");
+    expect(fixture.requests).toEqual([]);
+  } finally {
+    fixture.close();
+  }
+});
+
+test("check-only refuses every non-fence action before local or provider operations", async () => {
+  const fixture = gateFixture();
+  try {
+    for (const action of ["check-source", "era", "ready", "admit", "permit"]) {
+      const result = await cli(
+        ["mailbox-transition", "--action", action, "--check-only"],
+        fixture.dir
+      );
+      expect(result.code).toBe(1);
+      expect(result.output).toContain("--check-only is valid only with --action fence");
+    }
+    const fence = await cli(
+      ["mailbox-transition", "--action", "fence", "--check-only", ...common],
+      fixture.dir
+    );
+    expect(fence.code).toBe(1);
+    expect(fence.output).toContain("--paired-holds-confirmed");
+    expect(fixture.requests).toEqual([]);
+  } finally {
+    fixture.close();
+  }
+});
 
 test("transition and import refuse an unknown anchored installation or incarnation before provider access", async () => {
   const fixture = gateFixture();
@@ -543,6 +587,51 @@ test("serve requires the historical verification commit even after the head adva
         : ([second, first] as const);
     cpSync(local, localCopy, { recursive: true });
     cpSync(peer, peerCopy, { recursive: true });
+    const firstReceipt = join(root, "first-receipt.json");
+    const secondReceipt = join(root, "second-receipt.json");
+    writeFileSync(firstReceipt, JSON.stringify(first));
+    writeFileSync(secondReceipt, JSON.stringify(second));
+    writeFileSync(
+      join(local, "config.json"),
+      JSON.stringify({ fluree: { url: proxy.url.origin, ledger: actual.ledger } })
+    );
+    writeFileSync(join(local, "fluree-token"), actual.token, { mode: 0o600 });
+    const checkOnly = [
+      "mailbox-transition",
+      "--action",
+      "fence",
+      "--check-only",
+      "--first-receipt",
+      firstReceipt,
+      "--second-receipt",
+      secondReceipt,
+      "--operation",
+      operation,
+      "--expected-local-installation",
+      first.installation,
+      "--expected-peer-installation",
+      second.installation,
+      "--expected-incarnation",
+      source.incarnation,
+      ...holds,
+      "--source-commit",
+    ];
+    const localMarker = join(
+      local,
+      "fluree-cursors",
+      encodeURIComponent(actual.ledger),
+      `${source.incarnation}.v2`,
+      ".export-pending"
+    );
+    const wrongSource = await cli([...checkOnly, "wrong-source-cid"], local);
+    expect(wrongSource.code).toBe(1);
+    expect(wrongSource.output).toContain("captured source commit");
+    const withoutHold = await cli([...checkOnly, sourceCommit], local);
+    expect(withoutHold.code).toBe(1);
+    expect(withoutHold.output).toContain("Cursor transition refused");
+    expect(existsSync(localMarker)).toBe(false);
+    expect(await pin()).toEqual(source);
+    expect(requests.some((entry) => /^POST \/v1\/fluree\/(create|update)/.test(entry))).toBe(false);
     for (const [dir, receipt] of [
       [local, first],
       [peer, second],

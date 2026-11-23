@@ -44,6 +44,7 @@ import {
 import {
   buildMailboxTransitionSentinel,
   installMailboxTransitionGuard,
+  preflightMailboxTransitionGuard,
   verifyMailboxTransitionGuard,
 } from "./mailbox-transition-guard.ts";
 import { Peers, Published } from "./mcp-tools.ts";
@@ -185,6 +186,10 @@ const serve = Command.make(
     `Run this machine's bus: MCP over HTTP at ${endpoint}, and native delivery to this installation's Codex and Claude peers (run one per machine)`
   )
 );
+
+const serveAdmissionCapability = Command.make("serve-admission-capability", {}, () =>
+  Console.log("r1-h-k-peer-v1")
+).pipe(Command.withDescription("Report paired serve-admission compatibility"));
 
 const initialize = Command.make(
   "initialize-installation",
@@ -1116,6 +1121,10 @@ const mailboxTransition = Command.make(
   "mailbox-transition",
   {
     action: Flag.Literals("action", ["check-source", "fence", "era", "ready", "admit", "permit"]),
+    checkOnly: Flag.Boolean("check-only").pipe(
+      Flag.withDescription("Check an unmarked local fence without publishing it"),
+      Flag.withDefault(false)
+    ),
     firstReceipt: Flag.String("first-receipt").pipe(
       Flag.withDescription("First retained source receipt"),
       Flag.optional
@@ -1187,6 +1196,9 @@ const mailboxTransition = Command.make(
   },
   (raw) =>
     Effect.gen(function* () {
+      if (raw.checkOnly && raw.action !== "fence") {
+        return yield* transitionRefusal("--check-only is valid only with --action fence.");
+      }
       if (raw.action === "check-source") {
         const configFile = yield* requiredTransitionFlag(raw.recoveredConfig, "--recovered-config");
         const tokenFile = yield* requiredTransitionFlag(raw.recoveredToken, "--recovered-token");
@@ -1303,6 +1315,16 @@ const mailboxTransition = Command.make(
             yield* confirmCursorWriterOffline;
           });
           yield* atCapturedCut;
+          if (input.checkOnly) {
+            return yield* preflightMailboxTransitionGuard(
+              busDir,
+              config.ledger,
+              sources,
+              installation,
+              input.operation,
+              atCapturedCut
+            );
+          }
           const installed = yield* installMailboxTransitionGuard(
             busDir,
             config.ledger,
@@ -1324,13 +1346,17 @@ const mailboxTransition = Command.make(
         }).pipe(Effect.provide(Fluree.layerFluree(config, { existingOnly: true })));
         yield* Console.log(
           JSON.stringify({
-            marker: join(
-              busDir,
-              "fluree-cursors",
-              encodeURIComponent(config.ledger),
-              `${sentinel.cut.incarnation}.v2`,
-              ".export-pending"
-            ),
+            ...(input.checkOnly
+              ? { preflight: "passed", marker: "absent" }
+              : {
+                  marker: join(
+                    busDir,
+                    "fluree-cursors",
+                    encodeURIComponent(config.ledger),
+                    `${sentinel.cut.incarnation}.v2`,
+                    ".export-pending"
+                  ),
+                }),
             localHold: "checked-disabled-unloaded-and-off-port",
             pairedHolds: "operator-attested",
             providerSettlement: "operator-attested",
@@ -1597,6 +1623,7 @@ const cli = Command.make("agent-bus").pipe(
   Command.withDescription("Pub/sub message bus between Claude and Codex sessions"),
   Command.withSubcommands([
     serve,
+    serveAdmissionCapability,
     cursors,
     mailboxSource,
     mailboxImport,

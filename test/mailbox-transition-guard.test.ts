@@ -24,6 +24,7 @@ import type { MailboxSource } from "../src/mailbox-import.ts";
 import {
   buildMailboxTransitionSentinel,
   installMailboxTransitionGuard,
+  preflightMailboxTransitionGuard,
   verifyMailboxTransitionGuard,
 } from "../src/mailbox-transition-guard.ts";
 
@@ -73,6 +74,12 @@ const fixture = async () => {
       op = operation,
       fs = BunFileSystem.layer
     ) => run(installMailboxTransitionGuard(roots[0], ledger, pair, one, op, held), fs);
+    const preflight = (
+      held: Effect.Effect<void, LedgerError> = Effect.void,
+      pair: readonly [MailboxSource, MailboxSource] = sources,
+      op = operation,
+      fs = BunFileSystem.layer
+    ) => run(preflightMailboxTransitionGuard(roots[0], ledger, pair, one, op, held), fs);
     const verify = (pair: readonly [MailboxSource, MailboxSource] = sources, op = operation) =>
       run(verifyMailboxTransitionGuard(roots[0], ledger, pair, one, op));
     return {
@@ -88,6 +95,7 @@ const fixture = async () => {
       operation,
       build,
       install,
+      preflight,
       verify,
       cleanup: () => rmSync(dir, { recursive: true, force: true }),
     };
@@ -105,6 +113,133 @@ const temporary = async (use: (f: Awaited<ReturnType<typeof fixture>>) => Promis
     f.cleanup();
   }
 };
+
+test("both unmarked sources pass a read-only preflight before either is fenced", () =>
+  temporary(async (f) => {
+    const readOnly = Layer.effect(
+      FileSystem.FileSystem,
+      Effect.map(FileSystem.FileSystem, (fs) => {
+        const unexpectedWrite = () => {
+          throw new Error("preflight attempted a filesystem write");
+        };
+        return FileSystem.FileSystem.of({
+          ...fs,
+          open: (path, options) =>
+            options?.flag !== undefined && options.flag !== "r"
+              ? unexpectedWrite()
+              : fs.open(path, options),
+          link: unexpectedWrite,
+          makeDirectory: unexpectedWrite,
+          remove: unexpectedWrite,
+          rename: unexpectedWrite,
+          writeFile: unexpectedWrite,
+          writeFileString: unexpectedWrite,
+        });
+      })
+    ).pipe(Layer.provide(BunFileSystem.layer));
+    const files = f.roots.map((root) => {
+      const exact = `${f.legacy(root)}.v2`;
+      return readdirSync(exact)
+        .sort()
+        .map((name) => [name, readFileSync(join(exact, name)).toString("hex")] as const);
+    });
+    let holds = 0;
+    const held = Effect.sync(() => {
+      holds++;
+    });
+    const first = await f.preflight(held, f.sources, f.operation, readOnly);
+    const second = await run(
+      preflightMailboxTransitionGuard(f.roots[1], ledger, f.sources, f.two, f.operation, held),
+      readOnly
+    );
+    expect(holds).toBe(4);
+    expect(first).toEqual(await f.build());
+    expect(second.installation).toBe(f.two);
+    for (const [index, root] of f.roots.entries()) {
+      const exact = `${f.legacy(root)}.v2`;
+      const expected = files[index];
+      if (expected === undefined) throw new Error("Missing disposable source snapshot.");
+      expect(existsSync(join(exact, ".export-pending"))).toBe(false);
+      expect(
+        readdirSync(exact)
+          .sort()
+          .map((name) => [name, readFileSync(join(exact, name)).toString("hex")] as const)
+      ).toEqual(expected);
+    }
+    expect(await f.install()).toEqual(first);
+    const inode = lstatSync(f.marker).ino;
+    const bytes = readFileSync(f.marker);
+    await expect(f.preflight()).rejects.toThrow("already occupied");
+    expect(lstatSync(f.marker).ino).toBe(inode);
+    expect(readFileSync(f.marker)).toEqual(bytes);
+    expect(await f.install()).toEqual(first);
+    expect(lstatSync(f.marker).ino).toBe(inode);
+  }));
+
+test("preflight refuses a missing exact generation, missing manifest, or changed inventory", () =>
+  temporary(async (f) => {
+    const layout = join(f.exact, "layout");
+    const original = readFileSync(layout);
+    rmSync(layout);
+    await expect(f.preflight()).rejects.toThrow();
+    expect(existsSync(f.marker)).toBe(false);
+    writeFileSync(layout, original);
+    writeFileSync(f.cursor, JSON.stringify({ address: "address-0", cursor: 9 }));
+    await expect(f.preflight()).rejects.toThrow("inventory");
+    expect(existsSync(f.marker)).toBe(false);
+    rmSync(f.exact, { recursive: true });
+    await expect(f.preflight()).rejects.toThrow();
+    expect(existsSync(f.marker)).toBe(false);
+  }));
+
+for (const kind of ["foreign", "truncated", "directory", "dangling symlink"] as const) {
+  test(`preflight refuses an occupied ${kind} marker without modifying it`, () =>
+    temporary(async (f) => {
+      if (kind === "directory") mkdirSync(f.marker);
+      else if (kind === "dangling symlink") symlinkSync(join(f.dir, "missing"), f.marker);
+      else writeFileSync(f.marker, kind === "foreign" ? "foreign" : "{");
+      const before = lstatSync(f.marker);
+      await expect(f.preflight()).rejects.toThrow("already occupied");
+      const after = lstatSync(f.marker);
+      expect(after.ino).toBe(before.ino);
+      expect(after.mode).toBe(before.mode);
+      if (kind === "foreign" || kind === "truncated")
+        expect(readFileSync(f.marker, "utf8")).toBe(kind === "foreign" ? "foreign" : "{");
+      if (kind === "dangling symlink") expect(readlinkSync(f.marker)).toBe(join(f.dir, "missing"));
+      expect(readdirSync(f.exact).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+    }));
+}
+
+test("preflight rechecks the hold and source without publishing when either changes", () =>
+  temporary(async (f) => {
+    let calls = 0;
+    const lost = Effect.suspend(() =>
+      ++calls === 1 ? Effect.void : Effect.fail(new LedgerError({ message: "hold lost" }))
+    );
+    await expect(f.preflight(lost)).rejects.toThrow("hold lost");
+    expect(calls).toBe(2);
+    expect(existsSync(f.marker)).toBe(false);
+    calls = 0;
+    const changed = Effect.sync(() => {
+      if (++calls === 2)
+        writeFileSync(f.cursor, JSON.stringify({ address: "address-0", cursor: 9 }));
+    });
+    await expect(f.preflight(changed)).rejects.toThrow("inventory");
+    expect(calls).toBe(2);
+    expect(existsSync(f.marker)).toBe(false);
+  }));
+
+test("preflight never replaces a marker appearing during the final hold check", () =>
+  temporary(async (f) => {
+    let calls = 0;
+    const occupied = Effect.sync(() => {
+      if (++calls === 2) writeFileSync(f.marker, "other writer");
+    });
+    await expect(f.preflight(occupied)).rejects.toThrow("already occupied");
+    expect(calls).toBe(2);
+    expect(readFileSync(f.marker, "utf8")).toBe("other writer");
+    expect(readdirSync(f.exact).filter((name) => name.endsWith(".tmp"))).toEqual([]);
+  }));
 
 test("the canonical strict marker preserves the digest and is not an old export plan", () =>
   temporary(async (f) => {
@@ -274,8 +409,24 @@ test("mismatched sources, cut, identity, operation, and inventory refuse before 
       [first, { ...second, installation: first.installation }],
       [{ ...first, digest: "a".repeat(64) }, second],
     ];
-    for (const pair of badPairs) await expect(f.install(Effect.void, pair)).rejects.toThrow();
+    for (const pair of badPairs) {
+      await expect(f.preflight(Effect.void, pair)).rejects.toThrow();
+      await expect(f.install(Effect.void, pair)).rejects.toThrow();
+    }
+    await expect(f.preflight(Effect.void, f.sources, "not-a-uuid-v7")).rejects.toThrow();
     await expect(f.install(Effect.void, f.sources, "not-a-uuid-v7")).rejects.toThrow();
+    await expect(
+      run(
+        preflightMailboxTransitionGuard(
+          f.roots[0],
+          ledger,
+          f.sources,
+          f.two,
+          f.operation,
+          Effect.void
+        )
+      )
+    ).rejects.toThrow();
     await expect(
       run(
         installMailboxTransitionGuard(
@@ -292,6 +443,7 @@ test("mismatched sources, cut, identity, operation, and inventory refuse before 
       { ...first, cut: { ...cut, incarnation: "../outside" } },
       { ...second, cut: { ...cut, incarnation: "../outside" } },
     ];
+    await expect(f.preflight(Effect.void, unsafe)).rejects.toThrow();
     await expect(f.install(Effect.void, unsafe)).rejects.toThrow();
     expect(existsSync(f.marker)).toBe(false);
   }));
@@ -392,6 +544,7 @@ test("symlinked cursor ancestors are refused without publishing outside the inst
     writeFileSync(join(outsideExact, "layout"), original);
     rmSync(ledgerDir, { recursive: true });
     symlinkSync(outside, ledgerDir);
+    await expect(f.preflight()).rejects.toThrow();
     await expect(f.install()).rejects.toThrow();
     expect(existsSync(join(outsideExact, ".export-pending"))).toBe(false);
     expect(readFileSync(join(outsideExact, "layout"))).toEqual(original);
@@ -404,6 +557,7 @@ for (const component of ["cursor parent", "exact generation"] as const) {
       const moved = join(f.dir, "moved-cursors");
       renameSync(path, moved);
       symlinkSync(moved, path);
+      await expect(f.preflight()).rejects.toThrow();
       await expect(f.install()).rejects.toThrow();
       const movedExact =
         component === "cursor parent"

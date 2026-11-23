@@ -23,6 +23,8 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { BunServices } from "@effect/platform-bun";
+import { Effect, Exit, type FileSystem } from "effect";
 import { releaseLauncher, removeOwned } from "../scripts/release.ts";
 import {
   MAILBOX_BOOTSTRAP_COMPLETE_FILE,
@@ -31,6 +33,15 @@ import {
   MAILBOX_BOOTSTRAP_INIT_FILE,
   MAILBOX_BOOTSTRAP_SPENT_FILE,
 } from "../src/mailbox-bootstrap.ts";
+import {
+  acceptMailboxTransitionPeer,
+  assertMailboxTransitionAdmitted,
+  MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE,
+  MAILBOX_TRANSITION_READY_FILE,
+  permitMailboxTransitionServe,
+  recordMailboxTransitionReady,
+} from "../src/mailbox-transition-admission.ts";
+import { buildMailboxTransitionSentinel } from "../src/mailbox-transition-guard.ts";
 import { fakeRelease, mutate, replaceSealed, reseal } from "./release-fixture.ts";
 
 const installer = resolve(import.meta.dir, "../scripts/install-launch-agents.sh");
@@ -438,6 +449,89 @@ if (process.argv[2] === "initialize-installation") {
     await f.dispose();
   }
 });
+
+test.skipIf(process.platform !== "darwin")(
+  "a retained owned serve job prevents full installation into its missing state root",
+  async () => {
+    const f = await fixture();
+    try {
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      await rm(f.bus, { recursive: true });
+      await writeFile(f.toolLog, "");
+      const before = await snapshot(f.root);
+      for (const args of [
+        ["--bun", f.bunA],
+        ["--remote", "fixture-host", "--bun", f.bunA],
+      ]) {
+        const result = await f.install(args, { AGENT_BUS_PORT: "47895" });
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain(
+          "owned serve LaunchAgent refers to a missing installation root"
+        );
+        expect(await snapshot(f.root)).toEqual(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+
+      // A job relying on launchd's HOME default names the default root too.
+      await writeJob(f.plist, {
+        Label: f.label,
+        ProgramArguments: [f.launcher, "serve"],
+        EnvironmentVariables: { HOME: f.home },
+      });
+      const defaultRoot = join(f.home, ".agent-bus");
+      const defaultBefore = await snapshot(f.root);
+      const result = await f.install(["--bun", f.bunA], { AGENT_BUS_DIR: "" });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain(
+        "owned serve LaunchAgent refers to a missing installation root"
+      );
+      expect(existsSync(defaultRoot)).toBe(false);
+      expect(await snapshot(f.root)).toEqual(defaultBefore);
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "a similarly named foreign job does not prove an absent state root was established",
+  async () => {
+    for (const kind of ["launcher", "label", "other-root", "malformed", "symlink"]) {
+      const f = await fixture();
+      try {
+        await writeFile(
+          f.entry,
+          `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+        );
+        const job = {
+          Label: kind === "label" ? "another.label" : f.label,
+          ProgramArguments: [kind === "launcher" ? join(f.root, "foreign") : f.launcher, "serve"],
+          EnvironmentVariables: {
+            AGENT_BUS_DIR: kind === "other-root" ? join(f.root, "other") : f.bus,
+          },
+        };
+        if (kind === "malformed") {
+          await writeFile(f.plist, "not a plist\n");
+        } else if (kind === "symlink") {
+          const target = join(f.root, "foreign-link-target.plist");
+          await writeJob(target, job);
+          await symlink(target, f.plist);
+        } else {
+          await writeJob(f.plist, job);
+        }
+        const plist = await snapshot(f.plist);
+        await rm(f.bus, { recursive: true });
+        const result = await f.install(["--bun", f.bunA]);
+        expect(result.exitCode).toBe(42);
+        expect(result.stdout).toContain("initializer reached");
+        expect(await snapshot(f.plist)).toEqual(plist);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      } finally {
+        await f.dispose();
+      }
+    }
+  }
+);
 
 test("fresh remote attachment initializes identity only and keeps identity and config on retry", async () => {
   const f = await fixture();
@@ -1116,6 +1210,422 @@ async function writeJob(path: string, job: Record<string, unknown>) {
   );
   expect(converted.exitCode).toBe(0);
 }
+
+const PEER_IDENTITY = "f0b6c1f5-3d2a-4c7b-9e8f-1a2b3c4d5e6f";
+const OPERATION = "018f1234-5678-7abc-8def-0123456789ab";
+const GENERATION = "018f1234-5678-7abc-8def-0123456789ac";
+const cursorHelp = "Exact-address cursor layout v2: operator-only";
+
+const sourceCli = (probe: string) => `const args = process.argv.slice(2);
+if (args.join(" ") === "cursors --help") console.log(${JSON.stringify(cursorHelp)});
+else if (args[0] === "serve-admission-capability") { ${probe} }
+else console.log("fixture CLI");\n`;
+
+const releaseCli = (id: string, probe: string) => `const args = process.argv.slice(2);
+if (args[0] === "--version") console.log(${JSON.stringify(`agent-bus v${id}`)});
+else if (args.join(" ") === "cursors --help") console.log(${JSON.stringify(cursorHelp)});
+else if (args[0] === "serve-admission-capability") { ${probe} }
+else console.log("fixture CLI");\n`;
+
+async function transitionFixture(f: Awaited<ReturnType<typeof fixture>>) {
+  const ledger = "agent-bus:main";
+  const cut = { incarnation: "fixture-commit", head: 7 };
+  const sources = [
+    {
+      version: 1 as const,
+      ledger,
+      installation: IDENTITY,
+      cut,
+      capturedAt: 12,
+      digest: "a".repeat(64),
+    },
+    {
+      version: 1 as const,
+      ledger,
+      installation: PEER_IDENTITY,
+      cut,
+      capturedAt: 13,
+      digest: "b".repeat(64),
+    },
+  ] as const;
+  const sentinel = await Effect.runPromise(
+    buildMailboxTransitionSentinel(ledger, sources, IDENTITY, OPERATION)
+  );
+  const exact = join(
+    f.bus,
+    "fluree-cursors",
+    encodeURIComponent(sentinel.ledger),
+    `${sentinel.cut.incarnation}.v2`
+  );
+  await mkdir(exact, { recursive: true });
+  const marker = join(exact, ".export-pending");
+  await writeFile(marker, JSON.stringify(sentinel));
+  const ready = {
+    version: 1,
+    operation: OPERATION,
+    sourceCommit: "fixture-h-cid",
+    verifiedCommit: "fixture-k-cid",
+    sources,
+    cut: sentinel.cut,
+    verifiedAt: { ...sentinel.cut, head: 8 },
+    proofDigest: "c".repeat(64),
+    installation: IDENTITY,
+  };
+  return { sentinel, exact, marker, ready, sources };
+}
+
+test.skipIf(process.platform !== "darwin")(
+  "a capable target accepts production-generated complete paired evidence without changing it",
+  async () => {
+    const f = await fixture();
+    try {
+      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      const t = await transitionFixture(f);
+      const peer = join(f.root, "peer-transition");
+      await mkdir(peer);
+      const proof = { cut: t.sentinel.cut, verifiedAt: { ...t.sentinel.cut, head: 8 }, rows: [] };
+      const checks = { confirmLocalHeld: () => Effect.void, verifyLocalFence: () => Effect.void };
+      const common = {
+        operation: OPERATION,
+        sourceCommit: "fixture-h-cid",
+        verifiedCommit: "fixture-k-cid",
+        sources: t.sources,
+        proof,
+      };
+      const local = { ...common, busDir: f.bus, localInstallation: IDENTITY };
+      const other = { ...common, busDir: peer, localInstallation: PEER_IDENTITY };
+      const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
+        Effect.runPromise(effect.pipe(Effect.provide(BunServices.layer)));
+      const localReady = await run(recordMailboxTransitionReady(local, checks));
+      const peerReady = await run(recordMailboxTransitionReady(other, checks));
+      await run(acceptMailboxTransitionPeer(local, peerReady, checks));
+      await run(acceptMailboxTransitionPeer(other, localReady, checks));
+      await run(
+        permitMailboxTransitionServe(
+          {
+            busDir: f.bus,
+            ledgerName: t.sentinel.ledger,
+            incarnation: t.sentinel.cut.incarnation,
+            localInstallation: IDENTITY,
+          },
+          await readFile(join(peer, MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE), "utf8"),
+          checks
+        )
+      );
+      const before = await snapshot(f.bus);
+      expect(await f.install(["--runtime-only", "--bun", f.bunB])).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+      });
+      expect(await snapshot(f.bus)).toEqual(before);
+
+      // Select the actual candidate source from a verified release-shaped binding,
+      // rather than relying only on a stand-in that prints the capability token.
+      const id = "1.0.0-e3e3e3e3e3e3";
+      const release = await f.release(id);
+      const releaseDigest = replaceSealed(
+        release.dir,
+        "app/cli.js",
+        releaseCli(id, 'process.stdout.write("r1-h-k-peer-v1\\n");')
+      );
+      expect(await f.install(["--release", release.dir, "--expect", releaseDigest])).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+      });
+      expect(
+        await f.install(["--runtime-only", "--bun", f.bunB], {
+          AGENT_BUS_REPO: resolve(import.meta.dir, ".."),
+        })
+      ).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(await snapshot(f.bus)).toEqual(before);
+
+      // The installer checks compatibility, not the full canonical admission.
+      // A structurally plausible extra field can pass it, but serve's strict
+      // admission check rejects that evidence before its fence callback.
+      const readyPath = join(f.bus, MAILBOX_TRANSITION_READY_FILE);
+      const readyRecord = JSON.parse(await readFile(readyPath, "utf8"));
+      await writeFile(readyPath, JSON.stringify({ ...readyRecord, foreign: true }));
+      const damaged = await snapshot(f.bus);
+      expect(
+        await f.install(["--runtime-only", "--bun", f.bunB], {
+          AGENT_BUS_REPO: resolve(import.meta.dir, ".."),
+        })
+      ).toMatchObject({ exitCode: 0, stderr: "" });
+      expect(await snapshot(f.bus)).toEqual(damaged);
+      let checkedFence = false;
+      const result = await run(
+        Effect.exit(
+          assertMailboxTransitionAdmitted(
+            {
+              busDir: f.bus,
+              ledgerName: t.sentinel.ledger,
+              incarnation: t.sentinel.cut.incarnation,
+              localInstallation: IDENTITY,
+            },
+            () =>
+              Effect.sync(() => {
+                checkedFence = true;
+              })
+          )
+        )
+      );
+      expect(Exit.isFailure(result)).toBe(true);
+      expect(checkedFence).toBe(false);
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "paired evidence prevents incompatible source or release rebinding before any surface changes",
+  async () => {
+    const f = await fixture();
+    try {
+      await writeFile(f.entry, sourceCli('console.log("old help");'));
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      const legacyId = "1.0.0-e1e1e1e1e1e1";
+      const legacy = await f.release(legacyId);
+      const legacyDigest = replaceSealed(
+        legacy.dir,
+        "app/cli.js",
+        releaseCli(legacyId, 'console.log("old help");')
+      );
+      const currentId = "1.0.0-e2e2e2e2e2e2";
+      const current = await f.release(currentId);
+      const currentDigest = replaceSealed(
+        current.dir,
+        "app/cli.js",
+        releaseCli(currentId, 'process.stdout.write("r1-h-k-peer-v1\\n");')
+      );
+      const transition = await transitionFixture(f);
+      await writeFile(
+        join(f.bus, ".mailbox-transition-ready-r1"),
+        JSON.stringify(transition.ready)
+      );
+      await writeFile(f.toolLog, "");
+      const before = await snapshot(f.root);
+      for (const args of [
+        ["--bun", f.bunB],
+        ["--runtime-only", "--bun", f.bunB],
+        ["--release", legacy.dir, "--expect", legacyDigest],
+      ]) {
+        const result = await f.install(args);
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain(
+          "does not declare the required R1 serve-admission capability"
+        );
+        expect(await snapshot(f.root)).toEqual(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+
+      const state = await snapshot(f.bus);
+      const plist = await readFile(f.plist, "utf8");
+      expect(await f.install(["--release", current.dir, "--expect", currentDigest])).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+      });
+      expect(await snapshot(f.bus)).toEqual(state);
+      expect(await readFile(f.plist, "utf8")).toBe(plist);
+      expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(current.dir));
+
+      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+      expect(await f.install(["--runtime-only", "--bun", f.bunB])).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+      });
+      expect(await snapshot(f.bus)).toEqual(state);
+      expect(await readFile(f.plist, "utf8")).toBe(plist);
+    } finally {
+      await f.dispose();
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "paired evidence requires the exact successful capability response, including its newline",
+  async () => {
+    const f = await fixture();
+    try {
+      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      await transitionFixture(f);
+      for (const probe of [
+        'process.stdout.write("r1-h-k-peer-v1");',
+        'process.stdout.write("r1-h-k-peer-v1\\n\\n");',
+        'process.stdout.write("r1-h-k-peer-v1\\n"); process.exit(1);',
+        'process.stdout.write("r1-h-k-peer-v0\\n");',
+        'process.stdout.write("r1-h-k-peer-v1\\0\\n");',
+      ]) {
+        await writeFile(f.entry, sourceCli(probe));
+        await writeFile(f.toolLog, "");
+        const before = await snapshot(f.root);
+        const result = await f.install(["--runtime-only", "--bun", f.bunB]);
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain(
+          "does not declare the required R1 serve-admission capability"
+        );
+        expect(await snapshot(f.root)).toEqual(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "malformed, foreign, incomplete or linked transition evidence is preserved and refuses rebinding",
+  async () => {
+    for (const kind of [
+      "marker-json",
+      "marker-foreign",
+      "marker-link",
+      "marker-path",
+      "marker-installation",
+      "record-json",
+      "record-foreign",
+      "record-empty-k",
+      "record-wrong-k-incarnation",
+      "record-k-at-h",
+      "record-wrong-h",
+      "record-long-cid",
+      "record-wrong-source-version",
+      "record-duplicate-admission",
+      "record-link",
+      "record-without-marker",
+      "unknown-record",
+    ]) {
+      const f = await fixture();
+      try {
+        await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+        expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+        const t = await transitionFixture(f);
+        const record = join(f.bus, ".mailbox-transition-ready-r1");
+        switch (kind) {
+          case "marker-json":
+            await writeFile(t.marker, "{");
+            break;
+          case "marker-foreign":
+            await writeFile(t.marker, JSON.stringify({ kind: "foreign" }));
+            break;
+          case "marker-link":
+            await rm(t.marker);
+            await writeFile(join(f.root, "marker-target"), JSON.stringify(t.sentinel));
+            await symlink(join(f.root, "marker-target"), t.marker);
+            break;
+          case "marker-path":
+            await writeFile(t.marker, JSON.stringify({ ...t.sentinel, ledger: "different:main" }));
+            break;
+          case "marker-installation":
+            await writeFile(
+              t.marker,
+              JSON.stringify({ ...t.sentinel, installation: PEER_IDENTITY })
+            );
+            break;
+          case "record-json":
+            await writeFile(record, "{");
+            break;
+          case "record-foreign":
+            await writeFile(record, JSON.stringify({ ...t.ready, operation: GENERATION }));
+            break;
+          case "record-empty-k":
+            await writeFile(record, JSON.stringify({ ...t.ready, verifiedAt: {} }));
+            break;
+          case "record-wrong-k-incarnation":
+            await writeFile(
+              record,
+              JSON.stringify({ ...t.ready, verifiedAt: { incarnation: "other", head: 8 } })
+            );
+            break;
+          case "record-k-at-h":
+            await writeFile(record, JSON.stringify({ ...t.ready, verifiedAt: t.ready.cut }));
+            break;
+          case "record-wrong-h":
+            await writeFile(
+              record,
+              JSON.stringify({ ...t.ready, cut: { ...t.ready.cut, head: 6 } })
+            );
+            break;
+          case "record-long-cid":
+            await writeFile(
+              record,
+              JSON.stringify({ ...t.ready, verifiedCommit: "x".repeat(4097) })
+            );
+            break;
+          case "record-wrong-source-version":
+            await writeFile(
+              record,
+              JSON.stringify({
+                ...t.ready,
+                sources: [{ ...t.ready.sources[0], version: 2 }, t.ready.sources[1]],
+              })
+            );
+            break;
+          case "record-duplicate-admission":
+            await writeFile(
+              join(f.bus, ".mailbox-transition-admitted-r1"),
+              JSON.stringify({ version: 1, attestations: [t.ready, t.ready] })
+            );
+            break;
+          case "record-link":
+            await writeFile(join(f.root, "record-target"), JSON.stringify(t.ready));
+            await symlink(join(f.root, "record-target"), record);
+            break;
+          case "record-without-marker":
+            await rm(t.marker);
+            await writeFile(record, JSON.stringify(t.ready));
+            break;
+          case "unknown-record":
+            await writeFile(join(f.bus, ".mailbox-transition-foreign-r1"), "{}");
+            break;
+        }
+        await writeFile(f.toolLog, "");
+        const before = await snapshot(f.root);
+        const result = await f.install(["--runtime-only", "--bun", f.bunB]);
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("Mailbox transition binding refused");
+        expect(await snapshot(f.root)).toEqual(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      } finally {
+        await f.dispose();
+      }
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "an ordinary pending export is not mistaken for paired transition evidence",
+  async () => {
+    const f = await fixture();
+    try {
+      await writeFile(f.entry, sourceCli('console.log("old help");'));
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      const t = await transitionFixture(f);
+      await writeFile(
+        t.marker,
+        JSON.stringify({
+          generation: GENERATION,
+          operation: OPERATION,
+          exact: "a".repeat(64),
+          original: "b".repeat(64),
+          exported: "c".repeat(64),
+        })
+      );
+      const state = await snapshot(f.bus);
+      expect(await f.install(["--runtime-only", "--bun", f.bunB])).toMatchObject({
+        exitCode: 0,
+        stderr: "",
+      });
+      expect(await snapshot(f.bus)).toEqual(state);
+    } finally {
+      await f.dispose();
+    }
+  }
+);
 
 test.skipIf(process.platform !== "darwin")(
   "an exact-aware current launcher cannot authorize selecting a legacy target against active exact state",

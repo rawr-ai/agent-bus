@@ -553,6 +553,17 @@ the selected transition is fix-forward: do not remove the marker to resume an
 old file writer. There is no qualified file rollback after later ledger reads
 or joins. *Unverified on the paired installed hosts.*
 
+If only one sentinel was installed, keep both jobs held. Resume with the same
+operation and receipts only after the other original generation satisfies its
+fence checks; restore that generation only from independently verified captured
+bytes. An irreparable mismatch needs reviewed repair, not marker removal. If a
+reported failure establishes that the provider is unreachable, restore its
+availability under the authorized provider procedure; if it establishes that
+evidence is invalid, reconcile or restore the exact retained evidence instead.
+Do not discard either kind of evidence or substitute one diagnosis for the
+other. The retained originals, sentinels and completed paired records remain
+startup dependencies until explicit retirement. *Unverified on the paired installed hosts.*
+
 ## `bun` not found over SSH on the other machine
 
 The other machine's non-interactive SSH `PATH` lacks `bun`, so a remote command that needs it can fail to find it. The source records this as a limit, not as an observed error message. *Unverified, every step: it needs the other machine, and no SSH was made to it.*

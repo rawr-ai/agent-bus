@@ -89,6 +89,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Setting up the bus host and other machines | [Install](runbooks/install.md) |
 | Starting, stopping, health and logs | [Operate](runbooks/operate.md) |
 | Putting a new version into service | [Deploy](runbooks/deploy.md) |
+| Stopping the provider, capturing its store and reading the source cut from isolated copies for the paired transition | [Provider copies](runbooks/recover-provider-copy.md) |
 | Starting sessions the bus can wake | [Launch agents](runbooks/launch-agents.md) |
 | Publishing and reading orientation guidance | [Orientation runbook](runbooks/orientation.md) |
 | Upgrading a platform or the plugin | [Upgrade](runbooks/upgrade.md) |
