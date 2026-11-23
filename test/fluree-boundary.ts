@@ -83,6 +83,10 @@ export interface Boundary {
   readonly nextPin: (reply: Reply) => Promise<Held>;
   /** Pinned query requests that passed through to Fluree. */
   readonly passed: () => number;
+  /** All queries forwarded, including history ranges on the unqualified query path. */
+  readonly queries: () => number;
+  /** Update requests seen, including no-op writes and lost answers. */
+  readonly updates: () => number;
   /**
    * Forwards the next update to Fluree and answers it with a 504 once forwarding settles;
    * resolves with Fluree's status, or with the failure if the update got no response within
@@ -100,8 +104,13 @@ const UPDATE = "/v1/fluree/update";
 
 export const boundary = (
   upstream: string,
-  /** How long a lost update may take to reach Fluree and be answered. */
-  options: { readonly forwardTimeoutMs?: number } = {}
+  options: {
+    readonly forwardTimeoutMs?: number;
+    /** Hold a prepared transaction after its body arrives, before Fluree can evaluate it. */
+    readonly beforeUpdate?: () => Promise<void>;
+    /** A test-only return budget, independent of what fits in a query or an update request. */
+    readonly queryResponseBytes?: () => number;
+  } = {}
 ): Boundary => {
   type Pending = { readonly reply: Reply; readonly arrived: (held: Held) => void };
   const queued: Pending[] = [];
@@ -110,6 +119,8 @@ export const boundary = (
   let disconnected = false;
   let refused = 0;
   let passed = 0;
+  let queries = 0;
+  let updates = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -141,6 +152,7 @@ export const boundary = (
         return response;
       }
       if (pinned !== null) passed += 1;
+      if (pinned !== null || url.pathname === "/v1/fluree/query") queries += 1;
       const headers = new Headers(request.headers);
       headers.delete("host");
       const body =
@@ -154,8 +166,24 @@ export const boundary = (
           body,
           signal,
         });
+      if (url.pathname === UPDATE) {
+        updates += 1;
+        await options.beforeUpdate?.();
+      }
       const lost = url.pathname === UPDATE ? lostUpdates.shift() : undefined;
-      if (lost === undefined) return forward(request.signal);
+      if (lost === undefined) {
+        const response = await forward(request.signal);
+        const budget = options.queryResponseBytes;
+        if (budget === undefined || (pinned === null && url.pathname !== "/v1/fluree/query"))
+          return response;
+        const payload = await response.arrayBuffer();
+        return payload.byteLength > budget()
+          ? new Response(null, { status: 502 })
+          : new Response(payload, {
+              status: response.status,
+              headers: { "content-type": "application/json" },
+            });
+      }
       // The update still goes to Fluree after the client gives up, and its outcome settles
       // whether or not Fluree answers, so the test waiting on it can always finish.
       try {
@@ -173,6 +201,8 @@ export const boundary = (
     next: (reply) => new Promise<Held>((arrived) => queued.push({ reply, arrived })),
     nextPin: (reply) => new Promise<Held>((arrived) => pins.push({ reply, arrived })),
     passed: () => passed,
+    queries: () => queries,
+    updates: () => updates,
     loseNextUpdate: (options) =>
       new Promise<Forwarded>((settled) =>
         lostUpdates.push((result) => {

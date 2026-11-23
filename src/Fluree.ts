@@ -11,6 +11,14 @@ import {
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { makeFlureeMailbox } from "./FlureeMailbox.ts";
 import {
+  makeOwnership,
+  ownershipEra,
+  predecessor,
+  successor,
+  type Transition,
+  vacantSuccessor,
+} from "./FlureePresence.ts";
+import {
   type Admission,
   type CommandRead,
   commandIri,
@@ -165,6 +173,7 @@ const fullTextConfig = (ledger: string) => ({
   "@context": { ...context, f: "https://ns.flur.ee/db#" },
   insert: {
     "@graph": [
+      ownershipEra,
       {
         "@id": `urn:fluree:${ledger}:config:ledger`,
         "@type": "f:LedgerConfig",
@@ -665,6 +674,15 @@ export const layerFluree = (
         }).pipe(Effect.withSpan("Ledger.designate"));
 
       const append = Effect.fn("Ledger.append")(function* (message: Message) {
+        if (message.kind === "presence") {
+          const read = yield* presenceAt();
+          const admission = yield* admitEntry(message, read.cut, true);
+          if (admission.status !== "ADMITTED")
+            return yield* new LedgerError({
+              message: "The presence append could not be confirmed.",
+            });
+          return;
+        }
         yield* storable(message);
         const json = yield* encode(message).pipe(
           Effect.mapError(
@@ -882,6 +900,7 @@ export const layerFluree = (
        * sender, so a node it could miss, or one the activity relation refuses, fails the read
        * rather than letting an ownership decision rest on a standing that read can't establish.
        */
+      const transitions = new WeakMap<Pin, Map<string, Transition>>();
       const presenceAt = (at?: number) =>
         bounded(
           Effect.gen(function* () {
@@ -898,6 +917,16 @@ export const layerFluree = (
             if ((yield* guardedIncarnation) !== id) return yield* replaced();
             const cut = { head, incarnation: id };
             witnesses.set(cut, read);
+            const latest = new Map<string, Transition>();
+            for (const { t, message } of read) {
+              const prior = latest.get(message.from);
+              if (prior?.t === t)
+                return yield* new LedgerError({
+                  message: "Ambiguous address transitions in one ledger commit.",
+                });
+              latest.set(message.from, { id: message.id, previous: prior?.id ?? null, t });
+            }
+            transitions.set(cut, latest);
             return { entries, cut } satisfies PresenceRead;
           })
         ).pipe(Effect.withSpan("Ledger.presenceAt"));
@@ -910,14 +939,12 @@ export const layerFluree = (
         }).pipe(Effect.flatMap(decode(Commits)));
 
       /**
-       * The insert lands only if no presence for the address had an entry asserted after the
-       * basis (qualified on Fluree 4.2.4: a guard with no solutions commits nothing and answers
-       * with the current head), and only once for its id. The answer is read from the attempted
-       * entry at its own commit, never from the response alone. Fails only before sending.
+       * The predecessor slot remains empty through sends; a presence consumes it atomically.
+       * Read the result from the attempted entry, not the HTTP response. Fails only before sending.
        */
-      const admit = (entry: Message, basis: Pin) =>
+      const admitEntry = (entry: Message, basis: Pin, appendLegacy: boolean) =>
         Effect.gen(function* () {
-          if (!validOperation(entry.id)) {
+          if (!appendLegacy && !validOperation(entry.id)) {
             return yield* new LedgerError({ message: "Invalid guarded entry id." });
           }
           yield* storable(entry);
@@ -929,47 +956,52 @@ export const layerFluree = (
           const node = toGuardedNode(entry, json);
           // Narrows, without closing, the window in which a replaced ledger takes the insert.
           if ((yield* bounded(guardedIncarnation)) !== basis.incarnation) return yield* replaced();
+          const slot = yield* ownership.prepare(entry.from, basis);
+          const before = yield* bounded(guardedHead);
+          if (before < basis.head) return yield* replaced();
+          const current = { head: before, incarnation: basis.incarnation };
+          const ready =
+            before === basis.head ||
+            Option.contains(yield* Effect.option(ownership.prepare(entry.from, current)), slot);
           const update = guardedSend(
             HttpClientRequest.post(`${api}/update?ledger=${ledger}`).pipe(
               HttpClientRequest.bodyJsonUnsafe({
                 "@context": context,
                 where: [
-                  [
-                    "optional",
-                    // VALUES binds a literal even when the address starts with '?'.
-                    ["values", ["?sender", [entry.from]]],
-                    {
-                      "@id": "?other",
-                      "@type": "bus:Presence",
-                      "bus:from": "?sender",
-                      "bus:json": { "@value": "?otherJson", "@t": "?otherT" },
-                    },
-                    ["filter", `(> ?otherT ${basis.head})`],
-                  ],
-                  ["filter", "(not (bound ?otherT))"],
+                  ...vacantSuccessor(slot),
                   ["optional", { "@id": messageIri(entry.id), "?predicate": "?object" }],
                   ["filter", "(not (bound ?object))"],
                 ],
-                insert: node,
+                insert:
+                  entry.kind === "presence"
+                    ? [{ ...node, ...predecessor(slot) }, successor(slot, entry.id)]
+                    : node,
               })
             )
           ).pipe(Effect.flatMap(decode(UpdateResponse)));
           // A failed or undecodable response says nothing about whether Fluree committed.
-          const response = yield* Effect.option(bounded(update));
+          const response = ready ? yield* Effect.option(bounded(update)) : Option.none();
           return yield* bounded(
             Effect.gen(function* () {
               const id = yield* guardedIncarnation;
               if (id !== basis.incarnation) return { status: "UNKNOWN" } satisfies Admission;
-              const answered = Option.isSome(response) && response.value.t >= 1;
-              const head = answered ? response.value.t : yield* guardedHead;
+              const acknowledged =
+                Option.isSome(response) && response.value.t >= before && response.value.t > 0;
+              const answered = acknowledged || !ready;
+              const head = !ready ? before : acknowledged ? response.value.t : yield* guardedHead;
               let commits: ReadonlyArray<number>;
               if (entry.kind === "presence") {
-                const stored = yield* mailbox.entryAttempt(entry.id, { head, incarnation: id });
+                const stored = yield* mailbox.knownEntry(
+                  entry,
+                  json,
+                  { head, incarnation: id },
+                  { slot, after: basis.head }
+                );
                 if (stored.status === "MALFORMED") return { status: "UNKNOWN" } satisfies Admission;
-                if (stored.status === "FOUND" && stored.json !== json) {
+                if (stored.status === "DIFFERENT") {
                   return { status: "REFUSED", cut: { head, incarnation: id } } satisfies Admission;
                 }
-                commits = stored.status === "FOUND" ? [stored.t] : [];
+                commits = stored.status === "SAME" ? [stored.t] : [];
               } else commits = yield* attemptAt(entry.id, head);
               if ((yield* guardedIncarnation) !== id)
                 return { status: "UNKNOWN" } satisfies Admission;
@@ -1181,30 +1213,33 @@ export const layerFluree = (
           )
         ).pipe(Effect.asVoid, Effect.withSpan("Ledger.appendCommand"));
 
+      const at = (head: number, body: Readonly<Record<string, unknown>>) =>
+        sendBounded(
+          HttpClientRequest.post(pinned(head)).pipe(
+            HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
+          ),
+          JSONLD_RESPONSE_BYTES
+        );
+      const ownership = makeOwnership(at, entryHistory, (address, basis) =>
+        Effect.gen(function* () {
+          let map = transitions.get(basis);
+          if (!map) {
+            const read = yield* presenceAt(basis.head);
+            if (read.cut.incarnation !== basis.incarnation) return yield* replaced();
+            map = transitions.get(read.cut);
+          }
+          if (!map) return yield* replaced();
+          return map.get(address);
+        })
+      );
       const mailbox = makeFlureeMailbox({
+        ownership,
         instance,
         timeout: QUERY_TIMEOUT,
         head: bounded(guardedHead),
         incarnation: bounded(guardedIncarnation),
-        at: (head, body) =>
-          sendBounded(
-            HttpClientRequest.post(pinned(head)).pipe(
-              HttpClientRequest.bodyJsonUnsafe({ "@context": context, ...body })
-            ),
-            JSONLD_RESPONSE_BYTES
-          ),
-        history: (head, body) =>
-          sendBounded(
-            HttpClientRequest.post(`${api}/query`).pipe(
-              HttpClientRequest.bodyJsonUnsafe({
-                "@context": context,
-                from: `${config.ledger}@t:1`,
-                to: `${config.ledger}@t:${head}`,
-                ...body,
-              })
-            ),
-            JSONLD_RESPONSE_BYTES
-          ),
+        at,
+        history: entryHistory,
         update: (body) =>
           bounded(
             guardedSend(
@@ -1232,7 +1267,7 @@ export const layerFluree = (
           end,
           changes,
           presenceAt,
-          admit,
+          admit: (entry, basis) => admitEntry(entry, basis, false),
           ...mailbox,
           appendCommand,
           readCommand,

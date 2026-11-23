@@ -294,8 +294,7 @@ test("resuming an uncertain import verifies the same durable operation before fi
     await expect(f.run(captures)).rejects.toThrow("returned UNKNOWN");
     const changed = await f.state("first");
     if (changed.status !== "FOUND") throw new Error("fixture lost the committed write");
-    const operation = changed.records[0]?.record.operation;
-    if (operation === undefined) throw new Error("fixture operation missing");
+    const operation = changed.current.record.operation;
     expect(await f.state("second")).toEqual({ status: "ABSENT" });
     const resumed = await f.run(captures);
     expect(resumed.rows).toEqual([

@@ -6,7 +6,11 @@ import { type CursorImportFile, cursorImportSnapshot } from "./cursor-layout.ts"
 import { LedgerError, latestPresences, runOf } from "./domain.ts";
 import { loadInstallation } from "./installation.ts";
 import { Ledger } from "./Ledger.ts";
-import { encodeMailboxRecord, type MailboxStart, type MailboxUnresolved } from "./mailbox-model.ts";
+import {
+  type MailboxStart,
+  type MailboxUnresolved,
+  mailboxIntentMatches,
+} from "./mailbox-model.ts";
 import type { Pin } from "./Query.ts";
 
 export const MailboxSourceJson = Schema.fromJsonString(
@@ -228,7 +232,7 @@ export const importMailboxPositions = (
       const recorded =
         record.kind === "start" ? { position: record.position } : { reason: record.reason };
       if (witness.status === "FOUND") {
-        if (encodeMailboxRecord(witness.record) !== encodeMailboxRecord(record)) {
+        if (!mailboxIntentMatches(record, witness.record)) {
           return yield* refused(
             `operation ${operation} has another intent; keep both old writers held.`
           );

@@ -306,20 +306,20 @@ test(
       ]);
       expect((await take(a, owner, 1)).map((message) => message.body)).toEqual(["first"]);
       const afterAck = await mailbox(a);
-      const firstReceipt = afterAck.records.at(-1)?.record;
+      const firstReceipt = afterAck.current.record;
       expect(firstReceipt?.kind).toBe("ack");
       await Effect.runPromise(Deferred.succeed(hold.release, undefined));
       const joined = await joining;
       expect(joined).toMatchObject({ cursor: afterAck.position });
       const afterJoin = await mailbox(b);
       expect(afterJoin.position).toBe(afterAck.position);
-      expect(afterJoin.records).toEqual(afterAck.records);
+      expect(afterJoin.current).toEqual(afterAck.current);
 
       const rejected = await a.runPromise(
         Effect.flatMap(Bus.Bus, (bus) => Effect.flip(bus.take(inbox, owner)))
       );
       expect(rejected._tag).toBe("NotOwner");
-      expect((await mailbox(b)).records).toEqual(afterAck.records);
+      expect((await mailbox(b)).current).toEqual(afterAck.current);
       expect((await take(b, successor)).map((message) => message.body)).toEqual(["second"]);
     } finally {
       await Effect.runPromise(Deferred.succeed(hold.release, undefined));
@@ -353,7 +353,7 @@ test(
       await joinInbox(a);
       const sent = await send(a, inbox, "still unread after takeover");
       const before = await mailbox(a);
-      const oldJoin = before.records.at(-1)?.record.operation;
+      const oldJoin = before.current.record.operation;
       if (oldJoin === undefined) throw new Error("Missing fixture start.");
       const response = take(a);
       reading = response.catch(() => undefined);
@@ -373,12 +373,12 @@ test(
       await Effect.runPromise(Deferred.succeed(hold.release, undefined));
       await expect(response).rejects.toThrow("nothing was acknowledged");
       expect(await head(b)).toBe(admissionHead);
-      expect((await mailbox(b)).records).toEqual(before.records);
+      expect((await mailbox(b)).current).toEqual(before.current);
       const served = await take(b, successor);
       expect(served.map(({ id }) => id)).toEqual([sent.message.id]);
       const after = await mailbox(b);
       expect(after.position).toBe(admissionHead);
-      expect(after.records.at(-1)?.record).toMatchObject({
+      expect(after.current.record).toMatchObject({
         kind: "ack",
         from: before.position,
         through: admissionHead,
@@ -413,14 +413,14 @@ test.each(["committed", "never-sent"] as const)(
       const observed = await mailbox(a);
       if (fault === "committed") {
         expect(observed.position).toBe(through);
-        expect(observed.records.at(-1)?.record).toMatchObject({
+        expect(observed.current.record).toMatchObject({
           through,
           servedDigest: mailboxServedDigest([sent.message.id]),
         });
         expect(await take(a)).toEqual([]);
       } else {
         expect(await head(a)).toBe(through);
-        expect(observed.records).toEqual(before.records);
+        expect(observed.current).toEqual(before.current);
         expect((await take(a)).map(({ id }) => id)).toEqual([sent.message.id]);
       }
     } finally {
@@ -460,7 +460,7 @@ test(
         Effect.flatMap(Bus.Bus, (bus) => Effect.flip(bus.take(inbox, owner)))
       );
       expect(rejected._tag).toBe("NotJoined");
-      expect((await mailbox(b)).records).toEqual(beforeLeave.records);
+      expect((await mailbox(b)).current).toEqual(beforeLeave.current);
       expect((await take(b)).map((message) => message.body)).toEqual(["while left"]);
 
       await b.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.leave(inbox, owner)));
@@ -545,12 +545,12 @@ test(
       const restarted = await joinAs({ restartPosition: true });
       expect(restarted.cursor).toBe(restartAt);
       const resolved = await mailbox(a);
-      expect(resolved.records.at(-1)?.record).toMatchObject({
+      expect(resolved.current.record).toMatchObject({
         kind: "start",
         origin: "restart",
         position: restartAt,
       });
-      expect(resolved.records.at(-1)?.record.operation).not.toBe(oldJoin);
+      expect(resolved.current.record.operation).not.toBe(oldJoin);
       expect(await take(a)).toEqual([]);
       const next = await send(a, inbox, "mail after deliberate restart");
       expect((await take(a)).map(({ id }) => id)).toEqual([next.message.id]);
@@ -609,7 +609,7 @@ test(
       await send(a, inbox, "acknowledged");
       expect((await take(a)).map((message) => message.body)).toEqual(["acknowledged"]);
       const acknowledged = await mailbox(a);
-      expect(acknowledged.records.at(-1)?.record.kind).toBe("ack");
+      expect(acknowledged.current.record.kind).toBe("ack");
       const settledHead = await head(a);
       let nudges = 0;
       await a.runPromise(
@@ -626,13 +626,13 @@ test(
         await a.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.wait(inbox, owner, 0)))
       ).toEqual([]);
       expect(await head(a)).toBe(settledHead);
-      expect((await mailbox(a)).records).toEqual(acknowledged.records);
+      expect((await mailbox(a)).current).toEqual(acknowledged.current);
 
       await send(a, "#beta", "previously skipped");
       const beforeEmpty = await head(a);
       expect(await take(a)).toEqual([]);
       expect(await head(a)).toBe(beforeEmpty);
-      expect((await mailbox(a)).records).toEqual(acknowledged.records);
+      expect((await mailbox(a)).current).toEqual(acknowledged.current);
 
       await send(a, "#gamma", "also unrelated");
       const afterUnrelated = await head(a);
@@ -641,7 +641,7 @@ test(
       expect(reads.slice(priorReads).length).toBeGreaterThan(0);
       expect(reads[priorReads]).toBe(beforeEmpty);
       expect(await head(a)).toBe(afterUnrelated);
-      expect((await mailbox(a)).records).toEqual(acknowledged.records);
+      expect((await mailbox(a)).current).toEqual(acknowledged.current);
 
       await joinInbox(a, ["beta"]);
       expect((await take(a)).map((message) => message.body)).toEqual(["previously skipped"]);
@@ -712,7 +712,7 @@ test(
         Effect.flatMap(Bus.Bus, (bus) => Effect.flip(bus.take(inbox, owner)))
       );
       expect(["LedgerError", "InvalidQuery"]).toContain(error._tag);
-      expect((await mailbox(a)).records).toEqual(before.records);
+      expect((await mailbox(a)).current).toEqual(before.current);
       expect(await head(a)).toBe(beforeHead);
       delete probe.hiddenId;
       expect((await take(a)).map((message) => message.body)).toEqual(["temporarily omitted"]);
@@ -767,7 +767,7 @@ for (const indexed of [true, false]) {
             Effect.flatMap(Bus.Bus, (bus) => Effect.flip(bus.take(inbox, owner, limit)))
           );
           expect(["LedgerError", "InvalidQuery"]).toContain(error._tag);
-          expect((await mailbox(a)).records).toEqual(before.records);
+          expect((await mailbox(a)).current).toEqual(before.current);
           expect(await head(a)).toBe(beforeRead);
         }
       } finally {

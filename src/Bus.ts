@@ -1335,8 +1335,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         }
         const state = yield* ledger.mailboxAt(address, cut);
         if (state.status === "UNRESOLVED") return yield* unresolvedMailbox(state.reason);
-        const position = state.status === "FOUND" ? state.records.at(-1) : undefined;
-        if (state.status !== "FOUND" || position === undefined) {
+        if (state.status !== "FOUND") {
           return yield* new NotJoined({
             address,
             message: "This holding has no ledger position; nothing was changed.",
@@ -1346,7 +1345,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           subscriber,
           cut,
           position: state.position,
-          positionOperation: position.record.operation,
+          positionOperation: state.current.record.operation,
         } satisfies MailboxBasis;
       });
 

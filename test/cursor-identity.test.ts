@@ -52,7 +52,7 @@ for (const [idle, recipient] of [
           expect(
             new Set(
               before.flatMap((state) =>
-                state.status === "FOUND" ? state.records.map(({ record }) => record.operation) : []
+                state.status === "FOUND" ? [state.current.record.operation] : []
               )
             ).size
           ).toBe(3);

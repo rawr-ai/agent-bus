@@ -2,7 +2,7 @@ import { Context, type Effect, type Stream } from "effect";
 import type { DirectScan, InvalidQuery, LedgerError, Logged, Message } from "./domain.ts";
 import type {
   MailboxAck,
-  MailboxRecord,
+  MailboxFact,
   MailboxStart,
   MailboxState,
   MailboxUnresolved,
@@ -115,7 +115,7 @@ export type Admission =
 export type MailboxReceiptRead =
   | {
       readonly status: "FOUND";
-      readonly record: MailboxRecord;
+      readonly record: MailboxFact;
       readonly t: number;
       readonly cut: Pin;
     }
@@ -209,10 +209,9 @@ export class Ledger extends Context.Service<
       basis: Pin
     ) => Effect.Effect<Admission, LedgerError | InvalidQuery>;
     /**
-     * All start and acknowledgement assertions for this address at one cut, with their
-     * operation witnesses and starting presences checked. This is an address-scoped history
-     * scan, not a constant-time lookup; damage, deadline or response-budget exhaustion fails
-     * instead of returning an older or partial position. Its cost is not yet qualified.
+     * The address's current receipt at one cut. The marker, sole pointer and named receipt are
+     * checked together; prior history and unlinked orphan receipts are not audited by this read.
+     * Damage, deadline or response-budget exhaustion fails instead of returning an older position.
      */
     readonly mailboxAt: (address: string, cut: Pin) => Effect.Effect<MailboxState, LedgerError>;
     /** A raw immutable receipt at the supplied cut. This is not an authorization check. */

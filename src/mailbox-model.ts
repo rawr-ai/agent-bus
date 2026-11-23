@@ -1,6 +1,5 @@
 import { createHash } from "node:crypto";
-import { Effect, Option, Schema } from "effect";
-import { LedgerError } from "./domain.ts";
+import { Option, Schema } from "effect";
 
 /** The address itself, rather than a projected property, identifies its mailbox. */
 export const mailboxIri = (address: string): string =>
@@ -9,6 +8,15 @@ export const mailboxIri = (address: string): string =>
 /** Each operation has its own immutable receipt; it is not a mailbox head pointer. */
 export const mailboxReceiptIri = (operation: string): string =>
   `urn:agent-bus:mailbox-receipt:${operation}`;
+
+/** Versioned, domain-separated references preserve exact JavaScript UTF-16 code units. */
+const identityRef = (domain: "run" | "presence", value: string): string =>
+  `v1:${createHash("sha256")
+    .update(`agent-bus:mailbox-ref:v1:${domain}\0`, "utf8")
+    .update(Buffer.from(value, "utf16le"))
+    .digest("hex")}`;
+export const mailboxRunRef = (run: string): string => identityRef("run", run);
+export const mailboxPresenceRef = (id: string): string => identityRef("presence", id);
 
 const Operation = Schema.String.check(
   Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
@@ -80,16 +88,133 @@ export type MailboxStart = typeof MailboxStart.Type;
 export type MailboxUnresolved = typeof MailboxUnresolved.Type;
 export type MailboxAck = typeof MailboxAck.Type;
 export const MailboxRecordJson = Schema.fromJsonString(MailboxRecord);
+export const encodeMailboxRecord = Schema.encodeSync(MailboxRecordJson);
 
-/** A value of one of the address-scoped predicates at its assertion commit. */
-export interface RawMailboxRecord {
-  readonly predicate: "start" | "ack";
-  readonly json: string;
-  readonly t: number;
-}
+const Reference = Schema.String.check(Schema.isPattern(/^v1:[0-9a-f]{64}$/));
+const MailboxKey = Schema.String.check(Schema.isPattern(/^urn:agent-bus:mailbox:[0-9a-f]{64}$/));
+const Previous = Schema.NullOr(Operation);
+const MailboxFactStart = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal("start"),
+  operation: Operation,
+  mailbox: MailboxKey,
+  previous: Previous,
+  runRef: Reference,
+  origin: MailboxStart.fields.origin,
+  position: Position,
+});
+const MailboxFactUnresolved = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal("unresolved"),
+  operation: Operation,
+  mailbox: MailboxKey,
+  previous: Previous,
+  reason: MailboxUnresolved.fields.reason,
+});
+const MailboxFactAck = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal("ack"),
+  operation: Operation,
+  mailbox: MailboxKey,
+  previous: Previous,
+  mode: MailboxAck.fields.mode,
+  runRef: Reference,
+  from: Position,
+  through: Position,
+  dataCut: MailboxAck.fields.dataCut,
+  subscription: Schema.Struct({
+    presenceRef: Reference,
+    topicsDigest: MailboxAck.fields.subscription.fields.topicsDigest,
+  }),
+  servedCount: Position,
+  servedDigest: MailboxAck.fields.servedDigest,
+  carrierBytes: Position,
+});
+export const MailboxFact = Schema.Union([MailboxFactStart, MailboxFactUnresolved, MailboxFactAck]);
+export type MailboxFact = typeof MailboxFact.Type;
+const MailboxFactJson = Schema.fromJsonString(MailboxFact);
+export const encodeMailboxFact = Schema.encodeSync(MailboxFactJson);
+const decodeFact = Schema.decodeUnknownOption(MailboxFactJson, { onExcessProperty: "error" });
+export const decodeMailboxFact = (input: unknown) =>
+  Option.filter(
+    decodeFact(input),
+    (fact) => typeof input === "string" && encodeMailboxFact(fact) === input
+  );
+
+/** The sole logical-intent to compact immutable-receipt mapping. */
+export const mailboxFactOf = (record: MailboxRecord, previous: string | null): MailboxFact => {
+  const base = {
+    version: 1 as const,
+    kind: record.kind,
+    operation: record.operation,
+    mailbox: mailboxIri(record.address),
+    previous,
+  };
+  switch (record.kind) {
+    case "unresolved":
+      return { ...base, kind: record.kind, reason: record.reason };
+    case "start":
+      return {
+        ...base,
+        kind: record.kind,
+        runRef: mailboxRunRef(record.run),
+        origin: record.origin,
+        position: record.position,
+      };
+    case "ack":
+      return {
+        ...base,
+        kind: record.kind,
+        mode: record.mode,
+        runRef: mailboxRunRef(record.run),
+        from: record.from,
+        through: record.through,
+        dataCut: record.dataCut,
+        subscription: {
+          presenceRef: mailboxPresenceRef(record.subscription.presenceId),
+          topicsDigest: record.subscription.topicsDigest,
+        },
+        servedCount: record.servedCount,
+        servedDigest: record.servedDigest,
+        carrierBytes: record.carrierBytes,
+      };
+  }
+};
+
+/** Compare full caller intent without treating a historical result as new authorization. */
+export const mailboxIntentMatches = (record: MailboxRecord, fact: MailboxFact): boolean =>
+  encodeMailboxFact(mailboxFactOf(record, fact.previous)) === encodeMailboxFact(fact);
+
+/** Intrinsic current-receipt checks; predecessor history and served membership are separate. */
+export const validMailboxFactAt = (fact: MailboxFact, t: number, incarnation: string): boolean => {
+  if (!Number.isSafeInteger(t) || t < 1 || fact.previous === fact.operation) return false;
+  if (fact.kind === "unresolved") return fact.previous === null;
+  if (fact.runRef === mailboxRunRef("")) return false;
+  if (fact.kind === "start") {
+    return (
+      fact.position < t &&
+      (fact.origin !== "replay" || fact.position === 0) &&
+      (fact.origin !== "import" || fact.previous === null) &&
+      ((fact.origin !== "reconcile" && fact.origin !== "restart") || fact.previous !== null)
+    );
+  }
+  return (
+    fact.previous !== null &&
+    fact.subscription.presenceRef !== mailboxPresenceRef("") &&
+    fact.from < fact.through &&
+    fact.through <= fact.dataCut.head &&
+    fact.dataCut.head < t &&
+    fact.dataCut.incarnation === incarnation &&
+    (fact.mode === "read"
+      ? fact.servedCount > 0 && fact.carrierBytes > 0
+      : fact.servedCount === 0 &&
+        fact.carrierBytes === 0 &&
+        fact.servedDigest === mailboxServedDigest([]))
+  );
+};
 
 export interface StoredMailboxRecord {
-  readonly record: MailboxRecord;
+  readonly record: MailboxFact;
   readonly t: number;
 }
 
@@ -98,104 +223,10 @@ export type MailboxState =
   | {
       readonly status: "UNRESOLVED";
       readonly reason: MailboxUnresolved["reason"];
-      readonly records: ReadonlyArray<StoredMailboxRecord>;
+      readonly current: StoredMailboxRecord;
     }
   | {
       readonly status: "FOUND";
       readonly position: number;
-      readonly records: ReadonlyArray<StoredMailboxRecord>;
+      readonly current: StoredMailboxRecord;
     };
-
-const decode = Schema.decodeUnknownOption(MailboxRecordJson, {
-  onExcessProperty: "error",
-});
-export const encodeMailboxRecord = Schema.encodeSync(MailboxRecordJson);
-/** Exact canonical bytes reject duplicate JSON keys and other alternate encodings. */
-export const decodeMailboxRecord = (input: unknown) =>
-  Option.filter(
-    decode(input),
-    (record) => typeof input === "string" && encodeMailboxRecord(record) === input
-  );
-const damaged = (t: number) =>
-  new LedgerError({ message: `A mailbox entry at t=${t} could not be established.` });
-
-/**
- * Validate every address-scoped fact before returning a position. Rewinds are explicit starts;
- * acknowledgements advance the exact prior position, not merely a greater number. One operation
- * and one mailbox fact per commit make every stored position unambiguous.
- */
-export const resolveMailbox = (
-  raw: ReadonlyArray<RawMailboxRecord>,
-  address: string,
-  head: number,
-  incarnation: string
-) =>
-  Effect.gen(function* () {
-    if (!Number.isSafeInteger(head) || head < 0 || incarnation === "") {
-      return yield* damaged(head);
-    }
-    const records: Array<StoredMailboxRecord> = [];
-    const operations = new Set<string>();
-    let position: number | undefined;
-    let unresolved: MailboxUnresolved["reason"] | undefined;
-    let previousT = 0;
-    for (const entry of [...raw].sort((a, b) => a.t - b.t)) {
-      if (!Number.isSafeInteger(entry.t) || entry.t <= previousT || entry.t > head) {
-        return yield* damaged(entry.t);
-      }
-      const decoded = decodeMailboxRecord(entry.json);
-      if (
-        Option.isNone(decoded) ||
-        (decoded.value.kind === "ack" ? "ack" : "start") !== entry.predicate ||
-        decoded.value.address !== address ||
-        (decoded.value.kind !== "unresolved" && decoded.value.run === "")
-      ) {
-        return yield* damaged(entry.t);
-      }
-      const record = decoded.value;
-      if (operations.has(record.operation)) return yield* damaged(entry.t);
-      operations.add(record.operation);
-      if (record.kind === "unresolved") {
-        if (position !== undefined || unresolved !== undefined) return yield* damaged(entry.t);
-        unresolved = record.reason;
-      } else if (record.kind === "start") {
-        if (
-          record.position >= entry.t ||
-          (record.origin === "replay" && record.position !== 0) ||
-          (record.origin === "import" && (position !== undefined || unresolved !== undefined)) ||
-          ((record.origin === "reconcile" || record.origin === "restart") &&
-            unresolved === undefined) ||
-          ((record.origin === "join" || record.origin === "replay") && unresolved !== undefined)
-        ) {
-          return yield* damaged(entry.t);
-        }
-        position = record.position;
-        unresolved = undefined;
-      } else {
-        if (
-          position === undefined ||
-          record.from !== position ||
-          record.through <= record.from ||
-          record.through > record.dataCut.head ||
-          record.dataCut.head >= entry.t ||
-          record.dataCut.incarnation !== incarnation ||
-          (record.mode === "read" && (record.servedCount === 0 || record.carrierBytes === 0)) ||
-          (record.mode === "checkpoint" &&
-            (record.servedCount !== 0 ||
-              record.carrierBytes !== 0 ||
-              record.servedDigest !== mailboxServedDigest([])))
-        ) {
-          return yield* damaged(entry.t);
-        }
-        position = record.through;
-      }
-      previousT = entry.t;
-      records.push({ record, t: entry.t });
-    }
-    if (unresolved !== undefined) {
-      return { status: "UNRESOLVED", reason: unresolved, records } satisfies MailboxState;
-    }
-    return position === undefined
-      ? ({ status: "ABSENT" } satisfies MailboxState)
-      : ({ status: "FOUND", position, records } satisfies MailboxState);
-  });

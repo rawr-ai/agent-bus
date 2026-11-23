@@ -142,12 +142,11 @@ const observe = (observer: Fixture["observer"]) =>
     })
   );
 
-/** The latest start in a mailbox's history: the only place a test needs record identity. */
-const latestStart = (state: MailboxState) => {
-  if (state.status !== "FOUND") return undefined;
-  const found = state.records.filter(({ record }) => record.kind === "start").at(-1);
-  return found === undefined ? undefined : { operation: found.record.operation, t: found.t };
-};
+/** A successful initial join points at its start until a position change. */
+const currentStart = (state: MailboxState) =>
+  state.status === "FOUND" && state.current.record.kind === "start"
+    ? { operation: state.current.record.operation, t: state.current.t }
+    : undefined;
 
 /** A real holding of the address by another session that read its mail, then left. */
 const priorHolding = (bus: Fixture["bus"]) =>
@@ -215,7 +214,7 @@ describe("cancelling a guarded join", () => {
     if (result.before.mailbox.status !== "FOUND" || result.after.mailbox.status !== "FOUND")
       throw new Error("The prior holding has no position.");
     expect(result.after.mailbox.position).toBe(result.before.mailbox.position);
-    expect(latestStart(result.after.mailbox)).toEqual(latestStart(result.before.mailbox));
+    expect(result.after.mailbox.current).toEqual(result.before.mailbox.current);
     expect(result.after.holder?.presence.session).toBe("session:competitor");
     expect(result.after.mine).toBe(false);
   });
@@ -241,7 +240,7 @@ describe("cancelling a guarded join", () => {
     expect(holder?.presence.status).toBe("joined");
     expect(holder?.joinId).toBe(result.seen.attempted);
     expect(result.after.mailbox.status).toBe("FOUND");
-    const start = latestStart(result.after.mailbox);
+    const start = currentStart(result.after.mailbox);
     expect(start?.operation).toBe(result.seen.attempted);
     const committed = await result.observer.runPromise(
       Effect.flatMap(Ledger, (ledger) => ledger.read(0))
@@ -261,6 +260,6 @@ describe("cancelling a guarded join", () => {
     if (renewed.mailbox.status !== "FOUND" || result.after.mailbox.status !== "FOUND")
       throw new Error("The admitted join has no position.");
     expect(renewed.mailbox.position).toBe(result.after.mailbox.position);
-    expect(latestStart(renewed.mailbox)).toEqual(start);
+    expect(renewed.mailbox.current).toEqual(result.after.mailbox.current);
   });
 });
