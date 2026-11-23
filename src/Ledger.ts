@@ -1,6 +1,12 @@
 import { Context, type Effect, type Stream } from "effect";
 import type { DirectScan, InvalidQuery, LedgerError, Logged, Message } from "./domain.ts";
-import type { MailboxAck, MailboxRecord, MailboxStart, MailboxState } from "./mailbox-model.ts";
+import type {
+  MailboxAck,
+  MailboxRecord,
+  MailboxStart,
+  MailboxState,
+  MailboxUnresolved,
+} from "./mailbox-model.ts";
 import type { Pin } from "./Query.ts";
 
 /** Server-selected namespaces: callers cannot name an arbitrary ledger subject. */
@@ -91,7 +97,7 @@ export type Admission =
   | { readonly status: "REFUSED"; readonly cut: Pin }
   | { readonly status: "UNKNOWN" };
 
-/** A raw operation witness at the caller's pinned cut; it does not authorize its reader. */
+/** A raw operation witness at the caller's pinned cut; address mismatch never returns its payload. */
 export type MailboxReceiptRead =
   | {
       readonly status: "FOUND";
@@ -100,6 +106,7 @@ export type MailboxReceiptRead =
       readonly cut: Pin;
     }
   | { readonly status: "ABSENT"; readonly cut: Pin }
+  | { readonly status: "ADDRESS_MISMATCH"; readonly cut: Pin }
   | { readonly status: "MALFORMED"; readonly cut: Pin }
   | { readonly status: "UNAVAILABLE" };
 
@@ -178,14 +185,21 @@ export class Ledger extends Context.Service<
     ) => Effect.Effect<MailboxReceiptRead, LedgerError>;
     /**
      * Admit a presence and its initial or replay start in the same transaction, fenced against
-     * later presence and position facts. The caller decides whether that start is lawful.
+     * later presence and position facts. Exact retries may recover an older successful commit;
+     * that historical outcome is not a current ownership grant. The caller decides whether the
+     * original start was lawful and must authorize any new operation against current state.
      */
     readonly admitWithStart: (
       entry: Message,
       start: MailboxStart,
       basis: Pin
     ) => Effect.Effect<Admission, LedgerError | InvalidQuery>;
-    /** Import a position only into an absent mailbox; no presence is fabricated. */
+    /** Record an import that could not establish a position, only while truly absent. */
+    readonly classifyMailboxImport: (
+      unresolved: MailboxUnresolved,
+      basis: Pin
+    ) => Effect.Effect<MailboxWrite, LedgerError>;
+    /** Import into an absent mailbox, or explicitly reconcile an unresolved one. */
     readonly importMailbox: (
       start: MailboxStart,
       basis: Pin

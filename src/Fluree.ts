@@ -809,7 +809,15 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
               if (id !== basis.incarnation) return { status: "UNKNOWN" } satisfies Admission;
               const answered = Option.isSome(response) && response.value.t >= 1;
               const head = answered ? response.value.t : yield* guardedHead;
-              const commits = yield* attemptAt(entry.id, head);
+              let commits: ReadonlyArray<number>;
+              if (entry.kind === "presence") {
+                const stored = yield* mailbox.entryAttempt(entry.id, { head, incarnation: id });
+                if (stored.status === "MALFORMED") return { status: "UNKNOWN" } satisfies Admission;
+                if (stored.status === "FOUND" && stored.json !== json) {
+                  return { status: "REFUSED", cut: { head, incarnation: id } } satisfies Admission;
+                }
+                commits = stored.status === "FOUND" ? [stored.t] : [];
+              } else commits = yield* attemptAt(entry.id, head);
               if ((yield* guardedIncarnation) !== id)
                 return { status: "UNKNOWN" } satisfies Admission;
               const commit = commits[0];
@@ -992,7 +1000,6 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
               Effect.map((response) => response.t)
             )
           ),
-        attemptedMessage: attemptAt,
         messageNode: toGuardedNode,
       });
 

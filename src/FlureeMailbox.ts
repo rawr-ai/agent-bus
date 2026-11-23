@@ -9,6 +9,7 @@ import {
   MailboxRecord as MailboxRecordSchema,
   type MailboxStart,
   type MailboxState,
+  type MailboxUnresolved,
   mailboxIri,
   mailboxReceiptIri,
   type RawMailboxRecord,
@@ -30,7 +31,6 @@ export interface MailboxTransport {
   readonly at: (head: number, body: Query) => IO<unknown>;
   readonly history: (head: number, body: Query) => IO<unknown>;
   readonly update: (body: Query) => IO<number>;
-  readonly attemptedMessage: (id: string, head: number) => IO<ReadonlyArray<number>>;
   readonly messageNode: (message: Message, json: string) => Readonly<Record<string, unknown>>;
 }
 
@@ -80,9 +80,10 @@ const validAddress = (value: string) => {
     return false;
   }
 };
+const recordType = (kind: MailboxRecord["kind"]) =>
+  kind === "start" ? "Start" : kind === "ack" ? "Ack" : "Unresolved";
 const sameType = (value: string | null, kind: MailboxRecord["kind"]) =>
-  value === `bus:Mailbox${kind === "start" ? "Start" : "Ack"}` ||
-  value === `${BUS}Mailbox${kind === "start" ? "Start" : "Ack"}`;
+  value === `bus:Mailbox${recordType(kind)}` || value === `${BUS}Mailbox${recordType(kind)}`;
 const stringType = (value: string | null) =>
   value === "xsd:string" || value === "http://www.w3.org/2001/XMLSchema#string";
 
@@ -156,6 +157,56 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       })
       .pipe(Effect.flatMap(decode(StartPresenceRows)));
 
+  /** The complete encoded entry at an id, not an ownership or current-standing decision. */
+  const entryAttempt = (operation: string, cut: Pin) =>
+    bounded(
+      Effect.gen(function* () {
+        yield* present(cut);
+        const subject = `urn:agent-bus:message:${operation}`;
+        const predicates = yield* transport
+          .at(cut.head, {
+            select: "?predicate",
+            values: [["?message"], [[iri(subject)]]],
+            where: { "@id": "?message", "?predicate": "?object" },
+          })
+          .pipe(Effect.flatMap(decode(Schema.Array(Schema.String))));
+        if (predicates.length === 0) {
+          yield* present(cut);
+          return { status: "ABSENT" } as const;
+        }
+        const rows = yield* startPresences(cut, [operation]);
+        const row = rows.length === 1 ? rows[0] : undefined;
+        const message =
+          row?.[4] === null || row?.[4] === undefined
+            ? Option.none()
+            : Schema.decodeUnknownOption(MessageJson, { onExcessProperty: "error" })(row[4]);
+        if (
+          row === undefined ||
+          row[0] !== subject ||
+          row[2] !== operation ||
+          row[5] === null ||
+          row[5] < 1 ||
+          row[5] > cut.head ||
+          row[6] !== true ||
+          !stringType(row[7]) ||
+          Option.isNone(message) ||
+          message.value.id !== operation ||
+          message.value.from !== row[3] ||
+          (message.value.kind === "presence" && message.value.presence === undefined) ||
+          (row[1] !== `bus:${message.value.kind === "presence" ? "Presence" : "Message"}` &&
+            row[1] !== `${BUS}${message.value.kind === "presence" ? "Presence" : "Message"}`)
+        ) {
+          return { status: "MALFORMED" } as const;
+        }
+        yield* present(cut);
+        return {
+          status: "FOUND",
+          json: Schema.encodeSync(MessageJson)(message.value),
+          t: row[5],
+        } as const;
+      })
+    );
+
   const recordsAt = (address: string, cut: Pin) =>
     Effect.gen(function* () {
       if (cut.head === 0) return [] as Array<RawMailboxRecord>;
@@ -194,7 +245,10 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
           receiptPredicates(cut, operations),
         ]);
         const starts = batch.filter(
-          (event) => event.record.kind === "start" && event.record.origin !== "import"
+          (event) =>
+            event.record.kind === "start" &&
+            event.record.origin !== "import" &&
+            event.record.origin !== "reconcile"
         );
         const presences =
           starts.length === 0
@@ -221,7 +275,11 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
             !stringType(row[5])
           )
             return yield* invalid();
-          if (event.record.kind === "start" && event.record.origin !== "import") {
+          if (
+            event.record.kind === "start" &&
+            event.record.origin !== "import" &&
+            event.record.origin !== "reconcile"
+          ) {
             const matches = presences.filter(
               (value) => value[0] === `urn:agent-bus:message:${event.record.operation}`
             );
@@ -299,7 +357,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       }
       const state = yield* mailboxAt(record.value.address, cut);
       const matched =
-        state.status === "FOUND" &&
+        state.status !== "ABSENT" &&
         state.records.some(
           (entry) =>
             entry.t === row[3] &&
@@ -308,6 +366,9 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
         );
       if (!matched) return { status: "MALFORMED", cut } satisfies MailboxReceiptRead;
       yield* present(cut);
+      if (record.value.address !== address) {
+        return { status: "ADDRESS_MISMATCH", cut } satisfies MailboxReceiptRead;
+      }
       return { status: "FOUND", record: record.value, t: row[3], cut } satisfies MailboxReceiptRead;
     }).pipe(
       (effect) => bounded(effect),
@@ -346,11 +407,11 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
   const nodes = (record: MailboxRecord, json: string) => [
     {
       "@id": mailboxIri(record.address),
-      [record.kind === "start" ? "bus:mailboxStart" : "bus:mailboxAck"]: literal(json),
+      [record.kind === "ack" ? "bus:mailboxAck" : "bus:mailboxStart"]: literal(json),
     },
     {
       "@id": mailboxReceiptIri(record.operation),
-      "@type": record.kind === "start" ? "bus:MailboxStart" : "bus:MailboxAck",
+      "@type": `bus:Mailbox${recordType(record.kind)}`,
       "bus:mailboxRecord": literal(json),
     },
   ];
@@ -380,7 +441,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
     return { head, incarnation } satisfies Pin;
   });
 
-  const writeMailbox = (record: MailboxAck | MailboxStart, basis: Pin) =>
+  const writeMailbox = (record: MailboxAck | MailboxStart | MailboxUnresolved, basis: Pin) =>
     Effect.gen(function* () {
       const json = yield* checkInput(record, basis);
       yield* present(basis);
@@ -395,17 +456,23 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
             } satisfies MailboxWrite)
           : ({ status: "IDENTITY_MISMATCH", cut: current } satisfies MailboxWrite);
       }
+      if (existing.status === "ADDRESS_MISMATCH")
+        return { status: "IDENTITY_MISMATCH", cut: current } satisfies MailboxWrite;
       if (existing.status !== "ABSENT") return { status: "UNKNOWN" } satisfies MailboxWrite;
       const prior = yield* mailboxAt(record.address, basis);
       const now = yield* mailboxAt(record.address, current);
-      if (now.status === "FOUND" && now.records.some((entry) => entry.t > basis.head)) {
+      if (now.status !== "ABSENT" && now.records.some((entry) => entry.t > basis.head)) {
         return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
       }
-      if (record.kind === "start") {
+      if (record.kind === "unresolved") {
+        if (prior.status !== "ABSENT")
+          return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
+      } else if (record.kind === "start") {
         if (
-          record.origin !== "import" ||
+          (record.origin !== "import" && record.origin !== "reconcile") ||
           record.position > basis.head ||
-          prior.status !== "ABSENT"
+          (record.origin === "import" && prior.status !== "ABSENT") ||
+          (record.origin === "reconcile" && prior.status !== "UNRESOLVED")
         ) {
           return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
         }
@@ -419,7 +486,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       }
       const raw = yield* recordsAt(record.address, basis);
       yield* resolveMailbox(
-        [...raw, { predicate: record.kind, json, t: basis.head + 1 }],
+        [...raw, { predicate: record.kind === "ack" ? "ack" : "start", json, t: basis.head + 1 }],
         record.address,
         basis.head + 1,
         basis.incarnation
@@ -433,9 +500,13 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
           insert: nodes(record, json),
         })
       );
-      if (Option.isNone(response)) return { status: "UNKNOWN" } satisfies MailboxWrite;
       return yield* Effect.gen(function* () {
-        const cut = { head: response.value, incarnation: basis.incarnation };
+        const answered = Option.isSome(response);
+        const cut = answered
+          ? { head: response.value, incarnation: basis.incarnation }
+          : yield* latest;
+        if (cut.incarnation !== basis.incarnation)
+          return { status: "UNKNOWN" } satisfies MailboxWrite;
         const saved = yield* mailboxReceiptAt(record.address, record.operation, cut);
         if (saved.status === "FOUND") {
           return encodeMailboxRecord(saved.record) === json
@@ -445,7 +516,10 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
               } satisfies MailboxWrite)
             : ({ status: "IDENTITY_MISMATCH", cut } satisfies MailboxWrite);
         }
-        if (saved.status === "ABSENT") return { status: "CONFLICT", cut } satisfies MailboxWrite;
+        if (saved.status === "ADDRESS_MISMATCH")
+          return { status: "IDENTITY_MISMATCH", cut } satisfies MailboxWrite;
+        if (saved.status === "ABSENT" && answered)
+          return { status: "CONFLICT", cut } satisfies MailboxWrite;
         return { status: "UNKNOWN" } satisfies MailboxWrite;
       }).pipe(Effect.catch(() => Effect.succeed({ status: "UNKNOWN" } satisfies MailboxWrite)));
     }).pipe(
@@ -459,12 +533,12 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
     Effect.gen(function* () {
       if (
         start.origin === "import" ||
+        start.origin === "reconcile" ||
         message.kind !== "presence" ||
         message.presence?.status !== "joined" ||
         message.from !== start.address ||
         message.id !== start.operation ||
-        (message.presence.rejoinOf ?? message.id) !== start.run ||
-        start.position > basis.head
+        (message.presence.rejoinOf ?? message.id) !== start.run
       )
         return yield* invalid();
       yield* storable(message);
@@ -472,11 +546,47 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       const messageJson = yield* Schema.encodeEffect(MessageJson)(message).pipe(
         Effect.mapError(invalid)
       );
-      yield* mailboxAt(start.address, basis);
+      yield* present(basis);
       const current = yield* latest;
       if (current.incarnation !== basis.incarnation) return yield* replaced();
+      const existing = yield* mailboxReceiptAt(start.address, start.operation, current);
+      if (existing.status === "ADDRESS_MISMATCH") {
+        return { status: "REFUSED", cut: current } satisfies Admission;
+      }
+      if (existing.status === "MALFORMED" || existing.status === "UNAVAILABLE") {
+        return { status: "UNKNOWN" } satisfies Admission;
+      }
+      if (existing.status === "FOUND" && encodeMailboxRecord(existing.record) !== json) {
+        return { status: "REFUSED", cut: current } satisfies Admission;
+      }
+      const attempted = yield* Effect.option(entryAttempt(message.id, current));
+      if (Option.isNone(attempted)) return { status: "UNKNOWN" } satisfies Admission;
+      const attempt = attempted.value;
+      if (existing.status === "FOUND") {
+        if (attempt.status !== "FOUND" || attempt.t !== existing.t) {
+          return { status: "UNKNOWN" } satisfies Admission;
+        }
+        return attempt.json === messageJson
+          ? ({
+              status: "ADMITTED",
+              cut: { head: existing.t, incarnation: current.incarnation },
+            } satisfies Admission)
+          : ({ status: "REFUSED", cut: current } satisfies Admission);
+      }
+      if (attempt.status === "MALFORMED") return { status: "UNKNOWN" } satisfies Admission;
+      if (attempt.status === "FOUND")
+        return { status: "REFUSED", cut: current } satisfies Admission;
+      if (start.position > basis.head) return yield* invalid();
+      const prior = yield* mailboxAt(start.address, basis);
+      if (
+        (start.origin === "restart" &&
+          (prior.status !== "UNRESOLVED" || start.position !== basis.head)) ||
+        (start.origin !== "restart" && prior.status === "UNRESOLVED")
+      ) {
+        return { status: "REFUSED", cut: basis } satisfies Admission;
+      }
       const now = yield* mailboxAt(start.address, current);
-      if (now.status === "FOUND" && now.records.some((entry) => entry.t > basis.head)) {
+      if (now.status !== "ABSENT" && now.records.some((entry) => entry.t > basis.head)) {
         return { status: "REFUSED", cut: current } satisfies Admission;
       }
       const raw = yield* recordsAt(start.address, basis);
@@ -497,39 +607,36 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
           insert: [transport.messageNode(message, messageJson), ...nodes(start, json)],
         })
       );
-      if (Option.isNone(response)) return { status: "UNKNOWN" } satisfies Admission;
       return yield* Effect.gen(function* () {
-        const cut = { head: response.value, incarnation: basis.incarnation };
+        const answered = Option.isSome(response);
+        const cut = answered
+          ? { head: response.value, incarnation: basis.incarnation }
+          : yield* latest;
+        if (cut.incarnation !== basis.incarnation) return { status: "UNKNOWN" } satisfies Admission;
         const receipt = yield* mailboxReceiptAt(start.address, start.operation, cut);
-        const commits = yield* transport.attemptedMessage(message.id, cut.head);
-        const presences = yield* startPresences(cut, [message.id]);
+        const stored = yield* entryAttempt(message.id, cut);
         if ((yield* transport.incarnation) !== cut.incarnation) {
           return { status: "UNKNOWN" } satisfies Admission;
         }
-        const stored = presences.length === 1 ? presences[0] : undefined;
-        if (
-          receipt.status === "FOUND" &&
-          encodeMailboxRecord(receipt.record) === json &&
-          commits.length === 1 &&
-          commits[0] === receipt.t &&
-          receipt.t > basis.head &&
-          stored?.[4] === messageJson
-        ) {
-          return {
-            status: "ADMITTED",
-            cut: { head: receipt.t, incarnation: cut.incarnation },
-          } satisfies Admission;
+        if (receipt.status === "ADDRESS_MISMATCH")
+          return { status: "REFUSED", cut } satisfies Admission;
+        if (receipt.status === "FOUND" && encodeMailboxRecord(receipt.record) !== json) {
+          return { status: "REFUSED", cut } satisfies Admission;
+        }
+        if (receipt.status === "FOUND" && stored.status === "FOUND" && stored.t === receipt.t) {
+          return stored.json === messageJson
+            ? ({
+                status: "ADMITTED",
+                cut: { head: receipt.t, incarnation: cut.incarnation },
+              } satisfies Admission)
+            : ({ status: "REFUSED", cut } satisfies Admission);
         }
         if (
-          receipt.status === "FOUND" &&
-          commits.length === 1 &&
-          commits[0] === receipt.t &&
-          stored !== undefined &&
-          stored[4] !== messageJson
-        )
+          receipt.status === "ABSENT" &&
+          (stored.status === "FOUND" || (stored.status === "ABSENT" && answered))
+        ) {
           return { status: "REFUSED", cut } satisfies Admission;
-        if (receipt.status === "ABSENT" && commits.length === 0)
-          return { status: "REFUSED", cut } satisfies Admission;
+        }
         return { status: "UNKNOWN" } satisfies Admission;
       }).pipe(Effect.catch(() => Effect.succeed({ status: "UNKNOWN" } satisfies Admission)));
     }).pipe(
@@ -542,7 +649,10 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
   return {
     mailboxAt,
     mailboxReceiptAt,
+    entryAttempt,
     admitWithStart,
+    classifyMailboxImport: (unresolved: MailboxUnresolved, basis: Pin) =>
+      writeMailbox(unresolved, basis),
     importMailbox: (start: MailboxStart, basis: Pin) => writeMailbox(start, basis),
     appendMailboxAck: (ack: MailboxAck, basis: Pin) => writeMailbox(ack, basis),
   };

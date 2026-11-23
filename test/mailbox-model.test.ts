@@ -4,6 +4,7 @@ import {
   mailboxIri,
   mailboxReceiptIri,
   mailboxServedDigest,
+  mailboxTopicsDigest,
   type RawMailboxRecord,
   resolveMailbox,
 } from "../src/mailbox-model.ts";
@@ -40,7 +41,7 @@ const ack = (from: number, through: number, t: number, id = operation()): RawMai
     from,
     through,
     dataCut: { incarnation: "fixture", head: t - 1 },
-    subscription: [],
+    subscription: { presenceId: "legacy-presence", topicsDigest: mailboxTopicsDigest([]) },
     servedCount: 1,
     servedDigest: mailboxServedDigest(["message"]),
     carrierBytes: 42,
@@ -161,7 +162,7 @@ describe("mailbox storage facts", () => {
         from: 0,
         through: 2,
         dataCut: { incarnation: "fixture", head: 2 },
-        subscription: [],
+        subscription: { presenceId: "legacy-presence", topicsDigest: mailboxTopicsDigest([]) },
         servedCount: 0,
         servedDigest: mailboxServedDigest([]),
         carrierBytes: 0,
@@ -179,5 +180,10 @@ describe("mailbox storage facts", () => {
       "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
     );
     expect(mailboxServedDigest(["a", "b"])).not.toBe(mailboxServedDigest(["b", "a"]));
+    expect(mailboxTopicsDigest([])).toBe(
+      "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+    );
+    expect(mailboxTopicsDigest(["a", "b"])).not.toBe(mailboxTopicsDigest(["b", "a"]));
+    expect(mailboxTopicsDigest(["a,b"])).not.toBe(mailboxTopicsDigest(["a", "b"]));
   });
 });

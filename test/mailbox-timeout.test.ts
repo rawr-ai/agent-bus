@@ -21,7 +21,6 @@ const transport = (): MailboxTransport => ({
   at: () => Effect.succeed([]),
   history: () => Effect.succeed([]),
   update: () => Effect.succeed(cut.head),
-  attemptedMessage: () => Effect.succeed([]),
   messageNode: () => ({}),
 });
 
