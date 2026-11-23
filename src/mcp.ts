@@ -155,7 +155,8 @@ export const historyPreset = (input: {
     const ordered =
       input.query === undefined
         ? kept.reverse()
-        : // Ids are time-ordered UUIDv7s, which break ties between messages sent in the same millisecond.
+        : // Ids break ties between messages sent in the same millisecond. A caller's operation id
+          // carries its own clock, so such a tie follows the ids, not the order of sending.
           kept.sort((a, b) => a.ts.localeCompare(b.ts) || a.id.localeCompare(b.id));
     return { messages: ordered.map(publicEntry) };
   }).pipe(
@@ -268,6 +269,7 @@ const BusHandlers = BusToolkit.toLayer(
                   id: sent.message.id,
                   ts: sent.message.ts,
                   ...(sent.wake === undefined ? {} : { wake: sent.wake }),
+                  ...(sent.replayed === true ? { replayed: true } : {}),
                 }
           )
         ),

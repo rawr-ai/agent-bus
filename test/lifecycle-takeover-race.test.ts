@@ -20,7 +20,11 @@ import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger, messageIri } from "../src/Ledger.ts";
 import type { MailboxState } from "../src/mailbox-model.ts";
 import { historyPreset } from "../src/mcp.ts";
-import { MAX_INDEXED_FIELD_BYTES } from "../src/message-carrier.ts";
+import {
+  MAX_ENTRY_CARRIER_BYTES,
+  MAX_INDEXED_FIELD_BYTES,
+  messageCarrierBytes,
+} from "../src/message-carrier.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { startFileFlureeServer } from "./fluree-file-server.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -38,6 +42,7 @@ const TIMEOUT = 60_000;
 type Config = Awaited<ReturnType<typeof freshLedger>>;
 interface Failure {
   readonly _tag?: string;
+  readonly code?: string;
   readonly message?: string;
 }
 type Outcome<A> =
@@ -109,6 +114,9 @@ const machine = async (config: Config, url: string) => {
         )
       ),
     head: () => runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end)),
+    /** The ledger's point read of one entry, as a retried send reads it. */
+    entry: (id: string) =>
+      runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.readEntry(id))),
     append: (message: Message) =>
       runtime.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.append(message))),
     admit: (message: Message) =>
@@ -239,6 +247,10 @@ const writeRelay = (upstream: string) => {
     },
     armMessage: (plan: Plan) => {
       nextMessage = plan;
+    },
+    /** Ends an `unsettled` fault, so a later call can read the ledger again. */
+    settle: () => {
+      settleUnavailable = false;
     },
     attempts,
     starts,
@@ -815,7 +827,11 @@ describe("guarded publish across serves", () => {
             expect(published(result).id).toBe(id);
           } else {
             expectRefused(result, "LedgerError", "it may have committed");
-            if (!result.ok) expect(result.error.message).toContain("do not retry blindly");
+            if (!result.ok) {
+              expect(result.error.message).toContain(
+                `Retry the identical call with operation ${id}`
+              );
+            }
           }
         }),
       TIMEOUT
@@ -1184,6 +1200,164 @@ describe("guarded presence: damaged presence", () => {
         expect(relay.starts).toEqual([true]);
         expect(await stored(config, relay.attempts[0])).toEqual([]);
         expect(positionView(await b.mailbox())).toEqual(positionView(prior));
+      }),
+    TIMEOUT
+  );
+});
+
+describe("publish with an operation across serves", () => {
+  /** A body Fluree must keep byte for byte, or every retry would be a mismatch. */
+  const awkward = "line one\r\nline two \u00e9 e\u0301 \u{1f680}  ";
+
+  for (const fault of ["forwarded", "unsettled", "unforwarded"] as const) {
+    test(
+      `response loss (${fault}) then a retry with the operation: stored once`,
+      () =>
+        stagedSend("publish-op-loss", async ({ config, relay, a }, receiver) => {
+          const operation = Bun.randomUUIDv7();
+          relay.armMessage({ fault });
+          const result = await a.publish(holder, awkward, { operation });
+          relay.settle();
+          expect(relay.messageAttempts).toEqual([operation]);
+          if (fault === "forwarded") {
+            const first = published(result);
+            expect(first.id).toBe(operation);
+          } else {
+            expectRefused(result, "LedgerError", "it may have committed");
+          }
+          const retry = await a.publish(holder, awkward, { operation });
+          if (!retry.ok || !("message" in retry.value)) throw new Error("the retry failed");
+          expect(retry.value.message.id).toBe(operation);
+          // The retry wrote again only if the first attempt never reached the ledger.
+          expect(retry.value.replayed).toBe(fault === "unforwarded" ? undefined : true);
+          expect(relay.messageAttempts).toEqual(
+            fault === "unforwarded" ? [operation, operation] : [operation]
+          );
+          expect(await commitsOf(config, operation)).toHaveLength(1);
+          expect(await stored(config, operation)).toHaveLength(1);
+          expect(await receiver.takeMessageIds()).toEqual([operation]);
+        }),
+      TIMEOUT
+    );
+  }
+
+  for (const same of [true, false]) {
+    test(
+      `a racing attempt commits the operation first: ${same ? "the same send replays" : "another send is a mismatch"}`,
+      () =>
+        stagedSend("publish-op-race", async ({ config, relay, a, b }, receiver) => {
+          const operation = Bun.randomUUIDv7();
+          let racer: Bus.Posted | undefined;
+          relay.armMessage({
+            before: async () => {
+              const raced = await b.publish(holder, same ? "raced" : "the other send", {
+                operation,
+              });
+              if (!raced.ok || !("message" in raced.value)) throw new Error("the racer failed");
+              racer = raced.value;
+              // A later attempt carries a later time, so it can't pass for the racer's entry.
+              await Bun.sleep(2);
+            },
+          });
+          const result = await a.publish(holder, "raced", { operation });
+          if (racer === undefined) throw new Error("the relay did not stage the race");
+          // A's insert was forwarded, found the id taken and committed nothing.
+          expect(relay.messageAttempts).toEqual([operation]);
+          expect(await commitsOf(config, operation)).toHaveLength(1);
+          const kept = await stored(config, operation);
+          expect(kept).toHaveLength(1);
+          expect(Schema.decodeUnknownSync(MessageJson)(kept[0]).body).toBe(
+            same ? "raced" : "the other send"
+          );
+          if (same) {
+            if (!result.ok || !("message" in result.value)) throw new Error("A failed");
+            expect(result.value.replayed).toBe(true);
+            expect(result.value.message.id).toBe(operation);
+            expect(result.value.message.ts).toBe(racer.message.ts);
+          } else {
+            expectRefused(result, "InvalidQuery", "Nothing was written");
+            if (!result.ok) expect(result.error.code).toBe("IDENTITY_MISMATCH");
+          }
+          expect(await receiver.takeMessageIds()).toEqual([operation]);
+        }),
+      TIMEOUT
+    );
+  }
+
+  test(
+    "the point read returns the entry at its own commit, a presence, absence and damage",
+    () =>
+      stagedSend("publish-op-entry", async ({ config, a, b }) => {
+        const operation = Bun.randomUUIDv7();
+        published(await a.publish(holder, awkward, { operation }));
+        const found = await b.entry(operation);
+        if (found.status !== "FOUND") throw new Error(`entry was ${found.status}`);
+        expect([found.t]).toEqual((await commitsOf(config, operation)) as Array<number>);
+        expect(found.message.body).toBe(awkward);
+
+        const joinId = (await b.peer())?.joinId;
+        if (joinId === undefined) throw new Error("the holder has no join id");
+        const presence = await b.entry(joinId);
+        expect(presence.status === "FOUND" && presence.message.kind).toBe("presence");
+        expect((await b.entry(Bun.randomUUIDv7())).status).toBe("ABSENT");
+
+        const damaged = Bun.randomUUIDv7();
+        await insertRaw(config, {
+          "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+          "@id": messageIri(damaged),
+          "@type": "bus:Message",
+          "bus:json": "not an entry",
+        });
+        expect((await b.entry(damaged)).status).toBe("MALFORMED");
+        const refused = await a.publish(holder, "over damage", { operation: damaged });
+        expectRefused(refused, "LedgerError", "nothing was sent");
+      }),
+    TIMEOUT
+  );
+
+  test(
+    "a send near the carrier bound is read back whole: its retry replays",
+    () =>
+      stagedSend("publish-op-large", async ({ config, relay, a }, receiver) => {
+        const probe = await a.publish(holder, "probe", { operation: Bun.randomUUIDv7() });
+        if (!probe.ok || !("message" in probe.value)) throw new Error("the probe failed");
+        const { origin, ts } = probe.value.message;
+        const toOf = (pad: number) => [recipient, `claude/${"p".repeat(pad)}`];
+        const carrier = (pad: number) =>
+          messageCarrierBytes([
+            new Message({
+              id: Bun.randomUUIDv7(),
+              ts,
+              from: address,
+              to: toOf(pad),
+              kind: "message",
+              body: "near the bound",
+              ...(origin === undefined ? {} : { origin }),
+            }),
+          ]);
+        // Leave room for a later millisecond's timestamp or origin difference.
+        const target = MAX_ENTRY_CARRIER_BYTES - 256;
+        let pad = 0;
+        for (let step = 0; step < 8; step++) pad += Math.floor((target - carrier(pad)) / 2);
+        expect(carrier(pad)).toBeGreaterThan(MAX_ENTRY_CARRIER_BYTES - 512);
+
+        const operation = Bun.randomUUIDv7();
+        const first = await a.publish(holder, "near the bound", { to: toOf(pad), operation });
+        if (!first.ok || !("message" in first.value)) {
+          throw new Error(`the large send failed: ${first.ok ? "preview" : first.error.message}`);
+        }
+        const retry = await a.publish(holder, "near the bound", { to: toOf(pad), operation });
+        if (!retry.ok || !("message" in retry.value)) {
+          throw new Error(`the retry failed: ${retry.ok ? "preview" : retry.error.message}`);
+        }
+        expect(retry.value.replayed).toBe(true);
+        expect(retry.value.message.id).toBe(operation);
+        expect(retry.value.message.ts).toBe(first.value.message.ts);
+        expect(relay.messageAttempts.filter((id) => id === operation)).toHaveLength(1);
+        expect(await commitsOf(config, operation)).toHaveLength(1);
+        expect((await receiver.takeMessageIds()).filter((id) => id === operation)).toEqual([
+          operation,
+        ]);
       }),
     TIMEOUT
   );

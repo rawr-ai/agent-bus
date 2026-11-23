@@ -363,7 +363,8 @@ describe("the skill distinguishes hosted and native guidance", () => {
     expect(refusals).toContain("missing conversation correlation, no Bus call was sent");
     expect(refusals).toContain("do not invent or pass an identity");
     expect(refusals).toContain("Authorized session-free lookups remain available");
-    expect(refusals).toContain("do not blindly retry an ambiguous publish, read or wait");
+    expect(refusals).toContain("do not blindly retry an ambiguous read or wait");
+    expect(refusals).toContain("retry the identical call with the same `operation`");
     expect(refusals).toContain("same operation id and identical intent");
   });
 
