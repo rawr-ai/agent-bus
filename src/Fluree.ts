@@ -1,7 +1,13 @@
 import { Context, Effect, Layer, Option, Schedule, Schema, Stream } from "effect";
 import { Sse } from "effect/encoding";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
-import { directAt, logAt, PRESENCE_NODES, presencesOf } from "./activity-read.ts";
+import {
+  directAt,
+  type LocatedPresence,
+  logAt,
+  PRESENCE_NODES,
+  presencesOf,
+} from "./activity-read.ts";
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { makeFlureeMailbox } from "./FlureeMailbox.ts";
 import {
@@ -22,6 +28,7 @@ import {
   type WitnessRead,
   witnessIri,
 } from "./Ledger.ts";
+import { mailboxWindow } from "./mailbox-window.ts";
 import { ENTRY_READ_BYTES, storable } from "./message-carrier.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
 import { POLL_INTERVAL, RECONNECT_INTERVAL } from "./timing.ts";
@@ -64,7 +71,6 @@ const Commit = Schema.Struct({ id: Schema.String });
 const Rows = Schema.Array(
   Schema.Tuple([Schema.String, Schema.Int.check(Schema.isGreaterThanOrEqualTo(1))])
 );
-const LocatedRows = Schema.Array(Schema.Tuple([Schema.String, Schema.String, Schema.Int]));
 const CandidateRows = Schema.Array(Schema.Tuple([Schema.String, Schema.Int, Schema.Boolean]));
 const RoutingRows = Schema.Array(
   Schema.Tuple([
@@ -182,7 +188,14 @@ const fullTextConfig = (ledger: string) => ({
  * cursor is the last commit `t` read. The server's event stream only wakes
  * readers: reading from the cursor decides what is delivered.
  */
-export const layerFluree = (config: FlureeConfig, options?: { readonly existingOnly?: boolean }) =>
+export const layerFluree = (
+  config: FlureeConfig,
+  options?: {
+    readonly existingOnly?: boolean;
+    /** Lower the mailbox carrier response limit for a constrained reader; never raises the ceiling. */
+    readonly mailboxHistoryBytes?: number;
+  }
+) =>
   Layer.effectContext(
     Effect.gen(function* () {
       const base = yield* HttpClient.HttpClient;
@@ -212,13 +225,21 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           Effect.scoped
         );
 
+      const capacity = (bytes: number) =>
+        new LedgerError({
+          message: `Fluree's response exceeded ${bytes} bytes; narrow the query.`,
+        });
       /**
        * A pinned query: at most `maxBytes` of response are read, and the request
        * is interrupted after QUERY_TIMEOUT. Upstream error bodies are never read. As in
        * `guardedSend`, the request belongs to this call's scope, so an early refusal, an
        * over-bound body or a timeout closes the connection instead of leaving the body flowing.
        */
-      const sendBounded = (request: HttpClientRequest.HttpClientRequest, maxBytes: number) =>
+      const sendBounded = (
+        request: HttpClientRequest.HttpClientRequest,
+        maxBytes: number,
+        overflow?: LedgerError
+      ) =>
         Effect.gen(function* () {
           const response = yield* HttpClient.withScope(client).execute(request);
           if (response.status >= 400) {
@@ -231,11 +252,7 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
                 acc.parts.push(chunk);
                 acc.size += chunk.length;
                 return acc.size > maxBytes
-                  ? Effect.fail(
-                      new LedgerError({
-                        message: `Fluree's response exceeded ${maxBytes} bytes; narrow the query.`,
-                      })
-                    )
+                  ? Effect.fail(overflow ?? capacity(maxBytes))
                   : Effect.succeed(acc);
               }
             )
@@ -700,7 +717,13 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
           }
         });
 
-      const entryHistory = (start: number, stop: number, body: Record<string, unknown>) =>
+      const entryHistory = (
+        start: number,
+        stop: number,
+        body: Record<string, unknown>,
+        bytes = JSONLD_RESPONSE_BYTES,
+        overflow?: LedgerError
+      ) =>
         sendBounded(
           HttpClientRequest.post(`${api}/query`).pipe(
             HttpClientRequest.bodyJsonUnsafe({
@@ -710,9 +733,17 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
               ...body,
             })
           ),
-          JSONLD_RESPONSE_BYTES
+          bytes,
+          overflow
         );
 
+      const witnesses = new WeakMap<Pin, ReadonlyArray<LocatedPresence>>();
+      const budget = options?.mailboxHistoryBytes;
+      const carrierBytes =
+        budget !== undefined && Number.isSafeInteger(budget) && budget > 0
+          ? Math.min(budget, JSONLD_RESPONSE_BYTES)
+          : JSONLD_RESPONSE_BYTES;
+      const carrierOverflow = capacity(carrierBytes);
       const readAt = (from: number, cut: Pin) =>
         bounded(
           Effect.gen(function* () {
@@ -720,16 +751,28 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
             const entries: Array<LocatedSlice["entries"][number]> = [];
             for (let start = from + 1; start <= cut.head; start += READ_WINDOW) {
               const stop = Math.min(cut.head, start + READ_WINDOW - 1);
-              const rows = yield* entryHistory(start, stop, {
-                select: ["?m", "?json", "?t"],
-                where: [
-                  { "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t", "@op": true } },
-                ],
-              }).pipe(Effect.flatMap(decode(LocatedRows)));
-              for (const [subject, text, t] of rows) {
-                if (t < start || t > stop) return yield* invalidResponse();
-                entries.push({ message: yield* decodeMessage(text, t), end: t, subject });
-              }
+              const window = yield* mailboxWindow(
+                start,
+                stop,
+                (body) => entryHistory(start, stop, body, carrierBytes, carrierOverflow),
+                carrierOverflow,
+                (subjects) => {
+                  const warm = witnesses.get(cut);
+                  if (warm !== undefined) return Effect.succeed(warm);
+                  // A caller may supply an independently reconstructed pin. Use the same
+                  // validated presence read at that cut, restricted to the known subjects.
+                  return query({
+                    from: `${config.ledger}@t:${cut.head}`,
+                    ...PRESENCE_NODES,
+                    values: [
+                      ["?m"],
+                      subjects.map((subject) => [{ "@value": subject, "@type": "@id" }]),
+                    ],
+                  }).pipe(Effect.flatMap((response) => presencesOf(response, cut.head)));
+                },
+                decodeMessage
+              );
+              for (const entry of window) entries.push(entry);
             }
             yield* checkEntryCut(from, cut);
             entries.sort(
@@ -853,7 +896,9 @@ export const layerFluree = (config: FlureeConfig, options?: { readonly existingO
             }).pipe(Effect.flatMap((response) => presencesOf(response, head)));
             const entries = read.map((entry) => entry.message);
             if ((yield* guardedIncarnation) !== id) return yield* replaced();
-            return { entries, cut: { head, incarnation: id } } satisfies PresenceRead;
+            const cut = { head, incarnation: id };
+            witnesses.set(cut, read);
+            return { entries, cut } satisfies PresenceRead;
           })
         ).pipe(Effect.withSpan("Ledger.presenceAt"));
 
