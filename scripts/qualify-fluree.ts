@@ -15,10 +15,10 @@
  * 4. Guarded replacement, on a ledger of its own: a write that moves a scope's
  *    current-revision pointer only while the pointer still names the revision
  *    the writer read, and in the same commit records an immutable witness and
- *    one ordinary notification. Fluree 4.2.4's source evaluates the condition
- *    in transaction staging and restages when the head moves, so two writers
- *    cannot both match (fluree/db v4.2.4: routes/transact.rs, tx_builder.rs,
- *    commit.rs, consensus/local.rs). The run checks what a client can see: a
+ *    one ordinary notification. See docs/platforms/fluree.md#conditional-updates
+ *    for each reviewed release's staging and commit path. The reported version
+ *    selects that source citation; it does not attest the executable's build.
+ *    The run checks what a client can see: a
  *    stale writer writes nothing, a success status or a later t is not
  *    evidence of applying and the operation's own witness is, an operation id
  *    that already has a witness can't be reused for another request, a lost
@@ -46,6 +46,7 @@ import * as Catalogue from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
+import { incompleteMailbox } from "../src/mailbox-read.ts";
 import { storable } from "../src/message-carrier.ts";
 import type { QueryGateway } from "../src/Query.ts";
 import * as Selections from "../src/RankedSelections.ts";
@@ -204,7 +205,8 @@ const replacement = (
   scope: string,
   expected: string | null,
   op = Bun.randomUUIDv7(),
-  body = `${scope} is now ${op}`
+  body = `${scope} is now ${op}`,
+  from = "qualify/setter"
 ): Replacement => {
   return {
     op,
@@ -213,7 +215,7 @@ const replacement = (
     message: new Message({
       id: op,
       ts: new Date().toISOString(),
-      from: "qualify/setter",
+      from,
       to: [GUARD_READER],
       kind: "message",
       body,
@@ -321,16 +323,17 @@ const witnessOf = async (r: Replacement, t?: number) => {
  * classifier. The entry is bound through `values` as an IRI, as the catalogue binds a focus:
  * a bare string there is a literal and silently matches nothing.
  */
-const assertions = async (id: string) =>
-  (
+const carrierAssertions = async (ids: ReadonlyArray<string>) =>
+  Schema.decodeUnknownSync(Schema.Array(Schema.Tuple([Schema.String, Schema.Int])))(
     await guardedQuery({
       from: at(1),
       to: at(await guardedHead()),
-      select: ["?t"],
-      values: [["?m"], [[{ "@type": "@id", "@value": messageIri(id) }]]],
+      select: ["?m", "?t"],
+      values: [["?m"], ids.map((id) => [{ "@type": "@id", "@value": messageIri(id) }])],
       where: [{ "@id": "?m", "bus:json": { "@value": "?json", "@t": "?t", "@op": true } }],
     })
-  ).length;
+  );
+const assertions = async (id: string) => (await carrierAssertions([id])).length;
 
 const joined = (from: string, session: string) =>
   new Message({
@@ -467,7 +470,15 @@ const same = (a: ReadonlyArray<string>, b: ReadonlyArray<string>) =>
 
 const qualifyGuardedReplacement = async () => {
   const version = command([fluree, "--version"]);
-  check("source citation matches the installed fluree", version.endsWith(" 4.2.4"), version);
+  const source = new Map([
+    ["fluree 4.2.4", "ba4a982ecb469e5d9d10321fdd92e93997368d58"],
+    ["fluree 4.2.9", "4b8fa30e4b20b7043751a4c41cc6218f4afce8c8"],
+  ]).get(version);
+  check(
+    "reported Fluree release has reviewed transaction source",
+    source !== undefined,
+    source === undefined ? version : `${version}; fluree/db ${source}`
+  );
 
   // The production layer creates the ledger, joins the reader and writes one ordinary entry,
   // which calibrates the history oracle before a zero from it is read as absence.
@@ -575,26 +586,23 @@ const qualifyGuardedReplacement = async () => {
     await send(base);
     const next = replacement(scope, base.op);
     await send(next);
-    notified.push(base.op, next.op);
-    const conflicting = replacement(scope, next.op, base.op, "another request");
-    return { base, next, sent: await send(conflicting, { guard }) };
+    const conflicting = replacement(
+      scope,
+      next.op,
+      base.op,
+      "another request",
+      "qualify/other-setter"
+    );
+    return { base, next, conflicting, sent: await send(conflicting, { guard }) };
   };
   const reused = await reuse("reuse", "full");
+  notified.push(reused.base.op, reused.next.op);
   check(
     "reusing a witnessed operation id is an identity mismatch and changes nothing",
     reused.sent.outcome === "identity mismatch" &&
       same(await pointerAt("reuse"), [reused.next.op]) &&
       (await assertions(reused.base.op)) === 1
   );
-  const pointerOnly = await reuse("reuse-control", "pointer");
-  notified.push(pointerOnly.base.op);
-  check(
-    "control: without the witness condition, reuse restores an old revision and notifies twice",
-    same(await pointerAt("reuse-control"), [pointerOnly.base.op]) &&
-      (await assertions(pointerOnly.base.op)) === 2,
-    `classified ${pointerOnly.sent.outcome}`
-  );
-
   // Control: without its condition the same stale write lands and the pointer forks.
   const unguarded = replacement("a", toS.op);
   const unguardedSent = await send(unguarded, { guard: "none" });
@@ -693,10 +701,100 @@ const qualifyGuardedReplacement = async () => {
     }),
     GUARDED
   );
+  const stored = await carrierAssertions(notified);
+  const complete =
+    same(stored.map(([subject]) => subject).sort(), notified.map(messageIri).sort()) &&
+    same(
+      received.map((m) => m.id),
+      notified
+    );
   check(
     "reader receives one notification per applied write",
-    same(received.map((m) => m.id).sort(), [...notified].sort()),
+    complete,
     `${received.length} of ${notified.length}`
+  );
+  if (!complete) return;
+
+  // Only now introduce a damaged message group: a second assertion under an existing id.
+  const pointerOnly = await reuse("reuse-control", "pointer");
+  const duplicated = await carrierAssertions([pointerOnly.base.op]);
+  const firstAt = Math.min(...duplicated.map(([, t]) => t));
+  const duplicateAt = Math.max(...duplicated.map(([, t]) => t));
+  const duplicate =
+    duplicated.length === 2 &&
+    firstAt < duplicateAt &&
+    pointerOnly.sent.t === duplicateAt &&
+    same(await pointerAt("reuse-control"), [pointerOnly.base.op]) &&
+    duplicated.every(([subject]) => subject === messageIri(pointerOnly.base.op));
+  check(
+    "control: without the witness condition, reuse restores an old revision and asserts its notification twice",
+    duplicate,
+    `classified ${pointerOnly.sent.outcome}`
+  );
+  if (!duplicate) return;
+  // The conflicting write adds another sender to the same subject. Its original unread group
+  // no longer has routing facts from only its own commit; check that independently of take.
+  const senderRows = await guardedQuery({
+    from: at(firstAt),
+    to: at(duplicateAt),
+    select: ["?sender", "?t"],
+    where: [
+      {
+        "@id": messageIri(pointerOnly.base.op),
+        "bus:from": { "@value": "?sender", "@t": "?t", "@op": true },
+      },
+    ],
+    orderBy: "?t",
+  });
+  const conflictingSenders =
+    JSON.stringify(senderRows) ===
+    JSON.stringify([
+      [pointerOnly.base.message.from, firstAt],
+      [pointerOnly.conflicting.message.from, duplicateAt],
+    ]);
+  check(
+    "control: the duplicate commit added a second sender to the first unread subject",
+    conflictingSenders,
+    `${senderRows.length} sender assertions`
+  );
+  if (!conflictingSenders) return;
+  const refused = await withBus(
+    Effect.gen(function* () {
+      const bus = yield* Bus.Bus;
+      const ledger = yield* Ledger;
+      const position = Effect.gen(function* () {
+        const { cut } = yield* ledger.presenceAt();
+        const state = yield* ledger.mailboxAt(GUARD_READER, cut);
+        return { head: cut.head, position: state.status === "FOUND" ? state.position : undefined };
+      });
+      const before = yield* position;
+      const take = Effect.result(bus.take(GUARD_READER, READER));
+      const first = yield* take;
+      const second = yield* take;
+      const after = yield* position;
+      const correct = [first, second].every(
+        (result) =>
+          result._tag === "Failure" &&
+          result.failure._tag === "LedgerError" &&
+          result.failure.message === incompleteMailbox(firstAt).message
+      );
+      return {
+        correct:
+          correct &&
+          before.position !== undefined &&
+          before.position === after.position &&
+          before.position < firstAt &&
+          before.head === duplicateAt &&
+          after.head === before.head,
+        detail: `first t=${firstAt}, duplicate t=${duplicateAt}; positions ${before.position}/${after.position}; heads ${before.head}/${after.head}`,
+      };
+    }),
+    GUARDED
+  );
+  check(
+    "reader refuses the duplicate group without advancing its position or the ledger",
+    refused.correct,
+    refused.detail
   );
 };
 
