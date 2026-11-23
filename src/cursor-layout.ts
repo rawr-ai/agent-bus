@@ -26,6 +26,31 @@ const PendingExport = Schema.fromJsonString(
 );
 const LegacyJson = Schema.fromJsonString(Schema.Struct({ cursor: CursorPosition }));
 
+const Installation = Schema.String.check(
+  Schema.isPattern(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/)
+);
+const SentinelSource = Schema.Struct({
+  installation: Installation,
+  digest: Digest,
+  capturedAt: Schema.Int.check(Schema.isBetween({ minimum: 1, maximum: 0xffffffffffff })),
+});
+
+/** Intentionally disjoint from the old PendingExport plan, including all of its required fields. */
+export const MailboxTransitionSentinel = Schema.Struct({
+  version: Schema.Literal(1),
+  kind: Schema.Literal("mailbox-transition-guard"),
+  operation: Generation,
+  ledger: Schema.String.check(Schema.isMinLength(1)),
+  cut: Schema.Struct({
+    incarnation: Schema.String.check(Schema.isPattern(/^(?!\.{1,2}$)[^/\\\0]+$/)),
+    head: Schema.Int.check(Schema.isGreaterThanOrEqualTo(1)),
+  }),
+  sources: Schema.Tuple([SentinelSource, SentinelSource]),
+  installation: Installation,
+});
+export type MailboxTransitionSentinel = typeof MailboxTransitionSentinel.Type;
+export const MailboxTransitionSentinelJson = Schema.fromJsonString(MailboxTransitionSentinel);
+
 type Record = typeof CursorJson.Type;
 type File = readonly [name: string, bytes: Uint8Array];
 type Output = readonly [name: string, text: string];
@@ -36,6 +61,35 @@ const exactPath = (legacy: string) => `${legacy}.v2`;
 const backupPath = (dir: string, generation: string) => `${dir}.saved-${generation}`;
 const refused = (message: string) => new LedgerError({ message: `Cursor layout: ${message}` });
 const fileError = () => refused("could not read or write cursor state.");
+
+/** Reject unchecked expectations as well as malformed or noncanonical stored markers. */
+export const validateMailboxTransitionSentinel = (input: unknown) =>
+  Effect.gen(function* () {
+    const sentinel = yield* Schema.decodeUnknownEffect(MailboxTransitionSentinel, {
+      onExcessProperty: "error",
+    })(input).pipe(Effect.mapError(() => refused("invalid mailbox transition sentinel.")));
+    const [one, two] = sentinel.sources;
+    if (
+      one.installation >= two.installation ||
+      (sentinel.installation !== one.installation && sentinel.installation !== two.installation)
+    ) {
+      return yield* refused("invalid mailbox transition sentinel sources or installation.");
+    }
+    return sentinel;
+  });
+
+/** Verify transferred evidence against a constructed expectation, not remote liveness. */
+export const verifyMailboxTransitionSentinelText = (text: string, expected: unknown) =>
+  Effect.gen(function* () {
+    const sentinel = yield* validateMailboxTransitionSentinel(expected);
+    yield* Schema.decodeUnknownEffect(MailboxTransitionSentinelJson, {
+      onExcessProperty: "error",
+    })(text).pipe(Effect.mapError(() => refused("invalid mailbox transition sentinel.")));
+    if (text !== JSON.stringify(sentinel)) {
+      return yield* refused("the mailbox transition sentinel does not match the expected receipt.");
+    }
+    return sentinel;
+  });
 const sha256 = (value: string | Uint8Array) => Bun.CryptoHasher.hash("sha256", value, "hex");
 const fingerprint = (files: ReadonlyArray<File>) =>
   sha256(JSON.stringify(files.map(([name, bytes]) => [name, sha256(bytes)])));
@@ -153,6 +207,46 @@ const pendingExport = (fs: FileSystem.FileSystem, exact: string) =>
     if ((yield* infoAt(fs, file)) === undefined) return undefined;
     const bytes = yield* readRegular(fs, file);
     return yield* fromBytes(PendingExport, bytes, "the pending export");
+  });
+
+const expectedSentinel = (
+  fs: FileSystem.FileSystem,
+  exact: string,
+  expected: MailboxTransitionSentinel
+) =>
+  Effect.gen(function* () {
+    const file = join(exact, exporting);
+    if ((yield* infoAt(fs, file))?.type !== "File") return yield* fileError();
+    const opened = yield* fs
+      .open(file, { flag: "r", noFollow: true })
+      .pipe(Effect.mapError(fileError));
+    if ((yield* opened.stat.pipe(Effect.mapError(fileError))).type !== "File") {
+      return yield* fileError();
+    }
+    const bytes = new Uint8Array(Buffer.byteLength(JSON.stringify(expected), "utf8") + 1);
+    let offset = 0;
+    while (offset < bytes.length) {
+      const count = yield* opened.read(bytes.subarray(offset)).pipe(Effect.mapError(fileError));
+      if (count === 0) break;
+      offset += count;
+    }
+    const text = yield* Effect.try({
+      try: () => cursorText(bytes.subarray(0, offset)),
+      catch: () => refused("invalid mailbox transition sentinel."),
+    });
+    yield* verifyMailboxTransitionSentinelText(text, expected);
+    if ((yield* infoAt(fs, file))?.type !== "File") return yield* fileError();
+  }).pipe(Effect.scoped);
+
+/** Verify only the marker; callers must separately establish the source and held-writer proof. */
+export const verifyMailboxTransitionSentinelFile = (
+  legacy: string,
+  expected: MailboxTransitionSentinel
+) =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const sentinel = yield* validateMailboxTransitionSentinel(expected);
+    yield* expectedSentinel(fs, exactPath(legacy), sentinel);
   });
 
 const exportUnfinished = () =>
@@ -320,14 +414,24 @@ export type CursorImportFile =
  * An unreadable tree refuses capture. Readable bytes that fail cursor decoding can be
  * attested, but are never a missing file or a numeric read position.
  */
-export const cursorImportSnapshot = (legacy: string) =>
+export const cursorImportSnapshot = (
+  legacy: string,
+  options?: { readonly expectedSentinel: MailboxTransitionSentinel }
+) =>
   Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     const exact = exactPath(legacy);
+    const sentinel =
+      options === undefined
+        ? undefined
+        : yield* validateMailboxTransitionSentinel(options.expectedSentinel);
     const snapshot = yield* readSnapshot(fs, exact, manifestName);
     const old = yield* readLegacy(fs, legacy);
     const files = new Map<string, CursorImportFile>();
     if (snapshot === undefined) {
+      if (sentinel !== undefined) {
+        return yield* refused("the guarded exact cursor generation is missing.");
+      }
       if (old.receipt !== undefined || old.files.length > 0) {
         return yield* refused(
           "no attributable active exact generation; do not import legacy bytes by guesswork."
@@ -335,7 +439,11 @@ export const cursorImportSnapshot = (legacy: string) =>
       }
     } else {
       if (snapshot.marker === undefined) return yield* fileError();
-      if (yield* pendingExport(fs, exact)) return yield* exportUnfinished();
+      if (sentinel === undefined) {
+        if (yield* pendingExport(fs, exact)) return yield* exportUnfinished();
+      } else {
+        yield* expectedSentinel(fs, exact, sentinel);
+      }
       const manifest = yield* fromBytes(Manifest, snapshot.marker, "the exact cursor manifest");
       yield* checkRetained(old, manifest);
       for (const [name, bytes] of snapshot.files) {
@@ -352,6 +460,7 @@ export const cursorImportSnapshot = (legacy: string) =>
             : { status: "unreadable" }
         );
       }
+      if (sentinel !== undefined) yield* expectedSentinel(fs, exact, sentinel);
     }
     return {
       digest: sha256(JSON.stringify([snapshotIdentity(snapshot), old.identity])),

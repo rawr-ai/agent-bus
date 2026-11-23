@@ -632,6 +632,16 @@ fi
 
 mkdir -p "$bus_dir" "$agents"
 
+if [ -e "$bus_dir/config.json" ] || [ -L "$bus_dir/config.json" ]; then
+  [ -f "$bus_dir/config.json" ] && [ ! -L "$bus_dir/config.json" ] ||
+    fail "The existing config is not a real file; restore this installation before reinstalling."
+  valid_identity "$bus_dir/installation-id" ||
+    fail "Existing config but no valid installation-id. Restore the original identity before reinstalling."
+else
+  AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation \
+    --fluree-url "$url" --fluree-ledger "$ledger"
+fi
+
 if [ -z "$remote" ]; then
   fluree_bin=$(command -v fluree) || {
     echo "fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun" >&2
@@ -690,7 +700,6 @@ wait_for "$url" "$log"
 require_auth
 
 if [ ! -f "$bus_dir/config.json" ]; then
-  AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation
   printf '{ "fluree": { "url": "%s", "ledger": "%s" } }\n' "$url" "$ledger" > "$bus_dir/config.json"
   echo "bus store: $ledger at $url"
 fi

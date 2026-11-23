@@ -207,32 +207,260 @@ Before claiming the shared-ledger sender fence or admission bound for a cohort, 
 
 ## Import file positions into the ledger
 
-Use this only for the paired cutover from a file-based release. It is not an activation or rollback procedure. Keep both old writers disabled and unloaded through reconciliation and selection of the paired release. The Fluree server and tunnel stay up. Use the reviewed candidate executable without rebinding either installed launcher; set `AGENT_BUS_DIR`, `AGENT_BUS_LABEL` and `AGENT_BUS_PORT` to the verified local installation, job and listener. The CLI verifies the local hold; the operator establishes the remote hold separately.
+Use this only for the two identified installations moving from the retained
+file-based release to one reviewed ledger-mailbox release. This is not a
+general third-installation or restored-ledger procedure. The operator must
+exclude every other writer and any ledger replacement or restore throughout
+the transition. Use the reviewed candidate executable without rebinding either
+installed launcher. Set `AGENT_BUS_DIR`, `AGENT_BUS_LABEL` and `AGENT_BUS_PORT`
+to the independently identified local installation, job and listener on each
+machine. The CLI checks that local job is disabled, unloaded and off its port;
+the peer hold and provider settlement below are operator attestations, not
+facts the local CLI can prove.
 
-1. After verifying both holds, on **each** original installation:
+On each machine, export the three values for that installation before running
+the commands below:
+
+```sh
+export AGENT_BUS_DIR="$state_dir" AGENT_BUS_LABEL="$serve_label" AGENT_BUS_PORT="$serve_port"
+```
+
+Before capturing anything, hold both actual old writers and settle every
+previously submitted provider request, including uncertain joins. A stopped
+listener, unchanged head, copied cursor file or fixed delay does not prove a
+request cannot still commit. A provider shutdown or transition requires its
+own authorization and verified recovery procedure; do not stop it as an
+incidental step. If that shutdown has been separately authorized, positively
+stop the sole provider after holding the native writers, and preserve the full
+store, including its WAL and nameservice. For the verified standalone provider
+topology, cold-recover separate isolated writable copies in normal file mode
+with no Bus writer under the exact old and proposed provider binaries; the
+latter's read-only mode does not replay the physical WAL. Establish `H` from
+the recovered ledger, requiring the same ledger and branch, first-commit
+incarnation, head transaction and `H` commit ID on both copies and the intended
+selected store before capture. An index position is not the ledger head. A
+clean provider exit alone is not a receipt for every submitted operation.
+
+Reconcile any staged join against its durable outcome and the cursor belonging
+to the holding at `H`; examine the exact historical transition, not current
+ownership alone. A canonical cursor staged for a rejected or unknown join is
+not automatically the previous holding's position. Preserve any `.tmp` file,
+but do not infer acceptance or choose a position from it: one can remain before
+or after publication. If the join outcome or prior position cannot be proved,
+the current importer has no override that safely classifies a readable cursor:
+keep both jobs held before dispatch, preserve the evidence and report the
+affected count. Do not manually rewrite, guess smaller or larger, or synthesize
+a retry. If settlement or the continuity of the
+selected ledger cannot be established, keep both jobs held and stop. The first
+installed transition sentinel is the conservative
+fix-forward boundary, even before an import is dispatched. No step here
+removes it or authorizes an old file writer to return. *Unverified as a paired
+installed procedure; local and disposable checks are recorded separately.*
+
+1. After verifying both holds and settlement, on **each** original installation:
 
    ```sh
+   umask 077
    "$candidate_agent_bus" mailbox-source > "$source_receipt"
    ```
 
-   Expect one JSON receipt with the installation, ledger, cut and cursor inventory digest. The receipts must name distinct expected installations and the same ledger incarnation and commit. Retain them independently from the payload copies. *Unverified on the paired installed hosts; covered on disposable source trees.*
+   Expect one JSON receipt with the installation, ledger, cut and cursor
+   inventory digest. Compare both installation identities and the incarnation
+   to independently retained preflight anchors; the receipts must name the
+   same ledger and cut. Record one lowercase UUIDv7 as `operation` and reuse it
+   unchanged on both hosts and every retry. Retain the receipts independently
+   from the payload copies. *Unverified on the paired installed hosts.*
 
-2. Copy only the two `installation-id` files and each installation's exact `fluree-cursors/<encoded ledger>/<first commit id>.v2` directory plus its matching retained directory without the suffix, when present. Keep each source's paths under a separate copied state root. Do not copy credentials. Preserve the captured inventory and bytes without making either copy into a new active state directory.
+2. Copy only the two `installation-id` files and each installation's exact
+   `fluree-cursors/<encoded ledger>/<raw first commit id>.v2` directory plus its
+   matching retained directory without the suffix, when present. Capture these
+   copies **before** installing the sentinels. Keep each source's paths under a
+   separate protected copied state root; both roots and receipts must be
+   available on each machine for the later verification. Do not copy
+   credentials or turn a copy into an active state directory.
 
    Expect two read-only copies with their original installation identities and inventory digests, no adopted launcher or edited cursor. *Unverified on the paired installed hosts.*
 
-3. On the verified local installation, with both old writers still held, apply the paired import once:
+3. Before installing either sentinel, check the independently recovered copies.
+   `incarnation`, `source_head` and `head_cid` come from the independent
+   preflight record, not from the receipts being checked; `head_cid` is the
+   verified commit ID at `H`, not an index position. Supply a separate private
+   configuration and credential file for each isolated copy, never a live token
+   at a changed origin. With `AGENT_BUS_DIR` still pointing to the independently
+   identified original installation, run:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-transition --action check-source \
+     --recovered-config "$old_copy_config" --recovered-token "$old_copy_token" \
+     --expected-incarnation "$incarnation" --expected-head "$source_head" \
+     --source-commit "$head_cid"
+   "$candidate_agent_bus" mailbox-transition --action check-source \
+     --recovered-config "$new_copy_config" --recovered-token "$new_copy_token" \
+     --expected-incarnation "$incarnation" --expected-head "$source_head" \
+     --source-commit "$head_cid"
+   ```
+
+   Each command must report `status: verified` and the expected incarnation
+   and head against its intended isolated copy, at exactly `H`, before
+   proceeding. This read creates no installation, sentinel or receipt. The
+   limit is 32 MiB for the one full `H` commit, not for the
+   ledger's whole history. If it is unavailable, mismatched or oversized, keep
+   both jobs held and do not fence, append a throwaway commit to move `H`, or
+   treat the activation receipt as its own independent proof. Different origins
+   and credentials alone do not prove that the providers are isolated.
+   *Unverified as a paired installed procedure.*
+
+   On **each original installation**, with both jobs held and settlement
+   proved, install its local sentinel. `local_id` and `peer_id` also come from
+   the independent preflight record. Swap them when switching machines. The
+   fence command repeats the bounded commit comparison on the original binding
+   before and after publishing its marker:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-transition --action fence \
+     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
+     --operation "$operation" --source-commit "$head_cid" --expected-local-installation "$local_id" \
+     --expected-peer-installation "$peer_id" --expected-incarnation "$incarnation" \
+     --paired-holds-confirmed --provider-settled
+   ```
+
+   Expect the local marker path and explicitly operator-attested peer hold and
+   provider settlement. Verify each command on its original host, then transfer
+   each sentinel to the other host over the existing trusted connection as a
+   protected peer-evidence file. A transferred file proves matching content,
+   not that the other job remains stopped. The sentinel prevents a new startup
+   of the retained exact-format writer; it cannot stop a process already past
+   that check or fence an older writer that ignores it. Do not remove or replace
+   an unknown, partial or genuine export marker. *Unverified on the paired
+   installed hosts.*
+
+   With both sentinels verified and both jobs held, one designated operator
+   activates the ownership era against the recovered source cut. `head_cid`
+   is the independently verified commit ID at `H`, not an index position:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-transition --action era \
+     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
+     --operation "$operation" --source-commit "$head_cid" --peer-sentinel "$peer_sentinel" \
+     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
+     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
+   ```
+
+   Proceed only on an exact verified activation, including a previously saved
+   identical operation, with the era immediately after `H` and its parent
+   equal to `head_cid`. After an unknown result keep both holds and the same
+   operation; never infer non-commit from an absent read or issue a different
+   operation. An intervening or unverifiable write is a hold, not a basis to
+   rewrite history. *Unverified on the paired installed hosts.*
+
+4. On one verified installation, with both old jobs still held, import the two
+   copies. `peer_sentinel` is the marker independently checked on the other
+   original host and transferred through the trusted connection:
 
    ```sh
    "$candidate_agent_bus" mailbox-import \
      --first-state "$first_copy" --first-receipt "$first_receipt" \
      --second-state "$second_copy" --second-receipt "$second_receipt" \
-     --paired-holds-confirmed
+     --operation "$operation" --source-commit "$head_cid" --peer-sentinel "$peer_sentinel" \
+     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
+     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
    ```
 
-   Expect a per-address report: `IMPORTED` carries the original exact value; `VERIFIED_IMPORT` or `VERIFIED_CLASSIFICATION` confirms this capture's previously stored operation; `UNCHANGED` means another mailbox fact already exists, not that this import applied. A `CLASSIFIED` row has a reason and no guessed position. Keep both holds while reconciling any unexpected result, unresolved position or hosted checkpoint. The existing file export does not project later ledger positions; retained files are not permission to roll back. *Unverified on the paired installed hosts; interruption and exact-result checks run on disposable ledgers.*
+   Expect a per-address import report followed by a separate verified proof.
+   `UNCHANGED` alone is not proof; an unresolved classification is not a
+   guessed position. Keep both holds while reconciling any refusal, unexpected
+   or unresolved result, or hosted checkpoint. On interruption or an uncertain
+   result, retain both markers, copies and receipts and repeat with the same
+   operation; an absent read cannot prove a dispatched request will not commit.
+   Do not recapture to hide a mismatch. *Unverified on the paired installed
+   hosts.*
 
-   On interruption or an uncertain result, retain the same copies and receipts and repeat this exact command while both holds remain in force. Never recapture to conceal a mismatch or treat an incomplete copy as a missing cursor. See [recover](recover.md#mailbox-import-cannot-be-established).
+5. While **both** jobs remain held, establish each host's ready attestation and
+   exchange the completed ready files through the trusted connection:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-transition --action ready \
+     --first-state "$first_copy" --first-receipt "$first_receipt" \
+     --second-state "$second_copy" --second-receipt "$second_receipt" \
+     --operation "$operation" --source-commit "$head_cid" --peer-sentinel "$peer_sentinel" \
+     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
+     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
+   ```
+
+   Run that on each original host. Expect a completed ready file naming the
+   same operation, independently retained source commit, sources, proof and
+   verification cut on both hosts. A partial or failed candidate file is not
+   a ready attestation. Then, on **each** host,
+   pass the other host's completed ready file as `peer_ready`:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-transition --action admit \
+     --first-state "$first_copy" --first-receipt "$first_receipt" \
+     --second-state "$second_copy" --second-receipt "$second_receipt" \
+     --operation "$operation" --source-commit "$head_cid" \
+     --peer-sentinel "$peer_sentinel" --peer-ready "$peer_ready" \
+     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
+     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
+   ```
+
+   Expect both admission commands to succeed with the same verified cut.
+   Transfer each completed admission file to the other host over the trusted
+   connection. Then, still holding the local job, pass the other host's
+   completed file as `peer_admitted`:
+
+   ```sh
+   "$candidate_agent_bus" mailbox-transition --action permit \
+     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
+     --operation "$operation" --source-commit "$head_cid" \
+     --peer-sentinel "$peer_sentinel" --peer-admitted "$peer_admitted" \
+     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
+     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
+   ```
+
+   Expect a local start permit only after the other installation's completed
+   admission is verified. A missing, changed or unconfirmed evidence file
+   keeps that host unready. Once both admissions exist, a permit does not demand
+   that the ledger head still equal the old verification cut: one permitted
+   host may already have processed normal mail. Readiness, permit and the
+   candidate's serve check revalidate the read-only activation receipt against
+   the retained source commit; serve also revalidates its local evidence and
+   sentinel before starting HTTP or delivery. None of these checks activates
+   the era, writes a replacement receipt or proves the remote host remains
+   held. A verified unresolved
+   classification is a durable refusal, not proof that an active holding can
+   read or that it has no unread mail. Reconcile it, or explicitly account for
+   it under the agreed policy, before claiming a fully successful migration.
+   *Unverified on the paired installed hosts.*
+
+6. With both jobs still held, bind the **same verified candidate artifact** on
+   each machine without starting either job. Set the local launcher and release
+   directories from the independently recorded installation, and use the
+   candidate's externally recorded manifest digest:
+
+   ```sh
+   AGENT_BUS_LAUNCHER="$launcher" AGENT_BUS_RELEASES="$releases_dir" \
+     /bin/sh "$verified_target/app/install-launch-agents.sh" \
+     --release "$verified_target" --expect "$external_sha" --bind-only
+   ```
+
+   Verify both bindings, both disabled/unloaded jobs and both prior process
+   exits before enabling either one. Only after both permits and both bindings
+   have succeeded, enable and bootstrap the identified jobs:
+
+   ```sh
+   launchctl enable "$domain/$serve_label"
+   launchctl bootstrap "$domain" "$serve_plist"
+   ```
+
+   Check the paired release, native delivery and the actual hosted client as
+   described above. The retained file export cannot project subsequent ledger
+   progress, so it is not an old-binary rollback. *Unverified on the paired
+   installed hosts.*
+
+On any failure preserve both holds and all evidence; reconcile the identical
+operation without overwriting markers or rewinding newer positions. See
+[recover](recover.md#mailbox-import-cannot-be-established). Process-interruption
+checks do not by themselves establish power-loss durability.
 
 ## When a hosted peer is connected
 

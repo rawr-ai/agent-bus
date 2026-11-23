@@ -378,9 +378,11 @@ test("full install initializes identity before first config, including after an 
     // Stub only the CLI command; installation.test.ts exercises its actual file behavior.
     await writeFile(
       f.entry,
-      `import { writeFile } from "node:fs/promises";
+      `import { readFile, writeFile } from "node:fs/promises";
 if (process.argv[2] === "initialize-installation") {
   const file = process.env.AGENT_BUS_DIR + "/installation-id";
+  await writeFile(process.env.AGENT_BUS_DIR + "/initialize-args.json", JSON.stringify(process.argv.slice(3)));
+  await writeFile(process.env.AGENT_BUS_DIR + "/initialize-order.json", JSON.stringify(await readFile(${JSON.stringify(f.toolLog)}, "utf8")));
   try { await writeFile(file, crypto.randomUUID(), { flag: "wx" }); }
   catch (error) { if (error.code !== "EEXIST") throw error; }
   if (process.env.FAIL_INITIALIZE === "1") process.exit(42);
@@ -393,6 +395,13 @@ if (process.argv[2] === "initialize-installation") {
     });
     expect(await Bun.file(config).exists()).toBe(false);
     expect(await Bun.file(f.plist).exists()).toBe(false);
+    expect(JSON.parse(await readFile(join(f.bus, "initialize-args.json"), "utf8"))).toEqual([
+      "--fluree-url",
+      "http://127.0.0.1:47890",
+      "--fluree-ledger",
+      "agent-bus:main",
+    ]);
+    expect(JSON.parse(await readFile(join(f.bus, "initialize-order.json"), "utf8"))).toBe("");
     const first = await readFile(identity, "utf8");
 
     expect(await f.install(["--bun", f.bunA])).toMatchObject({ exitCode: 0, stderr: "" });
@@ -400,10 +409,9 @@ if (process.argv[2] === "initialize-installation") {
     expect(await readFile(identity, "utf8")).toBe(first);
 
     await rm(identity);
-    expect(await f.install(["--bun", f.bunA], { FAIL_INITIALIZE: "1" })).toMatchObject({
-      exitCode: 0,
-      stderr: "",
-    });
+    const missingIdentity = await f.install(["--bun", f.bunA], { FAIL_INITIALIZE: "1" });
+    expect(missingIdentity.exitCode).toBe(1);
+    expect(missingIdentity.stderr).toContain("Existing config but no valid installation-id");
     expect(await f.install(undefined, { FAIL_INITIALIZE: "1" })).toMatchObject({
       exitCode: 0,
       stderr: "",

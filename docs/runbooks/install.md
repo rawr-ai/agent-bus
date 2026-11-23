@@ -12,6 +12,14 @@ The full first-install and add-machine procedures below are the supported **sour
 
 An established installation can instead use [packaged deployment](deploy.md#deploy-a-packaged-release), now activated on the paired installations: its launcher binds a sealed release's own Bun, CLI/server and hooks, not the checkout. It needs this installation's existing valid `installation-id` and creates none. It does not provision Fluree or a tunnel. Keep the source bootstrap and rollback material; a release is not a replacement for first provisioning. Qualification and live-client limits are recorded separately in the deploy procedure.
 
+The paired file-to-ledger transition is limited to its identified existing
+installations. An additional fresh installation cannot yet attach to a migrated
+ledger whose ownership era was introduced after its first commit; do not
+initialize a replacement identity or delete transition evidence to force it.
+New installations may attach to an existing ledger born with the current era.
+See [deployment](deploy.md#import-file-positions-into-the-ledger) for the
+paired transition and its held-state requirements.
+
 What each machine needs:
 
 | Needs | On | Why |
@@ -72,7 +80,15 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    loaded ai.rawr.agent-bus; log: ~/.agent-bus/agent-bus.log
    ```
 
-   Then the registration commands, which the next sections cover. The managed launcher's narrow update was *Rehearsed 2026-11-02* on a disposable installation; a fresh full installation with the revised installer remains *Unverified* on launchd.
+   The installer binds the first-install bootstrap grant to the newly created
+   identity and the selected Fluree origin and ledger. The grant is spent before
+   a possible first creation or admission; a spent, incomplete or mismatched
+   grant refuses instead of retrying creation. Preserve such evidence and use
+   [recovery](recover.md), rather than reinitializing the identity. Then the
+   registration commands, which the next sections cover. The managed launcher's
+   narrow update was *Rehearsed 2026-11-02* on a disposable installation; a
+   fresh full installation with the revised installer remains *Unverified* on
+   launchd.
 
 3. **Check what it created:**
 
@@ -287,6 +303,13 @@ A shell installation does not refresh the plugin set of an already-loaded deskto
 ## Add another machine
 
 Another machine runs its own `serve` and an SSH tunnel to the bus host's Fluree server, on the same local port. It runs no Fluree. Every step here runs on that machine, which this page has not been run on.
+
+This procedure supports a ledger born with the current ownership era in its
+first commit. Adding a different installation to a migrated ledger whose era
+was introduced later is not yet supported; the paired transition admits only
+its two recorded installations. [Additional-installation enrollment](https://github.com/rawr-ai/agent-bus/issues/123)
+is tracked separately. Do not regenerate an existing identity or copy a permit
+to work around this limit. *Unverified as a new-machine procedure.*
 
 1. **Prepare the approved canonical checkout, check [the prerequisites](#before-you-start)** (it needs no `fluree`), **and install the dependencies:**
 

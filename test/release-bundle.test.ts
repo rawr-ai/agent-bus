@@ -87,21 +87,30 @@ async function run(
 async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledgerOn>) {
   const dir = join(root, `bus-${kind}`);
   mkdirSync(dir, { recursive: true });
-  writeFileSync(
-    join(dir, "config.json"),
-    JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
-  );
-  writeFileSync(join(dir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
   const port = freePort();
   const server = { port, dir } as Server;
   // Each installation's delivery identity, initialized by that build's own command, as a
   // first install does; serve refuses to start without it.
   const init = Bun.spawnSync(
-    [process.execPath, "--no-env-file", entryOf(kind), "initialize-installation"],
+    [
+      process.execPath,
+      "--no-env-file",
+      entryOf(kind),
+      "initialize-installation",
+      "--fluree-url",
+      ledger.url,
+      "--fluree-ledger",
+      ledger.ledger,
+    ],
     { cwd: decoy, env: cleanEnv(server), stdout: "pipe", stderr: "pipe" }
   );
   if (init.exitCode !== 0) throw new Error(`${kind} could not initialize its installation`);
   initialized[kind] = `${init.stdout}${init.stderr}`;
+  writeFileSync(
+    join(dir, "config.json"),
+    JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
+  );
+  writeFileSync(join(dir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
   // A Codex that always fails, so no real Codex delivery is attempted.
   const serve = [
     process.execPath,
@@ -174,7 +183,8 @@ beforeAll(async () => {
   );
   mkdirSync(join(root, "home"));
   const ledger = ledgerOn(await flureeServer(), "release-bundle");
-  await Promise.all([start("source", ledger), start("bundle", ledger)]);
+  await start("bundle", ledger);
+  await start("source", ledger);
 }, 60_000);
 
 afterAll(async () => {

@@ -5,6 +5,10 @@ import { join } from "node:path";
 import { BunFileSystem } from "@effect/platform-bun";
 import { Effect, type FileSystem } from "effect";
 import { initializeInstallation, loadInstallation } from "../src/installation.ts";
+import {
+  MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE,
+  MAILBOX_BOOTSTRAP_INIT_FILE,
+} from "../src/mailbox-bootstrap.ts";
 import { spawnSupervised } from "./supervised.ts";
 
 const run = <A, E>(effect: Effect.Effect<A, E, FileSystem.FileSystem>) =>
@@ -53,9 +57,18 @@ test("explicit initialization is idempotent, race safe and distinct by state dir
   try {
     const a = join(dir, "a");
     const b = join(dir, "b");
-    await Promise.all(Array.from({ length: 6 }, () => run(initializeInstallation(a))));
+    const attempts = await Promise.allSettled(
+      Array.from({ length: 6 }, () => run(initializeInstallation(a)))
+    );
+    expect(attempts.some((attempt) => attempt.status === "fulfilled")).toBe(true);
     const original = await readFile(join(a, "installation-id"), "utf8");
-    expect(await readdir(a)).toEqual(["installation-id"]);
+    expect((await readdir(a)).sort()).toEqual(
+      [
+        MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE,
+        MAILBOX_BOOTSTRAP_INIT_FILE,
+        "installation-id",
+      ].sort()
+    );
     expect(cli(a, "initialize-installation")).toEqual({ code: 0, stdout: "", stderr: "" });
     expect(await readFile(join(a, "installation-id"), "utf8")).toBe(original);
     expect(cli(b, "initialize-installation")).toEqual({ code: 0, stdout: "", stderr: "" });
