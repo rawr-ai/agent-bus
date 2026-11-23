@@ -429,13 +429,17 @@ if (process.argv[2] === "initialize-installation") {
     await rm(identity);
     const missingIdentity = await f.install(["--bun", f.bunA], { FAIL_INITIALIZE: "1" });
     expect(missingIdentity.exitCode).toBe(1);
-    expect(missingIdentity.stderr).toContain("Existing config but no valid installation-id");
+    expect(missingIdentity.stderr).toContain(
+      "owned serve LaunchAgent requires its original valid installation-id"
+    );
     expect(await f.install(undefined, { FAIL_INITIALIZE: "1" })).toMatchObject({
       exitCode: 0,
       stderr: "",
     });
     expect(await Bun.file(identity).exists()).toBe(false);
 
+    // Without an attributed job, the retained-cursor check still protects an incomplete root.
+    await rm(f.plist);
     await rm(config);
     await mkdir(join(f.bus, "fluree-cursors"));
     await writeFile(f.toolLog, "");
@@ -494,9 +498,114 @@ test.skipIf(process.platform !== "darwin")(
 );
 
 test.skipIf(process.platform !== "darwin")(
-  "a similarly named foreign job does not prove an absent state root was established",
+  "a retained owned job refuses an empty root or missing, invalid or linked identity before writes",
   async () => {
-    for (const kind of ["launcher", "label", "other-root", "malformed", "symlink"]) {
+    for (const kind of [
+      "empty-root",
+      "missing-identity",
+      "empty-identity",
+      "invalid-identity",
+      "identity-directory",
+      "identity-link",
+      "broken-identity-link",
+      "root-link",
+    ]) {
+      const f = await fixture();
+      try {
+        expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+        await writeFile(
+          f.entry,
+          `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+        );
+        const identity = join(f.bus, "installation-id");
+        if (kind === "empty-root") {
+          await rm(f.bus, { recursive: true });
+          await mkdir(f.bus);
+        } else if (kind === "root-link") {
+          const target = join(f.root, "linked-state-target");
+          renameSync(f.bus, target);
+          await symlink(target, f.bus);
+        } else {
+          await rm(identity);
+          if (kind === "empty-identity") await writeFile(identity, "");
+          if (kind === "invalid-identity") await writeFile(identity, `${IDENTITY}\nextra`);
+          if (kind === "identity-directory") await mkdir(identity);
+          if (kind === "identity-link") {
+            const target = join(f.root, "linked-identity-target");
+            await writeFile(target, `${IDENTITY}\n`);
+            await symlink(target, identity);
+          }
+          if (kind === "broken-identity-link")
+            await symlink(join(f.root, "missing-identity"), identity);
+        }
+        await writeFile(f.toolLog, "");
+        const before = await snapshot(f.root);
+        for (const args of [
+          ["--bun", f.bunA],
+          ["--remote", "fixture-host", "--bun", f.bunA],
+        ]) {
+          const result = await f.install(args, { AGENT_BUS_PORT: "47895" });
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toContain(
+            kind === "root-link"
+              ? "owned serve LaunchAgent refers to an unsafe installation root"
+              : "owned serve LaunchAgent requires its original valid installation-id"
+          );
+          expect(result.stdout).not.toContain("initializer reached");
+          expect(await snapshot(f.root)).toEqual(before);
+          expect(await readFile(f.toolLog, "utf8")).toBe("");
+        }
+      } finally {
+        await f.dispose();
+      }
+    }
+  },
+  RELEASE_TEST_TIMEOUT_MS
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "a retained owned job allows a valid original identity when config is absent",
+  async () => {
+    const f = await fixture();
+    try {
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      await writeFile(
+        f.entry,
+        `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+      );
+      await rm(join(f.bus, "config.json"));
+      const identity = await readFile(join(f.bus, "installation-id"));
+      await writeFile(f.toolLog, "");
+      for (const args of [
+        ["--bun", f.bunA],
+        ["--remote", "fixture-host", "--bun", f.bunA],
+      ]) {
+        const result = await f.install(args);
+        expect(result.exitCode).toBe(42);
+        expect(result.stdout).toContain("initializer reached");
+        expect(await readFile(join(f.bus, "installation-id"))).toEqual(identity);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "a conflicting or unknown same-label job refuses before initializing an absent or empty root",
+  async () => {
+    for (const kind of [
+      "launcher",
+      "label",
+      "other-root",
+      "extra-args",
+      "program",
+      "malformed",
+      "directory",
+      "symlink",
+      "broken-link",
+    ]) {
       const f = await fixture();
       try {
         await writeFile(
@@ -505,13 +614,22 @@ test.skipIf(process.platform !== "darwin")(
         );
         const job = {
           Label: kind === "label" ? "another.label" : f.label,
-          ProgramArguments: [kind === "launcher" ? join(f.root, "foreign") : f.launcher, "serve"],
+          ProgramArguments: [
+            kind === "launcher" ? join(f.root, "foreign") : f.launcher,
+            "serve",
+            ...(kind === "extra-args" ? ["--other"] : []),
+          ],
+          ...(kind === "program" ? { Program: join(f.root, "foreign") } : {}),
           EnvironmentVariables: {
             AGENT_BUS_DIR: kind === "other-root" ? join(f.root, "other") : f.bus,
           },
         };
         if (kind === "malformed") {
           await writeFile(f.plist, "not a plist\n");
+        } else if (kind === "directory") {
+          await mkdir(f.plist);
+        } else if (kind === "broken-link") {
+          await symlink(join(f.root, "missing-plist"), f.plist);
         } else if (kind === "symlink") {
           const target = join(f.root, "foreign-link-target.plist");
           await writeJob(target, job);
@@ -519,16 +637,200 @@ test.skipIf(process.platform !== "darwin")(
         } else {
           await writeJob(f.plist, job);
         }
-        const plist = await snapshot(f.plist);
         await rm(f.bus, { recursive: true });
-        const result = await f.install(["--bun", f.bunA]);
-        expect(result.exitCode).toBe(42);
-        expect(result.stdout).toContain("initializer reached");
-        expect(await snapshot(f.plist)).toEqual(plist);
-        expect(await readFile(f.toolLog, "utf8")).toBe("");
+        if (kind === "malformed" || kind === "symlink") await mkdir(f.bus);
+        const before = await snapshot(f.root);
+        for (const args of [
+          ["--bun", f.bunA],
+          ["--remote", "fixture-host", "--bun", f.bunA],
+        ]) {
+          const result = await f.install(args);
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toContain("cannot be attributed to the exact requested state root");
+          expect(result.stderr).not.toContain("requires its original valid installation-id");
+          expect(result.stdout).not.toContain("initializer reached");
+          expect(await snapshot(f.root)).toEqual(before);
+          expect(await readFile(f.toolLog, "utf8")).toBe("");
+        }
       } finally {
         await f.dispose();
       }
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "an unreadable same-label plist refuses before initializing a missing root",
+  async () => {
+    const f = await fixture();
+    try {
+      await writeFile(
+        f.entry,
+        `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+      );
+      await writeJob(f.plist, {
+        Label: f.label,
+        ProgramArguments: [f.launcher, "serve"],
+        EnvironmentVariables: { AGENT_BUS_DIR: f.bus },
+      });
+      await rm(f.bus, { recursive: true });
+      const before = await snapshot(f.root);
+      chmodSync(f.plist, 0);
+      for (const args of [
+        ["--bun", f.bunA],
+        ["--remote", "fixture-host", "--bun", f.bunA],
+      ]) {
+        const result = await f.install(args);
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("cannot be attributed to the exact requested state root");
+        expect(result.stdout).not.toContain("initializer reached");
+        expect((await lstat(f.plist)).mode & 0o777).toBe(0);
+        expect(existsSync(f.bus)).toBe(false);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+      chmodSync(f.plist, 0o644);
+      expect(await snapshot(f.root)).toEqual(before);
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "same-label jobs cannot be rebound through dot, slash or symlink aliases of their state root",
+  async () => {
+    const f = await fixture();
+    try {
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      await writeFile(
+        f.entry,
+        `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+      );
+      await rm(f.bus, { recursive: true });
+      await mkdir(f.bus);
+      const alias = join(f.root, "state-alias");
+      await symlink(f.bus, alias);
+      await writeFile(f.toolLog, "");
+      for (const requested of [`${f.bus}/.`, `${f.bus}/`, alias]) {
+        const before = await snapshot(f.root);
+        for (const args of [
+          ["--bun", f.bunA],
+          ["--remote", "fixture-host", "--bun", f.bunA],
+        ]) {
+          const result = await f.install(args, { AGENT_BUS_DIR: requested });
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toContain("cannot be attributed to the exact requested state root");
+          expect(result.stdout).not.toContain("initializer reached");
+          expect(await snapshot(f.root)).toEqual(before);
+          expect(await readFile(f.toolLog, "utf8")).toBe("");
+        }
+      }
+
+      // Also refuse when the plist contains the alias and the request uses the real path.
+      await writeJob(f.plist, {
+        Label: f.label,
+        ProgramArguments: [f.launcher, "serve"],
+        EnvironmentVariables: { AGENT_BUS_DIR: alias },
+      });
+      const before = await snapshot(f.root);
+      for (const args of [
+        ["--bun", f.bunA],
+        ["--remote", "fixture-host", "--bun", f.bunA],
+      ]) {
+        const result = await f.install(args);
+        expect(result.exitCode).toBe(1);
+        expect(result.stderr).toContain("cannot be attributed to the exact requested state root");
+        expect(result.stdout).not.toContain("initializer reached");
+        expect(await snapshot(f.root)).toEqual(before);
+      }
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "an identical alias spelling still requires and preserves the original identity",
+  async () => {
+    const f = await fixture();
+    try {
+      expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
+      await writeFile(
+        f.entry,
+        `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+      );
+      await rm(f.bus, { recursive: true });
+      await mkdir(f.bus);
+      const homeAlias = join(f.root, "home-alias");
+      await symlink(f.home, homeAlias);
+      const paths = [`${f.bus}/.`, join(homeAlias, f.bus.slice(f.home.length + 1))];
+      await writeFile(f.toolLog, "");
+      for (const requested of paths) {
+        await writeJob(f.plist, {
+          Label: f.label,
+          ProgramArguments: [f.launcher, "serve"],
+          EnvironmentVariables: { AGENT_BUS_DIR: requested },
+        });
+        const missing = await snapshot(f.root);
+        for (const args of [
+          ["--bun", f.bunA],
+          ["--remote", "fixture-host", "--bun", f.bunA],
+        ]) {
+          const result = await f.install(args, { AGENT_BUS_DIR: requested });
+          expect(result.exitCode).toBe(1);
+          expect(result.stderr).toContain("requires its original valid installation-id");
+          expect(result.stdout).not.toContain("initializer reached");
+          expect(await snapshot(f.root)).toEqual(missing);
+        }
+        const identity = join(f.bus, "installation-id");
+        await writeFile(identity, `${IDENTITY}\n`);
+        for (const args of [
+          ["--bun", f.bunA],
+          ["--remote", "fixture-host", "--bun", f.bunA],
+        ]) {
+          const result = await f.install(args, { AGENT_BUS_DIR: requested });
+          expect(result.exitCode).toBe(42);
+          expect(result.stdout).toContain("initializer reached");
+          expect(await readFile(identity, "utf8")).toBe(`${IDENTITY}\n`);
+          expect(await readFile(f.toolLog, "utf8")).toBe("");
+        }
+        await rm(identity);
+      }
+    } finally {
+      await f.dispose();
+    }
+  }
+);
+
+test.skipIf(process.platform !== "darwin")(
+  "a differently named job does not prevent a genuine fresh installation",
+  async () => {
+    const f = await fixture();
+    try {
+      const other = join(f.agents, "other.agent-bus.plist");
+      await writeJob(other, {
+        Label: "other.agent-bus",
+        ProgramArguments: [f.launcher, "serve"],
+        EnvironmentVariables: { AGENT_BUS_DIR: join(f.root, "other-state") },
+      });
+      await writeFile(
+        f.entry,
+        `if (process.argv[2] === "initialize-installation") { console.log("initializer reached"); process.exit(42); }\n`
+      );
+      await rm(f.bus, { recursive: true });
+      const before = await snapshot(other);
+      for (const args of [
+        ["--bun", f.bunA],
+        ["--remote", "fixture-host", "--bun", f.bunA],
+      ]) {
+        const result = await f.install(args);
+        expect(result.exitCode).toBe(42);
+        expect(result.stdout).toContain("initializer reached");
+        expect(await snapshot(other)).toEqual(before);
+        expect(await readFile(f.toolLog, "utf8")).toBe("");
+      }
+    } finally {
+      await f.dispose();
     }
   }
 );

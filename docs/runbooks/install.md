@@ -20,6 +20,31 @@ New installations may attach to an existing ledger born with the current era.
 See [deployment](deploy.md#import-file-positions-into-the-ledger) for the
 paired transition and its held-state requirements.
 
+Before treating an absent serve plist as a fresh installation, also establish
+that no job with that label remains loaded. A job can outlive the plist used to
+load it; the installer's on-disk check alone does not detect that case. On the
+machine and GUI domain being installed, inspect without printing the job:
+
+```sh
+label="${AGENT_BUS_LABEL:-ai.rawr.agent-bus}"
+if job=$(LC_ALL=C launchctl print "gui/$(id -u)/$label" 2>&1); then
+  echo "STOP: same-label job is loaded"
+else
+  rc=$?
+  absent=$(printf 'Bad request.\nCould not find service "%s" in domain for user gui: %s' "$label" "$(id -u)")
+  if [ "$rc" -eq 113 ] && [ "$job" = "$absent" ]; then
+    echo "same-label job is not loaded"
+  else
+    echo "STOP: cannot establish job absence"
+  fi
+fi
+```
+
+Proceed only on `same-label job is not loaded`. Otherwise identify and preserve
+the existing job and original installation state; do not initialize a new
+identity or boot it out. This is an operator check, not an atomic exclusion of a
+concurrent load. *Unverified as an installed first-install sequence.*
+
 What each machine needs:
 
 | Needs | On | Why |
@@ -154,7 +179,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
 
 ### Rerun the installer
 
-A full rerun keeps the key, token, `config.json`, `installation-id` and messages, but rewrites both plists and restarts both servers. A rerun with existing config does not initialize a missing identity. Restore a lost established identity from that installation's backup; a nonempty pre-identity root cannot be upgraded directly by the current initializer. See [identity recovery](recover.md#the-installation-identity-is-missing-or-invalid). Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)).
+A full rerun keeps the key, token, `config.json`, `installation-id` and messages, but rewrites both plists and restarts both servers. When a same-label serve plist exists, the installer requires it to identify the exact requested state-root spelling and a valid `installation-id` in that root before initializing anything. Its format check does not prove that a valid UUID is the original: compare it with the independently retained identity before proceeding. A foreign, unreadable or differently attributed plist is a conflict, not evidence of a fresh installation; preserve it for inspection. With that attributed plist, an empty or missing root is refused rather than assigned a new identity. Restore a lost identity from that installation's backup; a nonempty pre-identity root cannot be upgraded directly by the current initializer. See [identity recovery](recover.md#the-installation-identity-is-missing-or-invalid). Inspect installer changes before choosing it: for a runtime-only change use the narrow procedure in [deploy](deploy.md), which does not restart Fluree or the tunnel. `serve`'s memory is lost on restart, which costs at most one extra wake per address ([topology](../architecture/topology.md#where-state-lives)). The retained-job and identity refusals are fixture-tested; live *Unverified*.
 
 ```sh
 bun run install:launch-agents
@@ -363,6 +388,8 @@ The other machine's non-interactive SSH `PATH` may lack `bun`, so a command run 
 | `Refusing foreign launcher …` | A foreign file, symlink or modified wrapper occupies the launcher path. Establish ownership before moving it aside; the installer will not overwrite it. Fixture-tested; live *Unverified*. |
 | `Selected runtime cannot run …` | The selected executable or source cannot run under a minimal environment. Check the exact pin and frozen dependency install before retrying. *Unverified* live. |
 | `Retained cursors but no config.json or installation-id` | This is not a fresh install. Restore the configuration and identity for this installation, rather than letting the installer guess. Fixture-tested; live *Unverified*. |
+| `The existing serve LaunchAgent cannot be attributed …` | The same-label plist is foreign, unreadable, malformed or names a different state-root spelling. Preserve the job and its plist; identify their owner and the intended original installation before retrying. Fixture-tested; live *Unverified*. |
+| `The owned serve LaunchAgent requires its original valid installation-id` or `… missing installation root` | The attributed installation's identity or state is missing or unsafe. Restore that installation's own retained state, not a newly initialized identity. Fixture-tested; live *Unverified*. |
 | A runtime-only update fails after replacing a file | Launcher and plist replacement are atomic individually, not together. Inspect both and the job; rerun the qualified installer or follow [deploy rollback](deploy.md). *Unverified* on launchd. |
 | `The Fluree server at … does not enforce the bus token` | Another server holds the Fluree port. Find it with `lsof -nP -iTCP:8095 -sTCP:LISTEN`, stop it by its pid, rerun. *Rehearsed 2026-10-28* |
 | `Nothing answers at … ; see <log>` | A server didn't come up within 20 s. Read the log it names ([operate](operate.md)) |

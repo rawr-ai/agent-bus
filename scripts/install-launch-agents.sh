@@ -333,10 +333,23 @@ if { [ "$runtime_only" = true ] || [ -n "$release" ]; } && { [ -e "$serve_plist"
 fi
 [ "$bind_only" = false ] || [ "$keep_plist" = true ] || fail "--bind-only requires the existing owned serve LaunchAgent at $serve_plist"
 
-# A retained job for this exact installation is evidence of an established root,
-# even when that root was lost. Do not infer ownership from the plist name alone.
+# valid_identity FILE accepts a regular file holding one lowercase UUIDv4 with
+# ASCII whitespace around it. It refuses links and bytes outside that alphabet.
+valid_identity() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    [ "$(LC_ALL=C /usr/bin/tr -d '0123456789abcdef \t\r\n\v\f-' <"$1" | /usr/bin/wc -c | /usr/bin/tr -d ' ')" = 0 ] &&
+    LC_ALL=C /usr/bin/awk '
+      /[^ \t\r\v\f]/ { lines++; id = $0 }
+      END {
+        sub(/^[ \t\r\v\f]+/, "", id); sub(/[ \t\r\v\f]+$/, "", id)
+        h = "[0-9a-f]"; h4 = h h h h
+        exit !(lines == 1 && id ~ ("^" h4 h4 "-" h4 "-4" h h h "-[89ab]" h h h "-" h4 h4 h4 "$"))
+      }' "$1"
+}
+
+# A same-label job must be attributable to this exact root before a full install
+# changes anything. A conflicting or unreadable job is not evidence of a fresh root.
 if [ "$runtime_only" = false ] && [ -z "$release" ] &&
-  [ ! -e "$bus_dir" ] && [ ! -L "$bus_dir" ] &&
   { [ -e "$serve_plist" ] || [ -L "$serve_plist" ]; }; then
   target_bus_dir=$bus_dir
   if (
@@ -345,7 +358,15 @@ if [ "$runtime_only" = false ] && [ -z "$release" ] &&
     check_owned_plist
     [ "$kept_dir" = "$target_bus_dir" ]
   ) >/dev/null 2>&1; then
-    fail "The owned serve LaunchAgent refers to a missing installation root. Restore its original state before reinstalling."
+    if [ ! -e "$bus_dir" ] && [ ! -L "$bus_dir" ]; then
+      fail "The owned serve LaunchAgent refers to a missing installation root. Restore its original state before reinstalling."
+    fi
+    [ -d "$bus_dir" ] && [ ! -L "$bus_dir" ] ||
+      fail "The owned serve LaunchAgent refers to an unsafe installation root. Restore its original state before reinstalling."
+    valid_identity "$bus_dir/installation-id" ||
+      fail "The owned serve LaunchAgent requires its original valid installation-id. Restore it before reinstalling."
+  else
+    fail "The existing serve LaunchAgent cannot be attributed to the exact requested state root. Preserve it and resolve the conflicting or unknown job before reinstalling."
   fi
 fi
 
@@ -731,22 +752,6 @@ wait_for() {
 # A release's serve routes native delivery by this installation's identity and never creates
 # one. Activation does not create it either: a first upgrade initializes it deliberately, and
 # an established identity that is missing is restored, never replaced (docs/runbooks/deploy.md).
-# valid_identity FILE accepts what serve's loader accepts (src/installation.ts): a regular file
-# holding one lowercase UUIDv4, with ASCII whitespace around it (a CRLF ending, a trailing blank
-# line). It stays a subset of serve's rule: a byte outside hex digits, hyphens and ASCII
-# whitespace (a NUL, a byte-order mark) is refused here even where serve's trim would pass it.
-valid_identity() {
-  [ -f "$1" ] && [ ! -L "$1" ] &&
-    [ "$(LC_ALL=C /usr/bin/tr -d '0123456789abcdef \t\r\n\v\f-' <"$1" | /usr/bin/wc -c | /usr/bin/tr -d ' ')" = 0 ] &&
-    LC_ALL=C /usr/bin/awk '
-      /[^ \t\r\v\f]/ { lines++; id = $0 }
-      END {
-        sub(/^[ \t\r\v\f]+/, "", id); sub(/[ \t\r\v\f]+$/, "", id)
-        h = "[0-9a-f]"; h4 = h h h h
-        exit !(lines == 1 && id ~ ("^" h4 h4 "-" h4 "-4" h h h "-[89ab]" h h h "-" h4 h4 h4 "$"))
-      }' "$1"
-}
-
 if [ -n "$release" ]; then
   valid_identity "$bus_dir/installation-id" ||
     fail "No valid installation-id in $bus_dir. Initialize it before a first activation, or restore this installation's own; activation creates none."
