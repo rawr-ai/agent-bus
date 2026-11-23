@@ -87,6 +87,9 @@ export interface Boundary {
   readonly queries: () => number;
   /** Update requests seen, including no-op writes and lost answers. */
   readonly updates: () => number;
+  readonly creates: () => number;
+  /** Forward one create and lose only its acknowledgement. */
+  readonly loseNextCreate: () => Promise<Forwarded>;
   /**
    * Forwards the next update to Fluree and answers it with a 504 once forwarding settles;
    * resolves with Fluree's status, or with the failure if the update got no response within
@@ -116,11 +119,13 @@ export const boundary = (
   const queued: Pending[] = [];
   const pins: Pending[] = [];
   const lostUpdates: Array<(forwarded: Forwarded) => void> = [];
+  const lostCreates: Array<(forwarded: Forwarded) => void> = [];
   let disconnected = false;
   let refused = 0;
   let passed = 0;
   let queries = 0;
   let updates = 0;
+  let creates = 0;
   const server = Bun.serve({
     hostname: "127.0.0.1",
     port: 0,
@@ -170,7 +175,13 @@ export const boundary = (
         updates += 1;
         await options.beforeUpdate?.();
       }
-      const lost = url.pathname === UPDATE ? lostUpdates.shift() : undefined;
+      const create = url.pathname === "/v1/fluree/create";
+      if (create) creates++;
+      const lost = create
+        ? lostCreates.shift()
+        : url.pathname === UPDATE
+          ? lostUpdates.shift()
+          : undefined;
       if (lost === undefined) {
         const response = await forward(request.signal);
         const budget = options.queryResponseBytes;
@@ -203,6 +214,8 @@ export const boundary = (
     passed: () => passed,
     queries: () => queries,
     updates: () => updates,
+    creates: () => creates,
+    loseNextCreate: () => new Promise<Forwarded>((resolve) => lostCreates.push(resolve)),
     loseNextUpdate: (options) =>
       new Promise<Forwarded>((settled) =>
         lostUpdates.push((result) => {

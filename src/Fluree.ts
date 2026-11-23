@@ -222,6 +222,61 @@ const fullTextConfig = (ledger: string) => ({
   },
 });
 
+export type FlureeCreation =
+  | { readonly status: "CREATED"; readonly cut: Pin }
+  | { readonly status: "CONFLICT" | "UNKNOWN" };
+const CreationReceipt = Schema.Struct({
+  ledger_id: Schema.String,
+  t: Schema.Int,
+  commit: Schema.Struct({ hash: Schema.String }),
+});
+
+/**
+ * Dispatch once after the caller durably consumes its creation grant. The caller excludes other
+ * writers until it opens this incarnation. At t=0 there is no commit CID to identify a replacement.
+ */
+export const createFlureeLedgerOnce = (
+  config: FlureeConfig
+): Effect.Effect<FlureeCreation, never, HttpClient.HttpClient> => {
+  const unknown = { status: "UNKNOWN" } as const;
+  return Effect.gen(function* () {
+    const client = HttpClient.withScope(authenticated(yield* HttpClient.HttpClient, config));
+    const post = (path: string, body: unknown) =>
+      client.execute(
+        HttpClientRequest.post(apiFor(config) + path).pipe(HttpClientRequest.bodyJsonUnsafe(body))
+      );
+    const normalized = config.ledger.includes(":") ? config.ledger : config.ledger + ":main";
+    const created = yield* post("/create", { ledger: config.ledger });
+    if (created.status === 409) return { status: "CONFLICT" } as const;
+    if (created.status !== 201) return unknown;
+    const zero = yield* Schema.decodeUnknownEffect(CreationReceipt)(yield* created.json);
+    if (zero.ledger_id !== normalized || zero.t !== 0 || zero.commit.hash !== "") return unknown;
+    const updated = yield* post(
+      "/update?ledger=" + encodeURIComponent(normalized),
+      fullTextConfig(normalized)
+    );
+    if (updated.status !== 200) return unknown;
+    const first = yield* Schema.decodeUnknownEffect(CreationReceipt)(yield* updated.json);
+    if (first.ledger_id !== normalized || first.t !== 1 || !first.commit.hash) return unknown;
+    const cut: Pin = { head: 1, incarnation: first.commit.hash };
+    return yield* Effect.gen(function* () {
+      const ledger = yield* Ledger;
+      if (
+        ledger.instance !== cut.incarnation ||
+        (yield* ledger.ownershipEraAt(cut)) !== 1 ||
+        (yield* ledger.end) !== 1
+      )
+        return unknown;
+      return { status: "CREATED", cut } as const;
+    }).pipe(Effect.provide(layerFluree({ ...config, ledger: normalized }, { existingOnly: true })));
+  }).pipe(
+    Effect.scoped,
+    Effect.provideService(FetchHttpClient.RequestInit, { redirect: "manual" }),
+    Effect.timeoutOrElse({ duration: QUERY_TIMEOUT, orElse: () => Effect.succeed(unknown) }),
+    Effect.catch(() => Effect.succeed(unknown))
+  );
+};
+
 /**
  * A ledger on one Fluree transaction server, shared over HTTP by every bus
  * process; the server serializes writers. Each message is one commit, and a
