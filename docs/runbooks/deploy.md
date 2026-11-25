@@ -442,12 +442,42 @@ installed procedure; local and disposable checks are recorded separately.*
      --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
    ```
 
-   Proceed only on an exact verified activation, including a previously saved
-   identical operation, with the era immediately after `H` and its parent
-   equal to `head_cid`. After an unknown result keep both holds and the same
-   operation; never infer non-commit from an absent read or issue a different
-   operation. An intervening or unverifiable write is a hold, not a basis to
-   rewrite history. *Unverified on the paired installed hosts.*
+   Expect one JSON line, printed only after the command has checked that the
+   era commit is immediately after `H` and that its sole parent is `head_cid`:
+
+   - `activation`: `ALREADY_APPLIED` means the era already existed for this
+     `operation` when the call started. `APPLIED` means it was vacant then and
+     is now verified, usually by this call's write, possibly by an earlier
+     identical request that was still in flight. Both are a verified
+     activation.
+   - `cut`: the era's cut. Its `head` must equal `source_head + 1`.
+   - `commit`: the era commit's CID.
+   - `localHold`, `pairedHolds`, `providerSettlement` and `peerSentinel`
+     restate what the command checked itself and what remains your
+     attestation.
+
+   Every refusal starts `Mailbox transition refused:`. Two name the
+   activation outcome:
+
+   - `the era activation may have committed; retain both holds and retry the
+     same operation.` The outcome is unknown. Keep both holds and rerun the
+     identical command with the same `operation`, never a different one: an
+     absent read does not prove the request cannot still commit. If retries
+     keep returning this refusal, the era may have committed after an
+     intervening write or in a shape the command cannot verify: report it to
+     Release Operations, and do not rewrite history or issue a new operation.
+   - `the captured era activation conflicts; retain both holds for review.`
+     The ledger is not at `H` (behind it, or past it with no activation
+     record), the commit at `H` is not `head_cid`, the ledger was born with
+     the ownership era, or an activation record for a different operation,
+     cut or commit already exists. Keep both holds and report it to Release
+     Operations; do not rewrite history.
+
+   Treat any other refusal from this command as possibly arriving after the
+   era committed: keep both holds and rerun the identical command with the
+   same `operation` before anything else.
+
+   *Unverified on the paired installed hosts.*
 
 4. On one verified installation, with both old jobs still held, import the two
    copies. `peer_sentinel` is the marker independently checked on the other
@@ -462,10 +492,48 @@ installed procedure; local and disposable checks are recorded separately.*
      --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
    ```
 
-   Expect a per-address import report followed by a separate verified proof.
-   `UNCHANGED` alone is not proof; an unresolved classification is not a
-   guessed position. Keep both holds while reconciling any refusal, unexpected
-   or unresolved result, or hosted checkpoint. On interruption or an uncertain
+   On success, expect two JSON lines. The report is printed only after every
+   holding has been handled. A refusal during import prints no report, even if
+   that run had already written earlier addresses: rerun with the same two
+   captures. If only the proof refuses, you see the report followed by the
+   refusal.
+
+   The first line is the import report, marked
+   `phase: "import-report-not-admission"`. It names the source `cut` and has
+   one row per captured holding with `address`, `operation`, `status`, and
+   `position` (imported) or `reason` (classified); `UNCHANGED` rows carry
+   neither. A row's `operation` is a per-address import ID derived from the
+   two captures, not the `--operation` value, so a recapture changes it.
+
+   | `status` | Meaning |
+   | --- | --- |
+   | `IMPORTED` | This run wrote the address's mailbox start at the captured `position`. |
+   | `CLASSIFIED` | This run recorded the address as unresolved, with a `reason`; no position was guessed. |
+   | `VERIFIED_IMPORT`, `VERIFIED_CLASSIFICATION` | An earlier run with the same two captures already wrote this exact record; this run confirmed its receipt and wrote nothing. It does not show the record is still current; the verified proof checks that. |
+   | `UNCHANGED` | The address already had a current mailbox record (start, unresolved or acknowledgement) from another operation, so nothing was written. This is not proof: any `UNCHANGED` row makes the verified proof refuse as a whole, naming that address. |
+
+   An unresolved `reason` says why no position could be attributed:
+
+   | `reason` | Meaning |
+   | --- | --- |
+   | `conflict` | Both installations had a cursor file for the address. |
+   | `unattributable` | The address's latest join at `H` names neither captured installation (including a join with no recorded installation, as in hostname-routed records, or no join at all), or the owner's cursor file names another address. |
+   | `stale` | Only the installation that did not own the address had a cursor file. |
+   | `missing` | Neither installation had a cursor file. |
+   | `unreadable` | The owning installation's cursor file could not be read. |
+   | `ahead` | The cursor is beyond the captured cut `H`. |
+
+   The second line is the verified proof. It names `verifiedAt` and has a row
+   for every captured holding: `VERIFIED_IMPORT` with its `position`, or
+   `VERIFIED_CLASSIFICATION` with its `reason`, plus the holding's
+   `latestStatus`, `latestPresenceId` and `lastJoinId`. The whole proof
+   refuses, printing no rows, if the set of holdings or any holding's presence
+   changed since `H`, or if any holding's current mailbox record is not the
+   first record written after `H` by that address's import `operation`, with
+   the planned position or reason.
+
+   Keep both holds while reconciling any refusal, unexpected or unresolved
+   result, or hosted checkpoint. On interruption or an uncertain
    result, retain both markers, copies and receipts and repeat with the same
    operation; an absent read cannot prove a dispatched request will not commit.
    Do not recapture to hide a mismatch. *Unverified on the paired installed
