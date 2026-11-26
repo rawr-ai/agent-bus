@@ -14,7 +14,6 @@ import { RPCLink } from "@orpc/client/fetch";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -53,7 +52,6 @@ const bus = ManagedRuntime.make(
     Layer.provideMerge(
       Bus.layer("test-installation").pipe(
         Layer.provideMerge(layerFluree(config).pipe(Layer.provide(platform))),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
         Layer.provide(platform)
       )
     )

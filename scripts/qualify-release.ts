@@ -38,6 +38,7 @@ import {
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
+import { createFixtureLedger, fixtureAttach } from "../test/serve-binding-fixture.ts";
 import { sourceIsolated, sourceIsolationRefusesRead } from "../test/source-isolation.ts";
 import { spawnSupervised } from "../test/supervised.ts";
 import { modernHttp } from "./private-modern-http.ts";
@@ -326,32 +327,15 @@ try {
   );
   check("launcherIgnoresCallerBunfig", !existsSync(preloadMark));
 
-  // The installer probes the selected CLI directly, not the current launcher.
-  const cursorHelp = spawnSync(
-    join(rel, "runtime/bun"),
-    [
-      "--no-env-file",
-      `--config=${join(rel, "app/bunfig.toml")}`,
-      join(rel, "app/cli.js"),
-      "cursors",
-      "--help",
-    ],
-    {
-      cwd: "/",
-      env: {
-        HOME: home,
-        PATH: "/usr/bin:/bin:/usr/sbin:/sbin",
-        LC_ALL: "C",
-        CLICOLOR: "0",
-        BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
-      },
-      encoding: "utf8",
-      timeout: 20_000,
-    }
-  );
+  // The retired commands must not be registered by the sealed successor.
+  const commands = runIn([launcher, "--help"]);
   check(
-    "relocatedPackagedCliDeclaresExactCursorLayoutV2",
-    cursorHelp.status === 0 && cursorHelp.stdout.includes("Exact-address cursor layout v2:")
+    "relocatedCliExposesBindingNotMigrationCommands",
+    commands.status === 0 &&
+      /^\s+verify-serve-binding\b/m.test(commands.stdout) &&
+      !/^\s+(cursors|mailbox-source|mailbox-import|mailbox-transition|serve-admission-capability)\b/m.test(
+        commands.stdout
+      )
   );
 
   // A first install or upgrade initializes the identity a release's serve routes delivery by,
@@ -380,11 +364,26 @@ try {
 
   // 5. Serve the actual relocated sealed CLI, with its build tree unavailable.
   const ledger = await freshLedger("release-skill");
+  const pin = await createFixtureLedger(ledger);
   writeFileSync(
     join(state, "config.json"),
     JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
   );
   writeFileSync(join(state, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
+  const withState = (args: string[]) =>
+    spawnSync(launcher, args, {
+      cwd: decoy,
+      env: { ...empty, AGENT_BUS_DIR: state },
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+  check("relocatedVerifierRefusesIdentityOnly", withState(["verify-serve-binding"]).status !== 0);
+  check("relocatedCliAttachesApprovedPin", withState(fixtureAttach(created, pin)).status === 0);
+  const bound = withState(["verify-serve-binding"]);
+  check(
+    "relocatedVerifierChecksBoundStore",
+    bound.status === 0 && bound.stdout === "serve-binding-v1\n"
+  );
   const deniedSources = [clone, join(rel, "plugin")];
   if (process.platform === "darwin") {
     check(

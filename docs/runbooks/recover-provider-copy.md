@@ -1,25 +1,17 @@
 # Recover provider copies
 
-Use this during the paired mailbox transition. It covers the authorized cold stop of the bus host's Fluree provider, the capture of its store, two isolated working copies, and how to read the source cut from those copies for the `check-source` step. The transition itself is in [deploy](deploy.md#import-file-positions-into-the-ledger). Routine stops and starts are in [operate](operate.md#stop-and-start-serve-fluree-or-the-tunnel), and failures in [recover](recover.md#mailbox-import-cannot-be-established).
+Use this runbook to capture the installed Bus provider's entire store and prove that a private working copy recovers the expected ledger. For the one-time [mailbox retirement](deploy.md#retire-paired-mailbox-evidence), use the **same pinned provider executable** for the live store and the working copy. This is not a provider upgrade, a mailbox import, or authority to replace a live store. The [original paired transition](https://github.com/rawr-ai/agent-bus/blob/a32ae0aecb3413e1e04363f464242ae1a9136418/docs/runbooks/recover-provider-copy.md) is historical.
 
 ## Before you start
 
-- **Authorization comes first.** The provider stop needs its own authorization: the human's word, carried by Release Operations. A transition or release commission does not include it. Without it, go to [Without authorization](#without-authorization).
-- **Every native writer is held.** Both `serve` jobs are disabled, unloaded and off their ports, as in [deploy](deploy.md#import-file-positions-into-the-ledger). The hosted peer reaches the ledger only through `serve`. No sentinel exists yet.
-- **Stop only this provider.** It is the job `${AGENT_BUS_LABEL:-ai.rawr.agent-bus}.fluree`, on the port in `config.json`. Other Fluree servers on the host belong to other projects: never stop, copy or query them.
-- **Two binaries.**
-  - The *installed* binary is the path the live plist runs, exactly as the plist writes it.
-  - The *proposed* binary is unpacked from the release archive whose SHA-256 is on the [Fluree platform page](../platforms/fluree.md). Check the archive's hash before you unpack it.
-  - The live provider restarts only under the installed binary. Moving it to the proposed one is a separately reviewed change.
-  - If this service pins its own executable, retain the approved path and digest with the recovery record. Do not run the full `bun run install:launch-agents` on the provider host: it replaces the provider plist using `command -v fluree`, which can silently undo the pin. The `--release` and `--runtime-only` modes leave the provider plist alone; neither repairs it.
-- **Space and placement.** You need three times the store's size, on the bus host's local disk, in a private directory that nothing syncs or backs up off the host. Everything here runs on the bus host.
-- **zsh, one step at a time.** Run everything in zsh, the macOS default shell. Each step is one function call.
-  - A failed check prints `STOP:`. Don't run the next step after a `STOP`: a failed step may leave a private partial copy or a held provider for recovery.
-  - Every probe must prove its result: an empty PID, an unreadable listing or an unanswered probe counts as a failure, never as a match.
+- Release Operations needs the human's explicit authorization to stop the dedicated Bus provider. General release approval is not permission for database downtime. Without it, do not hold writers or stop the provider. A qualified storage-level snapshot could avoid a stop; a copy of a running directory or an RDF export cannot.
+- Identify the exact native service on each machine and the existing private host. Before sampling the cut, hold every writer, prove its process exited and its listener closed, and settle outstanding operations. Leave the tunnels, other Fluree jobs and credentials alone. The helper checks the **local** writer only; it does not establish the remote or hosted holds.
+- Keep separate evidence for **H/K** (original import), **R** (the committed history in the serving binding), and **S** (the current or last-known approved recovery point). Record S, its full native commit CID and ledger incarnation independently of the backup that will be tested. R and S may coincide at handoff. After later writes, R still establishes lineage but no longer establishes freshness. Retain independent receipts for a representative pending and acknowledged message.
+- Verify the pinned executable, original provider plist, canonical store and loopback port. Use only the installed service-specific binary. Never run a general installer to repair it. Use a private local parent, with space for the capture and an independent working copy. Exclude it from sync and off-host backups. Preserve both machines' protected admission and identity records as directed in [deploy](deploy.md#retire-paired-mailbox-evidence); a database backup cannot replace those records.
 
 ### Load the steps
 
-Paste this block into the shell once. It defines functions only and changes nothing.
+Run the following in zsh. Each command must succeed before the next. A `STOP:` is a failed check, not permission to continue.
 
 ```sh
 umask 077
@@ -48,29 +40,30 @@ plist_ok() {
 }
 writers_held() { disabled "$serve_label" && unloaded "$serve_label" && closed "$serve_port"; }
 
-new_work() {  # parent installed-binary proposed-binary
-  [[ -n "${AGENT_BUS_DIR:-}" && -d "$1" && -O "$1" && "$1" == "$(cd "$1" && pwd -P)" && -x "$2" && -x "$3" ]] || { stop "need AGENT_BUS_DIR, a canonical parent you own and two executables"; return 1; }
+new_work() {  # parent installed-binary
+  [[ -n "${AGENT_BUS_DIR:-}" && -d "$1" && -O "$1" && "$1" == "$(cd "$1" && pwd -P)" && -x "$2" ]] || { stop "need AGENT_BUS_DIR, a canonical parent you own and the pinned provider executable"; return 1; }
   local w="$1/provider-copy-$(date -u +%Y%m%dT%H%M%SZ)"
   mkdir -m 700 "$w" || { stop "cannot create a fresh $w"; return 1; }
   work=$w store="$AGENT_BUS_DIR/fluree/storage" label="${AGENT_BUS_LABEL:-ai.rawr.agent-bus}.fluree"
   serve_label="${AGENT_BUS_LABEL:-ai.rawr.agent-bus}" serve_port="${AGENT_BUS_PORT:-8096}"
-  plist="$HOME/Library/LaunchAgents/$label.plist" domain="gui/$(id -u)" old_fluree=$2 new_fluree=$3
-  ledger=$(cfg ledger) && live_port=$(cfg port) && [[ -n "$ledger" ]] && is_pid "$live_port" || { stop "config.json does not name a ledger and port"; return 1; }
-  old_sha=$(sha "$old_fluree") && new_sha=$(sha "$new_fluree") || { stop "cannot hash the binaries"; return 1; }
-  python3 -I -c 'import json,os,sys; keys="AGENT_BUS_DIR work store label serve_label serve_port plist domain old_fluree new_fluree ledger live_port old_sha new_sha".split(); assert len(sys.argv)==len(keys)+2; fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); f=os.fdopen(fd,"w"); json.dump(dict(zip(keys,sys.argv[2:])),f); f.close()' \
-    "$work/env" "$AGENT_BUS_DIR" "$work" "$store" "$label" "$serve_label" "$serve_port" "$plist" "$domain" "$old_fluree" "$new_fluree" "$ledger" "$live_port" "$old_sha" "$new_sha" || { stop "cannot record the work inputs"; return 1; }
-  print "work=$work"; print "installed $old_sha"; print "proposed $new_sha"
+  plist="$HOME/Library/LaunchAgents/$label.plist" domain="gui/$(id -u)" old_fluree=$2
+  ledger=$(cfg ledger) && live_port=$(cfg port) && [[ -n "$ledger" ]] && [[ "$live_port" == <1-65535> ]] || { stop "config.json does not name a ledger and port"; return 1; }
+  old_sha=$(sha "$old_fluree") || { stop "cannot hash the binaries"; return 1; }
+  python3 -I -c 'import json,os,sys; keys="AGENT_BUS_DIR work store label serve_label serve_port plist domain old_fluree ledger live_port old_sha".split(); assert len(sys.argv)==len(keys)+2; fd=os.open(sys.argv[1],os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600); f=os.fdopen(fd,"w"); json.dump(dict(zip(keys,sys.argv[2:])),f); f.close()' \
+    "$work/env" "$AGENT_BUS_DIR" "$work" "$store" "$label" "$serve_label" "$serve_port" "$plist" "$domain" "$old_fluree" "$ledger" "$live_port" "$old_sha" || { stop "cannot record the work inputs"; return 1; }
+  print "work=$work"; print "installed $old_sha"
 }
 resume_work() {  # existing work directory
   [[ -d "$1" && ! -L "$1" && -O "$1" && "$(stat -f %Lp "$1")" == 700 && -f "$1/env" && ! -L "$1/env" && -O "$1/env" && "$(stat -f %Lp "$1/env")" == 600 ]] || { stop "$1 is not a private work directory from new_work"; return 1; }
   local assignments
-  assignments=$(python3 -I -c 'import json,re,shlex,sys; keys="AGENT_BUS_DIR work store label serve_label serve_port plist domain old_fluree new_fluree ledger live_port old_sha new_sha".split(); pairs=json.load(open(sys.argv[1]),object_pairs_hook=lambda p:p); assert isinstance(pairs,list) and len(pairs)==len(keys); data=dict(pairs); assert len(data)==len(keys) and set(data)==set(keys) and all(isinstance(v,str) and v for v in data.values()) and data["work"]==sys.argv[2] and all(re.fullmatch("[0-9a-f]{64}",data[k]) for k in ("old_sha","new_sha")); print("\n".join(k+"="+shlex.quote(data[k]) for k in keys))' "$1/env" "$1") || { stop "$1/env is not a valid record for this path"; return 1; }
+  assignments=$(python3 -I -c 'import json,re,shlex,sys; keys="AGENT_BUS_DIR work store label serve_label serve_port plist domain old_fluree ledger live_port old_sha".split(); pairs=json.load(open(sys.argv[1]),object_pairs_hook=lambda p:p); assert isinstance(pairs,list) and len(pairs)==len(keys); data=dict(pairs); assert len(data)==len(keys) and set(data)==set(keys) and all(isinstance(v,str) and v for v in data.values()) and data["work"]==sys.argv[2] and re.fullmatch("[0-9a-f]{64}",data["old_sha"]); print("\n".join(k+"="+shlex.quote(data[k]) for k in keys))' "$1/env" "$1") || { stop "$1/env is not a valid record for this path"; return 1; }
   eval "$assignments" || { stop "cannot restore recorded inputs"; return 1; }
   print "resumed $work"
 }
 preflight() {
   [[ -f "$work/env" ]] || { stop "run new_work or resume_work first"; return 1; }
   [[ -d "$store" && "$store" == "$(cd "$store" && pwd -P)" ]] || { stop "the store path is not canonical"; return 1; }
+  [[ "$work" != "$store" && "$work" != "$store/"* && "$store" != "$work/"* ]] || { stop "capture and store paths overlap"; return 1; }
   plist_ok || { stop "the plist does not run the installed binary on this store and port"; return 1; }
   local actual_sha
   [[ "$old_sha" =~ '^[0-9a-f]{64}$' ]] && actual_sha=$(sha "$old_fluree") && [[ "$actual_sha" == "$old_sha" ]] || { stop "the installed binary changed or cannot be hashed"; return 1; }
@@ -96,7 +89,7 @@ capture_store() {
   setopt localoptions pipefail
   [[ -f "$work/stopped" ]] && unloaded "$label" && closed "$live_port" || { stop "the provider is not proved stopped"; return 1; }
   [[ -d "$store" ]] && plain_tree "$store" || { stop "the store is missing or contains links or special files"; return 1; }
-  [[ ! -e "$work/capture" ]] || { stop "a capture exists: move it to the Trash first to retake it"; return 1; }
+  [[ ! -e "$work/capture" ]] || { stop "a capture exists: preserve it and use a new private work directory"; return 1; }
   mkdir -m 700 "$work/capture" && /usr/bin/ditto --noclone "$store" "$work/capture/storage" || { stop "the capture failed"; return 1; }
   manifest "$work/capture/storage" > "$work/capture.manifest" || { stop "cannot list the capture"; return 1; }
   manifest "$store" | cmp -s - "$work/capture.manifest" || { stop "the capture differs from the store"; return 1; }
@@ -111,219 +104,111 @@ owns_copy() {  # copy directory
   is_pid "$p" && is_pid "$port" && [[ -n "$started" && "$(listener "$port")" == "$p" ]] || return 1
   current=$(ps -o lstart= -p "$p") && [[ -n "$current" && "$current" == "$started" ]]
 }
-make_copy() {  # name port binary
+make_copy() {  # unused loopback port
   setopt localoptions pipefail
-  local c="$work/$1" iss live_issuer other_issuer other expected_sha actual_sha recorded_sha capture_sha
-  case "$1" in
-    copy-old) [[ "$3" == "$old_fluree" ]] || { stop "copy-old binary differs from preflight"; return 1; }; expected_sha=$old_sha; other=copy-new ;;
-    copy-new) [[ "$3" == "$new_fluree" ]] || { stop "copy-new binary differs from preflight"; return 1; }; expected_sha=$new_sha; other=copy-old ;;
-    *) stop "unknown copy name"; return 1 ;;
-  esac
-  [[ "$expected_sha" =~ '^[0-9a-f]{64}$' ]] && actual_sha=$(sha "$3") && [[ "$actual_sha" == "$expected_sha" ]] || { stop "$1 binary changed or cannot be hashed"; return 1; }
+  local c="$work/reopened" copy_port="$1" iss live_issuer actual_sha recorded_sha capture_sha
+  [[ "$copy_port" == <1-65535> && "$copy_port" != "$live_port" ]] || { stop "invalid or live port"; return 1; }
+  [[ "$old_sha" =~ '^[0-9a-f]{64}$' ]] && actual_sha=$(sha "$old_fluree") && [[ "$actual_sha" == "$old_sha" ]] || { stop "provider binary changed or cannot be hashed"; return 1; }
   live_issuer=$(did "$AGENT_BUS_DIR/fluree-key.json") && [[ "$live_issuer" == did:key:* ]] || { stop "cannot establish the live issuer"; return 1; }
-  [[ -s "$work/capture.sha256" && ! -e "$c" ]] && closed "$2" || { stop "$1: no verified capture, the copy exists, or port $2 is taken"; return 1; }
+  [[ -s "$work/capture.sha256" && ! -e "$c" ]] && closed "$copy_port" || { stop "copy: no verified capture, the copy exists, or copy port is taken"; return 1; }
   recorded_sha=$(<"$work/capture.sha256")
-  [[ "$recorded_sha" =~ '^[0-9a-f]{64}$' ]] && capture_sha=$(sha "$work/capture.manifest") && [[ "$capture_sha" == "$recorded_sha" ]] && plain_tree "$work/capture/storage" && manifest "$work/capture/storage" | cmp -s - "$work/capture.manifest" || { stop "$1: the capture or its manifest changed"; return 1; }
-  mkdir -m 700 "$c" "$c/project" && /usr/bin/ditto --noclone "$work/capture/storage" "$c/storage" || { stop "$1: copy failed"; return 1; }
-  [[ "$c/storage" == "$(cd "$c/storage" && pwd -P)" ]] || { stop "$1: the copy path is not canonical"; return 1; }
-  manifest "$c/storage" | cmp -s - "$work/capture.manifest" || { stop "$1 differs from the capture"; return 1; }
-  (cd "$c/project" && "$3" init >/dev/null) && "$3" token keygen --format json > "$c/key.json" || { stop "$1: init or keygen failed"; return 1; }
+  [[ "$recorded_sha" =~ '^[0-9a-f]{64}$' ]] && capture_sha=$(sha "$work/capture.manifest") && [[ "$capture_sha" == "$recorded_sha" ]] && plain_tree "$work/capture/storage" && manifest "$work/capture/storage" | cmp -s - "$work/capture.manifest" || { stop "copy: the capture or its manifest changed"; return 1; }
+  mkdir -m 700 "$c" "$c/project" && /usr/bin/ditto --noclone "$work/capture/storage" "$c/storage" || { stop "copy: copy failed"; return 1; }
+  [[ "$c/storage" == "$(cd "$c/storage" && pwd -P)" ]] || { stop "copy: the copy path is not canonical"; return 1; }
+  manifest "$c/storage" | cmp -s - "$work/capture.manifest" || { stop "copy differs from the capture"; return 1; }
+  (cd "$c/project" && "$old_fluree" init >/dev/null) && "$old_fluree" token keygen --format json > "$c/key.json" || { stop "copy: init or keygen failed"; return 1; }
   python3 -I -c 'import json,sys; print(json.load(open(sys.argv[1]))["privateKey"]["hex"])' "$c/key.json" |
-    "$3" token create --private-key @- --expires-in 7d --all --read-all --write-all > "$c/token" 2>/dev/null && [[ -s "$c/token" ]] || { stop "$1: token failed"; return 1; }
-  iss=$(did "$c/key.json") && [[ "$iss" == did:key:* && "$iss" != "$live_issuer" ]] || { stop "$1: issuer missing or shared with the live key"; return 1; }
-  if [[ -e "$work/$other" ]]; then
-    other_issuer=$(did "$work/$other/key.json") && [[ "$other_issuer" == did:key:* && "$iss" != "$other_issuer" ]] || { stop "$1: issuer missing or shared with $other"; return 1; }
-  fi
-  printf '{ "fluree": { "url": "http://127.0.0.1:%s", "ledger": "%s" } }\n' "$2" "$ledger" > "$c/config.json"
-  "$3" server run --config "$c/project/.fluree/config.toml" --storage-path "$c/storage" \
-    --listen-addr "127.0.0.1:$2" --log-level warn -- --cors-enabled=false \
+    "$old_fluree" token create --private-key @- --expires-in 7d --all --read-all --write-all > "$c/token" 2>/dev/null && [[ -s "$c/token" ]] || { stop "copy: token failed"; return 1; }
+  iss=$(did "$c/key.json") && [[ "$iss" == did:key:* && "$iss" != "$live_issuer" ]] || { stop "copy: issuer missing or shared with the live key"; return 1; }
+  printf '{ "fluree": { "url": "http://127.0.0.1:%s", "ledger": "%s" } }\n' "$copy_port" "$ledger" > "$c/config.json"
+  "$old_fluree" server run --config "$c/project/.fluree/config.toml" --storage-path "$c/storage" \
+    --listen-addr "127.0.0.1:$copy_port" --log-level warn -- --cors-enabled=false \
     --data-auth-mode required --data-auth-trusted-issuer "$iss" \
     --admin-auth-mode required --admin-auth-trusted-issuer "$iss" > "$c/fluree.log" 2>&1 &
-  print $! > "$c/pid"; print "$2" > "$c/port"; ps -o lstart= -p "$(<"$c/pid")" > "$c/started"
-  waits 60 owns_copy "$c" || { stop "$1 did not start: read $c/fluree.log"; return 1; }
+  print $! > "$c/pid"; print "$copy_port" > "$c/port"; ps -o lstart= -p "$(<"$c/pid")" > "$c/started"
+  waits 60 owns_copy "$c" || { stop "copy did not start: read $c/fluree.log"; return 1; }
   local names; names=$(lsof -nP -a -p "$(<"$c/pid")" -Fn 2>/dev/null) && \
-    print -r -- "$names" | COPY_STORAGE="$c/storage" LIVE_STORAGE="$store" awk 'BEGIN {copy="n" ENVIRON["COPY_STORAGE"] "/"; live="n" ENVIRON["LIVE_STORAGE"]} index($0,copy)==1 {found=1} $0==live || index($0,live "/")==1 {unsafe=1} END {exit !(found && !unsafe)}' || { stop "$1 opened the live store, or its copy files cannot be proved open"; return 1; }
-  print "$1 serving on $2"
+    print -r -- "$names" | COPY_STORAGE="$c/storage" LIVE_STORAGE="$store" awk 'BEGIN {copy="n" ENVIRON["COPY_STORAGE"] "/"; live="n" ENVIRON["LIVE_STORAGE"]} index($0,copy)==1 {found=1} $0==live || index($0,live "/")==1 {unsafe=1} END {exit !(found && !unsafe)}' || { stop "copy opened the live store, or its copy files cannot be proved open"; return 1; }
+  print "working copy serving on $copy_port"
 }
 cut_of() {  # token-file port
-  setopt localoptions pipefail
-  local base="http://127.0.0.1:$2/v1/fluree" h t c i
+  setopt localoptions pipefail extendedglob
+  local base="http://127.0.0.1:$2/v1/fluree" h t i
   h=$(printf 'Authorization: Bearer %s\n' "$(<"$1")")
-  t=$(curl -fsS -H @<(print -r -- "$h") "$base/log/$ledger?limit=1" | python3 -I -c 'import json,sys; c=json.load(sys.stdin)["commits"][0]; print(c["t"], c["commit_id"])') || return 1
-  i=$(curl -fsS -H @<(print -r -- "$h") "$base/show/$ledger?commit=t:1" | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["id"])') || return 1
-  [[ -n "$t" && -n "$i" ]] && print "source_head ${t% *}\nhead_cid ${t#* }\nincarnation $i"
+  t=$(curl -fsS --max-time 10 -H @<(print -r -- "$h") "$base/log/$ledger?limit=1" | python3 -I -c 'import json,sys; c=json.load(sys.stdin)["commits"][0]; t=c["t"]; cid=c["commit_id"]; assert type(t) is int and t>=1 and isinstance(cid,str) and cid.isalnum(); print(t,cid)') || return 1
+  i=$(curl -fsS --max-time 10 -H @<(print -r -- "$h") "$base/show/$ledger?commit=t:1" | python3 -I -c 'import json,sys; i=json.load(sys.stdin)["id"]; assert isinstance(i,str) and i and not any(c.isspace() for c in i); print(i)') || return 1
+  [[ "${t% *}" == <1-> && "${t#* }" != "$t" && "${t#* }" == [[:alnum:]]## && -n "$i" && "$i" != *[[:space:]]* ]] || return 1
+  printf 'source_head %s\nhead_cid %s\nincarnation %s\n' "${t% *}" "${t#* }" "$i"
 }
-read_cuts() {
-  local c
-  for c in copy-old copy-new; do
-    owns_copy "$work/$c" || { stop "$c is not the process this step started"; return 1; }
-    cut_of "$work/$c/token" "$(<"$work/$c/port")" > "$work/$c/cut" && [[ -s "$work/$c/cut" ]] || { stop "$c did not answer"; return 1; }
-  done
-  cmp -s "$work/copy-old/cut" "$work/copy-new/cut" || { stop "the copies disagree: run restart_provider and report"; return 1; }
-  cp "$work/copy-old/cut" "$work/cut" && cat "$work/cut"
+verify_reopened() {
+  local c="$work/reopened"
+  owns_copy "$c" || { stop "working copy listener not attributed"; return 1; }
+  cut_of "$c/token" "$(<"$c/port")" > "$c/cut" && cmp -s "$work/expected.cut" "$c/cut" || { stop "working copy does not match the independent cut"; return 1; }
+  print "working copy recovered the exact cut"
 }
 restart_provider() {
   preflight || return 1
   unloaded "$label" && closed "$live_port" || { stop "the provider is already loaded or its port answers"; return 1; }
   launchctl enable "$domain/$label" && launchctl bootstrap "$domain" "$plist" || { stop "launchctl failed"; return 1; }
   waits 60 serves || { stop "the listener is not the job's process: do not send it the live token"; return 1; }
-  [[ -f "$work/cut" ]] || { print "provider restarted; no cut was recorded"; return 0; }
   cut_of "$AGENT_BUS_DIR/fluree-token" "$live_port" > "$work/live.cut" || { stop "the live provider did not answer"; return 1; }
-  cmp -s "$work/live.cut" "$work/cut" || { stop "the live provider is at another cut: do not fence"; return 1; }
+  cmp -s "$work/live.cut" "$work/expected.cut" || { stop "the live provider is at another cut: keep writers held"; return 1; }
   print "live provider at the recorded cut"
 }
-stop_copies() {
-  local c p
-  for c in copy-old copy-new; do
-    [[ -e "$work/$c" ]] || continue
-    owns_copy "$work/$c" || { stop "$c's saved pid is not the copy any more: check it by hand"; return 1; }
-    p=$(<"$work/$c/pid"); kill -TERM "$p" && waits 30 gone "$p" || { stop "$c did not exit"; return 1; }
-    /usr/bin/trash "$work/$c" || return 1
-  done
-  print "copies stopped and in the Trash"
+stop_copy() {
+  local c="$work/reopened" p
+  owns_copy "$c" || { stop "working copy listener not attributed"; return 1; }
+  p=$(<"$c/pid"); kill -TERM "$p" && waits 30 gone "$p" && closed "$(<"$c/port")" || { stop "copy did not exit cleanly"; return 1; }
+  print "working copy stopped; private files retained"
 }
 ```
-
-Then start a fresh, private work directory:
-
-```sh
-mkdir -p -m 700 "$HOME/.local/state/agent-bus"
-new_work "$HOME/.local/state/agent-bus" "<installed fluree executable>" "<unpacked proposed executable>"
-preflight
-```
-
-Expect `work=…`, both hashes and `preflight passed`. Record the hashes and the `work` path in the independent preflight record.
-- Check that the parent directory is excluded from any backup that leaves the host.
-- If the shell is lost, open a new zsh, paste the function block again, and run `resume_work "<independently recorded work path>"`. It checks the directory and data file's owner, modes, shape and recorded path; those checks do not prove provenance. Match its recorded paths and hashes to the independently retained record before proceeding. The file is parsed as data, not sourced as shell code.
-
-*Rehearsed 2026-11-23* on a disposable installation, with `plutil` reading a test plist. The subsequently tightened checks in the current block are *Unverified as a complete sequence*.
 
 ## Stop the provider and capture its store
 
-Both steps were *Rehearsed 2026-11-23* on a disposable server after an unclean kill, with `launchctl` stubbed to start and kill by pid.
+1. **Record the independent cut before the stop.** Release Operations supplies `AGENT_BUS_DIR`, the approved provider path and a private record from the held live ledger, retained outside the new copy. The cut file is three newline-terminated lines: `source_head <S>`, `head_cid <full native CID at S>`, and `incarnation <ID of commit 1>`. The value from the captured store cannot be its own expected result.
 
-1. **Stop the provider, and show that it stopped.**
+   ```sh
+   new_work "$protected_parent" "$approved_provider"
+   preflight
+   cp "$independent_cut" "$work/expected.cut"
+   serves && cut_of "$AGENT_BUS_DIR/fluree-token" "$live_port" > "$work/before.cut" &&
+     cmp -s "$work/before.cut" "$work/expected.cut"
+   ```
+
+   Check both provider identity and exact cut before continuing. If the approved cut is no longer current, reconcile the difference; do not silently replace it with the observed cut. Keep the work path and executable digest in the independent record. *Rehearsed 2026-11-26* on a disposable ledger; the job manager was stubbed.
+
+2. **Stop just the dedicated provider and capture it cold.**
 
    ```sh
    stop_provider
-   ```
-
-   Expect `provider stopped`.
-   - The step checks that the listener is the job's own process before it disables anything.
-   - It then checks that the job is unloaded, its process has exited, the port refuses connections and no process has the store open.
-   - A stopped provider can't commit a request that is still in flight. Its write-ahead log decides, on recovery, which of those requests committed.
-   - If this capture procedure aborts, see [If it fails](#if-it-fails) before restarting the provider.
-
-   A negative rehearsal showed that a mismatched pid stops before `launchctl disable`.
-
-2. **Capture the whole store, write-ahead log and nameservice included.**
-
-   ```sh
    capture_store
-   ls -A "$work/capture/storage"
    ```
 
-   Expect the manifest's hash, then `.fluree-wal`, `ns@v2` and the ledger's directory. Record the hash in the independent preflight record.
-   - Compare the capture file by file with the **stopped** store; the manifest lists file names and hashes only. Once a provider opens a store, its index files can change without a ledger commit. A live file listing cannot verify a cold copy, and a matching ledger cut does not prove byte identity.
-   - This procedure refuses symbolic links and special files rather than risk a working copy following a path outside the capture. Investigate such a store separately.
-   - `--noclone` makes independent files, not APFS clones that share blocks with the live store.
-   - `.fluree/config.toml`, the key and the token are not copied.
-   - The capture is the evidence: working copies are made from it, never from the live store.
+   Expect `provider stopped`, then a manifest digest. The helper checks PID ownership, listener closure and absence of open store files. It compares the capture file by file with the stopped original, including the WAL and nameservice. A successful copy command alone is not enough. Keep the independent digest and never open the master capture with a provider. *Rehearsed 2026-11-26* with the real provider and synthetic data; the job manager was stubbed.
 
-## Read the source cut from two working copies
+## Verify recovery
 
-Both steps were *Rehearsed 2026-11-23* with both binaries.
-
-3. **Make one working copy for each binary,** each with its own port, project, key and token.
-
-   ```sh
-   make_copy copy-old 18195 "$old_fluree" && make_copy copy-new 18196 "$new_fluree"
-   ```
-
-   Expect two `serving` lines.
-   - Each copy is checked against the capture, trusts only its own new key, listens on loopback only, and is checked not to open the live store.
-   - Each runs in normal file mode, so it replays the write-ahead log on start. Don't use a read-only or peer mode: the proposed binary's read-only mode does not replay the physical log.
-   - Never give a copy the live token.
-   - A copy holds the whole store, message content included: handle it like the capture.
-
-4. **Read the head, its commit ID and the incarnation from each copy,** without printing commit data.
-
-   ```sh
-   read_cuts
-   ```
-
-   Expect `source_head`, `head_cid` and `incarnation`, the same from both copies. Record them in the independent preflight record.
-   - `head_cid` is the commit's full CID, the spelling `--source-commit` takes. The 12-character hex that `fluree log` prints is a different spelling.
-   - `/show` returns the commit's data, so the filter keeps only its `id`. The raw response is never saved or printed.
-
-## Restart the live provider
-
-5. **Restart the live provider under the installed binary, with both writers still held, and check it is at the same cut.**
+3. **Restore the original provider promptly, then open only a private descendant of the capture.** Run in the same shell while all writers remain held. Opening the copy under its own key must not read or modify the live store.
 
    ```sh
    restart_provider
+   make_copy 18195
+   verify_reopened
    ```
 
-   Expect `live provider at the recorded cut`. Both `serve` jobs stay disabled and unloaded.
-   - The step re-checks the plist, the binary's hash and the held writers before `launchctl enable`.
-   - It sends the live token only once the listener is proved to be the job's own process.
-   - The transition continues at `mailbox-source` in [deploy](deploy.md#import-file-positions-into-the-ledger). Run its `check-source` commands on this host, because the copies listen only on this host's loopback. Pass `$work/copy-old/config.json` with `$work/copy-old/token`, then `$work/copy-new/config.json` with `$work/copy-new/token`. Each must report `status: verified` at `source_head`.
+   Expect `live provider at the recorded cut` and `working copy recovered the exact cut`. The two listeners have separate state paths, ports, issuers and tokens. Only the original listener receives the live token. When resuming after a shell interruption, use `resume_work "$recorded_work_path"` and compare its inputs and cut with the separately retained record before acting. *Rehearsed 2026-11-26* on a disposable store: both recovered at the independent cut, and the check refused a different expected CID at the same height.
 
-   *Rehearsed 2026-11-23* on disposable state:
-   - the original restarted at the copies' cut;
-   - `check-source` verified both copies;
-   - it refused a wrong `--expected-head`, and a copy at the live origin;
-   - a changed binary hash stopped before `launchctl enable`.
-
-   The `launchctl` commands were stubbed.
-
-## Clean up
-
-6. **Stop the working copies once both `check-source` runs have verified.**
+4. **Preserve the recovery evidence and release only the intended holds.**
 
    ```sh
-   stop_copies
+   stop_copy
    ```
 
-   Expect `copies stopped and in the Trash`.
-   - The step signals a copy only while that copy still owns its port, with the start time recorded when it started.
-   - The copies go to the Trash with their message content, keys and tokens. Their keys are trusted by nothing else.
-   - Keep `$work`, with the capture, the manifest, `env` and the cut files, until both hosts are permitted and the transition is reconciled. A separately reviewed retirement then decides their disposal.
-   - The capture holds the whole store, message content included. Never move it to the other host, attach it to a PR or message, or let a backup carry it off the host.
-   - Emptying the Trash is the human's decision.
-
-   *Rehearsed 2026-11-23.*
-
-## Without authorization
-
-- **If the provider stop isn't authorized, don't begin.** Without a cold capture, `check-source` can't run, so the transition can't proceed past it.
-- **An online copy is no substitute.** A copy of a running store, or a read of the live provider alone, doesn't establish the cut.
-- **The old jobs may return before any sentinel exists.** If both `serve` jobs were already held, nothing has crossed the fix-forward boundary. Load and start each one with `launchctl enable "gui/$(id -u)/<serve label>"` and then `launchctl bootstrap` as in [operate](operate.md#stop-and-start-serve-fluree-or-the-tunnel). Ask Release Operations to obtain the authorization.
-- **After a sentinel, the old jobs stay held** ([deploy](deploy.md#import-file-positions-into-the-ledger)).
-
-*Unverified as an installed procedure.*
+   Expect the isolated PID to exit and its own port to close. Keep the master capture, manifest, independent cut, identity evidence, and protected receipts. The working files contain private mail and credentials; do not attach them to a PR or transfer them through the Bus. If this is a retirement handoff, return to [deploy](deploy.md#retire-paired-mailbox-evidence) with application writers still held. Verify representative delivery there using the actual owners, not by reading their live inboxes as the operator. *Rehearsed 2026-11-26* for PID-owned cleanup; actual retirement and owner delivery are separate deployment checks.
 
 ## If it fails
 
-- **Keep the capture intact and both `serve` jobs held** in every case below.
-- **If the proposed binary has opened only isolated copies,** step 5 can bring the installed provider back after an abort, unless the live store is suspect. Use `resume_work` in a new shell if needed. The helper checks the originally recorded plist binding; it is not a provider upgrade or downgrade command.
-- **If a separately pinned provider fails to start or keeps restarting without a listener,** do not run `stop_provider`: it requires the job's PID to own the listener. Use the authorized operator's abort procedure to disable and unload only the identified provider job. Prove its processes are gone, the port is closed and no process has the store open before inspecting or restoring the store. Do not rerun the installer.
-- **After the proposed binary first opens the live store, never restart the old binary on that store.** Even a failed start may have changed files. Before either sentinel, and only with proof that no work committed after the recorded cut, Release Operations can restore the original binding on a fresh copy of the verified, untouched cold capture. Preserve the opened store and the capture; verify the restored provider's head, head CID and incarnation before releasing either writer. After the first sentinel or any newer commit, do not restore that capture. If either condition is uncertain, keep the jobs held and follow [paired transition recovery](recover.md#mailbox-import-cannot-be-established).
-- **Account for a copy after any `make_copy` failure.** It may already have started a process. Use the saved pid, listener and start time to prove ownership before stopping it; if ownership cannot be established, do not signal that pid and escalate for inspection.
-
-The pinned-provider abort and restore are *Unverified as an installed procedure*.
-
-| `STOP:` message | What it means | What to do |
-| --- | --- | --- |
-| `the plist does not run the installed binary…`, `the listener is not the job's own process` | The provider isn't the one you identified | Change nothing. Report to Release Operations. |
-| `serve is loaded or its port answers` | A writer isn't held | Hold it as in [deploy](deploy.md#import-file-positions-into-the-ledger), then rerun the step. |
-| `the provider did not stop`, `something still has the store open` | A process still serves or holds the store | Copy nothing. Stop only a process that belongs to this bus, by its pid. Anything else goes to Release Operations. |
-| `the capture failed`, `differs from the store` | The capture is incomplete | Move `$work/capture` to the Trash, then rerun `capture_store` while the provider is still stopped. |
-| `… differs from the capture`, `… did not start` | A copy is incomplete or failed to start | Read its log. Stop it by hand only after checking its pid, move it to the Trash and rerun `make_copy` for that copy. |
-| `the copies disagree` | The binaries recover the store differently | Choose neither. Run `restart_provider`: this is an incident for Release Operations, and no sentinel is installed. |
-| `the installed binary changed` | The live provider would start under an unreviewed binary | Don't start it. Release Operations restores the recorded binary first. |
-| `… do not send it the live token`, `the live provider did not answer` | The restarted listener is unproved | Don't send the token or fence. For a service-specific pin, use the abort procedure above, not the full installer in [recover](recover.md#fluree-wont-start-or-the-token-isnt-enforced). |
-| `the live provider is at another cut` | The live store differs from the capture, or something wrote | Don't fence. Restoring the live store from the capture is a separately reviewed recovery, not part of this page. |
-| `check-source` refuses (deploy) | See [deploy](deploy.md#import-file-positions-into-the-ledger) | Don't fence, and don't commit anything to move `H`. An expired copy token is re-minted with that copy's own key. |
-
-Further recovery is in [recover](recover.md#mailbox-import-cannot-be-established).
+- **A local or remote writer is unaccounted for, or authorization is missing:** do not stop the provider. If a hold was already taken, Release Operations restores only the original jobs it held after checking that their bindings are unchanged. Do not infer authority from an unavailable service.
+- **A listener or path does not match, or an open-file check is inconclusive:** do not send a token, signal a guessed PID or copy the store. If a disposable process may already have started, check its saved PID, start time and owned listener before stopping it.
+- **A capture or reopen fails:** preserve the original and the partial capture. A still-healthy original can restart under its unchanged pinned binary with the writers held; independently verify it against the accepted cut before resuming normal service or retrying. A mismatched original is a recovery incident, not a reason to promote the copy.
+- **Considering a later restore:** verify the ledger incarnation and the exact commit at an independently accepted **S**, on the candidate's own history. Its numeric head must reach S and that ancestor's full native CID must match; matching R, or having a higher head on a fork, is not enough. Do not release writers until the recovery procedure also accounts for known subsequent work and representative pending/ACK receipts. An old copy, missing expected CID or uncertain newer work cannot be approved as lossless. Keep the stores, report the uncertainty, and obtain a separate informed decision before any lossy recovery. See [serving-binding recovery](recover.md#the-serving-binding-is-refused).

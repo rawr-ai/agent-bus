@@ -16,50 +16,32 @@ A launcher change reaches a newly started hook immediately, but reaches `serve` 
 
 The activation decision must name the exact reviewed source commit and tree, candidate and previous installed bindings, runtime/dependency identities, affected services, checks and complete rollback. For a release, record its absolute root and manifest sha256 outside the release; its source identity is not necessarily the checkout's HEAD. Review the full deployed-to-candidate delta, including whether the separate viewer entrypoint can be exposed. The [query tools' check and rollback constraint](#query-tools) applies to every server and rollback: one machine's upgrade says nothing about another's. Preserve state, credentials, cursors and `installation-id`; a release never initializes an established installation's missing identity ([recover](recover.md#the-installation-identity-is-missing-or-invalid)).
 
-Crossing between legacy and exact cursor filenames in retained file-based releases requires [the stopped-bus transition](#change-the-cursor-format). Moving from exact files to ledger positions instead requires [the paired import](#import-file-positions-into-the-ledger). Neither uses the ordinary bind-and-restart or rollback step.
+The current runtime starts only with a proved serving binding. Established paired R1 installations use [the one-time handoff](#retire-paired-mailbox-evidence) before their first successor. [Historical file-writer transitions](#change-the-cursor-format) are not current deployment or rollback options.
 
 ### Check a paired-admission target
 
-When paired mailbox evidence or its sentinel exists, check the selected target
-before changing **any** viewer, plugin, launcher, checkout or service. First
-verify the package against its independently retained digest and release
-decision as below, or verify the source commit, tree, dependencies and Bun
-against the decision in a separate checkout. The current guarding installer
-must also perform its own compatibility check; never use an older installer
-to bypass it. For the externally verified package at `verified_target`:
+An ordinary upgrade or source rollback keeps the same serving binding. Before
+changing any viewer, plugin, launcher, checkout or service, verify the exact
+candidate against its independently recorded package digest or approved source
+tree and runtime. Then, in the intended installation's environment, run its
+read-only verifier. For a package:
 
 ```sh
 ( set -o pipefail
-  "$verified_target/runtime/bun" --no-env-file --config="$verified_target/app/bunfig.toml" \
-    "$verified_target/app/cli.js" serve-admission-capability | cmp -s - <(printf 'r1-h-k-peer-legacy-read-v2\n')
+  AGENT_BUS_DIR="$state_dir" "$verified_target/runtime/bun" --no-env-file \
+    --config="$verified_target/app/bunfig.toml" "$verified_target/app/cli.js" \
+    verify-serve-binding | cmp -s - <(printf 'serve-binding-v1\n')
 )
 ```
 
-For the already verified source target in `verified_source`, use its approved
-`verified_bun` and locked dependencies:
-
-```sh
-( set -o pipefail
-  "$verified_bun" --no-env-file --config="$verified_source/bunfig.toml" \
-    "$verified_source/src/bin.ts" serve-admission-capability | cmp -s - <(printf 'r1-h-k-peer-legacy-read-v2\n')
-)
-```
-
-Run the appropriate block in zsh. Expect exit 0 with no output: it checks both
-the command's success and exactly `r1-h-k-peer-legacy-read-v2` followed by one newline.
-Otherwise leave every existing binding untouched and stop. This
-operator-only self-declaration is not proof
-of artifact identity, intact admission evidence or successful startup. The
-guarding installer checks compatibility, not the complete evidence schema;
-the capable server validates its own full admission before serving. A damaged
-record may therefore still prevent startup after a compatible rebind. Preserve
-the evidence and recover forward rather than bypassing either guard.
-The earlier paired reader cannot interpret legacy read or vacancy receipts.
-Do not restart or rebind it against this format. Conversely, do not relabel
-or reissue earlier-format admission evidence: preserve it and use a separately
-reviewed transition before selecting a reader with a different capability.
-*Unverified as an installed operator sequence; CLI and installer tests use
-disposable state.*
+For verified source, run the same command using the exact approved Bun and
+`--config=/dev/null "$verified_source/src/bin.ts"`. Expect exit 0 and no output
+from the comparison. The managed installer independently repeats this check;
+a missing or inconclusive binding refuses before activation. Do not substitute
+a health response, a version string or the provider's self-reported current head.
+Use [retirement](#retire-paired-mailbox-evidence) for the first successor on an R1
+installation, or [recovery](recover.md#the-serving-binding-is-refused) for missing
+evidence. *Unverified as a complete installed sequence.*
 
 ## Deploy a packaged release
 
@@ -129,22 +111,17 @@ The binding mechanism, source/release transitions and complete rollback have bee
 
 ### Release rollback and partial failure
 
-If paired ledger-mailbox transition evidence or its sentinel exists, first
-follow [mailbox import recovery](recover.md#mailbox-import-cannot-be-established).
-The retained file generations are not a rollback of later ledger positions:
-do not rebind an incompatible package or source, run an older installer, or
-manually replace the launcher. Use the current guarding installer for any
-supported rebind and verify the target's paired-admission capability. A normal
-pending cursor export is a different record and follows the file-format
-procedure below.
-
-For an exact-to-legacy rollback to a verified package, complete the [held cursor export and binding](#change-the-cursor-format) and verify its fresh `exported` receipt before permitting the legacy server to start. The current installer refuses a target without exact layout support while this installation has an active exact directory. Do not use an older installer or manually replace the launcher to bypass this refusal. Rollback across this boundary to a source target is unavailable.
+The guarded routine rollback is only to a previously verified target that
+understands the same serving binding and current ledger. A conditional R1
+rollback needs the original admission evidence and
+[separately qualified recovery](recover.md#the-serving-binding-is-refused).
+Do not use a file writer, overwrite a binding or roll back the ledger.
 
 Verify the previous release against its retained external digest before using it. Review overlap compatibility: waiting hooks and loaded guidance from the newer release must work with or be refused safely by the older server, which must decode newer stored entries and retain public-query guarding. Include any [connected hosted peer](#when-a-hosted-peer-is-connected) in the rollback record, holding its attributed host stopped before a downgrade when the previous Bus cannot satisfy its contract. On downgrade, move guidance first: select the previous marketplace link and refresh clients, restore/rebind an existing viewer, then bind the launcher to the previous release. Use the ordinary installer only for same-format rollback; otherwise follow the held binding above. Repeat step 5 and all applicable checks. Keep newer release files while an old process still uses them. The source → release A → B → A → source mechanism is rehearsed; live rollback remains *Unverified*.
 
-Where paired evidence exists, run [the target capability check](#check-a-paired-admission-target) before the preceding guidance-first sequence, not only before rebinding the launcher. A failed or unavailable check leaves the entire cohort unchanged.
+Run [the target's binding check](#check-a-paired-admission-target) before the preceding guidance-first sequence, not only before rebinding the launcher. A failed or unavailable check leaves the entire cohort unchanged.
 
-To return to source **without changing cursor format**, first migrate the clients back to the recorded primary marketplace using [install's remove-and-add procedure](install.md#select-the-plugin-marketplace), not a release marketplace link pointed at an unversioned source plugin. Restore the viewer with the trusted release tool's `viewer-restore --from "$record"`, using its recorded source plist. Restore the approved clean, detached source and frozen dependencies with its exact Bun as in [the source lane](#deploy-a-new-version), then use the retained upgraded installer:
+To return to a source that proves the same binding, first migrate the clients back to the recorded primary marketplace using [install's remove-and-add procedure](install.md#select-the-plugin-marketplace), not a release marketplace link pointed at an unversioned source plugin. Restore the viewer with the trusted release tool's `viewer-restore --from "$record"`, using its recorded source plist. Restore the approved clean, detached source and frozen dependencies with its exact Bun as in [the source lane](#deploy-a-new-version), then use the retained upgraded installer:
 
 ```sh
 AGENT_BUS_REPO="$primary" /bin/sh "$R/app/install-launch-agents.sh" \
@@ -159,9 +136,9 @@ If a same-format step fails, inspect `status` per surface and re-run only the fa
 
 This is the supported **source-binding lane**, including source rollback. For an installation already bound to a package, use [the release lane](#deploy-a-packaged-release) instead; do not advance its retained primary merely to activate a release.
 
-Where paired mailbox-transition evidence exists, an incompatible source target
-is not a valid rollback. Use [mailbox import recovery](recover.md#mailbox-import-cannot-be-established)
-and the current guarding installer; do not bypass its target check.
+Use the [same binding preflight](#check-a-paired-admission-target) in a separate checkout
+before switching the primary. An incompatible source target is not a valid rollback.
+Do not bypass the current guarding installer.
 
 1. **Identify the primary explicitly** from the deployment record, not from `readlink`: the launcher may be a regular managed file. In that checkout record `git status --short --branch`, `git rev-parse HEAD`, `git rev-parse HEAD^{tree}`, the running `serve` process and its launcher/runtime binding. Stop if the tree is dirty, attached to a branch, or its identity differs from the approved record. Preserve both old source and exact runtime for rollback. *Observed live 2026-11-05* on both machines.
 
@@ -201,489 +178,71 @@ and the current guarding installer; do not bypass its target check.
 
 ## Change the cursor format
 
-Use this only when changing between a server that stores URI-encoded cursor filenames and a server that stores exact-address records, with a verified packaged target. It is per installation and current ledger incarnation, not a ledger or plugin migration. The write commands require macOS launchd and the positively identified job's explicit `AGENT_BUS_LABEL` and canonical `AGENT_BUS_PORT`; Linux and other supervision have no supported in-place converter. Use one operator; do not run the converter concurrently or manually run either `serve` outside the owned job. Persistently disable the job throughout conversion and binding, so login or restart cannot bring back the wrong writer. Keep the ledger, token, installation identity, configuration and retained cursor generations unchanged. The full live activation is *Unverified*; stopped conversion and fault cases have disposable test coverage. The ordinary release rehearsal refuses a cross-format pair; exercise this sequence with the exact packages in a disposable installation instead.
-
-This file-format procedure does not authorize rollback across a paired
-ledger-mailbox sentinel or admission. Preserve that evidence and follow
-[mailbox import recovery](recover.md#mailbox-import-cannot-be-established).
-
-Before claiming the shared-ledger sender fence or admission bound for a cohort, hold all obsolete writers and account for already-dispatched writes at the provider. A mixed cohort still permits the older behavior; converting one machine does not settle the others. Preserve the version-matched hosted binding and keep it stopped during the incompatible interval.
-
-1. **Identify the actual installation and inspect without writing.** Confirm the owned job, its plist, state directory and installed launcher. Derive `serve_port` from `EnvironmentVariables.AGENT_BUS_PORT` in that successfully read and validated plist; use the serve default `8096` only if the key is genuinely absent. An unreadable plist or an invalid port is a refusal, not a reason to use the default. Set `state_dir`, `serve_label`, `serve_plist` and `launcher` to the recorded values and `domain="gui/$(id -u)"`. Define the converter from the externally verified *exact-format* release `R`, even when downgrading. Set `verified_target`, `external_sha` and `releases_dir` to the selected package, its independently retained manifest digest and its releases directory. Before converting, confirm the selected target is supported and the current trusted installer supports `--bind-only`.
-
-   ```sh
-   cursor_cli() {
-     AGENT_BUS_DIR="$state_dir" AGENT_BUS_LABEL="$serve_label" AGENT_BUS_PORT="$serve_port" \
-       "$R/runtime/bun" --no-env-file --config="$R/app/bunfig.toml" "$R/app/cli.js" cursors "$@"
-   }
-   cursor_cli --action check
-   ```
-
-   Expected: exit 0 and `state: "legacy"` before conversion or `state: "exact"` after it, with the intended `installation`, `incarnation`, inspected `head` and `count`. Exact-state `check` includes `legacyExport.eligible` and the first reason when ineligible. It describes the inspected cursor files and pinned history, not permission to downgrade later. A validation or read failure is an error, not an eligibility result. A live preflight is preliminary; only the stopped operation decides. This never creates a Fluree ledger, changes cursor files or consumes mail. *Unverified as an installed command.*
-
-2. **Hold the existing writer.**
-
-   ```sh
-   launchctl disable "$domain/$serve_label"
-   launchctl bootout "$domain/$serve_label"
-   launchctl print-disabled "$domain"
-   launchctl print "$domain/$serve_label"
-   ```
-
-   Expected: the positively identified label is disabled, `print` reports no service, and the recorded old process and listener are gone. The converter checks the exact launchd label and listener on the explicit port. Those checks supplement, not replace, your proof of the previous process's exit and settlement of its outstanding provider writes. Do not treat an unknown domain, a different label or an uninspectable port as an empty installation. Keep the owned job disabled while deciding or recovering, including after a failed command. *Unverified as an installed sequence.*
-
-3. **Convert before launching either binary.** For an upgrade:
-
-   ```sh
-   cursor_cli --action migrate
-   cursor_cli --action check
-   ```
-
-   For a downgrade instead, while the newer writer is still stopped:
-
-   ```sh
-   cursor_cli --action export
-   ```
-
-   Expected on upgrade: both receipts show `state: "exact"` and the same `installation`, `incarnation` and `generation`. Old files are retained, not reused as a fallback. Expected on downgrade: `state: "exported"` with the matching installation and incarnation. This publishes a fresh old-format directory from the *current* exact positions and retains the exact generation separately. A previous export receipt or pre-upgrade backup is not downgrade authorization. An unrepresentable address, a known case alias (including a historical address without a local cursor) or a cursor without a historical witness refuses export. The alias restriction applies on all volumes, including a case-sensitive volume with both spellings. An exact address stays valid even when it cannot be projected into the older format. On refusal, keep the job held and use [the phase-specific forward recovery](recover.md#cursor-format-transition-refused); do not remove, replay or replace a cursor to make export pass. A successful export cannot prevent a legacy server from aliasing a *future* case variant. *Tested on disposable state; installed transition Unverified.*
-
-4. **Bind the verified package while the job is held.** Use the current verified `trusted_installer`, not an old script from the rollback target. These overrides identify the already validated installation, not a replacement job or state folder.
-
-   ```sh
-   AGENT_BUS_LABEL="$serve_label" AGENT_BUS_DIR="$state_dir" \
-     AGENT_BUS_PORT="$serve_port" AGENT_BUS_LAUNCHER="$launcher" \
-     AGENT_BUS_RELEASES="$releases_dir" /bin/sh "$trusted_installer" \
-     --release "$verified_target" --expect "$external_sha" --bind-only
-   ```
-
-   Expected: the launcher points to the exact target, the plist is unchanged, and the identified job remains disabled, unloaded and off its port. Check again that the recorded previous process exited. There is no source or `--runtime-only --bind-only` fallback. On refusal, keep the job held and preserve the retained generations. *Unverified as an installed sequence.*
-
-5. **Resume the verified writer.** Verify the selected binary and retained or exported generation, and complete the applicable owned guidance, viewer and hosted binding steps. Then enable and bootstrap just the positively identified job:
-
-   ```sh
-   launchctl enable "$domain/$serve_label"
-   launchctl bootstrap "$domain" "$serve_plist"
-   ```
-
-   Expected: the selected writer runs on the recorded port and state directory and passes the applicable release health and delivery checks above. A pending export blocks exact-format startup and migration. [Recover an interrupted export](recover.md#cursor-format-transition-refused) with the retained exact-format CLI; do not remove its marker or start the old launcher. Files are staged and renamed as complete directories; process-interruption testing does not establish power-loss durability. *Unverified as an installed sequence.*
+This is a [retained file-writer procedure](https://github.com/rawr-ai/agent-bus/blob/a32ae0aecb3413e1e04363f464242ae1a9136418/docs/runbooks/deploy.md#change-the-cursor-format), not a current deployment option. Do not export ledger mailboxes to cursor files or remove the predecessor blocker to make the old executable serve.
 
 ## Import file positions into the ledger
 
-Use this only for the two identified installations moving from the retained
-file-based release to one reviewed ledger-mailbox release. This is not a
-general third-installation or restored-ledger procedure. The operator must
-exclude every other writer and any ledger replacement or restore throughout
-the transition. Use the reviewed candidate executable without rebinding either
-installed launcher. Set `AGENT_BUS_DIR`, `AGENT_BUS_LABEL` and `AGENT_BUS_PORT`
-to the independently identified local installation, job and listener on each
-machine. The CLI checks that local job is disabled, unloaded and off its port;
-the peer hold and provider settlement below are operator attestations, not
-facts the local CLI can prove.
+The [pinned R1 procedure](https://github.com/rawr-ai/agent-bus/blob/a32ae0aecb3413e1e04363f464242ae1a9136418/docs/runbooks/deploy.md#import-file-positions-into-the-ledger) records the original import and both provider-open and mailbox-fence recovery boundaries. Current releases have no import, fence or cursor commands. Keep that procedure and its exact artifacts for diagnosis, not to rerun a completed import. An incomplete earlier transition must be reconciled safely under its original procedure before retirement.
 
-Before an installed transition, run the release qualifier from the reviewed
-source tree against disposable state. Put the approved Bun and provider on
-`PATH`; supply independently recorded release roots and digests (not values
-read back from the artifacts being checked):
+## Retire paired mailbox evidence
 
-```sh
-AGENT_BUS_OLD_RELEASE="$file_writer" AGENT_BUS_OLD_RELEASE_SHA256="$file_writer_sha" \
-AGENT_BUS_PRIOR_MAILBOX_RELEASE="$prior_reader" AGENT_BUS_PRIOR_MAILBOX_RELEASE_SHA256="$prior_reader_sha" \
-AGENT_BUS_CANDIDATE_RELEASE="$verified_target" AGENT_BUS_CANDIDATE_RELEASE_SHA256="$external_sha" \
-AGENT_BUS_CANDIDATE_COMMIT="$candidate" AGENT_BUS_CANDIDATE_TREE="$candidate_tree" \
-AGENT_BUS_FLUREE_SHA256="$provider_sha" AGENT_BUS_FLUREE_VERSION="$provider_version" \
-bun --no-env-file test test/mailbox-transition-old-release.test.ts
-```
+Release Operations owns this one-time handoff from the final admitted R1 release. It does not create a ledger or era, write a mailbox receipt, rejoin, or reimport any holding. Use the ordinary deployment path on subsequent upgrades.
 
-Require an executed, passing test, not a skip. The prior ledger reader is a
-negative control distinct from the old file writer: it must not start with the
-new admission evidence. A disposable pass does not qualify installed data or
-replace the pre-sentinel comparison below. *Unverified as a packaged operator
-sequence.*
-
-On each machine, export the three values for that installation before running
-the commands below:
-
-```sh
-export AGENT_BUS_DIR="$state_dir" AGENT_BUS_LABEL="$serve_label" AGENT_BUS_PORT="$serve_port"
-candidate_agent_bus() {
-  "$verified_target/runtime/bun" --no-env-file --config="$verified_target/app/bunfig.toml" \
-    "$verified_target/app/cli.js" "$@"
-}
-```
-
-`verified_target` is the already verified, externally anchored release on that
-machine, not a command string or the currently installed launcher. Preserve the
-existing hosted peer's [hold and version handoff](#when-a-hosted-peer-is-connected)
-and the existing [release, plugin and viewer checks](#deploy-a-packaged-release)
-on both sides of this transition.
-
-Before capturing anything, hold both actual old writers and settle every
-previously submitted provider request, including uncertain joins. A stopped
-listener, unchanged head, copied cursor file or fixed delay does not prove a
-request cannot still commit. A provider shutdown or transition requires its
-own authorization and verified recovery procedure; do not stop it as an
-incidental step. If that shutdown has been separately authorized, positively
-stop the sole provider after holding the native writers, and preserve the full
-store, including its WAL and nameservice, using [the provider-copy procedure](recover-provider-copy.md).
-For the verified standalone provider topology, cold-recover separate isolated
-writable copies in normal file mode with no Bus writer under the exact old and
-proposed provider binaries. Establish `H` from
-the recovered ledger, requiring the same ledger and branch, first-commit
-incarnation, head transaction and `H` commit ID on both copies and the intended
-selected store before capture. An index position is not the ledger head. A
-clean provider exit alone is not a receipt for every submitted operation.
-
-Reconcile any staged join against its durable outcome and the cursor belonging
-to the holding at `H`; examine the exact historical transition, not current
-ownership alone. A canonical cursor staged for a rejected or unknown join is
-not automatically the previous holding's position. Preserve any `.tmp` file,
-but do not infer acceptance or choose a position from it: one can remain before
-or after publication. If the join outcome or prior position cannot be proved,
-the current importer has no override that safely classifies a readable cursor:
-keep both jobs held before dispatch, preserve the evidence and report the
-affected count. Do not manually rewrite, guess smaller or larger, or synthesize
-a retry. If settlement or the continuity of the
-selected ledger cannot be established, keep both jobs held and stop. The first
-installed transition sentinel is the conservative
-fix-forward boundary, even before an import is dispatched. No step here
-removes it or authorizes an old file writer to return. *Unverified as a paired
-installed procedure; local and disposable checks are recorded separately.*
-
-1. After verifying both holds and settlement, on **each** original installation:
+1. **Pin the tools and rehearse.** Verify the exact predecessor, successor, provider and existing private host package against the release decision. Pin the successor checkout and the reviewed handoff recipe digest independently; build the verifier as a separate artifact from the pinned predecessor tree:
 
    ```sh
-   (umask 077; set -C; candidate_agent_bus mailbox-source > "$source_receipt")
+   "$approved_bun" --no-env-file --config=/dev/null scripts/build-retired-r1-handoff.ts \
+     --out "$new_private_handoff_directory" --expected-recipe "$approved_recipe_sha256"
    ```
 
-   Expect one JSON receipt with the installation, ledger, cut and cursor
-   inventory digest. Compare both installation identities and the incarnation
-   to independently retained preflight anchors; the receipts must name the
-   same ledger and cut. `source_receipt` must be a fresh path in a protected
-   directory for this attempt; noclobber refuses an existing file. A failed
-   capture may leave an incomplete file: retain it and select a different fresh
-   path only after reconciling the failure. Retain independent private receipt
-   copies and backups separately from the payloads; do not reconstruct an
-   anchor from the copy being verified. On one designated host generate one
-   operation and pass the same value to the other:
+   Retain the manifest digest printed by the build outside the directory and anchor that digest on both hosts. Prove the exact release and handoff on synthetic roots before scheduling any hold:
 
    ```sh
-   operation=$("$verified_target/runtime/bun" --no-env-file \
-     --config="$verified_target/app/bunfig.toml" -e 'console.log(Bun.randomUUIDv7())')
+   "$approved_bun" --no-env-file --config=/dev/null scripts/qualify-retired-r1.ts \
+     --release "$candidate" --expect "$candidate_sha256" \
+     --file-writer "$file_writer" --expect-file-writer "$file_writer_sha256" \
+     --prior-mailbox "$older_r1" --expect-prior-mailbox "$older_r1_sha256" \
+     --handoff "$handoff" --expect-handoff "$handoff_sha256" \
+     --fluree "$fluree" --expect-fluree "$fluree_sha256" \
+     --private-archive "$locked_dev_archive" --expect-private-archive "$archive_sha256"
    ```
 
-   Record and reuse that lowercase UUIDv7 unchanged on both hosts and every
-   retry. *Unverified on the paired installed hosts.*
+   Use the pinned Bun and Fluree first on `PATH`. Both commands accept `--git-repo "$canonical_repo"` for a verified source export outside the repository. The qualifier changes only the disposable macOS labels `test.agent-bus-r1-retirement-one` and `test.agent-bus-r1-retirement-two`; it requires their existing explicit enabled overrides and unloaded jobs. For a first run, confirm those exact names are unowned and unloaded, then explicitly enable only those test labels with `launchctl enable "gui/$(id -u)/$test_label"`. The qualifier restores each to enabled and unloaded. No test uses real owners or production state. Expect the specialized exact-package qualification to pass, including the file writer refusal and stale/incomparable restore refusals. *Unverified as an installed procedure.*
 
-2. Copy only the two `installation-id` files and each installation's exact
-   `fluree-cursors/<encoded ledger>/<raw first commit id>.v2` directory plus its
-   matching retained directory without the suffix, when present. Capture these
-   copies **before** installing the sentinels. Keep each source's paths under a
-   separate protected copied state root; both roots and receipts must be
-   available on each machine for the later verification. Do not copy
-   credentials or turn a copy into an active state directory.
+2. **Hold, settle and preserve.** On each host positively identify the original job, plist, launcher, effective state directory and listener port before holding any service. Read just the plist's `ProgramArguments` and its `AGENT_BUS_DIR` / `AGENT_BUS_PORT` overrides, for example `/usr/bin/plutil -extract ProgramArguments json -o - "$serve_plist"`; resolve genuine missing overrides from the owned job's defaults, not the caller's environment. Check the exact state directory and original installation UUID against the independent deployment record. Record the original plist and launcher SHA-256 (or exact prior managed symlink target); recheck before each handoff command and immediately before the held bind. The handoff tool verifies that the named label is disabled, unloaded and off-port; it cannot establish that an arbitrary label actually owns the supplied root.
 
-   Expect two read-only copies with their original installation identities and inventory digests, no adopted launcher or edited cursor. *Unverified on the paired installed hosts.*
+   Hold every attributed application writer (including any hosted peer), prove the exact processes exited and ports are clear, and settle in-flight work. Preserve each installation's original identity and config, both full R1 evidence sets and exact cursor generations (including each original `layout` and `.export-pending`), the original independent H and K proof records, and all exact packages, launchers and plist witnesses. Do not move original evidence yet. Follow [cold capture](recover-provider-copy.md#stop-the-provider-and-capture-its-store) to preserve a complete post-reconciliation provider store with its native head CID and incarnation. Boot only the approved existing provider and verify it at the capture's cut. Protect the original backup and separate credentials. Do not substitute an old pre-import H image, a live directory copy, or a logical export. *Unverified as an installed procedure.*
 
-3. Before installing either sentinel, check the independently recovered copies.
-   `incarnation`, `source_head` and `head_cid` come from the independent
-   preflight record, not from the receipts being checked; `head_cid` is the
-   verified commit ID at `H`, not an index position. Supply a separate private
-   configuration and credential file for each isolated copy, never a live token
-   at a changed origin. With `AGENT_BUS_DIR` still pointing to the independently
-   identified original installation, run:
+3. **Verify both installations at a common R.** Use an independently observed post-reconciliation head with exact CID and incarnation, at or after the retained K. Stay at that cut until both publications finish. In a private mode-0600 plan file, record version 1, `ledger`, `incarnation`, the original `operation`, and three objects `source` (H), `imported` (K), `anchor` (R), each with `head` and `commit`. The `installations` array contains the two independent witnesses in ascending UUID order: `installation`, exact configured `url`, original source receipt `digest` and `capturedAt`, plus the independent SHA-256 of the original sentinel (`sentinel`), completed admission (`admitted`), and start permit (`permit`). No credentials belong in this file. Derive the expected digests from protected originals and reconciliation records, not candidate-generated claims.
+
+   Independently compare the hashes of `manifest.json`, `handoff.js` and the selected predecessor Bun before running the tool on each host. With the attributed local label, port, state path and UUID:
 
    ```sh
-   candidate_agent_bus mailbox-transition --action check-source \
-     --recovered-config "$old_copy_config" --recovered-token "$old_copy_token" \
-     --expected-incarnation "$incarnation" --expected-head "$source_head" \
-     --source-commit "$head_cid"
-   candidate_agent_bus mailbox-transition --action check-source \
-     --recovered-config "$new_copy_config" --recovered-token "$new_copy_token" \
-     --expected-incarnation "$incarnation" --expected-head "$source_head" \
-     --source-commit "$head_cid"
+   ( umask 077; set -C
+     AGENT_BUS_DIR="$state_dir" AGENT_BUS_LABEL="$serve_label" AGENT_BUS_PORT="$serve_port" \
+       "$predecessor_bun" --no-env-file --config=/dev/null "$handoff/handoff.js" check \
+       --plan "$private_plan" --expect-plan "$plan_sha256" --installation "$installation" \
+       > "$local_checked"
+   )
+   shasum -a 256 "$local_checked"
    ```
 
-   Each command must report `status: verified` and the expected incarnation
-   and head against its intended isolated copy, at exactly `H`, before
-   proceeding. This read creates no installation, sentinel or receipt. The
-   limit is 32 MiB for the one full `H` commit, not for the
-   ledger's whole history. If it is unavailable, mismatched or oversized, keep
-   both jobs held and do not fence, append a throwaway commit to move `H`, or
-   treat the activation receipt as its own independent proof. Different origins
-   and credentials alone do not prove that the providers are isolated.
-   *Unverified as a paired installed procedure.*
+   Observe each host's own `check` exit successfully while both holds persist. Retrieve the fresh stdout bytes and its separately recorded digest directly from that host over the authenticated operator connection. The check bytes are deterministic for the plan, not signed attestation of a process: do not template them, reuse stale output, or substitute locally generated or forwarded bytes. Neither a lone permit nor a digest obtained only from the candidate store authorizes handoff. *Unverified as an installed procedure.*
 
-   On **each original installation**, with both jobs held and settlement
-   proved, check the local fence prerequisites without writing. `local_id`
-   and `peer_id` also come from the independent preflight record; swap them on
-   the other machine:
+4. **Publish both bindings, with originals retained.** On each host:
 
    ```sh
-   candidate_agent_bus mailbox-transition --action fence --check-only \
-     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" --expected-local-installation "$local_id" \
-     --expected-peer-installation "$peer_id" --expected-incarnation "$incarnation" \
-     --paired-holds-confirmed --provider-settled
+   AGENT_BUS_DIR="$state_dir" AGENT_BUS_LABEL="$serve_label" AGENT_BUS_PORT="$serve_port" \
+     "$predecessor_bun" --no-env-file --config=/dev/null "$handoff/handoff.js" publish \
+     --plan "$private_plan" --expect-plan "$plan_sha256" --installation "$installation" \
+     --peer-checked "$peer_checked" --expect-peer-checked "$peer_checked_sha256"
    ```
 
-   Both checks must report `preflight: passed` before either first sentinel.
-   They inspect each original generation, inventory and pending-marker vacancy;
-   a local check is not an atomic proof that the other host remains held. If a
-   marker is already present, do not pretend this is a fresh preflight: retain
-   both holds and follow the same-operation recovery below.
+   Expect exactly `serve-binding-v1` on each host. The publication does not replace an existing file. The same exact operation can be rerun while both jobs are held at R with the original evidence intact. One successful publication is not the pair: on interruption or conflict, hold both jobs, preserve the entire state, and reconcile before continuing; never edit the new record in place. *Unverified as an installed procedure.*
 
-   Neither check proves that holders will keep their unread mail. Before either
-   sentinel, rehearse the candidate import and verification on a separate
-   writable disposable copy of the recovered ledger, with copies of the
-   **fresh** paired receipts, identities and original cursor generations. Keep
-   the cold recovery evidence and both live sources unchanged. Compare every
-   predicted row to the old writer's actual capabilities: current owner,
-   exact cursor and source for manual reads; last owner, source or confirmed
-   absence on both installations for returns after leave. Verification labels
-   these cases `manual-on-source`, `return-on-source`, `vacant-no-files` or
-   `fresh-claimant-only`; the source reference identifies the installation
-   whose file was captured, not the machine that once announced the join.
-   Account for each classification privately. Stop before the sentinel if a
-   previously usable read or return would become unresolved, evidence of a
-   staged position cannot be settled, or an unexpected right would be granted.
-   Neither matching hostnames nor matching totals substitute for this check.
-   *Unverified as a paired installed procedure.*
+5. **Verify, bind held, and prove both releases serve.** Verify each exact successor against its external digest and new binding with the read-only [preflight](#check-a-paired-admission-target). Keep the hosted peer held while its expected native version changes. Use the known successor installer with `--release "$candidate" --expect "$candidate_sha256" --bind-only` for each held native job; confirm both launchers and holds before enabling either. Bootstrap the two attributed jobs, check actual MCP ledger identity, exact controlled pending/acknowledged IDs and no replay, then complete the applicable [hosted](#when-a-hosted-peer-is-connected), viewer and plugin checks. Keep the original evidence until both successor bindings and client checks pass; archive nonessential R1 files only under a separate, verified custody decision. Keep the two original blocker files, `layout` and `.export-pending`, at each exact old generation path while a file writer could still write to this ledger. The installed successor does not read that directory; the retained file writer must take its intentional pending-export refusal, not the fresh-layout path. Removing the blocker is not a fence. *Unverified as an installed procedure.*
 
-   Then install each sentinel on its original host. The fence command repeats
-   the bounded commit comparison on the original binding before and after
-   publishing its marker:
-
-   ```sh
-   candidate_agent_bus mailbox-transition --action fence \
-     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" --expected-local-installation "$local_id" \
-     --expected-peer-installation "$peer_id" --expected-incarnation "$incarnation" \
-     --paired-holds-confirmed --provider-settled
-   ```
-
-   Expect the local marker path and explicitly operator-attested peer hold and
-   provider settlement. Verify each command on its original host, then transfer
-   each sentinel to the other host over the existing trusted connection as a
-   protected peer-evidence file. A transferred file proves matching content,
-   not that the other job remains stopped. The sentinel prevents a new startup
-   of the retained exact-format writer; it cannot stop a process already past
-   that check or fence an older writer that ignores it. Do not remove or replace
-   an unknown, partial or genuine export marker. *Unverified on the paired
-   installed hosts.*
-
-   With both sentinels verified and both jobs held, one designated operator
-   activates the ownership era against the recovered source cut. `head_cid`
-   is the independently verified commit ID at `H`, not an index position:
-
-   ```sh
-   candidate_agent_bus mailbox-transition --action era \
-     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" --peer-sentinel "$peer_sentinel" \
-     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
-     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
-   ```
-
-   Expect one JSON line, printed only after the command has checked that the
-   era commit is immediately after `H` and that its sole parent is `head_cid`:
-
-   - `activation`: `ALREADY_APPLIED` means the era already existed for this
-     `operation` when the call started. `APPLIED` means it was vacant then and
-     is now verified, usually by this call's write, possibly by an earlier
-     identical request that was still in flight. Both are a verified
-     activation.
-   - `cut`: the era's cut. Its `head` must equal `source_head + 1`.
-   - `commit`: the era commit's CID.
-   - `localHold`, `pairedHolds`, `providerSettlement` and `peerSentinel`
-     restate what the command checked itself and what remains your
-     attestation.
-
-   Every refusal starts `Mailbox transition refused:`. Two name the
-   activation outcome:
-
-   - `the era activation may have committed; retain both holds and retry the
-     same operation.` The outcome is unknown. Keep both holds and rerun the
-     identical command with the same `operation`, never a different one: an
-     absent read does not prove the request cannot still commit. If retries
-     keep returning this refusal, the era may have committed after an
-     intervening write or in a shape the command cannot verify: report it to
-     Release Operations, and do not rewrite history or issue a new operation.
-   - `the captured era activation conflicts; retain both holds for review.`
-     The ledger is not at `H` (behind it, or past it with no activation
-     record), the commit at `H` is not `head_cid`, the ledger was born with
-     the ownership era, or an activation record for a different operation,
-     cut or commit already exists. Keep both holds and report it to Release
-     Operations; do not rewrite history.
-
-   Treat any other refusal from this command as possibly arriving after the
-   era committed: keep both holds and rerun the identical command with the
-   same `operation` before anything else.
-
-   *Unverified on the paired installed hosts.*
-
-4. On one verified installation, with both old jobs still held, import the two
-   copies. `peer_sentinel` is the marker independently checked on the other
-   original host and transferred through the trusted connection:
-
-   ```sh
-   candidate_agent_bus mailbox-import \
-     --first-state "$first_copy" --first-receipt "$first_receipt" \
-     --second-state "$second_copy" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" --peer-sentinel "$peer_sentinel" \
-     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
-     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
-   ```
-
-   On success, expect two JSON lines. The report is printed only after every
-   holding has been handled. A refusal during import prints no report, even if
-   that run had already written earlier addresses: rerun with the same two
-   captures. If only the proof refuses, you see the report followed by the
-   refusal.
-
-   The first line is the import report, marked
-   `phase: "import-report-not-admission"`. It names the source `cut` and has
-   one row per captured holding with `address`, `operation`, `status`, and
-   `position` (imported) or `reason` (classified); `UNCHANGED` rows carry
-   neither. A row's `operation` is a per-address import ID derived from the
-   two captures, not the `--operation` value, so a recapture changes it.
-
-   | `status` | Meaning |
-   | --- | --- |
-   | `IMPORTED` | This run wrote the address's mailbox start at the captured `position`. |
-   | `CLASSIFIED` | This run recorded the address as unresolved, with a `reason`; no position was guessed. |
-   | `VERIFIED_IMPORT`, `VERIFIED_CLASSIFICATION` | An earlier run with the same two captures already wrote this exact record; this run confirmed its receipt and wrote nothing. It does not show the record is still current; the verified proof checks that. |
-   | `UNCHANGED` | The address already had a current mailbox record (start, unresolved or acknowledgement) from another operation, so nothing was written. This is not proof: any `UNCHANGED` row makes the verified proof refuse as a whole, naming that address. |
-
-   An unresolved `reason` says why no position could be attributed:
-
-   | `reason` | Meaning |
-   | --- | --- |
-   | `conflict` | Both installations had a cursor file for the address. |
-   | `unattributable` | The last join explicitly names a different installation, the leave does not match the last joined holder, that join is missing, or the cursor record names another address. Absence of an installation on the join does not by itself cause this classification. |
-   | `stale` | Only the installation that did not own the address had a cursor file. |
-   | `missing` | Neither installation had a cursor file. |
-   | `unreadable` | The owning installation's cursor file could not be read. |
-   | `ahead` | The cursor is beyond the captured cut `H`. |
-
-   The second line is the verified proof. It names `verifiedAt` and has a row
-   for every captured holding: `VERIFIED_IMPORT` with its `position`, or
-   `VERIFIED_CLASSIFICATION` with its `reason`, plus the holding's
-   `latestStatus`, `latestPresenceId` and `lastJoinId`. Where the
-   importer distinguished a manual read or return, `legacyAccess` reports
-   the applicable disposition from step 3; `sourceInstallationRef` is the
-   compact reference to the one installation whose exact position was found.
-   A `vacant-no-files` classification witnesses absence, not an imported
-   position of zero. The whole proof
-   refuses, printing no rows, if the set of holdings or any holding's presence
-   changed since `H`, or if any holding's current mailbox record is not the
-   first record written after `H` by that address's import `operation`, with
-   the planned position or reason.
-
-   Keep both holds while reconciling any refusal, unexpected or unresolved
-   result, or hosted checkpoint. On interruption or an uncertain
-   result, retain both markers, copies and receipts and repeat with the same
-   operation; an absent read cannot prove a dispatched request will not commit.
-   Do not recapture to hide a mismatch. *Unverified on the paired installed
-   hosts.*
-
-5. While **both** jobs remain held, establish each host's ready attestation and
-   exchange the completed ready files through the trusted connection:
-
-   ```sh
-   candidate_agent_bus mailbox-transition --action ready \
-     --first-state "$first_copy" --first-receipt "$first_receipt" \
-     --second-state "$second_copy" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" --peer-sentinel "$peer_sentinel" \
-     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
-     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
-   ```
-
-   Run that on each original host. Expect a completed ready file naming the
-   same operation, independently retained source commit, sources, proof and
-   verification cut `K` on both hosts. The ready evidence also binds the native
-   commit ID at `K`; a partial or failed candidate file is not a ready
-   attestation. Then, on **each** host,
-   pass the other host's completed ready file as `peer_ready`:
-
-   ```sh
-   candidate_agent_bus mailbox-transition --action admit \
-     --first-state "$first_copy" --first-receipt "$first_receipt" \
-     --second-state "$second_copy" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" \
-     --peer-sentinel "$peer_sentinel" --peer-ready "$peer_ready" \
-     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
-     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
-   ```
-
-   Expect both admission commands to succeed with the same verified cut.
-   Transfer each completed admission file to the other host over the trusted
-   connection. Then, still holding the local job, pass the other host's
-   completed file as `peer_admitted`:
-
-   ```sh
-   candidate_agent_bus mailbox-transition --action permit \
-     --first-receipt "$first_receipt" --second-receipt "$second_receipt" \
-     --operation "$operation" --source-commit "$head_cid" \
-     --peer-sentinel "$peer_sentinel" --peer-admitted "$peer_admitted" \
-     --expected-local-installation "$local_id" --expected-peer-installation "$peer_id" \
-     --expected-incarnation "$incarnation" --paired-holds-confirmed --provider-settled
-   ```
-
-   Expect a local start permit only after the other installation's completed
-   admission is verified. A missing, changed or unconfirmed evidence file
-   keeps that host unready. Once both admissions exist, a permit does not demand
-   that the ledger head still equal the old verification cut: one permitted
-   host may already have processed normal mail. Readiness, permit and the
-   candidate's serve check revalidate the read-only activation receipt against
-   the retained source commit. Permit and serve also require the same native
-   commit ID at `K`, without requiring the current head to remain at `K`; this
-   detects a missing or replaced import commit, not every possible later
-   restore. Serve also revalidates its local evidence and sentinel before
-   starting HTTP or delivery. None of these checks activates the era, writes a
-   replacement receipt or proves the remote host remains held. A verified unresolved
-   classification is a durable refusal, not proof that an active holding can
-   read or that it has no unread mail. Reconcile it, or explicitly account for
-   it under the agreed policy, before claiming a fully successful migration.
-   *Unverified on the paired installed hosts.*
-
-6. With both jobs still held, bind the **same verified candidate artifact** on
-   each machine without starting either job. Set the local launcher and release
-   directories from the independently recorded installation, and use the
-   candidate's externally recorded manifest digest. `guarding_installer` is
-   the separately verified current installer that enforces paired-admission
-   compatibility; for this first cutover it may be the verified candidate's
-   installer. Do not invoke an older target's unguarded installer:
-
-   ```sh
-   AGENT_BUS_LAUNCHER="$launcher" AGENT_BUS_RELEASES="$releases_dir" \
-     /bin/sh "$guarding_installer" \
-     --release "$verified_target" --expect "$external_sha" --bind-only
-   ```
-
-   Verify both bindings, both disabled/unloaded jobs and both prior process
-   exits before enabling either one. Only after both permits and both bindings
-   have succeeded, enable and bootstrap the identified jobs:
-
-   ```sh
-   launchctl enable "$domain/$serve_label"
-   launchctl bootstrap "$domain" "$serve_plist"
-   ```
-
-   Check the paired release, native delivery and the actual hosted client as
-   described above. The retained file export cannot project subsequent ledger
-   progress, so it is not an old-binary rollback. *Unverified on the paired
-   installed hosts.*
-
-On any failure preserve both holds and all evidence; reconcile the identical
-operation without overwriting markers or rewinding newer positions. See
-[recover](recover.md#mailbox-import-cannot-be-established). Process-interruption
-checks do not by themselves establish power-loss durability.
-
-The original exact cursor generations, sentinels, and completed paired
-admission and permit evidence remain startup dependencies until a separate
-retirement is designed and executed. Preserve and back them up; do not remove
-legacy files to force a restart. A provider-unreachable error and invalid local
-evidence are different conditions when the reported failure distinguishes
-them. Neither permits rebinding to an incompatible old writer.
+If the handoff fails, follow [serving-binding recovery](recover.md#the-serving-binding-is-refused). The successor's lineage anchor R is not a backup freshness guarantee. Any deliberate restore requires an independently known recovery cut S and the pending/ACK checks, not a ledger reopened merely because it reaches R.
 
 ## When a hosted peer is connected
 

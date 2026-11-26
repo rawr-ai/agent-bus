@@ -49,7 +49,7 @@ The dotted lines are signals; the mail itself moves only when a session reads it
 | **Ledger** (`src/Ledger.ts`, `src/Fluree.ts`) | Stores every entry in Fluree, on one transaction server on the bus host. Delivery reads it through `Ledger`; queries through their own read-only gateway. The unit tests use a JSONL ledger (`test/jsonl-ledger.ts`) | One shared, ordered log across machines, with history and full-text search |
 | **Queries** (`src/catalogue.ts`, `src/sparql.ts`, `src/Query.ts`) | The saved-query catalogue behind `bus_queries`, `bus_run_query` and the `bus_history` and `bus_peers` presets, and raw SPARQL for `bus_query`, each pinned to one commit through a read-only gateway | Complete, pageable answers about past mail without a second read path ([interfaces](architecture/interfaces.md#bus_run_query)) |
 | **Orientation** (`src/Orientation.ts`, `src/OrientationView.ts`, `src/orientation-read.ts`) | Composes explicit directory and concern context, associated addresses and designated guidance at one cut | A participant finds context and the designated handoff without inferring authority from recency ([orientation](architecture/orientation.md)) |
-| **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`, `src/Cursors.ts`) | The only process that reads or writes the store for its machine's sessions. Serves the bus tools over MCP on loopback, keeps cursors, enforces ownership, and runs the Codex deliverer | One owner of cursors and locks per machine, so a message is taken once |
+| **`serve`**, one per machine (`src/serve.ts`, `src/Bus.ts`, `src/mcp.ts`) | Verifies the installation's ledger binding, serves MCP on loopback, advances positions in the ledger, and runs native delivery | One owner of local delivery and address locks per machine |
 | **CLI** (`src/bin.ts`, `src/client.ts`) | `serve`, `join`, `orient`, `publish`, `peers` and `claude-wake`. All but `serve` are MCP clients of the local `serve` | Shell access, and the hook's command |
 | **Claude wake** (`src/claude.ts`, `plugin/`) | A Claude Code plugin whose `asyncRewake` hook waits in `bus_wake` and wakes the session when its addresses have new mail | Wakes idle Claude sessions, desktop or terminal, without the model starting or restarting anything |
 | **Codex deliverer** (`src/codex.ts`, `src/rollout.ts`) | Gives each Codex thread with unread mail one nudge in its own queue, through a short-lived app-server of `serve`'s own. A thread loaded nowhere is borrowed by the machine's Codex daemon to run it, when its stored settings, read from its rollout, allow | Wakes every Codex thread, desktop or daemon, without a second writer |
@@ -89,7 +89,7 @@ Each topic has one owner page; other pages link to it rather than restate it.
 | Setting up the bus host and other machines | [Install](runbooks/install.md) |
 | Starting, stopping, health and logs | [Operate](runbooks/operate.md) |
 | Putting a new version into service | [Deploy](runbooks/deploy.md) |
-| Stopping the provider, capturing its store and reading the source cut from isolated copies for the paired transition | [Provider copies](runbooks/recover-provider-copy.md) |
+| Capturing and verifying isolated provider copies before recovery | [Provider copies](runbooks/recover-provider-copy.md) |
 | Starting sessions the bus can wake | [Launch agents](runbooks/launch-agents.md) |
 | Publishing and reading orientation guidance | [Orientation runbook](runbooks/orientation.md) |
 | Upgrading a platform or the plugin | [Upgrade](runbooks/upgrade.md) |

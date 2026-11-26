@@ -8,7 +8,6 @@ import { FetchHttpClient } from "effect/http";
 import { type DirectTool, type EventsProgram, type StaticSkill, serveTools } from "mcp-openapi";
 import { type ModernHttp, modernHttp } from "../scripts/private-modern-http.ts";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -243,11 +242,7 @@ const store = layerFluree(await freshLedger("hosted-peer")).pipe(Layer.provide(p
 const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "hosted-fixture" }).pipe(
     Layer.provideMerge(
-      Bus.layer("fixture").pipe(
-        Layer.provideMerge(store),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
+      Bus.layer("fixture").pipe(Layer.provideMerge(store), Layer.provide(platform))
     )
   )
 );

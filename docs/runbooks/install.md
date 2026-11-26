@@ -105,10 +105,11 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    loaded ai.rawr.agent-bus; log: ~/.agent-bus/agent-bus.log
    ```
 
-   The installer binds the first-install bootstrap grant to the newly created
-   identity and the selected Fluree origin and ledger. The grant is spent before
-   a possible first creation or admission; a spent, incomplete or mismatched
-   grant refuses instead of retrying creation. Preserve such evidence and use
+   The installer reserves a first-create grant for the new identity, exact
+   origin and ledger. `serve` spends it once only after positively observing the
+   target absent; the provider's conflict-safe creation must win. An already
+   present target, spent-but-uncertain grant or mismatched proof refuses instead
+   of attaching or retrying creation. Preserve the evidence and use
    [recovery](recover.md), rather than reinitializing the identity. Then the
    registration commands, which the next sections cover. The managed launcher's
    narrow update was *Rehearsed 2026-11-02* on a disposable installation; a
@@ -130,6 +131,7 @@ State lives in `~/.agent-bus`. An isolated bus for checks, which moves it with t
    | The token | `~/.agent-bus/fluree-token`, mode 0600 | The bearer token for Fluree's data and admin APIs. It has no subject and lasts 520 weeks ([connections](../architecture/connections.md#limits)) |
    | `config.json` | `~/.agent-bus/config.json` | `{ "fluree": { "url": "http://127.0.0.1:8095", "ledger": "agent-bus:main" } }`, written only if absent. `serve` won't start without it |
    | Native delivery identity | `~/.agent-bus/installation-id`, mode 0600 | Initialized before the first config is written. Keep it with this installation; never copy it to another machine |
+   | Serving binding | `~/.agent-bus/.serve-binding-v1`, mode 0600 | Pins this installation to its verified ledger history. No credentials. Restore it with the identity, never from another installation |
    | The Fluree project and storage | `~/.agent-bus/fluree/` | The ledger lives here |
    | Two LaunchAgents | `~/Library/LaunchAgents/ai.rawr.agent-bus.fluree.plist` and `ai.rawr.agent-bus.plist` | `RunAtLoad` and `KeepAlive`; `serve` runs the managed launcher with `serve`, so a `.env` file in the state directory is not loaded |
 
@@ -329,14 +331,11 @@ A shell installation does not refresh the plugin set of an already-loaded deskto
 
 Another machine runs its own `serve` and an SSH tunnel to the bus host's Fluree server, on the same local port. It runs no Fluree. Every step here runs on that machine, which this page has not been run on.
 
-This procedure supports a ledger born with the current ownership era in its
-first commit. Adding a different installation to a migrated ledger whose era
-was introduced later is not yet supported; the paired transition admits only
-its two recorded installations. [Additional-installation enrollment](https://github.com/rawr-ai/agent-bus/issues/123)
-is tracked separately. Do not regenerate an existing identity or copy a permit
-to work around this limit. A fresh remote installation can attach only to an
-existing supported ledger; it receives no grant to create a ledger on the
-remote provider. *Unverified as a new-machine procedure.*
+The operator explicitly authorizes the new installation against an independently
+observed existing-ledger pin. A prepared identity or working SSH tunnel is not
+an existing-store authorization. This path does not create a remote ledger or
+grant rights over another installation's imported holdings. Never copy a
+binding or regenerate the identity of an established installation.
 
 1. **Prepare the approved canonical checkout, check [the prerequisites](#before-you-start)** (it needs no `fluree`), **and install the dependencies:**
 
@@ -354,15 +353,37 @@ remote provider. *Unverified as a new-machine procedure.*
 
    Expected: the file name, with no password or host-key prompt. *Unverified*
 
-3. **Run the installer with `--remote`:**
+3. **Prepare the remote attachment without starting serve:**
 
    ```sh
-   bun run install:launch-agents -- --remote <ssh host of the bus host>
+   bun run install:launch-agents -- --remote "$ssh_host" --prepare-attachment
    ```
 
-   Expected: it copies `~/.agent-bus/fluree-token` from the bus host with `scp` into a mode-0600 file, and stops if what arrived isn't a token. It loads `ai.rawr.agent-bus.tunnel` (log `~/.agent-bus/tunnel.log`), waits for Fluree through the tunnel, checks the token is enforced there, writes `config.json` if absent, and loads `ai.rawr.agent-bus`. The script is the bus host's, with the tunnel in place of Fluree. *Unverified*
+   Expected: a local identity, mode-0600 token copied from the bus host,
+   authenticated tunnel, and config, but no serve launcher or job is started or
+   bound. Preparation refuses an existing config; do not remove it to repeat
+   provisioning. Locate the prepared root privately and have Release Operations
+   authorize its exact installation UUID and independently observed ledger pin.
+   *Unverified as an installed procedure.*
 
-4. **Check it:**
+4. **Bind the independently approved installation and store, then activate:**
+
+   ```sh
+   "$approved_bun" --no-env-file --config=/dev/null src/bin.ts bind-existing-ledger \
+     --expected-installation "$approved_installation" \
+     --expected-incarnation "$approved_incarnation" \
+     --expected-head "$approved_head" --expected-commit "$approved_cid"
+   "$approved_bun" --no-env-file --config=/dev/null src/bin.ts verify-serve-binding
+   ./scripts/install-launch-agents.sh --runtime-only --bun "$approved_bun"
+   ```
+
+   The approved checkout is the retained source checkout. Expect `serve-binding-v1`
+   from the read-only verification and a running native job after activation.
+   On a refusal, preserve the root for [recovery](recover.md#the-serving-binding-is-refused).
+   Do not repeat an uncertain attachment under a different pin. *Unverified as
+   an installed procedure.*
+
+5. **Check it:**
 
    ```sh
    launchctl print gui/$(id -u)/ai.rawr.agent-bus.tunnel | grep -E 'state =|pid ='
@@ -374,7 +395,7 @@ remote provider. *Unverified as a new-machine procedure.*
 
    Expected: both agents `running`, `ok`, a Fluree status through the tunnel, and the same peers as on the bus host. The token check (step 6 above) works unchanged through the tunnel. *Unverified*
 
-5. **Register the MCP server and install the plugin,** with the commands above.
+6. **Register the MCP server and install the plugin,** with the commands above.
 
 ### `bun` on the other machine's remote shell
 
@@ -387,7 +408,7 @@ The other machine's non-interactive SSH `PATH` may lack `bun`, so a command run 
 | `fluree is not on PATH; install the Fluree CLI (docs/runbooks/install.md), then rerun`, exit status 1 | `fluree` isn't on `PATH` (bus host). Check with `command -v fluree`, fix the `PATH`, rerun. *Rehearsed 2026-10-28* |
 | `Refusing foreign launcher …` | A foreign file, symlink or modified wrapper occupies the launcher path. Establish ownership before moving it aside; the installer will not overwrite it. Fixture-tested; live *Unverified*. |
 | `Selected runtime cannot run …` | The selected executable or source cannot run under a minimal environment. Check the exact pin and frozen dependency install before retrying. *Unverified* live. |
-| `Retained cursors but no config.json or installation-id` | This is not a fresh install. Restore the configuration and identity for this installation, rather than letting the installer guess. Fixture-tested; live *Unverified*. |
+| Established state has no matching config, installation identity or binding | Restore the original attributed files. Do not retry as a new installation or create a target. Fixture-tested; live *Unverified*. |
 | `The existing serve LaunchAgent cannot be attributed …` | The same-label plist is foreign, unreadable, malformed or names a different state-root spelling. Preserve the job and its plist; identify their owner and the intended original installation before retrying. Fixture-tested; live *Unverified*. |
 | `The owned serve LaunchAgent requires its original valid installation-id` or `… missing installation root` | The attributed installation's identity or state is missing or unsafe. Restore that installation's own retained state, not a newly initialized identity. Fixture-tested; live *Unverified*. |
 | A runtime-only update fails after replacing a file | Launcher and plist replacement are atomic individually, not together. Inspect both and the job; rerun the qualified installer or follow [deploy rollback](deploy.md). *Unverified* on launchd. |

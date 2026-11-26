@@ -22,7 +22,7 @@ import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { Effect, Layer } from "effect";
+import { Effect, Layer, Schema } from "effect";
 import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import { modernHttp, modernRequest } from "../scripts/private-modern-http.ts";
@@ -97,10 +97,7 @@ async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledger
       "--no-env-file",
       entryOf(kind),
       "initialize-installation",
-      "--fluree-url",
-      ledger.url,
-      "--fluree-ledger",
-      ledger.ledger,
+      ...(kind === "bundle" ? ["--fluree-url", ledger.url, "--fluree-ledger", ledger.ledger] : []),
     ],
     { cwd: decoy, env: cleanEnv(server), stdout: "pipe", stderr: "pipe" }
   );
@@ -111,6 +108,37 @@ async function start(kind: "source" | "bundle", ledger: ReturnType<typeof ledger
     JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
   );
   writeFileSync(join(dir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
+  if (kind === "source") {
+    // The first installation created the fixture ledger. The second must explicitly
+    // attach to that same independently observed genesis, not reuse a creation grant.
+    const first = await fetch(
+      `${ledger.url}/v1/fluree/show/${encodeURIComponent(ledger.ledger)}?commit=t%3A1`,
+      { headers: { authorization: `Bearer ${ledger.token}` } }
+    );
+    if (!first.ok) throw new Error("Could not observe the fixture ledger's genesis.");
+    const { id } = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
+      await first.json()
+    );
+    const attached = Bun.spawnSync(
+      [
+        process.execPath,
+        "--no-env-file",
+        entryOf(kind),
+        "bind-existing-ledger",
+        "--expected-installation",
+        readFileSync(join(dir, "installation-id"), "utf8").trim(),
+        "--expected-incarnation",
+        id,
+        "--expected-head",
+        "1",
+        "--expected-commit",
+        id,
+      ],
+      { cwd: decoy, env: cleanEnv(server), stdout: "pipe", stderr: "pipe" }
+    );
+    if (attached.exitCode !== 0)
+      throw new Error("Source fixture could not bind to the existing ledger.");
+  }
   // A Codex that always fails, so no real Codex delivery is attempted.
   const serve = [
     process.execPath,
@@ -269,10 +297,17 @@ test("the bundle reports its release and the source reports itself as source", a
   expect(servers.source!.client.getServerVersion()?.version).toBe(`${VERSION}+source`);
 });
 
-test("the relocated bundle advertises exact cursor support on stdout", async () => {
-  const { code, stdout } = await run("bundle", ["cursors", "--help"]);
-  expect(code).toBe(0);
-  expect(stdout).toContain("Exact-address cursor layout v2:");
+test("the relocated bundle verifies its binding and does not offer the retired cursor commands", async () => {
+  expect(await run("bundle", ["verify-serve-binding"])).toMatchObject({
+    code: 0,
+    stdout: "serve-binding-v1",
+  });
+  const help = await run("bundle", ["--help"]);
+  expect(help.code).toBe(0);
+  expect(help.stdout).toMatch(/^\s+verify-serve-binding\b/m);
+  expect(help.stdout).not.toMatch(
+    /^\s+(cursors|mailbox-source|mailbox-import|mailbox-transition|serve-admission-capability)\b/m
+  );
 });
 
 test("bundled and source serve present the same MCP surface", async () => {

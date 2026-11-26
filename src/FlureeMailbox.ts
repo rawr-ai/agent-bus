@@ -8,11 +8,9 @@ import {
   encodeMailboxFact,
   type MailboxAck,
   type MailboxFact,
-  type MailboxRecord,
   MailboxRecord as MailboxRecordSchema,
   type MailboxStart,
   type MailboxState,
-  type MailboxUnresolved,
   mailboxFactOf,
   mailboxIntentMatches,
   mailboxIri,
@@ -640,7 +638,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
     return [["values", ["?mailbox", [iri(key)]]], ...current, ...vacantSuccessor(slot)];
   };
   const update = (
-    record: MailboxRecord,
+    record: MailboxAck | MailboxStart,
     prior: Head,
     slot: string,
     extra: ReadonlyArray<unknown> = []
@@ -669,7 +667,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       ],
     };
   };
-  const checkInput = (record: MailboxRecord, basis: Pin) =>
+  const checkInput = (record: MailboxAck | MailboxStart, basis: Pin) =>
     Effect.gen(function* () {
       const checked = yield* Schema.decodeUnknownEffect(MailboxRecordSchema, {
         onExcessProperty: "error",
@@ -682,7 +680,8 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       if (
         !validOperation(checked.operation) ||
         basis.incarnation !== transport.instance ||
-        (checked.kind !== "unresolved" && checked.run === "")
+        checked.kind === "unresolved" ||
+        checked.run === ""
       )
         return yield* invalid();
       return checked;
@@ -695,9 +694,10 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
   const sameHead = (a: Head, b: Head) =>
     a.operation === b.operation && a.markerT === b.markerT && a.pointerT === b.pointerT;
 
-  const writeMailbox = (input: MailboxAck | MailboxStart | MailboxUnresolved, basis: Pin) =>
+  const appendMailboxAck = (input: MailboxAck, basis: Pin) =>
     Effect.gen(function* () {
       const record = yield* checkInput(input, basis);
+      if (record.kind !== "ack") return yield* invalid();
       yield* present(basis);
       const current = yield* latest;
       if (current.incarnation !== basis.incarnation) return yield* replaced();
@@ -716,18 +716,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       const prior = yield* headAt(key, basis);
       const now = yield* headAt(key, current);
       if (!sameHead(prior, now)) return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
-      if (record.kind === "unresolved") {
-        if (prior.state.status !== "ABSENT")
-          return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
-      } else if (record.kind === "start") {
-        if (
-          (record.origin !== "import" && record.origin !== "reconcile") ||
-          record.position > basis.head ||
-          (record.origin === "import" && prior.state.status !== "ABSENT") ||
-          (record.origin === "reconcile" && prior.state.status !== "UNRESOLVED")
-        )
-          return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
-      } else if (
+      if (
         prior.state.status !== "FOUND" ||
         record.from !== prior.state.position ||
         record.dataCut.head > basis.head ||
@@ -897,9 +886,6 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
     mailboxReceiptAt,
     knownEntry,
     admitWithStart,
-    classifyMailboxImport: (unresolved: MailboxUnresolved, basis: Pin) =>
-      writeMailbox(unresolved, basis),
-    importMailbox: (start: MailboxStart, basis: Pin) => writeMailbox(start, basis),
-    appendMailboxAck: (ack: MailboxAck, basis: Pin) => writeMailbox(ack, basis),
+    appendMailboxAck,
   };
 };

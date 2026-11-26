@@ -9,7 +9,6 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { CATALOGUE_VERSION, history, orientationAssociations } from "../src/catalogue.ts";
 import { Message, Presence } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
@@ -509,11 +508,7 @@ const testRealPresenceDamage = async (damage: "missing-json" | "missing-id") => 
     const store = layerFluree(config).pipe(Layer.provide(platform));
     const layer = Serve.layerHttp({ port, version: "test" }).pipe(
       Layer.provideMerge(
-        Bus.layer("test-installation").pipe(
-          Layer.provideMerge(store),
-          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-          Layer.provide(platform)
-        )
+        Bus.layer("test-installation").pipe(Layer.provideMerge(store), Layer.provide(platform))
       )
     );
     const runtime = ManagedRuntime.make(layer);

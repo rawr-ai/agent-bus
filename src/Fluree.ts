@@ -11,10 +11,6 @@ import {
 import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { makeFlureeMailbox } from "./FlureeMailbox.ts";
 import {
-  makeOwnershipActivation,
-  makeOwnershipActivationReader,
-} from "./FlureeOwnershipActivation.ts";
-import {
   makeOwnership,
   ownershipEra,
   predecessor,
@@ -1356,27 +1352,32 @@ export const layerFluree = (
             Effect.map((response) => response.t)
           )
         );
-      const activation = makeOwnershipActivationReader(
-        {
-          incarnation: bounded(guardedIncarnation),
-          tip: bounded(guardedSend(HttpClientRequest.get(`${api}/log/${ledger}?limit=1`))).pipe(
-            Effect.flatMap(decode(Tip)),
-            Effect.map(({ commits: [tip] }) => ({ t: tip.t, id: tip.commit_id }))
-          ),
-          commitAt: (t) =>
-            bounded(
-              guardedSend(
-                HttpClientRequest.get(`${api}/show/${ledger}?commit=t:${t}`),
-                JSONLD_RESPONSE_BYTES
-              )
-            ).pipe(Effect.flatMap(decode(NativeCommit))),
-          at,
-          history: entryHistory,
-          eraAt: ownership.eraAt,
-        },
-        instance
-      );
-      const activate = makeOwnershipActivation(activation.inspect, update);
+      const sourceCommitAt = (source: Pin) =>
+        Effect.gen(function* () {
+          const unavailable = () =>
+            new LedgerError({ message: "Cannot establish the native commit at this pin." });
+          if (
+            !Number.isSafeInteger(source.head) ||
+            source.head < 1 ||
+            source.incarnation !== instance ||
+            (yield* bounded(guardedIncarnation)) !== instance
+          )
+            return yield* unavailable();
+          const native = yield* bounded(
+            guardedSend(
+              HttpClientRequest.get(`${api}/show/${ledger}?commit=t:${source.head}`),
+              JSONLD_RESPONSE_BYTES
+            )
+          ).pipe(Effect.flatMap(decode(NativeCommit)));
+          if (
+            native.t !== source.head ||
+            !/^b[a-z2-7]+$/.test(native.id) ||
+            (native.t === 1 && native.id !== instance) ||
+            (yield* bounded(guardedIncarnation)) !== instance
+          )
+            return yield* unavailable();
+          return native.id;
+        }).pipe(Effect.withSpan("Ledger.sourceCommitAt"));
       const mailbox = makeFlureeMailbox({
         ownership,
         instance,
@@ -1411,18 +1412,7 @@ export const layerFluree = (
                 return era;
               })
             ).pipe(Effect.withSpan("Ledger.ownershipEraAt")),
-          ownershipActivationAt: (lookup) =>
-            activation.proofAt(lookup).pipe(Effect.withSpan("Ledger.ownershipActivationAt")),
-          sourceCommitAt: (source) =>
-            activation.sourceCommitAt(source).pipe(Effect.withSpan("Ledger.sourceCommitAt")),
-          activateOwnershipEra: (intent) =>
-            options?.existingOnly === true
-              ? activate(intent).pipe(Effect.withSpan("Ledger.activateOwnershipEra"))
-              : Effect.fail(
-                  new LedgerError({
-                    message: "Ownership activation requires an existing-only ledger binding.",
-                  })
-                ),
+          sourceCommitAt,
           admit: (entry, basis) => admitEntry(entry, basis, false),
           ...mailbox,
           appendCommand,

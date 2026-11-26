@@ -27,7 +27,6 @@ import { ResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import { initializeWatchAuthority } from "../src/private-web/watch-authority.ts";
 import * as Serve from "../src/serve.ts";
@@ -303,11 +302,7 @@ try {
   const bus = ManagedRuntime.make(
     Serve.layerHttp({ port: busPort, version: "events-fixture" }).pipe(
       Layer.provideMerge(
-        Bus.layer("fixture").pipe(
-          Layer.provideMerge(store),
-          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-          Layer.provide(platform)
-        )
+        Bus.layer("fixture").pipe(Layer.provideMerge(store), Layer.provide(platform))
       )
     )
   );

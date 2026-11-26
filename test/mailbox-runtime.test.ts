@@ -1,16 +1,15 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync, truncateSync } from "node:fs";
+import { appendFileSync, mkdtempSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Deferred, Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin, Presence, runOf } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
-import { mailboxServedDigest } from "../src/mailbox-model.ts";
+import { encodeMailboxFact, mailboxFactOf, mailboxServedDigest } from "../src/mailbox-model.ts";
 import { servedCarrierBytes } from "../src/message-carrier.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -42,7 +41,7 @@ interface Probe {
 type Store = Layer.Layer<Ledger | QueryGateway, unknown, never>;
 
 /** Separate Bus instances have separate installations and local cursor roots, but one ledger. */
-const machine = (store: Store, root: string, installation: string, probe: Probe = {}) => {
+const machine = (store: Store, _root: string, installation: string, probe: Probe = {}) => {
   const observed = Layer.effect(Ledger)(
     Effect.gen(function* () {
       const ledger = yield* Ledger;
@@ -91,11 +90,7 @@ const machine = (store: Store, root: string, installation: string, probe: Probe 
     })
   ).pipe(Layer.provideMerge(store));
   return ManagedRuntime.make(
-    Bus.layer(installation).pipe(
-      Layer.provideMerge(observed),
-      Layer.provideMerge(Cursors.layerFiles(join(root, installation))),
-      Layer.provide(platform)
-    )
+    Bus.layer(installation).pipe(Layer.provideMerge(observed), Layer.provide(platform))
   );
 };
 type Machine = ReturnType<typeof machine>;
@@ -489,7 +484,8 @@ test(
   "an unresolved import survives ordinary join, replay and a would-be successor's restart",
   async () => {
     const root = mkdtempSync(join(tmpdir(), "agent-bus-mailbox-unresolved-"));
-    const store = layerJsonl(join(root, "ledger.jsonl")).pipe(Layer.provide(platform));
+    const file = join(root, "ledger.jsonl");
+    const store = layerJsonl(file).pipe(Layer.provide(platform));
     const a = machine(store, root, "installation-a");
     try {
       await joinSender(a);
@@ -514,19 +510,21 @@ test(
               }),
             })
           );
-          const basis = (yield* ledger.presenceAt()).cut;
-          const result = yield* ledger.classifyMailboxImport(
-            {
-              version: 1,
-              kind: "unresolved",
-              operation: Bun.randomUUIDv7(),
-              address: inbox,
-              reason: "conflict",
-            },
-            basis
-          );
-          expect(result.status).toBe("APPLIED");
         })
+      );
+      const unresolved = mailboxFactOf(
+        {
+          version: 1,
+          kind: "unresolved",
+          operation: Bun.randomUUIDv7(),
+          address: inbox,
+          reason: "conflict",
+        },
+        null
+      );
+      appendFileSync(
+        file,
+        `${JSON.stringify({ "@mailboxStart": encodeMailboxFact(unresolved), message: null })}\n`
       );
       await send(a, inbox, "position unknown for this older mail");
       const restartAt = await head(a);

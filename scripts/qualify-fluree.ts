@@ -41,7 +41,6 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Fiber, Layer, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import * as Catalogue from "../src/catalogue.ts";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
@@ -144,7 +143,6 @@ const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpCli
 const busLayer = (store: Fluree.FlureeConfig = config) =>
   Bus.layer("qualification-installation").pipe(
     Layer.provideMerge(Fluree.layerFluree(store)),
-    Layer.provide(Cursors.layerFiles(join(dir, "cursors", encodeURIComponent(store.ledger)))),
     Layer.provide(platform)
   );
 const withBus = <A, E>(

@@ -18,13 +18,13 @@ flowchart TB
     fluree["Fluree server<br/>127.0.0.1:8095"]
     ledger[("Ledger agent-bus:main<br/>~/.agent-bus/fluree/storage")]
     serveA["agent-bus serve<br/>127.0.0.1:8096"]
-    stateA[("~/.agent-bus<br/>config.json, fluree-token,<br/>fluree-key.json, fluree-cursors/")]
+    stateA[("~/.agent-bus<br/>config.json, installation-id,<br/>.serve-binding-v1, Fluree credentials")]
     clientsA["Claude and Codex sessions,<br/>CLI, wake hooks"]
   end
   subgraph other["Other machine"]
     tunnel["SSH tunnel<br/>127.0.0.1:8095"]
     serveB["agent-bus serve<br/>127.0.0.1:8096"]
-    stateB[("~/.agent-bus<br/>config.json, fluree-token,<br/>fluree-cursors/")]
+    stateB[("~/.agent-bus<br/>config.json, installation-id,<br/>.serve-binding-v1, fluree-token")]
     clientsB["Claude and Codex sessions,<br/>CLI, wake hooks"]
   end
   clientsA -- "MCP, loopback HTTP" --> serveA
@@ -118,9 +118,9 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | State | Where | Written by | What it is |
 | --- | --- | --- | --- |
 | The ledger | Bus host: `~/.agent-bus/fluree/storage`, with the Fluree project in `~/.agent-bus/fluree/.fluree` | The Fluree server, for every machine's `serve` | Every message and presence entry, append-only, in ledger `agent-bus:main`. [Messaging](messaging.md) gives its model |
-| Mailbox positions | The ledger | The installation holding each address; operator-controlled import | The latest start or acknowledgement for each exact address, in the same history as its presence and mail ([messaging](messaging.md#rules)) |
-| Retained cursor files | Each machine: `~/.agent-bus/fluree-cursors/<URI-encoded ledger>/<first commit id>.v2/` | Offline cursor tools and paired-transition admission | Cutover evidence, not live positions. During a paired import, `serve` verifies the original inventory and its sentinel before starting. The older file format lacks the `.v2` suffix; use its [transition procedure](../runbooks/deploy.md#change-the-cursor-format), not a manual rename |
-| Native delivery identity | Each machine: `~/.agent-bus/installation-id` | That machine's `serve` | Random identity initialized once and retained across restarts. Keep it with that installation's state and do not copy it to another installation |
+| Mailbox positions | The ledger | The installation holding each address | The latest start or acknowledgement for each exact address, in the same history as its presence and mail ([messaging](messaging.md#rules)) |
+| Serving binding | Each machine: `~/.agent-bus/.serve-binding-v1` | First creation, explicit attachment, or a verified upgrade handoff | Exact identity, target, incarnation, ownership era and native history anchor for `serve`; it never advances with mailbox writes. Retained predecessor fences and transition proofs are operator evidence, not startup state |
+| Native delivery identity | Each machine: `~/.agent-bus/installation-id` | The initialization command | Random identity initialized once and retained across restarts. Keep it with that installation's state and do not copy it to another installation |
 | `config.json` | Each machine: `~/.agent-bus/config.json` | The installer, only when absent | The Fluree URL and ledger. `serve` won't start without it |
 | `fluree-token` | Each machine: `~/.agent-bus/fluree-token`, mode 0600 | The installer; copied over `scp` to other machines | The bearer token for Fluree's data and admin APIs |
 | `fluree-key.json` | Bus host: `~/.agent-bus/fluree-key.json`, mode 0600 | The installer | The key the Fluree server trusts tokens from |
@@ -145,7 +145,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 6. **Message text lives only in the ledger.** Cursors, `serve`'s memory and wakes hold addresses and positions, never mail; a held search ranking holds entry ids, scores and node names, and every page reads its messages from the ledger.
 7. **`serve` and the hook use the same managed launcher.** Source and runtime changes are controlled together at deploy ([deploy](../runbooks/deploy.md)). A release binds exact immutable files, not a moving `current` link. Already-running hooks retain their loaded code and runtime until they rearm; keep every release still named by a process, binding or rollback record.
 8. **Each ledger instance contains its own mailbox positions.** A replaced history does not inherit them ([messaging rule 11](messaging.md#rules)).
-9. **`serve` won't start without a `config.json` that names a Fluree ledger.** There is no fallback store.
+9. **A named ledger is not an authorized store.** Before listening, `serve` checks the installation identity and exact configured target against its serving binding, opens the ledger existing-only, and verifies the incarnation, active ownership era and exact historical commit. It never treats missing evidence as a new installation. Only a current-format exclusive targeted first-create reservation permits one conflict-safe create; an already-present target spends the reservation without attaching. Older unspent grants do not carry forward. New attachments to existing history require an independent anchor and explicit operator action. An already verified native era-1 bootstrap can carry forward its original incarnation.
 
 ## Why
 
@@ -164,6 +164,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 | `serve`'s memory is lost on restart, which costs at most one extra wake per address and ends held search rankings, whose next pages are then refused | **Accepted** |
 | A binding change reaches newly started hooks immediately and `serve` only at its restart; waiting hooks retain their loaded cohort | **Known limit** |
 | Launcher, viewer and plugin selection are separate changes; failure between them can leave split bindings | **Known limit**; inspect per-surface agreement and restore one reviewed cohort ([deploy](../runbooks/deploy.md#release-rollback-and-partial-failure)) |
+| A normal serving binding proves a history floor, not that a restored copy has every later commit | **Known limit**; deliberate restore also verifies the last independently known cut and checks pending mail and acknowledgements ([recovery](../runbooks/recover.md)) |
 
 ## Rests on
 
@@ -177,6 +178,7 @@ Each LaunchAgent keeps its process alive (`KeepAlive`, restarted at most every 1
 
 The frames that made these choices are indexed in [frames](../frames/README.md):
 - [Stable native delivery](../frames/stable-native-delivery.md): explicit initialization and retained local installation identity.
+- [Mailbox transition retirement](../frames/mailbox-transition-retirement.md): ledger-backed startup binding and separate recovery freshness.
 - [Release packaging](../frames/release-packaging.md): immutable source-independent cohorts and retained source rollback.
 - [simplification-pass](../frames/simplification-pass.md): Fluree as the only production store, JSONL as test support.
 - [one-codex-route](../frames/one-codex-route.md): one `serve` per machine, and `serve` no longer connecting to the daemon to deliver.

@@ -14,7 +14,6 @@ import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message } from "../src/domain.ts";
 import { type Admission, type EntryRead, Ledger } from "../src/Ledger.ts";
 import {
@@ -98,7 +97,6 @@ const serve = (
     Bus.layer("test-installation", () => host.name, storedEntryBytes).pipe(
       Layer.provideMerge(ledger),
       Layer.provideMerge(frozen ? TestClock.layer() : Layer.empty),
-      Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
       Layer.provide(platform)
     )
   );

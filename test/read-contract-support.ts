@@ -3,7 +3,6 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Deferred, Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Ledger, type MailboxReceiptRead, type PresenceRead } from "../src/Ledger.ts";
 import type { MailboxFact, MailboxState } from "../src/mailbox-model.ts";
 import type { QueryGateway } from "../src/Query.ts";
@@ -65,7 +64,7 @@ export interface Probe {
 export type Store = Layer.Layer<Ledger | QueryGateway, unknown, never>;
 
 /** One installation's Bus layer over a shared store, its ledger wrapped by `probe`. */
-export const busLayer = (store: Store, root: string, installation: string, probe: Probe = {}) => {
+export const busLayer = (store: Store, _root: string, installation: string, probe: Probe = {}) => {
   const observed = Layer.effect(Ledger)(
     Effect.gen(function* () {
       const ledger = yield* Ledger;
@@ -131,11 +130,7 @@ export const busLayer = (store: Store, root: string, installation: string, probe
       });
     })
   ).pipe(Layer.provideMerge(store));
-  return Bus.layer(installation).pipe(
-    Layer.provideMerge(observed),
-    Layer.provideMerge(Cursors.layerFiles(join(root, installation))),
-    Layer.provide(platform)
-  );
+  return Bus.layer(installation).pipe(Layer.provideMerge(observed), Layer.provide(platform));
 };
 
 /** One installation's Bus over a shared store, its ledger wrapped by `probe`. */

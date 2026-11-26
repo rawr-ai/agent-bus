@@ -6,9 +6,9 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { Message, MessageJson, Origin, Presence } from "../src/domain.ts";
-import { flureeLedgerExists, layerFluree, toNode } from "../src/Fluree.ts";
+import { layerFluree, toNode } from "../src/Fluree.ts";
 import { ownershipEra } from "../src/FlureePresence.ts";
-import { Ledger, messageIri, type OwnershipActivation } from "../src/Ledger.ts";
+import { Ledger, messageIri } from "../src/Ledger.ts";
 import {
   encodeMailboxFact,
   type MailboxAck,
@@ -46,16 +46,10 @@ const handle = async (layer: LedgerLayer) => {
     cut: () => use((ledger) => Effect.map(ledger.presenceAt(), (value) => value.cut)),
     era: (cut: Pin) => use((ledger) => ledger.ownershipEraAt(cut)),
     sourceCommitAt: (cut: Pin) => use((ledger) => ledger.sourceCommitAt(cut)),
-    activationAt: (source: Pin, operation: string) =>
-      use((ledger) => ledger.ownershipActivationAt({ source, operation })),
-    activate: (intent: OwnershipActivation) => use((ledger) => ledger.activateOwnershipEra(intent)),
     append: (message: Message) => use((ledger) => ledger.append(message)),
     admit: (message: Message, cut: Pin) => use((ledger) => ledger.admit(message, cut)),
     start: (message: Message, value: MailboxStart, cut: Pin) =>
       use((ledger) => ledger.admitWithStart(message, value, cut)),
-    classify: (value: MailboxUnresolved, cut: Pin) =>
-      use((ledger) => ledger.classifyMailboxImport(value, cut)),
-    import: (value: MailboxStart, cut: Pin) => use((ledger) => ledger.importMailbox(value, cut)),
     ack: (value: MailboxAck, cut: Pin) => use((ledger) => ledger.appendMailboxAck(value, cut)),
     mailbox: (value: string, cut: Pin) => use((ledger) => ledger.mailboxAt(value, cut)),
     receipt: (operation: string, cut: Pin, sender = address) =>
@@ -92,6 +86,22 @@ const backends = [
       return {
         one,
         two,
+        seed: (record: MailboxStart | MailboxUnresolved) =>
+          insertRaw(config, {
+            "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+            "@graph": [
+              {
+                "@id": mailboxIri(record.address),
+                "bus:mailboxMarker": "v1",
+                "bus:mailboxHead": mailboxReceiptIri(record.operation),
+              },
+              {
+                "@id": mailboxReceiptIri(record.operation),
+                "@type": `bus:Mailbox${record.kind === "start" ? "Start" : "Unresolved"}`,
+                "bus:mailboxRecord": encodeMailboxFact(mailboxFactOf(record, null)),
+              },
+            ],
+          }),
         damage: (value: string) =>
           insertRaw(config, {
             "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
@@ -113,6 +123,11 @@ const backends = [
       return {
         one,
         two,
+        seed: (record: MailboxStart | MailboxUnresolved) =>
+          appendFileSync(
+            file,
+            `${JSON.stringify({ "@mailboxStart": encodeMailboxFact(mailboxFactOf(record, null)), message: null })}\n`
+          ),
         damage: () => appendFileSync(file, `${JSON.stringify({ "@mailboxAck": "{}" })}\n`),
       };
     },
@@ -263,7 +278,7 @@ for (const backend of backends) {
     });
 
     test("a settled message or another mailbox fact cannot be claimed as a start", async () => {
-      const { one } = await backend.make();
+      const { one, seed } = await backend.make();
       const basis = await one.cut();
       const original = message();
       await one.append(original);
@@ -275,13 +290,13 @@ for (const backend of backends) {
       expect((await one.mailbox(address, afterMessage)).status).toBe("ABSENT");
 
       const marker = unresolved();
-      const marked = await one.classify(marker, afterMessage);
-      if (marked.status !== "APPLIED") throw new Error("classification was not written");
+      await seed(marker);
+      const marked = await one.cut();
       const collided = new Message({ ...presence(), id: marker.operation });
       expect(
         (await one.start(collided, starting(collided, afterMessage), afterMessage)).status
       ).toBe("REFUSED");
-      expect(await one.cut()).toEqual(marked.cut);
+      expect(await one.cut()).toEqual(marked);
     });
 
     test("receipt lookup cannot expose a different address's operation", async () => {
@@ -294,39 +309,24 @@ for (const backend of backends) {
       const wrong = await two.receipt(entry.id, first.cut, other);
       expect(wrong.status).toBe("ADDRESS_MISMATCH");
       expect(wrong).not.toHaveProperty("record");
-      const imported: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: entry.id,
-        address: other,
-        run: "other-run",
-        origin: "import",
-        position: 0,
-      };
-      expect((await two.import(imported, first.cut)).status).toBe("IDENTITY_MISMATCH");
       expect((await two.mailbox(other, await two.cut())).status).toBe("ABSENT");
       expect(await two.cut()).toEqual(first.cut);
     });
 
-    test("unresolved imports persist until explicit reconciliation", async () => {
-      const { one, two } = await backend.make();
+    test("unresolved imports remain visible and cannot be guessed as a start", async () => {
+      const { one, two, seed } = await backend.make();
       const before = await one.cut();
       const marker = unresolved(address, "conflict");
-      const first = await one.classify(marker, before);
-      if (first.status !== "APPLIED") throw new Error("classification was not written");
+      await seed(marker);
+      const first = await one.cut();
       expect(await two.mailbox(address, before)).toEqual({ status: "ABSENT" });
-      const unknown = await two.mailbox(address, first.cut);
+      const unknown = await two.mailbox(address, first);
       expect(unknown.status).toBe("UNRESOLVED");
       if (unknown.status !== "UNRESOLVED") return;
       expect(unknown.reason).toBe("conflict");
       expect(unknown.current.record.operation).toBe(marker.operation);
       expect(unknown.current.record.previous).toBeNull();
-      expect(await two.classify(marker, before)).toEqual(first);
-      expect((await two.classify({ ...marker, reason: "stale" }, before)).status).toBe(
-        "IDENTITY_MISMATCH"
-      );
-
-      expect((await two.admit(presence(), first.cut)).status).toBe("ADMITTED");
+      expect((await two.admit(presence(), first)).status).toBe("ADMITTED");
       const renewed = await two.cut();
       expect((await one.mailbox(address, renewed)).status).toBe("UNRESOLVED");
       const entry = presence();
@@ -335,126 +335,29 @@ for (const backend of backends) {
         "REFUSED"
       );
       expect(await one.cut()).toEqual(renewed);
-      const noGuess: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: Bun.randomUUIDv7(),
-        address,
-        run: "reconciled-run",
-        origin: "import",
-        position: 0,
-      };
-      expect((await two.import(noGuess, renewed)).status).toBe("CONFLICT");
-      const recovered: MailboxStart = { ...noGuess, origin: "reconcile" };
-      const applied = await two.import(recovered, renewed);
-      if (applied.status !== "APPLIED") throw new Error("reconciliation was not written");
-      const final = await one.mailbox(address, applied.cut);
-      if (final.status !== "FOUND") throw new Error("reconciliation lost the position");
-      expect(final.position).toBe(0);
-      expect(final.current.record.operation).toBe(recovered.operation);
-      expect(final.current.record.previous).toBe(marker.operation);
-      expect((await one.receipt(marker.operation, applied.cut)).status).toBe("FOUND");
-      expect((await one.mailbox(address, first.cut)).status).toBe("UNRESOLVED");
+      expect((await one.receipt(marker.operation, renewed)).status).toBe("FOUND");
+      expect((await one.mailbox(address, first)).status).toBe("UNRESOLVED");
     });
 
     test("restart resolves an unresolved import only as an explicit atomic start", async () => {
-      const { one, two } = await backend.make();
-      const before = await one.cut();
+      const { one, two, seed } = await backend.make();
       const unresolvedImport = unresolved();
-      const marker = await one.classify(unresolvedImport, before);
-      if (marker.status !== "APPLIED") throw new Error("classification was not written");
+      await seed(unresolvedImport);
+      const marker = await one.cut();
       const entry = presence();
-      const replay = { ...starting(entry, marker.cut, "replay"), position: 0 };
-      expect((await two.start(entry, replay, marker.cut)).status).toBe("REFUSED");
-      const restart = starting(entry, marker.cut, "restart");
-      const result = await two.start(entry, restart, marker.cut);
+      const replay = { ...starting(entry, marker, "replay"), position: 0 };
+      expect((await two.start(entry, replay, marker)).status).toBe("REFUSED");
+      const restart = starting(entry, marker, "restart");
+      const result = await two.start(entry, restart, marker);
       if (result.status !== "ADMITTED") throw new Error("restart was not admitted");
       const state = await one.mailbox(address, result.cut);
       if (state.status !== "FOUND") throw new Error("missing restart position");
-      expect(state.position).toBe(marker.cut.head);
+      expect(state.position).toBe(marker.head);
       expect(state.current.record.operation).toBe(entry.id);
       expect(state.current.record.previous).toBe(unresolvedImport.operation);
     });
 
-    test("concurrent reconciliation and restart have one resolution", async () => {
-      const { one, two } = await backend.make();
-      const before = await one.cut();
-      const unresolvedImport = unresolved();
-      const marked = await one.classify(unresolvedImport, before);
-      if (marked.status !== "APPLIED") throw new Error("classification was not written");
-      const entry = presence();
-      const restart = starting(entry, marked.cut, "restart");
-      const reconcile: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: Bun.randomUUIDv7(),
-        address,
-        run: "recovered-run",
-        origin: "reconcile",
-        position: 0,
-      };
-      const [restarted, reconciled] = await Promise.all([
-        one.start(entry, restart, marked.cut),
-        two.import(reconcile, marked.cut),
-      ]);
-      expect(
-        [restarted.status, reconciled.status].filter(
-          (status) => status === "ADMITTED" || status === "APPLIED"
-        )
-      ).toHaveLength(1);
-      const cut = await one.cut();
-      const state = await two.mailbox(address, cut);
-      if (state.status !== "FOUND") throw new Error("missing winning resolution");
-      expect(state.current.record.previous).toBe(unresolvedImport.operation);
-      const receipts = await Promise.all([
-        one.receipt(entry.id, cut),
-        one.receipt(reconcile.operation, cut),
-      ]);
-      expect(receipts.filter((value) => value.status === "FOUND")).toHaveLength(1);
-      const entries = (await one.read(marked.cut.head)).entries.filter(
-        (item) => item.message.id === entry.id
-      );
-      expect(entries).toHaveLength(restarted.status === "ADMITTED" ? 1 : 0);
-    });
-
-    test("classification, initial start and import cannot all win the same empty basis", async () => {
-      const { one, two } = await backend.make();
-      const basis = await one.cut();
-      const marker = unresolved();
-      const entry = presence();
-      const imported: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: Bun.randomUUIDv7(),
-        address,
-        run: "imported-run",
-        origin: "import",
-        position: 0,
-      };
-      const results = await Promise.all([
-        one.classify(marker, basis),
-        two.start(entry, starting(entry, basis), basis),
-        one.import(imported, basis),
-      ]);
-      expect(
-        results.filter((result) => result.status === "APPLIED" || result.status === "ADMITTED")
-      ).toHaveLength(1);
-      const cut = await one.cut();
-      const state = await one.mailbox(address, cut);
-      if (state.status === "ABSENT") throw new Error("winning fact is missing");
-      expect([marker.operation, entry.id, imported.operation]).toContain(
-        state.current.record.operation
-      );
-      expect(state.current.record.previous).toBeNull();
-      const receipts = await Promise.all([
-        one.receipt(marker.operation, cut),
-        one.receipt(entry.id, cut),
-        one.receipt(imported.operation, cut),
-      ]);
-      expect(receipts.filter((value) => value.status === "FOUND")).toHaveLength(1);
-    });
-
-    test("a later presence alone fences a stale acknowledgement and import", async () => {
+    test("a later presence alone fences a stale acknowledgement", async () => {
       const { one, two } = await backend.make();
       const initial = await one.cut();
       const owner = presence();
@@ -470,40 +373,6 @@ for (const backend of backends) {
       const position = await one.mailbox(address, afterRenewal);
       if (position.status !== "FOUND") throw new Error("missing original position");
       expect(position.position).toBe(initial.head);
-
-      const other = "claude/import-target";
-      const importBasis = await one.cut();
-      const join = presence(other);
-      expect((await two.admit(join, importBasis)).status).toBe("ADMITTED");
-      const imported: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: Bun.randomUUIDv7(),
-        address: other,
-        run: "run",
-        origin: "import",
-        position: 0,
-      };
-      expect((await one.import(imported, importBasis)).status).toBe("CONFLICT");
-      expect((await one.receipt(imported.operation, await one.cut(), other)).status).toBe("ABSENT");
-      expect((await one.mailbox(other, await one.cut())).status).toBe("ABSENT");
-    });
-
-    test("another address's presence and classification do not fence an import", async () => {
-      const { one, two } = await backend.make();
-      const basis = await one.cut();
-      expect((await two.admit(presence("claude/neighbour"), basis)).status).toBe("ADMITTED");
-      expect((await two.classify(unresolved("claude/elsewhere"), basis)).status).toBe("APPLIED");
-      const imported: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: Bun.randomUUIDv7(),
-        address,
-        run: "run",
-        origin: "import",
-        position: 0,
-      };
-      expect((await one.import(imported, basis)).status).toBe("APPLIED");
     });
 
     test("a compact witness retains a 66 KB joined subscription by exact presence id", async () => {
@@ -539,11 +408,10 @@ for (const backend of backends) {
     });
 
     test("escaped addresses and long legacy identities fit compact receipts exactly", async () => {
-      const { one } = await backend.make();
+      const { one, seed } = await backend.make();
       const key = "\u0001".repeat(11_000);
       const run = `legacy-${"\ud800".repeat(40_000)}`;
       const presenceId = `old-${'a\\"'.repeat(30_000)}`;
-      const basis = await one.cut();
       const imported: MailboxStart = {
         version: 1,
         kind: "start",
@@ -553,8 +421,7 @@ for (const backend of backends) {
         origin: "import",
         position: 0,
       };
-      const start = await one.import(imported, basis);
-      if (start.status !== "APPLIED") throw new Error("long identity import refused");
+      await seed(imported);
       await one.append(message("claude/neighbour"));
       const dataCut = await one.cut();
       const ack: MailboxAck = {
@@ -750,7 +617,7 @@ for (const backend of backends) {
     });
 
     test("earlier message, presence and direct scans ignore mailbox records", async () => {
-      const { one } = await backend.make();
+      const { one, seed } = await backend.make();
       const initial = await one.cut();
       const owner = presence();
       expect((await one.start(owner, starting(owner, initial), initial)).status).toBe("ADMITTED");
@@ -760,10 +627,7 @@ for (const backend of backends) {
       expect(
         (await one.ack(acknowledgement(owner.id, initial.head, basis.head, basis), basis)).status
       ).toBe("APPLIED");
-      const classifiedAt = await one.cut();
-      expect((await one.classify(unresolved("claude/unresolved"), classifiedAt)).status).toBe(
-        "APPLIED"
-      );
+      await seed(unresolved("claude/unresolved"));
       const cut = await one.cut();
       expect((await one.read(initial.head)).entries.map((entry) => entry.message.id)).toEqual([
         owner.id,
@@ -779,7 +643,7 @@ for (const backend of backends) {
     });
 
     test("checkpoint and import are not fictional read receipts", async () => {
-      const { one } = await backend.make();
+      const { one, seed } = await backend.make();
       const initial = await one.cut();
       const imported: MailboxStart = {
         version: 1,
@@ -790,11 +654,7 @@ for (const backend of backends) {
         origin: "import",
         position: initial.head,
       };
-      expect((await one.import(imported, initial)).status).toBe("APPLIED");
-      const afterImport = await one.cut();
-      expect(
-        (await one.import({ ...imported, operation: Bun.randomUUIDv7() }, afterImport)).status
-      ).toBe("CONFLICT");
+      await seed(imported);
       await one.append(message());
       const basis = await one.cut();
       const checkpoint: MailboxAck = {
@@ -867,54 +727,7 @@ for (const backend of backends) {
       await damage(address);
       const damaged = await one.cut();
       await expect(one.mailbox(address, damaged)).rejects.toThrow();
-      const wouldImport: MailboxStart = {
-        version: 1,
-        kind: "start",
-        operation: Bun.randomUUIDv7(),
-        address,
-        run: Bun.randomUUIDv7(),
-        origin: "import",
-        position: 0,
-      };
-      const result = await one.import(wouldImport, damaged).then(
-        (value) => value.status,
-        () => "ERROR"
-      );
-      expect(["UNKNOWN", "ERROR"]).toContain(result);
       expect(await one.cut()).toEqual(damaged);
-    });
-
-    test("import distinguishes supported address keys and explicitly refuses unpaired surrogates on Fluree", async () => {
-      const { one } = await backend.make();
-      for (const key of [
-        "\ud800",
-        "\ud801",
-        "\ufffd",
-        "\u00e9",
-        "e\u0301",
-        "?one/two",
-        "?one%2Ftwo",
-      ]) {
-        const basis = await one.cut();
-        const value: MailboxStart = {
-          version: 1,
-          kind: "start",
-          operation: Bun.randomUUIDv7(),
-          address: key,
-          run: Bun.randomUUIDv7(),
-          origin: "import",
-          position: 0,
-        };
-        if (backend.name === "fluree" && (key === "\ud800" || key === "\ud801")) {
-          await expect(one.import(value, basis)).rejects.toThrow();
-          expect(await one.cut()).toEqual(basis);
-          continue;
-        }
-        expect((await one.import(value, basis)).status).toBe("APPLIED");
-        const state = await one.mailbox(key, await one.cut());
-        expect(state.status).toBe("FOUND");
-        if (state.status === "FOUND") expect(state.position).toBe(0);
-      }
     });
   });
 }
@@ -926,9 +739,6 @@ describe("mailbox Fluree boundaries", () => {
     const store = await open();
     const cut = await store.cut();
     expect(await store.era(cut)).toBe(1);
-    await expect(store.activationAt(cut, Bun.randomUUIDv7())).rejects.toMatchObject({
-      _tag: "LedgerError",
-    });
     for (const invalid of [
       { ...cut, incarnation: "wrong" },
       { ...cut, head: cut.head + 1 },
@@ -1007,27 +817,6 @@ describe("mailbox Fluree boundaries", () => {
     );
     expect(retracted.ok).toBe(true);
     const missing = await store.cut();
-    const relay = boundary(config.url);
-    cleanups.push(relay.stop);
-    const operator = await handle(
-      layerFluree({ ...config, url: relay.url }, { existingOnly: true }).pipe(
-        Layer.provide(platform)
-      ) as LedgerLayer
-    );
-    const missingCommit = await fetch(
-      `${config.url}/v1/fluree/show/${encodeURIComponent(config.ledger)}?commit=t:${missing.head}`,
-      { headers: { authorization: `Bearer ${config.token}` } }
-    ).then((response) => response.json() as Promise<{ id: string }>);
-    expect(
-      (
-        await operator.activate({
-          source: missing,
-          commit: missingCommit.id,
-          operation: Bun.randomUUIDv7(),
-        })
-      ).status
-    ).toBe("UNKNOWN");
-    expect(relay.updates()).toBe(0);
     for (const reader of [store, await open()]) {
       await expect(reader.era(missing)).rejects.toMatchObject({ _tag: "LedgerError" });
       expect(await reader.cut()).toEqual(missing);
@@ -1076,290 +865,99 @@ describe("mailbox Fluree boundaries", () => {
     expect(await store.cut()).toEqual(damaged);
   });
 
-  test.each(["answered", "lost", "displaced", "genesis"] as const)(
-    "the %s ownership cut rejects earlier legacy decisions and adopts the last transition including leave",
-    async (answer) => {
-      const server = await startFileFlureeServer(process.env.AGENT_BUS_LEGACY_FLUREE_BIN);
-      cleanups.push(server.stop);
-      const config = server.freshLedger("legacy-ownership-cut");
-      const exists = (token: string) =>
-        Effect.runPromise(
-          flureeLedgerExists({ ...config, token }).pipe(Effect.provide(FetchHttpClient.layer))
-        );
-      expect(await exists(config.token)).toBe(false);
-      await expect(exists("invalid")).rejects.toMatchObject({ _tag: "LedgerError" });
-      const created = await fetch(`${config.url}/v1/fluree/create`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${config.token}`, "content-type": "application/json" },
-        body: JSON.stringify({ ledger: config.ledger }),
-      });
-      expect(created.ok).toBe(true);
-      expect(await exists(config.token)).toBe(true);
-      const original = presence();
-      await insertRaw(
-        config,
-        answer === "genesis"
-          ? { "@id": "urn:fixture:legacy", "urn:fixture:empty": "held" }
-          : toNode(original, Schema.encodeSync(MessageJson)(original))
-      );
-      const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
-      const before = await store.cut();
-      const next = presence(address, "replaced");
-      if (answer !== "genesis")
-        await insertRaw(config, toNode(next, Schema.encodeSync(MessageJson)(next)));
-      const executable = Bun.which("fluree");
-      if (!executable) throw new Error("The selected provider is unavailable.");
-      await server.restart(executable);
-      const legacy = await store.cut();
-      await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
-      const send = () => new Message({ ...message(), from: address });
-      await expect(store.admit(send(), legacy)).rejects.toThrow();
-      expect(await store.cut()).toEqual(legacy);
-      const relay = boundary(config.url, {
-        beforeUpdate: async () => {
-          if (answer === "displaced") await store.append(message());
-        },
-      });
-      cleanups.push(relay.stop);
-      const openOperator = () =>
-        handle(
-          layerFluree({ ...config, url: relay.url }, { existingOnly: true }).pipe(
-            Layer.provide(platform)
-          ) as LedgerLayer
-        );
-      const operator = await openOperator();
-      const native = async (t: number) => {
-        const response = await fetch(
-          `${config.url}/v1/fluree/show/${encodeURIComponent(config.ledger)}?commit=t:${t}`,
-          { headers: { authorization: `Bearer ${config.token}` } }
-        );
-        expect(response.ok).toBe(true);
-        return (await response.json()) as { id: string; t: number; parents: string[] };
-      };
-      const intent = {
-        source: legacy,
-        commit: (await native(legacy.head)).id,
-        operation: Bun.randomUUIDv7(),
-      };
-      expect(await operator.sourceCommitAt(legacy)).toBe(intent.commit);
-      if (answer === "answered") {
-        const first = { ...legacy, head: 1 };
-        expect(await operator.sourceCommitAt(first)).toBe(legacy.incarnation);
-        expect(legacy.incarnation).not.toBe(intent.commit);
-        for (const source of [
-          { ...legacy, incarnation: "different" },
-          { ...legacy, head: 0 },
-          { ...legacy, head: legacy.head + 1 },
-        ]) {
-          await expect(operator.sourceCommitAt(source)).rejects.toMatchObject({
-            _tag: "LedgerError",
-          });
-        }
-        for (const native of [
-          { id: intent.commit, t: legacy.head - 1 },
-          { t: legacy.head },
-          { id: "not a CID", t: legacy.head },
-        ]) {
-          const wrong = relay.nextPin(() => Response.json(native), legacy.head);
-          await expect(operator.sourceCommitAt(legacy)).rejects.toMatchObject({
-            _tag: "LedgerError",
-          });
-          await wrong;
-        }
-        const entered = relay.nextPin(() => Response.json({ id: legacy.incarnation }));
-        const falseGenesis = relay.nextPin(() => Response.json({ id: intent.commit, t: 1 }));
-        await expect(operator.sourceCommitAt(first)).rejects.toMatchObject({ _tag: "LedgerError" });
-        await Promise.all([entered, falseGenesis]);
-        const pins = [legacy.incarnation, intent.commit].map((id) =>
-          relay.nextPin(() => Response.json({ id }))
-        );
-        await expect(operator.sourceCommitAt(legacy)).rejects.toMatchObject({
-          _tag: "LedgerError",
-        });
-        await Promise.all(pins);
-        // Both bodies are valid JSON. Stream padding to the real boundary without storing a large transaction.
-        const ceiling = 32 * 1024 * 1024;
-        for (const bytes of [ceiling, ceiling + 1]) {
-          const answered = relay.nextPin(() => {
-            const value = new TextEncoder().encode(
-              JSON.stringify({ t: legacy.head, id: intent.commit })
-            );
-            const pad = new Uint8Array(64 * 1024).fill(32);
-            let remaining = bytes - value.byteLength;
-            return new Response(
-              new ReadableStream<Uint8Array>({
-                start(controller) {
-                  controller.enqueue(value);
-                },
-                pull(controller) {
-                  if (!remaining) return controller.close();
-                  const size = Math.min(remaining, pad.byteLength);
-                  controller.enqueue(pad.subarray(0, size));
-                  remaining -= size;
-                },
-              })
-            );
-          }, legacy.head);
-          if (bytes === ceiling) expect(await operator.sourceCommitAt(legacy)).toBe(intent.commit);
-          else
-            await expect(operator.sourceCommitAt(legacy)).rejects.toMatchObject({
-              _tag: "LedgerError",
-            });
-          await answered;
-        }
-      }
-      await expect(operator.activationAt(legacy, intent.operation)).rejects.toMatchObject({
-        _tag: "LedgerError",
-      });
-      expect(relay.creates()).toBe(0);
-      expect(relay.updates()).toBe(0);
-      expect((await native((await store.cut()).head)).id).toBe(intent.commit);
-      await expect(store.activate(intent)).rejects.toMatchObject({ _tag: "LedgerError" });
-      expect((await operator.activate({ ...intent, commit: "not-the-source-cid" })).status).toBe(
-        "CONFLICT"
-      );
-      if (answer !== "genesis")
-        expect(
-          (await operator.activate({ ...intent, source: before, commit: before.incarnation }))
-            .status
-        ).toBe("CONFLICT");
-      expect(relay.updates()).toBe(0);
-      const dropped = answer === "lost" ? relay.loseNextUpdate({ disconnect: true }) : undefined;
-      expect((await operator.activate(intent)).status).toBe(
-        answer === "answered" || answer === "genesis" ? "APPLIED" : "UNKNOWN"
-      );
-      if (dropped) {
-        expect(await dropped).toEqual({ status: 200 });
-        expect(relay.reconnect()).toBeGreaterThan(0);
-      }
-      const active = await store.cut();
-      if (answer === "displaced") {
-        expect(active.head).toBe(legacy.head + 2);
-        expect(await store.era(active)).toBe(active.head);
-        expect((await (await openOperator()).activate(intent)).status).toBe("UNKNOWN");
-        await expect(operator.activationAt(legacy, intent.operation)).rejects.toMatchObject({
-          _tag: "LedgerError",
-        });
-        expect(relay.updates()).toBe(1);
-        expect(await store.cut()).toEqual(active);
-        return;
-      }
-      expect(active.head).toBe(legacy.head + 1);
-      const born = await native(active.head);
-      expect(born.parents).toEqual([intent.commit]);
-      const exact = { status: "ALREADY_APPLIED", cut: active, commit: born.id } as const;
-      const recovered = await openOperator();
-      const proof = { cut: active, commit: born.id, sourceCommit: intent.commit };
-      expect(await recovered.activationAt(legacy, intent.operation)).toEqual(proof);
-      if (answer === "answered") {
-        // Isolate each native identity from the otherwise valid, untouched durable receipt.
-        for (const [t, wrong] of [
-          [legacy.head, { t: legacy.head, id: legacy.incarnation }],
-          [active.head, { ...born, parents: ["not-the-source"] }],
-        ] as const) {
-          const replaced = relay.nextPin(() => Response.json(wrong), t);
-          await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
-            _tag: "LedgerError",
-          });
-          await replaced;
-        }
-        const pins = [
-          legacy.incarnation,
-          legacy.incarnation,
-          legacy.incarnation,
-          "different-at-finish",
-        ].map((id) => relay.nextPin(() => Response.json({ id })));
-        await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
-          _tag: "LedgerError",
-        });
-        await Promise.all(pins);
-      }
-      await expect(recovered.activationAt(legacy, Bun.randomUUIDv7())).rejects.toMatchObject({
-        _tag: "LedgerError",
-      });
-      await expect(recovered.activationAt(active, intent.operation)).rejects.toMatchObject({
-        _tag: "LedgerError",
-      });
-      await expect(
-        recovered.activationAt({ ...legacy, incarnation: "replaced" }, intent.operation)
-      ).rejects.toMatchObject({ _tag: "LedgerError" });
-      expect(await recovered.activate(intent)).toEqual(exact);
-      expect((await recovered.activate({ ...intent, operation: Bun.randomUUIDv7() })).status).toBe(
-        "CONFLICT"
-      );
-      expect(relay.updates()).toBe(1);
-      expect(active.head).toBeGreaterThan(1);
-      if (answer === "genesis") {
-        expect(legacy.head).toBe(1);
-        expect((await native(1)).parents).toBeUndefined();
-        await insertRaw(config, { "@id": "urn:fixture:after", "urn:fixture:state": "ordinary" });
-        expect(await (await openOperator()).activationAt(legacy, intent.operation)).toEqual(proof);
-        const receipt = { "@id": ownershipEra["@id"], "bus:ownershipActivation": "?record" };
-        const damaged = await fetch(
-          config.url + "/v1/fluree/update?ledger=" + encodeURIComponent(config.ledger),
-          {
-            method: "POST",
-            headers: {
-              authorization: `Bearer ${config.token}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
-              where: receipt,
-              delete: receipt,
-            }),
-          }
-        );
-        expect(damaged.ok).toBe(true);
-        const later = await store.cut();
-        expect(await store.era(later)).toBe(active.head);
-        await expect(recovered.activationAt(legacy, intent.operation)).rejects.toMatchObject({
-          _tag: "LedgerError",
-        });
-        expect(await store.cut()).toEqual(later);
-        expect(relay.updates()).toBe(1);
-        expect(relay.creates()).toBe(0);
-        return;
-      }
-      expect(await store.era(active)).toBe(active.head);
-      await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
-      await expect(store.admit(send(), before)).rejects.toThrow();
-      await expect(store.admit(send(), legacy)).rejects.toThrow();
-      expect(await store.cut()).toEqual(active);
-      const fresh = await store.admit(send(), active);
-      if (fresh.status !== "ADMITTED") throw new Error("active legacy holder refused");
-      expect(fresh.cut.head).toBe(active.head + 1);
-      expect(await store.era(fresh.cut)).toBe(active.head);
-      expect(await (await openOperator()).activationAt(legacy, intent.operation)).toEqual(proof);
-      expect(await recovered.activate(intent)).toEqual(exact);
-      expect(relay.updates()).toBe(1);
-      expect(await store.cut()).toEqual(fresh.cut);
-      const renewal = presence(address, "replaced");
-      const renewed = await store.admit(renewal, fresh.cut);
-      if (renewed.status !== "ADMITTED") throw new Error("renewal refused");
-      expect((await store.admit(send(), fresh.cut)).status).toBe("REFUSED");
-      if (!renewal.presence) throw new Error("missing presence fixture");
-      const leave = new Message({
-        ...renewal,
-        id: Bun.randomUUIDv7(),
-        presence: new Presence({ ...renewal.presence, status: "left" }),
-      });
-      const left = await store.admit(leave, renewed.cut);
-      if (left.status !== "ADMITTED") throw new Error("leave refused");
-      expect((await store.admit(send(), renewed.cut)).status).toBe("REFUSED");
-      const rejoin = presence(address, "new");
-      const rejoined = await store.admit(rejoin, left.cut);
-      if (rejoined.status !== "ADMITTED") throw new Error("rejoin refused");
-      expect((await store.admit(presence(), left.cut)).status).toBe("REFUSED");
-      expect((await store.mailbox(address, rejoined.cut)).status).toBe("ABSENT");
-      expect((await store.read(legacy.head)).entries.map(({ message }) => message.id)).toEqual([
-        expect.any(String),
-        renewal.id,
-        leave.id,
-        rejoin.id,
-      ]);
+  test("the existing store proves a pinned native commit, not a matching height or genesis name", async () => {
+    const config = await freshLedger("native-commit-pin");
+    const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const first = await store.cut();
+    await store.append(message());
+    const later = await store.cut();
+    const relay = boundary(config.url);
+    cleanups.push(relay.stop);
+    const reader = await handle(
+      layerFluree({ ...config, url: relay.url }, { existingOnly: true }).pipe(
+        Layer.provide(platform)
+      ) as LedgerLayer
+    );
+    const native = await flureeFetch(
+      `/v1/fluree/show/${encodeURIComponent(config.ledger)}?commit=t:${later.head}`
+    );
+    expect(native.ok).toBe(true);
+    const { id } = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
+      await native.json()
+    );
+    expect(await reader.sourceCommitAt(first)).toBe(first.incarnation);
+    expect(await reader.sourceCommitAt(later)).toBe(id);
+    expect(id).not.toBe(first.incarnation);
+    for (const cut of [
+      { ...later, incarnation: "different" },
+      { ...later, head: 0 },
+      { ...later, head: later.head + 1 },
+    ]) {
+      await expect(reader.sourceCommitAt(cut)).rejects.toMatchObject({ _tag: "LedgerError" });
     }
-  );
+    for (const value of [
+      { id, t: first.head },
+      { t: later.head },
+      { id: "not-a-cid", t: later.head },
+    ]) {
+      const answered = relay.nextPin(() => Response.json(value), later.head);
+      await expect(reader.sourceCommitAt(later)).rejects.toMatchObject({ _tag: "LedgerError" });
+      await answered;
+    }
+    expect(relay.creates()).toBe(0);
+    expect(relay.updates()).toBe(0);
+  });
+
+  test("the retained ownership era fences earlier decisions and uses the last legacy presence", async () => {
+    const config = await freshLedger("legacy-ownership-cut");
+    const created = await flureeFetch("/v1/fluree/create", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ledger: config.ledger }),
+    });
+    expect(created.ok).toBe(true);
+    const original = presence();
+    await insertRaw(config, toNode(original, Schema.encodeSync(MessageJson)(original)));
+    const store = await handle(
+      layerFluree(config, { existingOnly: true }).pipe(Layer.provide(platform)) as LedgerLayer
+    );
+    const before = await store.cut();
+    const newer = presence(address, "replaced");
+    await insertRaw(config, toNode(newer, Schema.encodeSync(MessageJson)(newer)));
+    const legacy = await store.cut();
+    await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
+    await insertRaw(config, {
+      "@context": {
+        bus: "https://rawr.ai/ns/agent-bus#",
+        xsd: "http://www.w3.org/2001/XMLSchema#",
+      },
+      ...ownershipEra,
+    });
+    const active = await store.cut();
+    expect(active.head).toBe(legacy.head + 1);
+    expect(await store.era(active)).toBe(active.head);
+    await expect(store.era(legacy)).rejects.toMatchObject({ _tag: "LedgerError" });
+    const send = () => new Message({ ...message(), from: address });
+    await expect(store.admit(send(), before)).rejects.toThrow();
+    await expect(store.admit(send(), legacy)).rejects.toThrow();
+    const fresh = await store.admit(send(), active);
+    if (fresh.status !== "ADMITTED") throw new Error("active legacy holder refused");
+    expect(fresh.cut.head).toBe(active.head + 1);
+    const renewal = presence(address, "replaced");
+    const renewed = await store.admit(renewal, fresh.cut);
+    if (renewed.status !== "ADMITTED") throw new Error("renewal refused");
+    expect((await store.admit(send(), fresh.cut)).status).toBe("REFUSED");
+    if (!renewal.presence) throw new Error("missing presence fixture");
+    const leave = new Message({
+      ...renewal,
+      id: Bun.randomUUIDv7(),
+      presence: new Presence({ ...renewal.presence, status: "left" }),
+    });
+    const left = await store.admit(leave, renewed.cut);
+    if (left.status !== "ADMITTED") throw new Error("leave refused");
+    expect((await store.admit(send(), renewed.cut)).status).toBe("REFUSED");
+    expect(await store.era(left.cut)).toBe(active.head);
+  });
 
   test("the active sender makes progress while its history is being indexed", async () => {
     const server = await startFileFlureeServer();
@@ -1488,7 +1086,6 @@ describe("mailbox Fluree boundaries", () => {
     const observed = await handle(
       layerFluree({ ...config, url: relay.url }).pipe(Layer.provide(platform)) as LedgerLayer
     );
-    const initial = await direct.cut();
     const start: MailboxStart = {
       version: 1,
       kind: "start",
@@ -1498,7 +1095,21 @@ describe("mailbox Fluree boundaries", () => {
       origin: "import",
       position: 0,
     };
-    expect((await direct.import(start, initial)).status).toBe("APPLIED");
+    await insertRaw(config, {
+      "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+      "@graph": [
+        {
+          "@id": mailboxIri(address),
+          "bus:mailboxMarker": "v1",
+          "bus:mailboxHead": mailboxReceiptIri(start.operation),
+        },
+        {
+          "@id": mailboxReceiptIri(start.operation),
+          "@type": "bus:MailboxStart",
+          "bus:mailboxRecord": encodeMailboxFact(mailboxFactOf(start, null)),
+        },
+      ],
+    });
     const positions: number[] = [];
     for (let i = 0; i < 96; i++) {
       await direct.append(message());
@@ -1775,87 +1386,6 @@ describe("mailbox Fluree boundaries", () => {
     expect(stored.entries[0]?.message.presence?.topics).toEqual([]);
   });
 
-  test("a foreign receipt winning after preflight is a collision, not a leaked receipt", async () => {
-    const config = await freshLedger("mailbox-foreign-race");
-    let release = () => {};
-    let arrived = () => {};
-    const seen = new Promise<void>((resolve) => {
-      arrived = resolve;
-    });
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    let armed = false;
-    const proxy = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 0,
-      idleTimeout: 0,
-      async fetch(request) {
-        const path = new URL(request.url);
-        const headers = new Headers(request.headers);
-        headers.delete("host");
-        const body = request.method === "GET" ? undefined : await request.arrayBuffer();
-        if (armed && path.pathname === "/v1/fluree/update") {
-          armed = false;
-          arrived();
-          await gate;
-        }
-        return fetch(`${config.url}${path.pathname}${path.search}`, {
-          method: request.method,
-          headers,
-          body,
-          signal: request.signal,
-        });
-      },
-    });
-    cleanups.push(() => proxy.stop(true));
-    const direct = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
-    const slow = await handle(
-      layerFluree({ ...config, url: proxy.url.origin }).pipe(Layer.provide(platform)) as LedgerLayer
-    );
-    const basis = await direct.cut();
-    const other = "claude/foreign-winner";
-    const marker = unresolved(other, "stale");
-    const imported: MailboxStart = {
-      version: 1,
-      kind: "start",
-      operation: marker.operation,
-      address,
-      run: "run",
-      origin: "import",
-      position: 0,
-    };
-    armed = true;
-    const pending = slow.import(imported, basis);
-    let deadline: ReturnType<typeof setTimeout> | undefined;
-    let winning: Awaited<ReturnType<typeof direct.classify>> | undefined;
-    try {
-      await Promise.race([
-        seen,
-        pending.then(() => {
-          throw new Error("the delayed update did not reach the relay");
-        }),
-        new Promise<void>((_, reject) => {
-          deadline = setTimeout(() => reject(new Error("delayed update timed out")), 3000);
-        }),
-      ]);
-      winning = await direct.classify(marker, basis);
-      expect(winning.status).toBe("APPLIED");
-    } finally {
-      if (deadline !== undefined) clearTimeout(deadline);
-      release();
-    }
-    if (winning?.status !== "APPLIED") throw new Error("foreign receipt did not win");
-    expect((await pending).status).toBe("IDENTITY_MISMATCH");
-    expect(await direct.cut()).toEqual(winning.cut);
-    expect((await direct.mailbox(address, winning.cut)).status).toBe("ABSENT");
-    expect((await direct.mailbox(other, winning.cut)).status).toBe("UNRESOLVED");
-    const hidden = await direct.receipt(marker.operation, winning.cut, address);
-    expect(hidden.status).toBe("ADDRESS_MISMATCH");
-    expect(hidden).not.toHaveProperty("record");
-    expect((await direct.receipt(marker.operation, winning.cut, other)).status).toBe("FOUND");
-  });
-
   test("a position committed after preflight fences a delayed update inside the provider", async () => {
     const config = await freshLedger("mailbox-delayed");
     let release = () => {};
@@ -2092,7 +1622,7 @@ describe("mailbox Fluree boundaries", () => {
     expect(await direct.cut()).toEqual(committed);
   });
 
-  test("lost successful join-start and import responses recover their original commits", async () => {
+  test("lost successful join-start responses recover their original commits", async () => {
     const config = await freshLedger("mailbox-lost-start");
     const relay = boundary(config.url);
     cleanups.push(() => relay.stop());
@@ -2113,29 +1643,6 @@ describe("mailbox Fluree boundaries", () => {
     const afterJoin = await direct.cut();
     expect(await unreliable.start(entry, start, basis)).toEqual(joined);
     expect(await direct.cut()).toEqual(afterJoin);
-
-    const other = "claude/import-after-loss";
-    const imported: MailboxStart = {
-      version: 1,
-      kind: "start",
-      operation: Bun.randomUUIDv7(),
-      address: other,
-      run: "imported-run",
-      origin: "import",
-      position: 0,
-    };
-    const secondForwarded = relay.loseNextUpdate();
-    const saved = await unreliable.import(imported, afterJoin);
-    expect(saved.status).toBe("APPLIED");
-    expect(await secondForwarded).toEqual({ status: 200 });
-    if (saved.status !== "APPLIED") return;
-    await direct.append(message("claude/neighbour"));
-    const afterImport = await direct.cut();
-    expect(await unreliable.import(imported, afterJoin)).toEqual(saved);
-    expect(await direct.cut()).toEqual(afterImport);
-    const state = await direct.mailbox(other, afterImport);
-    if (state.status !== "FOUND") throw new Error("import was not retained");
-    expect(state.current.record.operation).toBe(imported.operation);
   });
 
   for (const mode of ["ack", "start"] as const) {
@@ -2375,9 +1882,23 @@ describe("mailbox Fluree boundaries", () => {
   test("retracting an unresolved import is damage, not a fresh mailbox", async () => {
     const config = await freshLedger("unresolved-retraction");
     const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
-    const basis = await store.cut();
-    const result = await store.classify(unresolved(), basis);
-    if (result.status !== "APPLIED") throw new Error("classification was not written");
+    const marker = unresolved();
+    await insertRaw(config, {
+      "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
+      "@graph": [
+        {
+          "@id": mailboxIri(address),
+          "bus:mailboxMarker": "v1",
+          "bus:mailboxHead": mailboxReceiptIri(marker.operation),
+        },
+        {
+          "@id": mailboxReceiptIri(marker.operation),
+          "@type": "bus:MailboxUnresolved",
+          "bus:mailboxRecord": encodeMailboxFact(mailboxFactOf(marker, null)),
+        },
+      ],
+    });
+    const result = await store.cut();
     const response = await fetch(
       `${config.url}/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
       {
@@ -2391,7 +1912,7 @@ describe("mailbox Fluree boundaries", () => {
       }
     );
     expect(response.status).toBe(200);
-    expect((await store.mailbox(address, result.cut)).status).toBe("UNRESOLVED");
+    expect((await store.mailbox(address, result)).status).toBe("UNRESOLVED");
     await expect(store.mailbox(address, await store.cut())).rejects.toThrow();
   });
 
@@ -2674,17 +2195,6 @@ test("JSONL refuses mailbox positions that split a stored commit", async () => {
   const invalid = acknowledgement(owner.id, initial.head, middle, basis);
   await expect(one.ack(invalid, basis)).rejects.toThrow("complete commit");
   expect(await one.cut()).toEqual(basis);
-  const malformedImport: MailboxStart = {
-    version: 1,
-    kind: "start",
-    operation: Bun.randomUUIDv7(),
-    address: "claude/other",
-    run: Bun.randomUUIDv7(),
-    origin: "import",
-    position: middle,
-  };
-  await expect(one.import(malformedImport, basis)).rejects.toThrow("complete commit");
-  expect(await one.cut()).toEqual(basis);
 });
 
 test("JSONL reopens compact receipts at their original byte cuts", async () => {
@@ -2710,21 +2220,29 @@ test("JSONL reopens compact receipts at their original byte cuts", async () => {
   const before = await use(first, (ledger) =>
     Effect.map(ledger.presenceAt(), (value) => value.cut)
   );
-  const written = await use(first, (ledger) => ledger.importMailbox(imported, before));
-  if (written.status !== "APPLIED") throw new Error("import was not written");
+  appendFileSync(
+    file,
+    `${JSON.stringify({ "@mailboxStart": encodeMailboxFact(mailboxFactOf(imported, null)), message: null })}\n`
+  );
+  const written = await use(first, (ledger) =>
+    Effect.map(ledger.presenceAt(), (value) => value.cut)
+  );
   await first.dispose();
   const reopened = ManagedRuntime.make(layer());
   cleanups.push(() => reopened.dispose());
   expect(await use(reopened, (ledger) => ledger.mailboxAt(address, before))).toEqual({
     status: "ABSENT",
   });
-  const state = await use(reopened, (ledger) => ledger.mailboxAt(address, written.cut));
+  const state = await use(reopened, (ledger) => ledger.mailboxAt(address, written));
   if (state.status !== "FOUND" || state.current.record.kind !== "start")
     throw new Error("missing reopened import");
   expect(state.current.record.runRef).toBe(mailboxRunRef(longRun));
-  expect(state.current.t).toBe(written.cut.head);
+  expect(state.current.t).toBe(written.head);
   expect((await Bun.file(file).text()).includes(longRun)).toBe(false);
-  expect(await use(reopened, (ledger) => ledger.importMailbox(imported, before))).toEqual(written);
+  expect(
+    (await use(reopened, (ledger) => ledger.mailboxReceiptAt(address, imported.operation, written)))
+      .status
+  ).toBe("FOUND");
 });
 
 test("an unrelated undecodable JSONL line is not silently a mailbox position fact", async () => {

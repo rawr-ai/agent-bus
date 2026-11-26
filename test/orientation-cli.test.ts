@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import * as Ledger from "../src/Ledger.ts";
 import * as Serve from "../src/serve.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
@@ -75,7 +74,6 @@ test("a failed post-join orientation reports the committed join and retries read
   const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
   const bus = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
-    Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
   );
   const runtime = ManagedRuntime.make(
@@ -288,7 +286,6 @@ test("association CLI preserves a real owner refusal without changing presence o
   const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer);
   const bus = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
-    Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
   );
   const runtime = ManagedRuntime.make(

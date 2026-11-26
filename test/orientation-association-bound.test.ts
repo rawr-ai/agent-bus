@@ -5,36 +5,13 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, Option } from "effect";
 import * as Bus from "../src/Bus.ts";
-import { Cursors } from "../src/Cursors.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 
 test("association address admission counts UTF-8 bytes without changing unassociated policy", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-orientation-bound-"));
-  const values = new Map<string, number>();
-  let accesses = 0;
-  const cursors = Layer.succeed(Cursors)(
-    Cursors.of({
-      get: (address) =>
-        Effect.sync(() => {
-          accesses += 1;
-          return Option.fromNullishOr(values.get(address));
-        }),
-      set: (address, value) =>
-        Effect.sync(() => {
-          accesses += 1;
-          values.set(address, value);
-        }),
-      clear: (address) =>
-        Effect.sync(() => {
-          accesses += 1;
-          values.delete(address);
-        }),
-    })
-  );
   const layer = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
-    Layer.provideMerge(cursors),
     Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))
   );
   try {
@@ -51,13 +28,12 @@ test("association address admission counts UTF-8 bytes without changing unassoci
         expect(
           (yield* bus.join({ ...input, address: boundary, associations: association })).associations
         ).toEqual(association);
-        const before = { head: yield* ledger.end, accesses };
+        const before = yield* ledger.end;
         const refused = yield* Effect.flip(
           bus.join({ ...input, address: oversized, associations: association })
         );
         expect(refused._tag).toBe("InvalidAssociations");
-        expect(yield* ledger.end).toBe(before.head);
-        expect(accesses).toBe(before.accesses);
+        expect(yield* ledger.end).toBe(before);
         expect((yield* bus.join({ ...input, address: oversized })).associations).toEqual([]);
       }).pipe(Effect.provide(layer))
     );

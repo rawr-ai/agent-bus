@@ -8,7 +8,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { Message, MessageJson, Origin } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
@@ -26,11 +25,7 @@ const store = layerFluree(config).pipe(Layer.provide(platform));
 const server = ManagedRuntime.make(
   Serve.layerHttp({ port, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer("fixture").pipe(
-        Layer.provideMerge(store),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
+      Bus.layer("fixture").pipe(Layer.provideMerge(store), Layer.provide(platform))
     )
   )
 );

@@ -41,6 +41,7 @@ export function bunWrapper(path: string, identity?: string) {
 /** The stand-in CLI: reports the release as `--version`, otherwise echoes how it was run. */
 const cli = (id: string) => `const args = process.argv.slice(2);
 if (args[0] === "--version") console.log(${JSON.stringify(`agent-bus v${id}`)});
+else if (args[0] === "verify-serve-binding") console.log("serve-binding-v1");
 else console.log(JSON.stringify({ runtime: process.env.BINDING_RUNTIME ?? null, args, dotenv: process.env.BINDING_DOTENV ?? null, release: ${JSON.stringify(id)} }));
 `;
 

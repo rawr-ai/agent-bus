@@ -12,7 +12,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import {
   clerkPeerResolver,
@@ -119,11 +118,7 @@ try {
   const bus = ManagedRuntime.make(
     Serve.layerHttp({ port: busPort, version: "peer-http-fixture" }).pipe(
       Layer.provideMerge(
-        Bus.layer("fixture").pipe(
-          Layer.provideMerge(store),
-          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-          Layer.provide(platform)
-        )
+        Bus.layer("fixture").pipe(Layer.provideMerge(store), Layer.provide(platform))
       )
     )
   );

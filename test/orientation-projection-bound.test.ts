@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Context, Effect, Layer, Option } from "effect";
 import * as Bus from "../src/Bus.ts";
-import { Cursors } from "../src/Cursors.ts";
 import { InvalidQuery } from "../src/domain.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { updateBulletin } from "../src/Orientation.ts";
@@ -15,16 +14,8 @@ import { layerJsonl } from "./jsonl-ledger.ts";
 
 test("publication refuses an oversized projection even when its stored record fits", async () => {
   const dir = mkdtempSync(join(tmpdir(), "agent-bus-projection-bound-"));
-  const cursors = Layer.succeed(Cursors)(
-    Cursors.of({
-      get: () => Effect.succeed(Option.none()),
-      set: () => Effect.void,
-      clear: () => Effect.void,
-    })
-  );
   const layer = Bus.layer("test-installation").pipe(
     Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
-    Layer.provideMerge(cursors),
     Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))
   );
   try {
