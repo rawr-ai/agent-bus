@@ -331,6 +331,10 @@ for (const backend of backends) {
       expect((await one.mailbox(address, renewed)).status).toBe("UNRESOLVED");
       const entry = presence();
       expect((await two.start(entry, starting(entry, renewed), renewed)).status).toBe("REFUSED");
+      expect((await two.start(entry, starting(entry, renewed, "vacancy"), renewed)).status).toBe(
+        "REFUSED"
+      );
+      expect(await one.cut()).toEqual(renewed);
       const noGuess: MailboxStart = {
         version: 1,
         kind: "start",

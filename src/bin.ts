@@ -188,7 +188,7 @@ const serve = Command.make(
 );
 
 const serveAdmissionCapability = Command.make("serve-admission-capability", {}, () =>
-  Console.log("r1-h-k-peer-v1")
+  Console.log("r1-h-k-peer-legacy-read-v2")
 ).pipe(Command.withDescription("Report paired serve-admission compatibility"));
 
 const initialize = Command.make(

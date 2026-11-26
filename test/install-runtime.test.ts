@@ -1563,7 +1563,7 @@ async function transitionFixture(f: Awaited<ReturnType<typeof fixture>>) {
   const marker = join(exact, ".export-pending");
   await writeFile(marker, JSON.stringify(sentinel));
   const ready = {
-    version: 1,
+    version: 2,
     operation: OPERATION,
     sourceCommit: "fixture-h-cid",
     verifiedCommit: "fixture-k-cid",
@@ -1581,7 +1581,7 @@ test.skipIf(process.platform !== "darwin")(
   async () => {
     const f = await fixture();
     try {
-      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-legacy-read-v2\\n");'));
       expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
       const t = await transitionFixture(f);
       const peer = join(f.root, "peer-transition");
@@ -1629,7 +1629,7 @@ test.skipIf(process.platform !== "darwin")(
       const releaseDigest = replaceSealed(
         release.dir,
         "app/cli.js",
-        releaseCli(id, 'process.stdout.write("r1-h-k-peer-v1\\n");')
+        releaseCli(id, 'process.stdout.write("r1-h-k-peer-legacy-read-v2\\n");')
       );
       expect(await f.install(["--release", release.dir, "--expect", releaseDigest])).toMatchObject({
         exitCode: 0,
@@ -1699,7 +1699,7 @@ test.skipIf(process.platform !== "darwin")(
       const currentDigest = replaceSealed(
         current.dir,
         "app/cli.js",
-        releaseCli(currentId, 'process.stdout.write("r1-h-k-peer-v1\\n");')
+        releaseCli(currentId, 'process.stdout.write("r1-h-k-peer-legacy-read-v2\\n");')
       );
       const transition = await transitionFixture(f);
       await writeFile(
@@ -1732,7 +1732,7 @@ test.skipIf(process.platform !== "darwin")(
       expect(await readFile(f.plist, "utf8")).toBe(plist);
       expect(await readFile(f.launcher, "utf8")).toBe(releaseLauncher(current.dir));
 
-      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-legacy-read-v2\\n");'));
       expect(await f.install(["--runtime-only", "--bun", f.bunB])).toMatchObject({
         exitCode: 0,
         stderr: "",
@@ -1751,15 +1751,16 @@ test.skipIf(process.platform !== "darwin")(
   async () => {
     const f = await fixture();
     try {
-      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+      await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-legacy-read-v2\\n");'));
       expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
       await transitionFixture(f);
       for (const probe of [
-        'process.stdout.write("r1-h-k-peer-v1");',
-        'process.stdout.write("r1-h-k-peer-v1\\n\\n");',
-        'process.stdout.write("r1-h-k-peer-v1\\n"); process.exit(1);',
+        'process.stdout.write("r1-h-k-peer-legacy-read-v2");',
+        'process.stdout.write("r1-h-k-peer-legacy-read-v2\\n\\n");',
+        'process.stdout.write("r1-h-k-peer-legacy-read-v2\\n"); process.exit(1);',
         'process.stdout.write("r1-h-k-peer-v0\\n");',
-        'process.stdout.write("r1-h-k-peer-v1\\0\\n");',
+        'process.stdout.write("r1-h-k-peer-v1\\n");',
+        'process.stdout.write("r1-h-k-peer-legacy-read-v2\\0\\n");',
       ]) {
         await writeFile(f.entry, sourceCli(probe));
         await writeFile(f.toolLog, "");
@@ -1788,6 +1789,7 @@ test.skipIf(process.platform !== "darwin")(
       "marker-path",
       "marker-installation",
       "record-json",
+      "record-previous-ready",
       "record-foreign",
       "record-empty-k",
       "record-wrong-k-incarnation",
@@ -1802,7 +1804,10 @@ test.skipIf(process.platform !== "darwin")(
     ]) {
       const f = await fixture();
       try {
-        await writeFile(f.entry, sourceCli('process.stdout.write("r1-h-k-peer-v1\\n");'));
+        await writeFile(
+          f.entry,
+          sourceCli('process.stdout.write("r1-h-k-peer-legacy-read-v2\\n");')
+        );
         expect(await f.install()).toMatchObject({ exitCode: 0, stderr: "" });
         const t = await transitionFixture(f);
         const record = join(f.bus, ".mailbox-transition-ready-r1");
@@ -1829,6 +1834,9 @@ test.skipIf(process.platform !== "darwin")(
             break;
           case "record-json":
             await writeFile(record, "{");
+            break;
+          case "record-previous-ready":
+            await writeFile(record, JSON.stringify({ ...t.ready, version: 1 }));
             break;
           case "record-foreign":
             await writeFile(record, JSON.stringify({ ...t.ready, operation: GENERATION }));

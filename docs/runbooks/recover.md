@@ -547,7 +547,12 @@ is not evidence a cursor was absent. For an uncertain era or import write,
 follow the [paired procedure](deploy.md#import-file-positions-into-the-ledger)
 with the same operation and captures; an absent read does not prove a
 dispatched request cannot still commit. Do not ask `bus_join` to settle a
-classified unresolved position. Fix the evidence and reconcile through the
+classified unresolved position. If the pre-sentinel comparison loses a
+formerly usable read or same-owner return, preserve both copies and reconcile
+the original holding and exact position offline; do not write a sentinel,
+disguise the loss with a fresh join, or infer a route from a hostname. An
+explicitly verified vacancy with no source files is not damaged mail.
+Fix the evidence and reconcile through the
 owner-approved procedure before selecting a release. After the first sentinel,
 the selected transition is fix-forward: do not remove the marker to resume an
 old file writer. There is no qualified file rollback after later ledger reads

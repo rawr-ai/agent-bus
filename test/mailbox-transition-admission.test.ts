@@ -212,6 +212,43 @@ test("both independent installations require complete matching readiness and adm
   }
 });
 
+test("previous reader readiness cannot admit either host, resume a partial cut or replace old evidence", async () => {
+  const f = fixture();
+  // Change only Ready objects: source receipts and completion envelopes remain v1.
+  const previousReader = (bytes: string) =>
+    JSON.stringify(JSON.parse(bytes), (_key, value) =>
+      value !== null && typeof value === "object" && "proofDigest" in value
+        ? { ...value, version: 1 }
+        : value
+    );
+  try {
+    const local = await f.ready(0);
+    const peer = await f.ready(1);
+    expect(JSON.parse(local).ready.version).toBe(2);
+    await expect(f.admit(0, previousReader(peer))).rejects.toThrow();
+    expect(existsSync(join(f.roots[0], MAILBOX_TRANSITION_ADMITTED_FILE))).toBe(false);
+    await f.admit(0, peer);
+    await f.admit(1, local);
+    await expect(f.permit(0, previousReader(f.admitted(1)))).rejects.toThrow();
+    expect(existsSync(join(f.roots[0], MAILBOX_TRANSITION_START_PERMIT_FILE))).toBe(false);
+    await f.permit(0, f.admitted(1));
+    await run(f.serve(0));
+    const prior = MAILBOX_TRANSITION_EVIDENCE_FILES.map((name) => {
+      const path = join(f.roots[0], name);
+      const bytes = previousReader(readFileSync(path, "utf8"));
+      writeFileSync(path, bytes);
+      return { path, bytes };
+    });
+    await expect(run(f.serve(0))).rejects.toThrow();
+    await expect(f.permit(0, f.admitted(1))).rejects.toThrow();
+    await expect(f.admit(0, peer)).rejects.toThrow();
+    await expect(f.ready(0)).rejects.toThrow();
+    for (const { path, bytes } of prior) expect(readFileSync(path, "utf8")).toBe(bytes);
+  } finally {
+    f.cleanup();
+  }
+});
+
 test("invalid source pair, proof bounds, row ordering, operation and identity never create evidence", async () => {
   const f = fixture();
   try {
@@ -313,7 +350,7 @@ test("peer and local attestations are strict, ordered, complete and bound to ide
       if (variant === "extra")
         peer = peer.replace('{"version":1', '{"extra":"private","version":1');
       if (variant === "nested-extra")
-        peer = peer.replace('"ready":{"version":1', '"ready":{"extra":true,"version":1');
+        peer = peer.replace('"ready":{"version":2', '"ready":{"extra":true,"version":2');
       if (variant === "partial") peer = peer.slice(0, -1);
       if (variant === "noncanonical") peer = `${peer}\n`;
       await expect(f.admit(0, peer)).rejects.toThrow();

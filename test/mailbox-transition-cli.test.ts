@@ -300,7 +300,7 @@ test("the serve-admission capability is an exact read-only compatibility declara
     const before = readdirSync(fixture.dir).sort();
     const result = await cli(["serve-admission-capability"], fixture.dir);
     expect(result.code).toBe(0);
-    expect(result.output).toBe("r1-h-k-peer-v1\n");
+    expect(result.output).toBe("r1-h-k-peer-legacy-read-v2\n");
     expect(readdirSync(fixture.dir).sort()).toEqual(before);
     expect(readFileSync(config, "utf8")).toBe("invalid config");
     expect(fixture.requests).toEqual([]);

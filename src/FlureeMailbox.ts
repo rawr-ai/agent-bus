@@ -3,6 +3,7 @@ import { LedgerError, type Message, MessageJson } from "./domain.ts";
 import { type Ownership, predecessor, successor, vacantSuccessor } from "./FlureePresence.ts";
 import type { Admission, MailboxReceiptRead, MailboxWrite } from "./Ledger.ts";
 import {
+  admitsMailboxStart,
   decodeMailboxFact,
   encodeMailboxFact,
   type MailboxAck,
@@ -535,6 +536,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
           ? { status: "UNRESOLVED", reason: receipt.record.reason, current }
           : {
               status: "FOUND",
+              initialT: row[1],
               position:
                 receipt.record.kind === "start" ? receipt.record.position : receipt.record.through,
               current,
@@ -823,11 +825,7 @@ export const makeFlureeMailbox = (transport: MailboxTransport) => {
       if (start.position > basis.head) return yield* invalid();
       const key = mailboxIri(start.address);
       const prior = yield* headAt(key, basis);
-      if (
-        (start.origin === "restart" &&
-          (prior.state.status !== "UNRESOLVED" || start.position !== basis.head)) ||
-        (start.origin !== "restart" && prior.state.status === "UNRESOLVED")
-      )
+      if (!admitsMailboxStart(prior.state, start, basis.head, message.presence))
         return { status: "REFUSED", cut: basis } satisfies Admission;
       const now = yield* headAt(key, current);
       if (!sameHead(prior, now)) return { status: "REFUSED", cut: current } satisfies Admission;

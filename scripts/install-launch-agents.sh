@@ -475,7 +475,7 @@ try {
   const match = /^[ \t\r\n\v\f]*([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})[ \t\r\n\v\f]*$/.exec(identity);
   if (match === null || markers.some((item) => item.installation !== match[1]))
     fail("the migration sentinel does not match this installation; preserve it for recovery.");
-  const ready = (value) => object(value) && value.version === 1 && uuid7.test(value.operation) &&
+  const ready = (value) => object(value) && value.version === 2 && uuid7.test(value.operation) &&
     uuid4.test(value.installation) && Array.isArray(value.sources) && value.sources.length === 2 &&
     typeof value.sourceCommit === "string" && value.sourceCommit.length > 0 && value.sourceCommit.length <= 4096 &&
     typeof value.verifiedCommit === "string" && value.verifiedCommit.length > 0 && value.verifiedCommit.length <= 4096 &&
@@ -524,7 +524,7 @@ try {
     cwd: "/", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
     stdout: "pipe", stderr: "pipe", timeout: 10_000,
   });
-  if (probe.exitCode !== 0 || !probe.stdout.equals(Buffer.from("r1-h-k-peer-v1\n")))
+  if (probe.exitCode !== 0 || !probe.stdout.equals(Buffer.from("r1-h-k-peer-legacy-read-v2\n")))
     fail("the selected target does not declare the required R1 serve-admission capability.");
 } catch {
   fail("cannot inspect transition evidence safely; preserve it for recovery.");

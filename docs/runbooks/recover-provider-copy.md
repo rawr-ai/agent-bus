@@ -11,6 +11,7 @@ Use this during the paired mailbox transition. It covers the authorized cold sto
   - The *installed* binary is the path the live plist runs, exactly as the plist writes it.
   - The *proposed* binary is unpacked from the release archive whose SHA-256 is on the [Fluree platform page](../platforms/fluree.md). Check the archive's hash before you unpack it.
   - The live provider restarts only under the installed binary. Moving it to the proposed one is a separately reviewed change.
+  - If this service pins its own executable, retain the approved path and digest with the recovery record. Do not run the full `bun run install:launch-agents` on the provider host: it replaces the provider plist using `command -v fluree`, which can silently undo the pin. The `--release` and `--runtime-only` modes leave the provider plist alone; neither repairs it.
 - **Space and placement.** You need three times the store's size, on the bus host's local disk, in a private directory that nothing syncs or backs up off the host. Everything here runs on the bus host.
 - **zsh, one step at a time.** Run everything in zsh, the macOS default shell. Each step is one function call.
   - A failed check prints `STOP:`. Don't run the next step after a `STOP`: a failed step may leave a private partial copy or a held provider for recovery.
@@ -211,7 +212,7 @@ Both steps were *Rehearsed 2026-11-23* on a disposable server after an unclean k
    - The step checks that the listener is the job's own process before it disables anything.
    - It then checks that the job is unloaded, its process has exited, the port refuses connections and no process has the store open.
    - A stopped provider can't commit a request that is still in flight. Its write-ahead log decides, on recovery, which of those requests committed.
-   - From here on, any abort brings the provider back with step 5 (see [If it fails](#if-it-fails)).
+   - If this capture procedure aborts, see [If it fails](#if-it-fails) before restarting the provider.
 
    A negative rehearsal showed that a mismatched pid stops before `launchctl disable`.
 
@@ -223,7 +224,7 @@ Both steps were *Rehearsed 2026-11-23* on a disposable server after an unclean k
    ```
 
    Expect the manifest's hash, then `.fluree-wal`, `ns@v2` and the ledger's directory. Record the hash in the independent preflight record.
-   - The capture is compared file by file with the stopped store. The manifest lists file names and hashes only.
+   - Compare the capture file by file with the **stopped** store; the manifest lists file names and hashes only. Once a provider opens a store, its index files can change without a ledger commit. A live file listing cannot verify a cold copy, and a matching ledger cut does not prove byte identity.
    - This procedure refuses symbolic links and special files rather than risk a working copy following a path outside the capture. Investigate such a store separately.
    - `--noclone` makes independent files, not APFS clones that share blocks with the live store.
    - `.fluree/config.toml`, the key and the token are not copied.
@@ -305,8 +306,12 @@ Both steps were *Rehearsed 2026-11-23* with both binaries.
 ## If it fails
 
 - **Keep the capture intact and both `serve` jobs held** in every case below.
-- **Bring the provider back after any abort past step 1.** Unless the live store itself is suspect, run `restart_provider`, with `resume_work` in a new shell if needed. A disabled job stays disabled across reboots. It refuses on its own failed checks.
+- **If the proposed binary has opened only isolated copies,** step 5 can bring the installed provider back after an abort, unless the live store is suspect. Use `resume_work` in a new shell if needed. The helper checks the originally recorded plist binding; it is not a provider upgrade or downgrade command.
+- **If a separately pinned provider fails to start or keeps restarting without a listener,** do not run `stop_provider`: it requires the job's PID to own the listener. Use the authorized operator's abort procedure to disable and unload only the identified provider job. Prove its processes are gone, the port is closed and no process has the store open before inspecting or restoring the store. Do not rerun the installer.
+- **After the proposed binary first opens the live store, never restart the old binary on that store.** Even a failed start may have changed files. Before either sentinel, and only with proof that no work committed after the recorded cut, Release Operations can restore the original binding on a fresh copy of the verified, untouched cold capture. Preserve the opened store and the capture; verify the restored provider's head, head CID and incarnation before releasing either writer. After the first sentinel or any newer commit, do not restore that capture. If either condition is uncertain, keep the jobs held and follow [paired transition recovery](recover.md#mailbox-import-cannot-be-established).
 - **Account for a copy after any `make_copy` failure.** It may already have started a process. Use the saved pid, listener and start time to prove ownership before stopping it; if ownership cannot be established, do not signal that pid and escalate for inspection.
+
+The pinned-provider abort and restore are *Unverified as an installed procedure*.
 
 | `STOP:` message | What it means | What to do |
 | --- | --- | --- |
@@ -317,7 +322,7 @@ Both steps were *Rehearsed 2026-11-23* with both binaries.
 | `… differs from the capture`, `… did not start` | A copy is incomplete or failed to start | Read its log. Stop it by hand only after checking its pid, move it to the Trash and rerun `make_copy` for that copy. |
 | `the copies disagree` | The binaries recover the store differently | Choose neither. Run `restart_provider`: this is an incident for Release Operations, and no sentinel is installed. |
 | `the installed binary changed` | The live provider would start under an unreviewed binary | Don't start it. Release Operations restores the recorded binary first. |
-| `… do not send it the live token`, `the live provider did not answer` | The restarted listener is unproved | Don't send the token or fence. Use [recover](recover.md#fluree-wont-start-or-the-token-isnt-enforced). |
+| `… do not send it the live token`, `the live provider did not answer` | The restarted listener is unproved | Don't send the token or fence. For a service-specific pin, use the abort procedure above, not the full installer in [recover](recover.md#fluree-wont-start-or-the-token-isnt-enforced). |
 | `the live provider is at another cut` | The live store differs from the capture, or something wrote | Don't fence. Restoring the live store from the capture is a separately reviewed recovery, not part of this page. |
 | `check-source` refuses (deploy) | See [deploy](deploy.md#import-file-positions-into-the-ledger) | Don't fence, and don't commit anything to move `H`. An expired copy token is re-minted with that copy's own key. |
 

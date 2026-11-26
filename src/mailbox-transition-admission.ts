@@ -44,8 +44,11 @@ const Source = Schema.Struct({
   digest: Digest,
 });
 const Sources = Schema.Tuple([Source, Source]);
+// Every admission and permit embeds both readiness attestations. Older readers
+// must reject this one before serving receipts with legacy read/vacancy evidence.
+const readyVersion = 2;
 const Ready = Schema.Struct({
-  version: Schema.Literal(1),
+  version: Schema.Literal(readyVersion),
   operation: Operation,
   sourceCommit: Commit,
   verifiedCommit: Commit,
@@ -141,7 +144,7 @@ const canonicalSource = (source: MailboxSource) => ({
   digest: source.digest,
 });
 const canonicalReady = (ready: Ready): Ready => ({
-  version: 1,
+  version: readyVersion,
   operation: ready.operation,
   sourceCommit: ready.sourceCommit,
   verifiedCommit: ready.verifiedCommit,
@@ -386,7 +389,7 @@ const expectedReady = (input: MailboxTransitionInput) =>
     const json = yield* Effect.try({ try: () => JSON.stringify(input.proof), catch: refused });
     if (json === undefined) return yield* refused();
     const candidate = yield* Schema.decodeUnknownEffect(Ready, { onExcessProperty: "error" })({
-      version: 1,
+      version: readyVersion,
       operation: input.operation,
       sourceCommit: input.sourceCommit,
       verifiedCommit: input.verifiedCommit,
