@@ -53,10 +53,14 @@ import {
 } from "./domain.ts";
 import { type CommandRead, type Entry, Ledger, validEntryId } from "./Ledger.ts";
 import {
+  canStartVacancy,
+  encodeMailboxFact,
   type MailboxAck,
   type MailboxFact,
   type MailboxStart,
+  type MailboxState,
   type MailboxUnresolved,
+  mailboxInstallationRef,
   mailboxPresenceRef,
   mailboxRunRef,
   mailboxServedDigest,
@@ -903,14 +907,24 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           });
         }
         const read = yield* ledger.presenceAt();
-        const { presence, mine, takeover } = yield* decideJoin(
-          input,
-          session,
-          latestPresences(read.entries)
-        );
+        const holdings = latestPresences(read.entries);
+        const last = holdings.get(input.address);
+        const { presence, mine, takeover } = yield* decideJoin(input, session, holdings);
         const previous = yield* ledger.mailboxAt(input.address, read.cut);
         const restart = input.restartPosition === true;
-        if (previous.status === "UNRESOLVED" && (!restart || !mine || input.replay === true)) {
+        const classified = previous.status === "UNRESOLVED" ? previous.current.record : undefined;
+        const vacant =
+          last?.presence.status === "left" &&
+          classified?.kind === "unresolved" &&
+          !restart &&
+          classified.vacant?.presenceRef === mailboxPresenceRef(last.joinId) &&
+          (input.replay !== true || classified.vacant.noFiles) &&
+          canStartVacancy(previous, input.runtime, session);
+        if (
+          previous.status === "UNRESOLVED" &&
+          !vacant &&
+          (!restart || !mine || input.replay === true)
+        ) {
           return yield* unresolvedMailbox(previous.reason);
         }
         if (restart && previous.status !== "UNRESOLVED") {
@@ -920,9 +934,17 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           });
         }
         const message = yield* presenceMessage(input.address, presence, input.cwd);
+        const imported = previous.status === "FOUND" ? previous.current.record : undefined;
+        const elsewhere =
+          last?.presence.status === "left" &&
+          imported?.kind === "start" &&
+          imported.legacySource?.presenceRef === mailboxPresenceRef(last.joinId) &&
+          imported.legacySource.installationRef !== mailboxInstallationRef(installation);
         // Never copy an inherited position: an old holder may acknowledge mail after our
         // decision and before the takeover commits. A fresh start and its presence are atomic.
         const start: MailboxStart | undefined =
+          vacant ||
+          elsewhere ||
           restart ||
           input.replay === true ||
           previous.status === "ABSENT" ||
@@ -933,7 +955,14 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
                 operation: message.id,
                 address: input.address,
                 run: presence.rejoinOf ?? message.id,
-                origin: restart ? "restart" : input.replay === true ? "replay" : "join",
+                origin:
+                  vacant && input.replay !== true
+                    ? "vacancy"
+                    : restart
+                      ? "restart"
+                      : input.replay === true
+                        ? "replay"
+                        : "join",
                 position: input.replay === true ? 0 : read.cut.head,
               }
             : undefined;
@@ -1400,16 +1429,70 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         Effect.withSpan("Bus.withOwner")
       );
 
-    const mailboxBasis = (subscriber: Subscriber, cut: Pin) =>
+    /** Only the immutable initial import can witness manual access on a pre-routing join. */
+    const legacyReadOnSource = (
+      subscriber: Subscriber,
+      cut: Pin,
+      state: Extract<MailboxState, { status: "FOUND" }>
+    ) =>
+      Effect.gen(function* () {
+        if (
+          subscriber.presence.installation !== undefined ||
+          subscriber.presence.status !== "joined"
+        )
+          return false;
+        let first = state.current;
+        if (first.t !== state.initialT) {
+          const original = yield* ledger.mailboxAt(subscriber.address, {
+            ...cut,
+            head: state.initialT,
+          });
+          if (original.status !== "FOUND" || original.current.t !== state.initialT) return false;
+          const intact = yield* ledger.mailboxReceiptAt(
+            subscriber.address,
+            original.current.record.operation,
+            cut
+          );
+          if (
+            intact.status !== "FOUND" ||
+            intact.t !== state.initialT ||
+            encodeMailboxFact(intact.record) !== encodeMailboxFact(original.current.record)
+          )
+            return false;
+          first = intact;
+        }
+        const { record } = first;
+        return (
+          record.kind === "start" &&
+          record.origin === "import" &&
+          record.previous === null &&
+          record.legacySource?.cut.incarnation === cut.incarnation &&
+          record.legacySource.installationRef === mailboxInstallationRef(installation) &&
+          record.legacySource.presenceRef === mailboxPresenceRef(subscriber.joinId) &&
+          record.runRef === mailboxRunRef(runOf(subscriber)) &&
+          (state.current.t === state.initialT ||
+            (state.current.record.kind === "ack" &&
+              state.current.record.runRef === record.runRef &&
+              state.current.record.subscription.presenceRef === record.legacySource.presenceRef))
+        );
+      });
+
+    const mailboxBasis = (subscriber: Subscriber, cut: Pin, manual = false) =>
       Effect.gen(function* () {
         const address = subscriber.address;
-        if (!local(subscriber)) {
-          return yield* new NotJoined({
+        const notLocal = () =>
+          new NotJoined({
             address,
             message: "This holding did not join from this installation; nothing was changed.",
           });
-        }
+        if (!local(subscriber) && (!manual || subscriber.presence.installation !== undefined))
+          return yield* notLocal();
         const state = yield* ledger.mailboxAt(address, cut);
+        if (
+          !local(subscriber) &&
+          (state.status !== "FOUND" || !(yield* legacyReadOnSource(subscriber, cut, state)))
+        )
+          return yield* notLocal();
         if (state.status === "UNRESOLVED") return yield* unresolvedMailbox(state.reason);
         if (state.status !== "FOUND") {
           return yield* new NotJoined({
@@ -1625,12 +1708,9 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           return undefined;
         const prior = basis.subscriber;
         const current = yield* ownedIn(latestPresences(entries), prior.address, session);
-        if (
-          !local(current) ||
-          current.presence.runtime !== prior.presence.runtime ||
-          runOf(current) !== runOf(prior)
-        )
+        if (current.presence.runtime !== prior.presence.runtime || runOf(current) !== runOf(prior))
           return undefined;
+        if (!local(current)) yield* mailboxBasis(current, cut, true);
         return yield* recordedRead(current, readId, cut);
       }).pipe(Effect.option, Effect.map(Option.getOrUndefined));
 
@@ -1912,7 +1992,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         if (readId !== undefined && !READ_ID.test(readId)) return yield* invalidReadId();
         const { entries: presence, cut } = yield* ledger.presenceAt();
         const subscriber = yield* ownedIn(latestPresences(presence), address, session);
-        const basis = yield* mailboxBasis(subscriber, cut);
+        const basis = yield* mailboxBasis(subscriber, cut, true);
         yield* touch(address);
         const nextReadId = Bun.randomUUIDv7();
         if (readId !== undefined) {
@@ -2058,7 +2138,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           });
         const { entries: presence, cut } = yield* ledger.presenceAt();
         const subscriber = yield* ownedIn(latestPresences(presence), address, session);
-        const current = yield* mailboxBasis(subscriber, cut);
+        const current = yield* mailboxBasis(subscriber, cut, true);
         yield* touch(address);
         const nextReadId = Bun.randomUUIDv7();
         const done = (replayed: boolean): Acked => ({
@@ -2106,7 +2186,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           peeked.joinId !== subscriber.joinId
         )
           return yield* changed();
-        const basis = yield* mailboxBasis(peeked, peekCut);
+        const basis = yield* mailboxBasis(peeked, peekCut, true);
         if (basis.position !== receipt.from) return yield* changed();
         const { entries, boundary } = yield* servedPrefix(
           ledger,

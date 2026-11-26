@@ -174,6 +174,7 @@ const fixture = () => {
             return {
               status: "FOUND" as const,
               position: cursor,
+              initialT: 1,
               current: {
                 t: 1,
                 record: mailboxFactOf(

@@ -19,7 +19,7 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { Message, Presence } from "../src/domain.ts";
-import { layerFluree } from "../src/Fluree.ts";
+import { createFlureeLedgerOnce, layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
@@ -48,7 +48,9 @@ const run = async () => {
   const root = mkdtempSync(join(tmpdir(), "agent-bus-qualify-restart-"));
   const roots = [join(root, "before"), join(root, "fresh")] as const;
   const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
-  const witness = ManagedRuntime.make(layerFluree(config).pipe(Layer.provide(platform)));
+  const witness = ManagedRuntime.make(
+    layerFluree(config, { existingOnly: true }).pipe(Layer.provide(platform))
+  );
   const pin = () => witness.runPromise(Effect.flatMap(QueryGateway, (q) => q.pin));
   const facts = (t: number, subject: string, predicates: string[]) =>
     witness.runPromise(
@@ -263,6 +265,15 @@ const run = async () => {
       );
       writeFileSync(join(dir, "fluree-token"), config.token, { mode: 0o600 });
       writeFileSync(join(dir, "installation-id"), installation, { mode: 0o600 });
+    }
+    // The file baseline creates its own ledger. The ledger writer must attach to an
+    // existing era-1 store on both starts; provisioning belongs to the disposable fixture.
+    if (!files) {
+      const provisioned = await Effect.runPromise(
+        createFlureeLedgerOnce(config).pipe(Effect.provide(platform))
+      );
+      assert(provisioned.status === "CREATED", "disposable era-1 ledger was not created");
+      assert.deepEqual(await pin(), provisioned.cut);
     }
     await start(roots[0]);
     await joinPeer(author, []);

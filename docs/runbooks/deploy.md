@@ -31,7 +31,7 @@ to bypass it. For the externally verified package at `verified_target`:
 ```sh
 ( set -o pipefail
   "$verified_target/runtime/bun" --no-env-file --config="$verified_target/app/bunfig.toml" \
-    "$verified_target/app/cli.js" serve-admission-capability | cmp -s - <(printf 'r1-h-k-peer-v1\n')
+    "$verified_target/app/cli.js" serve-admission-capability | cmp -s - <(printf 'r1-h-k-peer-legacy-read-v2\n')
 )
 ```
 
@@ -41,12 +41,12 @@ For the already verified source target in `verified_source`, use its approved
 ```sh
 ( set -o pipefail
   "$verified_bun" --no-env-file --config="$verified_source/bunfig.toml" \
-    "$verified_source/src/bin.ts" serve-admission-capability | cmp -s - <(printf 'r1-h-k-peer-v1\n')
+    "$verified_source/src/bin.ts" serve-admission-capability | cmp -s - <(printf 'r1-h-k-peer-legacy-read-v2\n')
 )
 ```
 
 Run the appropriate block in zsh. Expect exit 0 with no output: it checks both
-the command's success and exactly `r1-h-k-peer-v1` followed by one newline.
+the command's success and exactly `r1-h-k-peer-legacy-read-v2` followed by one newline.
 Otherwise leave every existing binding untouched and stop. This
 operator-only self-declaration is not proof
 of artifact identity, intact admission evidence or successful startup. The
@@ -54,6 +54,10 @@ guarding installer checks compatibility, not the complete evidence schema;
 the capable server validates its own full admission before serving. A damaged
 record may therefore still prevent startup after a compatible rebind. Preserve
 the evidence and recover forward rather than bypassing either guard.
+The earlier paired reader cannot interpret legacy read or vacancy receipts.
+Do not restart or rebind it against this format. Conversely, do not relabel
+or reissue earlier-format admission evidence: preserve it and use a separately
+reviewed transition before selecting a reader with a different capability.
 *Unverified as an installed operator sequence; CLI and installer tests use
 disposable state.*
 
@@ -276,6 +280,26 @@ machine. The CLI checks that local job is disabled, unloaded and off its port;
 the peer hold and provider settlement below are operator attestations, not
 facts the local CLI can prove.
 
+Before an installed transition, run the release qualifier from the reviewed
+source tree against disposable state. Put the approved Bun and provider on
+`PATH`; supply independently recorded release roots and digests (not values
+read back from the artifacts being checked):
+
+```sh
+AGENT_BUS_OLD_RELEASE="$file_writer" AGENT_BUS_OLD_RELEASE_SHA256="$file_writer_sha" \
+AGENT_BUS_PRIOR_MAILBOX_RELEASE="$prior_reader" AGENT_BUS_PRIOR_MAILBOX_RELEASE_SHA256="$prior_reader_sha" \
+AGENT_BUS_CANDIDATE_RELEASE="$verified_target" AGENT_BUS_CANDIDATE_RELEASE_SHA256="$external_sha" \
+AGENT_BUS_CANDIDATE_COMMIT="$candidate" AGENT_BUS_CANDIDATE_TREE="$candidate_tree" \
+AGENT_BUS_FLUREE_SHA256="$provider_sha" AGENT_BUS_FLUREE_VERSION="$provider_version" \
+bun --no-env-file test test/mailbox-transition-old-release.test.ts
+```
+
+Require an executed, passing test, not a skip. The prior ledger reader is a
+negative control distinct from the old file writer: it must not start with the
+new admission evidence. A disposable pass does not qualify installed data or
+replace the pre-sentinel comparison below. *Unverified as a packaged operator
+sequence.*
+
 On each machine, export the three values for that installation before running
 the commands below:
 
@@ -408,6 +432,23 @@ installed procedure; local and disposable checks are recorded separately.*
    marker is already present, do not pretend this is a fresh preflight: retain
    both holds and follow the same-operation recovery below.
 
+   Neither check proves that holders will keep their unread mail. Before either
+   sentinel, rehearse the candidate import and verification on a separate
+   writable disposable copy of the recovered ledger, with copies of the
+   **fresh** paired receipts, identities and original cursor generations. Keep
+   the cold recovery evidence and both live sources unchanged. Compare every
+   predicted row to the old writer's actual capabilities: current owner,
+   exact cursor and source for manual reads; last owner, source or confirmed
+   absence on both installations for returns after leave. Verification labels
+   these cases `manual-on-source`, `return-on-source`, `vacant-no-files` or
+   `fresh-claimant-only`; the source reference identifies the installation
+   whose file was captured, not the machine that once announced the join.
+   Account for each classification privately. Stop before the sentinel if a
+   previously usable read or return would become unresolved, evidence of a
+   staged position cannot be settled, or an unexpected right would be granted.
+   Neither matching hostnames nor matching totals substitute for this check.
+   *Unverified as a paired installed procedure.*
+
    Then install each sentinel on its original host. The fence command repeats
    the bounded commit comparison on the original binding before and after
    publishing its marker:
@@ -517,7 +558,7 @@ installed procedure; local and disposable checks are recorded separately.*
    | `reason` | Meaning |
    | --- | --- |
    | `conflict` | Both installations had a cursor file for the address. |
-   | `unattributable` | The address's latest join at `H` names neither captured installation (including a join with no recorded installation, as in hostname-routed records, or no join at all), or the owner's cursor file names another address. |
+   | `unattributable` | The last join explicitly names a different installation, the leave does not match the last joined holder, that join is missing, or the cursor record names another address. Absence of an installation on the join does not by itself cause this classification. |
    | `stale` | Only the installation that did not own the address had a cursor file. |
    | `missing` | Neither installation had a cursor file. |
    | `unreadable` | The owning installation's cursor file could not be read. |
@@ -526,7 +567,12 @@ installed procedure; local and disposable checks are recorded separately.*
    The second line is the verified proof. It names `verifiedAt` and has a row
    for every captured holding: `VERIFIED_IMPORT` with its `position`, or
    `VERIFIED_CLASSIFICATION` with its `reason`, plus the holding's
-   `latestStatus`, `latestPresenceId` and `lastJoinId`. The whole proof
+   `latestStatus`, `latestPresenceId` and `lastJoinId`. Where the
+   importer distinguished a manual read or return, `legacyAccess` reports
+   the applicable disposition from step 3; `sourceInstallationRef` is the
+   compact reference to the one installation whose exact position was found.
+   A `vacant-no-files` classification witnesses absence, not an imported
+   position of zero. The whole proof
    refuses, printing no rows, if the set of holdings or any holding's presence
    changed since `H`, or if any holding's current mailbox record is not the
    first record written after `H` by that address's import `operation`, with

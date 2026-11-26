@@ -19,6 +19,7 @@ import {
   messageIri,
 } from "../src/Ledger.ts";
 import {
+  admitsMailboxStart,
   decodeMailboxFact,
   encodeMailboxFact,
   type MailboxAck,
@@ -77,6 +78,7 @@ const resolveMailbox = (
 ) =>
   Effect.gen(function* () {
     let current: StoredMailboxRecord | undefined;
+    let initialT = 0;
     let position: number | undefined;
     let unresolved: MailboxUnresolved["reason"] | undefined;
     let previousT = 0;
@@ -94,6 +96,7 @@ const resolveMailbox = (
       previousT = t;
       operations.add(record.operation);
       if (record.mailbox !== mailbox) continue;
+      if (initialT === 0) initialT = t;
       if (
         !validMailboxFactAt(record, t, incarnation) ||
         record.previous !== (current?.record.operation ?? null) ||
@@ -108,9 +111,14 @@ const resolveMailbox = (
       } else if (record.kind === "start") {
         if (
           (record.origin === "import" && current !== undefined) ||
-          ((record.origin === "reconcile" || record.origin === "restart") &&
+          ((record.origin === "reconcile" ||
+            record.origin === "restart" ||
+            record.origin === "vacancy") &&
             unresolved === undefined) ||
-          ((record.origin === "join" || record.origin === "replay") && unresolved !== undefined) ||
+          ((record.origin === "join" ||
+            (record.origin === "replay" &&
+              !(current?.record.kind === "unresolved" && current.record.vacant?.noFiles))) &&
+            unresolved !== undefined) ||
           (record.origin === "restart" && record.position < (current?.t ?? 0))
         ) {
           return yield* ledgerError(`A mailbox entry at t=${t} could not be established.`);
@@ -129,7 +137,7 @@ const resolveMailbox = (
       return { status: "UNRESOLVED", reason: unresolved, current } satisfies MailboxState;
     }
     if (position === undefined) return yield* ledgerError("A mailbox position is missing.");
-    return { status: "FOUND", position, current } satisfies MailboxState;
+    return { status: "FOUND", position, current, initialT } satisfies MailboxState;
   });
 
 /**
@@ -348,11 +356,7 @@ export const layerJsonl = (file: string) =>
             if (now.some((row) => row.t > basis.head && row.record.mailbox === mailbox)) {
               return { status: "REFUSED", cut: current } satisfies Admission;
             }
-            if (
-              (start.origin === "restart" &&
-                (priorState.status !== "UNRESOLVED" || start.position !== basis.head)) ||
-              (start.origin !== "restart" && priorState.status === "UNRESOLVED")
-            ) {
+            if (!admitsMailboxStart(priorState, start, basis.head, message.presence)) {
               return { status: "REFUSED", cut: current } satisfies Admission;
             }
             const fact = mailboxFactOf(

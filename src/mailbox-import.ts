@@ -10,7 +10,11 @@ import { Ledger } from "./Ledger.ts";
 import {
   type MailboxStart,
   type MailboxUnresolved,
+  mailboxHolderRef,
+  mailboxInstallationRef,
   mailboxIntentMatches,
+  mailboxPresenceRef,
+  mailboxRunRef,
 } from "./mailbox-model.ts";
 import type { Pin } from "./Query.ts";
 
@@ -112,15 +116,38 @@ const operationFor = (address: string, one: MailboxSource, two: MailboxSource) =
 };
 
 const decide = (
-  address: string,
-  run: string,
-  owner: string | undefined,
+  holding: Subscriber,
+  lastJoin: Subscriber | undefined,
   one: { readonly receipt: MailboxSource; readonly files: ReadonlyMap<string, CursorImportFile> },
   two: { readonly receipt: MailboxSource; readonly files: ReadonlyMap<string, CursorImportFile> }
 ): MailboxStart | MailboxUnresolved => {
+  const { address } = holding;
+  const run = runOf(lastJoin ?? holding);
+  const owner = lastJoin?.presence.installation;
   const name = cursorFileName(address);
   const a = one.files.get(name);
   const b = two.files.get(name);
+  const cut = one.receipt.cut;
+  const presenceRef = mailboxPresenceRef(holding.joinId);
+  const vacancy =
+    holding.presence.status === "left" &&
+    lastJoin !== undefined &&
+    holding.presence.runtime === lastJoin.presence.runtime &&
+    holding.presence.session !== undefined &&
+    holding.presence.session === lastJoin.presence.session
+      ? {
+          cut,
+          presenceRef,
+          runRef: mailboxRunRef(run),
+          holderRef: mailboxHolderRef(holding.presence.runtime, holding.presence.session),
+          noFiles:
+            a === undefined &&
+            b === undefined &&
+            (owner === undefined ||
+              owner === one.receipt.installation ||
+              owner === two.receipt.installation),
+        }
+      : undefined;
   const operation = operationFor(address, one.receipt, two.receipt);
   const unresolved = (reason: MailboxUnresolved["reason"]): MailboxUnresolved => ({
     version: 1,
@@ -128,13 +155,37 @@ const decide = (
     operation,
     address,
     reason,
+    ...(vacancy === undefined ? {} : { vacant: vacancy }),
   });
   if (a !== undefined && b !== undefined) return unresolved("conflict");
-  if (owner !== one.receipt.installation && owner !== two.receipt.installation) {
+  if (
+    lastJoin === undefined ||
+    (holding.presence.status === "left" &&
+      (holding.presence.runtime !== lastJoin.presence.runtime ||
+        holding.presence.session !== lastJoin.presence.session))
+  ) {
     return unresolved("unattributable");
   }
-  const current = owner === one.receipt.installation ? a : b;
-  const elsewhere = owner === one.receipt.installation ? b : a;
+  if (
+    owner !== undefined &&
+    owner !== one.receipt.installation &&
+    owner !== two.receipt.installation
+  ) {
+    return unresolved("unattributable");
+  }
+  if (vacancy?.noFiles) return unresolved("missing");
+  // Identify where the old owner could read, not where the historical join was made.
+  // Only the two independently captured and verified source inventories participate.
+  const source =
+    owner === undefined
+      ? a === undefined
+        ? two
+        : one
+      : owner === one.receipt.installation
+        ? one
+        : two;
+  const current = source === one ? a : b;
+  const elsewhere = source === one ? b : a;
   if (current === undefined) return unresolved(elsewhere !== undefined ? "stale" : "missing");
   if (current.status === "unreadable") return unresolved("unreadable");
   if (current.record.address !== address) return unresolved("unattributable");
@@ -147,6 +198,15 @@ const decide = (
     run,
     origin: "import",
     position: current.record.cursor,
+    ...(owner === undefined || holding.presence.status === "left"
+      ? {
+          legacySource: {
+            cut,
+            presenceRef,
+            installationRef: mailboxInstallationRef(source.receipt.installation),
+          },
+        }
+      : {}),
   };
 };
 
@@ -227,13 +287,7 @@ const planMailboxImport = (
       )
       .map((holding) => {
         const owner = owners.get(holding.address);
-        const record = decide(
-          holding.address,
-          runOf(owner ?? holding),
-          owner?.presence.installation,
-          one,
-          two
-        );
+        const record = decide(holding, owner, one, two);
         return { holding, owner, record };
       });
     return { cut, planned };
@@ -325,6 +379,12 @@ type VerifiedImportRow = {
   readonly latestStatus: Subscriber["presence"]["status"];
   readonly latestPresenceId: string;
   readonly lastJoinId: string | null;
+  readonly legacyAccess?:
+    | "manual-on-source"
+    | "return-on-source"
+    | "vacant-no-files"
+    | "fresh-claimant-only";
+  readonly sourceInstallationRef?: string;
 } & (
   | { readonly status: "VERIFIED_IMPORT"; readonly position: number }
   | { readonly status: "VERIFIED_CLASSIFICATION"; readonly reason: MailboxUnresolved["reason"] }
@@ -380,13 +440,37 @@ export const verifyMailboxImport = (
         state.position === record.position &&
         state.position <= cut.head
       ) {
-        rows.push({ ...identity, status: "VERIFIED_IMPORT", position: state.position });
+        rows.push({
+          ...identity,
+          status: "VERIFIED_IMPORT",
+          position: state.position,
+          ...(record.legacySource === undefined
+            ? {}
+            : {
+                legacyAccess:
+                  holding.presence.status === "joined"
+                    ? ("manual-on-source" as const)
+                    : ("return-on-source" as const),
+                sourceInstallationRef: record.legacySource.installationRef,
+              }),
+        });
       } else if (
         record.kind === "unresolved" &&
         state.status === "UNRESOLVED" &&
         state.reason === record.reason
       ) {
-        rows.push({ ...identity, status: "VERIFIED_CLASSIFICATION", reason: state.reason });
+        rows.push({
+          ...identity,
+          status: "VERIFIED_CLASSIFICATION",
+          reason: state.reason,
+          ...(record.vacant === undefined
+            ? {}
+            : {
+                legacyAccess: record.vacant.noFiles
+                  ? ("vacant-no-files" as const)
+                  : ("fresh-claimant-only" as const),
+              }),
+        });
       } else {
         return yield* refused(`incorrect current position or classification for ${address}.`);
       }

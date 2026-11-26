@@ -20,8 +20,8 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { cursorImportSnapshot } from "../src/cursor-layout.ts";
-import { LedgerError } from "../src/domain.ts";
-import { layerFluree } from "../src/Fluree.ts";
+import { LedgerError, Message, MessageJson, Presence } from "../src/domain.ts";
+import { layerFluree, toNode } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import {
   captureMailboxSource,
@@ -31,6 +31,7 @@ import {
 import {
   acceptMailboxTransitionPeer,
   MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE,
+  MAILBOX_TRANSITION_EVIDENCE_FILES,
   type MailboxTransitionBinding,
   type MailboxTransitionChecks,
   permitMailboxTransitionServe,
@@ -49,6 +50,8 @@ import { spawnSupervised } from "./supervised.ts";
 // This exercises real processes and components on synthetic roots, not launchd or the operator CLI.
 const release = process.env.AGENT_BUS_OLD_RELEASE;
 const anchor = process.env.AGENT_BUS_OLD_RELEASE_SHA256;
+const priorMailbox = process.env.AGENT_BUS_PRIOR_MAILBOX_RELEASE;
+const priorMailboxAnchor = process.env.AGENT_BUS_PRIOR_MAILBOX_RELEASE_SHA256;
 const flureeAnchor = process.env.AGENT_BUS_FLUREE_SHA256;
 const flureeVersion = process.env.AGENT_BUS_FLUREE_VERSION;
 const candidateRoot = process.env.AGENT_BUS_CANDIDATE_RELEASE;
@@ -58,6 +61,8 @@ const candidateTree = process.env.AGENT_BUS_CANDIDATE_TREE;
 const selected = [
   release,
   anchor,
+  priorMailbox,
+  priorMailboxAnchor,
   flureeAnchor,
   flureeVersion,
   candidateRoot,
@@ -223,15 +228,19 @@ const spawnServer = (
 qualify(
   selected
     ? `the real released file writers transition to admitted ledger mailboxes (${candidateRoot === undefined ? "source" : "packaged"} candidate)`
-    : "old-release transition qualification (set AGENT_BUS_OLD_RELEASE, AGENT_BUS_OLD_RELEASE_SHA256, AGENT_BUS_FLUREE_SHA256 and AGENT_BUS_FLUREE_VERSION)",
+    : "old-release transition qualification (set both release paths and manifest digests and the Fluree digest/version)",
   async () => {
     if (
       release === undefined ||
       anchor === undefined ||
+      priorMailbox === undefined ||
+      priorMailboxAnchor === undefined ||
       flureeAnchor === undefined ||
       flureeVersion === undefined
     ) {
-      throw new Error("Set all four old-release and selected-Fluree qualification variables.");
+      throw new Error(
+        "Set both old-release paths and manifest digests and the Fluree digest/version."
+      );
     }
     let candidatePackage:
       | {
@@ -272,6 +281,12 @@ qualify(
     let stopFluree: (() => Promise<void>) | undefined;
     try {
       verifyArtifact(release, anchor, fixture, "a18838d7483f8c377097bd7f00e42a98dc5b73d9");
+      verifyArtifact(
+        priorMailbox,
+        priorMailboxAnchor,
+        fixture,
+        "7bfd97ebccd0d3c113b7a0d1f649063e5075bde9"
+      );
       if (candidatePackage !== undefined) {
         verifyWorkspace(candidatePackage.commit, candidatePackage.tree, fixture);
         verifyArtifact(
@@ -311,15 +326,15 @@ qualify(
       // ownership era before the old presences exist and would not model an old installation.
       let incarnation = "";
 
-      const spawn = (root: string) => {
+      const spawn = (root: string, artifact = release) => {
         const server = spawnServer(
           [
-            join(release, "runtime/bun"),
+            join(artifact, "runtime/bun"),
             "--no-env-file",
-            `--config=${join(release, "app/bunfig.toml")}`,
-            join(release, "app/cli.js"),
+            `--config=${join(artifact, "app/bunfig.toml")}`,
+            join(artifact, "app/cli.js"),
           ],
-          dirname(join(release, "runtime/bun")),
+          dirname(join(artifact, "runtime/bun")),
           root,
           fixture,
           processes,
@@ -404,25 +419,66 @@ qualify(
           topics: [],
         });
       }
-      const send = async (to: string, body: string) => {
+      // a188 can read a pre-routing holding but cannot create one: its own join always stamps
+      // an installation. Seed only that historical state; a188 itself must advance the cursor.
+      const legacy = "fixture/old-transition-pre-routing";
+      const legacyJoin = new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: legacy,
+        to: ["*"],
+        kind: "presence",
+        body: "synthetic pre-routing join",
+        presence: new Presence({
+          runtime: "other",
+          status: "joined",
+          session: session(legacy),
+          topics: [],
+        }),
+      });
+      await insertRaw(config, toNode(legacyJoin, Schema.encodeSync(MessageJson)(legacyJoin)));
+      const legacyFile = join(
+        roots[0],
+        "fluree-cursors",
+        encodeURIComponent(config.ledger),
+        `${incarnation}.v2`,
+        `${sha256(Buffer.from(legacy, "utf16le"))}.json`
+      );
+      writeFileSync(
+        legacyFile,
+        JSON.stringify({ address: legacy, cursor: (await cutNow()).head }),
+        {
+          flag: "wx",
+          mode: 0o600,
+        }
+      );
+      const send = async (to: string, body: string, ...also: string[]) => {
         const result = await call(clientOne, "bus_publish", {
           from: author,
           session: session(author),
-          to: [to],
+          to: [to, ...also],
           body,
         });
         if (typeof result.id !== "string")
           throw new Error("The old publish returned no message id.");
         return result.id;
       };
-      const acknowledged = await send(readers[0], "already read");
+      const acknowledged = await send(readers[0], "already read", legacy);
       const read = await call(clientOne, "bus_read", {
         address: readers[0],
         session: session(readers[0]),
       });
       expect(messages(read.messages).map((message) => message.id)).toEqual([acknowledged]);
+      const legacyInput = { address: legacy, session: session(legacy) };
+      const legacyRead = await call(clientOne, "bus_read", legacyInput);
+      expect(messages(legacyRead.messages).map((message) => message.id)).toEqual([acknowledged]);
+      const legacyPosition = (await cutNow()).head;
+      expect(JSON.parse(readFileSync(legacyFile, "utf8"))).toEqual({
+        address: legacy,
+        cursor: legacyPosition,
+      });
       const unread = [
-        await send(readers[0], "unread one"),
+        await send(readers[0], "unread one", legacy),
         await send(readers[1], "unread two"),
       ] as const;
       const unresolvedMail = await send(unresolved, "unread but position is damaged");
@@ -599,18 +655,20 @@ qualify(
       }
       expect(await cutNow()).toEqual(cut);
 
-      const rejectCandidate = async (root: string) => {
-        const refused = candidate(root);
+      const expectAdmissionRefusal = async (refused: ReturnType<typeof spawnServer>) => {
         const status = await Promise.race([
           refused.child.exited,
           Bun.sleep(10_000).then(() => {
-            throw new Error("The candidate did not refuse incomplete admission.");
+            throw new Error(
+              "The selected reader did not refuse incompatible or incomplete admission."
+            );
           }),
         ]);
         expect(status).not.toBe(0);
         expect(await refused.stderr).toMatch(/admission evidence is missing, invalid, or changed/i);
         expect(portIsFree(refused.port)).toBe(true);
       };
+      const rejectCandidate = (root: string) => expectAdmissionRefusal(candidate(root));
       await rejectCandidate(roots[0]);
       expect(await cutNow()).toEqual(cut);
 
@@ -669,7 +727,7 @@ qualify(
         Schema.Struct({ address: Schema.String, cursor: Schema.Int })
       )(authorCursor);
       expect(authorPosition.address).toBe(author);
-      const expectedAddresses = [author, ...readers, unresolved].sort();
+      const expectedAddresses = [author, ...readers, unresolved, legacy].sort();
       expect(imported.rows.map((row) => row.address)).toEqual(expectedAddresses);
       expect(imported.rows).toEqual(
         expect.arrayContaining([
@@ -690,6 +748,12 @@ qualify(
             operation: expect.any(String),
             status: "IMPORTED",
             position: twoOriginal.position,
+          },
+          {
+            address: legacy,
+            operation: expect.any(String),
+            status: "IMPORTED",
+            position: legacyPosition,
           },
           {
             address: unresolved,
@@ -779,6 +843,13 @@ qualify(
             address: readers[1],
             status: "VERIFIED_IMPORT",
             position: twoOriginal.position,
+          }),
+          expect.objectContaining({
+            address: legacy,
+            status: "VERIFIED_IMPORT",
+            position: legacyPosition,
+            latestPresenceId: legacyJoin.id,
+            lastJoinId: legacyJoin.id,
           }),
           expect.objectContaining({
             address: unresolved,
@@ -930,6 +1001,15 @@ qualify(
         permitMailboxTransitionServe(serveInputs[0], admittedTwo, permitChecks(0))
       );
 
+      // This root is now fully permitted. The previous ledger reader must refuse the
+      // corrected evidence itself, not merely an absent permit or the file-writer sentinel.
+      const evidence = () =>
+        MAILBOX_TRANSITION_EVIDENCE_FILES.map((name) => sha256(readFileSync(join(roots[0], name))));
+      const beforeOldReader = evidence();
+      await expectAdmissionRefusal(spawn(roots[0], priorMailbox));
+      expect(evidence()).toEqual(beforeOldReader);
+      expect(await cutNow()).toEqual(proof.verifiedAt);
+      expect((await readCommit(proof.verifiedAt.head)).id).toBe(verifiedCommit);
       const nextOne = candidate(roots[0]);
       const nextClientOne = await connect(nextOne);
       const newSend = await call(nextClientOne, "bus_publish", {
@@ -956,6 +1036,18 @@ qualify(
         messages(
           (await call(client, "bus_read", { address, session: session(address) })).messages
         ).map((message) => message.id);
+      const beforeWrongHome = await cutNow();
+      const wrongHome = CallToolResultSchema.parse(
+        await nextClientTwo.callTool({ name: "bus_read", arguments: legacyInput })
+      );
+      expect(wrongHome.isError).toBe(true);
+      expect(wrongHome.content[0]).toMatchObject({
+        type: "text",
+        text: expect.stringMatching(/did not join from this installation/i),
+      });
+      expect(await cutNow()).toEqual(beforeWrongHome);
+      expect(await readCandidate(nextClientOne, legacy)).toEqual([unread[0]]);
+      expect(await readCandidate(nextClientOne, legacy)).toEqual([]);
       const delivered = await readCandidate(nextClientOne, readers[0]);
       expect(delivered).toEqual([unread[0], newSend.id]);
       expect(delivered).not.toContain(acknowledged);

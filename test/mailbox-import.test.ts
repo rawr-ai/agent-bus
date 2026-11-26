@@ -6,6 +6,8 @@ import { join } from "node:path";
 import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
+import * as Bus from "../src/Bus.ts";
+import * as Cursors from "../src/Cursors.ts";
 import { cursorFileName } from "../src/Cursors.ts";
 import { LedgerError, Message, Presence } from "../src/domain.ts";
 import { layerFluree } from "../src/Fluree.ts";
@@ -18,8 +20,9 @@ import {
   type MailboxSource,
   verifyMailboxImport,
 } from "../src/mailbox-import.ts";
+import { mailboxReceiptIri } from "../src/mailbox-model.ts";
 import type { Pin } from "../src/Query.ts";
-import { freshLedger } from "./fluree-server.ts";
+import { freshLedger, insertRaw } from "./fluree-server.ts";
 
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 const stopped = Effect.void;
@@ -55,11 +58,20 @@ const fixture = async () => {
   const admissions: Array<{ address: string; head: number }> = [];
   let renewAtAdmission: Message | undefined;
   let substitutePosition: number | undefined;
+  let loseAck = false;
   const selected = layerFluree(config);
   const withFault = Layer.effect(Ledger)(
     Effect.map(Ledger, (ledger) =>
       Ledger.of({
         ...ledger,
+        appendMailboxAck: (ack, basis) =>
+          ledger.appendMailboxAck(ack, basis).pipe(
+            Effect.map((result) => {
+              if (!loseAck || result.status !== "APPLIED") return result;
+              loseAck = false;
+              return { status: "UNKNOWN" as const };
+            })
+          ),
         importMailbox: (record, basis) =>
           Effect.gen(function* () {
             admissions.push({ address: record.address, head: basis.head });
@@ -186,6 +198,22 @@ const fixture = async () => {
   return {
     one,
     two,
+    damageReceipt: (id: string) =>
+      insertRaw(config, {
+        "@id": mailboxReceiptIri(id),
+        "https://example.invalid/unexpected": "damaged",
+      }),
+    loseNextAck: () => {
+      loseAck = true;
+    },
+    machine: (installation: string) =>
+      ManagedRuntime.make(
+        Bus.layer(installation).pipe(
+          Layer.provideMerge(withFault),
+          Layer.provide(Cursors.layerFiles(join(root, installation))),
+          Layer.provide(platform)
+        )
+      ),
     stage,
     captures,
     run,
@@ -206,6 +234,174 @@ const fixture = async () => {
     cleanup,
   };
 };
+
+test("paired capture preserves manual reads without granting the old join a wake installation", async () => {
+  const f = await fixture();
+  let source = f.machine(f.one);
+  const peer = f.machine(f.two);
+  try {
+    const address = "legacy/manual";
+    const session = `owner:${address}`;
+    const holding = presence(address);
+    await f.use((ledger) => ledger.append(holding));
+    const mail = (body: string) =>
+      new Message({
+        id: Bun.randomUUIDv7(),
+        ts: new Date().toISOString(),
+        from: "legacy/sender",
+        to: [address],
+        kind: "message",
+        body,
+      });
+    await f.use((ledger) => ledger.append(mail("consumed")));
+    const position = (await f.cutNow()).head;
+    const first = mail("first unread");
+    const second = mail("second unread");
+    await f.use((ledger) => ledger.append(first));
+    await f.use((ledger) => ledger.append(second));
+    const cut = await f.cutNow();
+    f.stage(cut)(0, address, position);
+    const captures = await f.captures(cut);
+    const result = await f.run(captures);
+    const operation = result.rows[0]?.operation;
+    if (!operation) throw new Error("No import operation.");
+    const read = (machine: typeof source, holder: string) =>
+      machine.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.take(address, holder)));
+    const before = await f.cutNow();
+    await expect(read(peer, session)).rejects.toThrow();
+    await expect(read(source, "different-session")).rejects.toThrow();
+    expect(
+      await source.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) => bus.deliver(address, () => Effect.succeed("woke")))
+      )
+    ).toBeUndefined();
+    expect(await f.cutNow()).toEqual(before);
+    const peek = await source.runPromise(
+      Effect.flatMap(Bus.Bus, (bus) => bus.read({ address, session, peek: true, limit: 1 }))
+    );
+    expect(peek.messages.map(({ id }) => id)).toEqual([first.id]);
+    const proof = peek.receipt;
+    if (!proof?.basis || !proof.served) throw new Error("No peek witness.");
+    const receipt = { ...proof, basis: proof.basis, served: proof.served };
+    const ack = (machine: typeof source) =>
+      machine.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.ack({ address, session, receipt })));
+    f.loseNextAck();
+    expect((await ack(source)).receipt.readId).toBe(receipt.readId);
+    await source.dispose();
+    source = f.machine(f.one);
+    await expect(ack(peer)).rejects.toThrow();
+    expect((await ack(source)).receipt.replayed).toBe(true);
+    expect((await read(source, session)).map(({ id }) => id)).toEqual([second.id]);
+    expect((await f.use((ledger) => ledger.presenceAt())).entries).toEqual([holding]);
+    expect((await f.cutNow()).head).toBe(before.head + 2);
+    expect(
+      await source.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) => bus.deliver(address, () => Effect.succeed("woke")))
+      )
+    ).toBeUndefined();
+    await f.damageReceipt(operation);
+    const damaged = await f.cutNow();
+    expect(await f.state(address)).toMatchObject({ status: "FOUND" });
+    await expect(read(source, session)).rejects.toThrow();
+    await expect(ack(source)).rejects.toThrow();
+    expect(await f.cutNow()).toEqual(damaged);
+  } finally {
+    await source.dispose();
+    await peer.dispose();
+    await f.cleanup();
+  }
+}, 30_000);
+
+test("a dormant import distinguishes exact position, proven absence, and uncertain position when the vacancy is claimed", async () => {
+  const f = await fixture();
+  const a = f.machine(f.one);
+  const b = f.machine(f.two);
+  try {
+    const addresses = [
+      "same-home",
+      "other-home",
+      "new-owner",
+      "no-files",
+      "replay-empty",
+      "conflict",
+      "garbled",
+      "renewed",
+    ];
+    for (const address of addresses) {
+      await f.use((ledger) => ledger.append(presence(address)));
+      if (address !== "renewed")
+        await f.use((ledger) => ledger.append(presence(address, undefined, "left")));
+    }
+    const cut = await f.cutNow();
+    const stage = f.stage(cut);
+    for (const address of addresses)
+      if (address !== "no-files" && address !== "replay-empty") stage(0, address, 1);
+    stage(1, "conflict", 2);
+    writeFileSync(stage(0, "garbled", 1), "not JSON");
+    const captures = await f.captures(cut);
+    const proof = await f.run(captures);
+    expect(proof.rows.find(({ address }) => address === "conflict")).toMatchObject({
+      reason: "conflict",
+    });
+    expect(proof.rows.find(({ address }) => address === "garbled")).toMatchObject({
+      reason: "unreadable",
+    });
+    const verified = await f.verify(captures);
+    const byAddress = new Map(verified.rows.map((row) => [row.address, row.legacyAccess]));
+    expect(byAddress.get("renewed")).toBe("manual-on-source");
+    expect(byAddress.get("same-home")).toBe("return-on-source");
+    expect(byAddress.get("no-files")).toBe("vacant-no-files");
+    expect(byAddress.get("conflict")).toBe("fresh-claimant-only");
+    const claim = (machine: typeof a, address: string, session = `owner:${address}`) =>
+      machine.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) =>
+          bus.join({ address, session, runtime: "other", cwd: "/fixture" })
+        )
+      );
+    expect((await claim(a, "same-home")).cursor).toBe(1);
+    for (const [machine, address, who] of [
+      [b, "other-home", "owner:other-home"],
+      [a, "new-owner", "new-session"],
+      [a, "no-files", "owner:no-files"],
+    ] as const) {
+      const before = await f.cutNow();
+      expect((await claim(machine, address, who)).cursor).toBe(before.head);
+    }
+    for (const address of ["conflict", "garbled"]) {
+      const before = await f.cutNow();
+      await expect(claim(a, address)).rejects.toThrow("unresolved");
+      expect(await f.cutNow()).toEqual(before);
+      expect((await claim(a, address, "new-session")).cursor).toBe(before.head);
+    }
+    expect(
+      (
+        await a.runPromise(
+          Effect.flatMap(Bus.Bus, (bus) =>
+            bus.join({
+              address: "replay-empty",
+              session: "owner:replay-empty",
+              runtime: "other",
+              cwd: "/fixture",
+              replay: true,
+            })
+          )
+        )
+      ).cursor
+    ).toBe(0);
+    // This is a real renewal of a still-joined holding, not a return from a captured vacancy.
+    expect((await claim(b, "renewed")).cursor).toBe(1);
+    expect(
+      (await f.use((ledger) => ledger.presenceAt())).entries.at(-1)?.presence?.installation
+    ).toBe(f.two);
+    await expect(
+      a.runPromise(Effect.flatMap(Bus.Bus, (bus) => bus.take("renewed", "owner:renewed")))
+    ).rejects.toThrow();
+  } finally {
+    await a.dispose();
+    await b.dispose();
+    await f.cleanup();
+  }
+}, 30_000);
 
 test("the released layout encodes the ledger, preserves the raw incarnation, and rejects escaping components", async () => {
   const root = join(tmpdir(), "mailbox-layout-fixture");
