@@ -787,7 +787,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
 
     const unresolvedMailbox = (reason: MailboxUnresolved["reason"]) =>
       new LedgerError({
-        message: `This mailbox position is unresolved (${reason}); reconcile the import or explicitly restart it at the present. Nothing was changed.`,
+        message: `This mailbox position is unresolved (${reason}); ask the operator to reconcile the import. Do not rejoin or replay. Nothing was changed.`,
       });
 
     /**
@@ -1429,7 +1429,13 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         Effect.withSpan("Bus.withOwner")
       );
 
-    /** Only the immutable initial import can witness manual access on a pre-routing join. */
+    const unprovedSource = () =>
+      new LedgerError({
+        message:
+          "The original mailbox import does not establish this holding's read source. Nothing was served or changed. Ask the operator to reconcile the retained evidence; do not rejoin or replay.",
+      });
+
+    /** Only an intact initial import can identify the source, including a confirmed nonlocal one. */
     const legacyReadOnSource = (
       subscriber: Subscriber,
       cut: Pin,
@@ -1447,34 +1453,42 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
             ...cut,
             head: state.initialT,
           });
-          if (original.status !== "FOUND" || original.current.t !== state.initialT) return false;
+          if (original.status !== "FOUND" || original.current.t !== state.initialT)
+            return yield* unprovedSource();
           const intact = yield* ledger.mailboxReceiptAt(
             subscriber.address,
             original.current.record.operation,
             cut
           );
+          if (intact.status === "UNAVAILABLE")
+            return yield* new LedgerError({
+              message:
+                "The original mailbox import receipt could not be read. This call served and changed nothing. Retry the same call once when the store is available, keeping the same readId or acknowledgement receipt. Do not rejoin.",
+            });
           if (
             intact.status !== "FOUND" ||
             intact.t !== state.initialT ||
             encodeMailboxFact(intact.record) !== encodeMailboxFact(original.current.record)
           )
-            return false;
+            return yield* unprovedSource();
           first = intact;
         }
         const { record } = first;
-        return (
-          record.kind === "start" &&
-          record.origin === "import" &&
-          record.previous === null &&
-          record.legacySource?.cut.incarnation === cut.incarnation &&
-          record.legacySource.installationRef === mailboxInstallationRef(installation) &&
-          record.legacySource.presenceRef === mailboxPresenceRef(subscriber.joinId) &&
-          record.runRef === mailboxRunRef(runOf(subscriber)) &&
-          (state.current.t === state.initialT ||
-            (state.current.record.kind === "ack" &&
-              state.current.record.runRef === record.runRef &&
-              state.current.record.subscription.presenceRef === record.legacySource.presenceRef))
-        );
+        // An ordinary start is not a missing import; it never carried a manual-read grant.
+        if (record.kind === "start" && record.origin !== "import") return false;
+        if (
+          record.kind !== "start" ||
+          record.previous !== null ||
+          record.legacySource?.cut.incarnation !== cut.incarnation ||
+          record.legacySource.presenceRef !== mailboxPresenceRef(subscriber.joinId) ||
+          record.runRef !== mailboxRunRef(runOf(subscriber)) ||
+          (state.current.t !== state.initialT &&
+            (state.current.record.kind !== "ack" ||
+              state.current.record.runRef !== record.runRef ||
+              state.current.record.subscription.presenceRef !== record.legacySource.presenceRef))
+        )
+          return yield* unprovedSource();
+        return record.legacySource.installationRef === mailboxInstallationRef(installation);
       });
 
     const mailboxBasis = (subscriber: Subscriber, cut: Pin, manual = false) =>
@@ -1488,18 +1502,16 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         if (!local(subscriber) && (!manual || subscriber.presence.installation !== undefined))
           return yield* notLocal();
         const state = yield* ledger.mailboxAt(address, cut);
-        if (
-          !local(subscriber) &&
-          (state.status !== "FOUND" || !(yield* legacyReadOnSource(subscriber, cut, state)))
-        )
-          return yield* notLocal();
         if (state.status === "UNRESOLVED") return yield* unresolvedMailbox(state.reason);
         if (state.status !== "FOUND") {
+          if (!local(subscriber)) return yield* unprovedSource();
           return yield* new NotJoined({
             address,
             message: "This holding has no ledger position; nothing was changed.",
           });
         }
+        if (!local(subscriber) && !(yield* legacyReadOnSource(subscriber, cut, state)))
+          return yield* notLocal();
         return {
           subscriber,
           cut,

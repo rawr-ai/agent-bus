@@ -59,11 +59,21 @@ const fixture = async () => {
   let renewAtAdmission: Message | undefined;
   let substitutePosition: number | undefined;
   let loseAck = false;
+  let originFault:
+    | { address: string; operation: string; status: "UNAVAILABLE" | "ABSENT" }
+    | undefined;
   const selected = layerFluree(config);
   const withFault = Layer.effect(Ledger)(
     Effect.map(Ledger, (ledger) =>
       Ledger.of({
         ...ledger,
+        mailboxReceiptAt: (address, operation, cut) => {
+          if (originFault?.address !== address || originFault.operation !== operation)
+            return ledger.mailboxReceiptAt(address, operation, cut);
+          const { status } = originFault;
+          originFault = undefined;
+          return Effect.succeed(status === "ABSENT" ? { status, cut } : { status });
+        },
         appendMailboxAck: (ack, basis) =>
           ledger.appendMailboxAck(ack, basis).pipe(
             Effect.map((result) => {
@@ -206,6 +216,13 @@ const fixture = async () => {
     loseNextAck: () => {
       loseAck = true;
     },
+    failNextOriginLookup: (
+      address: string,
+      operation: string,
+      status: "UNAVAILABLE" | "ABSENT"
+    ) => {
+      originFault = { address, operation, status };
+    },
     machine: (installation: string) =>
       ManagedRuntime.make(
         Bus.layer(installation).pipe(
@@ -289,9 +306,43 @@ test("paired capture preserves manual reads without granting the old join a wake
     expect((await ack(source)).receipt.readId).toBe(receipt.readId);
     await source.dispose();
     source = f.machine(f.one);
-    await expect(ack(peer)).rejects.toThrow();
+    await expect(ack(peer)).rejects.toMatchObject({
+      _tag: "NotJoined",
+      message: "This holding did not join from this installation; nothing was changed.",
+    });
     expect((await ack(source)).receipt.replayed).toBe(true);
-    expect((await read(source, session)).map(({ id }) => id)).toEqual([second.id]);
+    const readId = Bun.randomUUIDv7();
+    const keyed = (machine: typeof source, holder = session, id = readId) =>
+      machine.runPromise(
+        Effect.flatMap(Bus.Bus, (bus) => bus.read({ address, session: holder, readId: id }))
+      );
+    const afterAck = await f.cutNow();
+    const acknowledged = await f.state(address);
+    expect(acknowledged).toMatchObject({ current: { record: { operation: receipt.readId } } });
+    f.failNextOriginLookup(address, operation, "UNAVAILABLE");
+    await expect(keyed(source, "different-session")).rejects.toMatchObject({ _tag: "NotOwner" });
+    await expect(keyed(source)).rejects.toMatchObject({
+      _tag: "LedgerError",
+      message: expect.stringMatching(/Retry the same call once.*same readId/),
+    });
+    await expect(keyed(peer)).rejects.toMatchObject({
+      _tag: "NotJoined",
+      message: "This holding did not join from this installation; nothing was changed.",
+    });
+    f.failNextOriginLookup(address, operation, "ABSENT");
+    await expect(keyed(source)).rejects.toMatchObject({
+      _tag: "LedgerError",
+      message: expect.stringContaining("Ask the operator to reconcile"),
+    });
+    expect(await f.cutNow()).toEqual(afterAck);
+    expect(await f.state(address)).toEqual(acknowledged);
+    const recovered = await keyed(source);
+    expect(recovered.messages.map(({ id }) => id)).toEqual([second.id]);
+    expect(recovered.receipt).toMatchObject({ readId, replayed: false });
+    const replay = await keyed(source);
+    expect(replay.messages).toEqual(recovered.messages);
+    expect(replay.receipt).toMatchObject({ readId, replayed: true });
+    expect((await keyed(source, session, recovered.nextReadId)).messages).toEqual([]);
     expect((await f.use((ledger) => ledger.presenceAt())).entries).toEqual([holding]);
     expect((await f.cutNow()).head).toBe(before.head + 2);
     expect(
@@ -302,8 +353,12 @@ test("paired capture preserves manual reads without granting the old join a wake
     await f.damageReceipt(operation);
     const damaged = await f.cutNow();
     expect(await f.state(address)).toMatchObject({ status: "FOUND" });
-    await expect(read(source, session)).rejects.toThrow();
-    await expect(ack(source)).rejects.toThrow();
+    const damagedEvidence = {
+      _tag: "LedgerError",
+      message: expect.stringContaining("Ask the operator to reconcile"),
+    };
+    await expect(keyed(source)).rejects.toMatchObject(damagedEvidence);
+    await expect(ack(source)).rejects.toMatchObject(damagedEvidence);
     expect(await f.cutNow()).toEqual(damaged);
   } finally {
     await source.dispose();
