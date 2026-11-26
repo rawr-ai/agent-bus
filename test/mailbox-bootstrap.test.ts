@@ -24,6 +24,7 @@ import {
   MAILBOX_BOOTSTRAP_INIT_FILE,
   MAILBOX_BOOTSTRAP_SPENT_FILE,
   reserveMailboxBootstrap,
+  spendExistingAttachment,
   spendMailboxBootstrap,
 } from "../src/mailbox-bootstrap.ts";
 import { ownership } from "./processes.ts";
@@ -88,7 +89,7 @@ test("CLI requires both target flags for a grant while preserving targetless ini
     expect(cli(standalone, []).exitCode).toBe(0);
     const standaloneId = await run(loadInstallation(standalone));
     expect(await run(inspectMailboxBootstrap(standalone, standaloneId, target))).toEqual({
-      kind: "ungranted",
+      kind: "identity-only",
     });
     expect(cli(half, ["--fluree-url", target.url]).exitCode).toBe(1);
     expect(await Bun.file(join(half, "installation-id")).exists()).toBe(false);
@@ -121,7 +122,7 @@ test("new targeted identity receives an exclusive private grant, never an existi
     const old = await run(loadInstallation(existing));
     await run(initializeInstallation(existing, target));
     expect(await run(inspectMailboxBootstrap(existing, old, target))).toEqual({
-      kind: "ungranted",
+      kind: "identity-only",
     });
     expect(await Bun.file(join(existing, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
   } finally {
@@ -181,7 +182,7 @@ test("a delayed targeted claimant cannot poison a completed identity-only initia
     await expect(run(reserveMailboxBootstrap(dir, identity, target))).rejects.toThrow();
     expect(await run(loadInstallation(dir))).toBe(id);
     expect(await readFile(join(dir, MAILBOX_BOOTSTRAP_INIT_FILE), "utf8")).toBe(before);
-    expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({ kind: "ungranted" });
+    expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({ kind: "identity-only" });
     expect(await Bun.file(join(dir, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
   } finally {
     await cleanup(dir);
@@ -256,7 +257,7 @@ test("the stale empty observation cannot claim the occupied slot", async () => {
     expect(await child.exited).toBe(0);
     expect(await run(loadInstallation(dir))).toBe(id);
     expect(await readFile(join(dir, MAILBOX_BOOTSTRAP_INIT_FILE), "utf8")).toBe(reservation);
-    expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({ kind: "ungranted" });
+    expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({ kind: "identity-only" });
     expect(await Bun.file(join(dir, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
   } finally {
     await owned.stop();
@@ -277,39 +278,47 @@ test("a durable spend without completion always refuses another dispatch", async
     await expect(run(spendMailboxBootstrap(dir, id, target, false))).rejects.toThrow();
     await expect(run(initializeInstallation(dir, target))).rejects.toThrow();
     expect(await readFile(join(dir, MAILBOX_BOOTSTRAP_SPENT_FILE), "utf8")).toBe(spent);
-    await run(completeMailboxBootstrap(dir, id, target, "first-commit", "grant"));
+    await run(completeMailboxBootstrap(dir, id, target, "first-commit"));
     expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({
       kind: "complete",
       incarnation: "first-commit",
     });
-    await expect(
-      run(completeMailboxBootstrap(dir, id, target, "another", "grant"))
-    ).rejects.toThrow();
+    await expect(run(completeMailboxBootstrap(dir, id, target, "another"))).rejects.toThrow();
   } finally {
     await cleanup(dir);
   }
 });
 
-test("an ungranted identity may retain only an existing-ledger binding", async () => {
-  const dir = await fixture();
+test("a new attachment reservation can be spent once; older identity-only evidence cannot", async () => {
+  const current = await fixture();
+  const previous = await fixture();
   try {
-    await run(initializeInstallation(dir));
-    const id = await run(loadInstallation(dir));
-    await expect(run(spendMailboxBootstrap(dir, id, target, false))).rejects.toThrow();
-    await expect(
-      run(completeMailboxBootstrap(dir, id, target, "incarnation", "grant"))
-    ).rejects.toThrow();
-    await run(completeMailboxBootstrap(dir, id, target, "incarnation", "existing"));
-    expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({
-      kind: "complete",
-      incarnation: "incarnation",
+    for (const root of [current, previous]) await run(initializeInstallation(root));
+    const oldId = await run(loadInstallation(previous));
+    await writeFile(
+      join(previous, MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE),
+      JSON.stringify({ version: 1, installation: oldId, kind: "identity-only-complete" })
+    );
+    expect(await run(inspectMailboxBootstrap(previous, oldId, target))).toEqual({
+      kind: "ungranted",
     });
-    expect(await Bun.file(join(dir, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
+    await expect(run(spendExistingAttachment(previous, oldId, target))).rejects.toThrow();
+    const id = await run(loadInstallation(current));
+    await expect(run(spendMailboxBootstrap(current, id, target, false))).rejects.toThrow();
     await expect(
-      run(inspectMailboxBootstrap(dir, id, { ...target, url: "http://127.0.0.1:9999" }))
+      run(completeMailboxBootstrap(current, id, target, "incarnation"))
+    ).rejects.toThrow();
+    await run(spendExistingAttachment(current, id, target));
+    expect(await run(inspectMailboxBootstrap(current, id, target))).toEqual({
+      kind: "attachment-spent",
+    });
+    await expect(run(spendExistingAttachment(current, id, target))).rejects.toThrow();
+    await expect(
+      run(inspectMailboxBootstrap(current, id, { ...target, url: "http://127.0.0.1:9999" }))
     ).rejects.toThrow();
   } finally {
-    await cleanup(dir);
+    await cleanup(current);
+    await cleanup(previous);
   }
 });
 
@@ -438,7 +447,7 @@ test("competing targeted and targetless initializers cannot mint a grant for ano
           expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({ kind: "unspent" });
         } else if (hasReservation && identityComplete) {
           expect(await run(inspectMailboxBootstrap(dir, id, target))).toEqual({
-            kind: "ungranted",
+            kind: "identity-only",
           });
         } else if (hasReservation) {
           await expect(run(inspectMailboxBootstrap(dir, id, target))).rejects.toThrow();

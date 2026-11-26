@@ -13,7 +13,6 @@ import { RPCLink } from "@orpc/client/fetch";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { createViewer } from "../viewer/server/host.ts";
@@ -32,11 +31,7 @@ probe.stop(true);
 const bus = ManagedRuntime.make(
   Serve.layerHttp({ port: busPort, version: "test" }).pipe(
     Layer.provideMerge(
-      Bus.layer("test-installation").pipe(
-        Layer.provideMerge(store),
-        Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-        Layer.provide(platform)
-      )
+      Bus.layer("test-installation").pipe(Layer.provideMerge(store), Layer.provide(platform))
     )
   )
 );

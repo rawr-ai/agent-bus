@@ -17,7 +17,6 @@ import { McpClient, McpProtocol } from "effect/ai";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { claudeWake, formatWake } from "../src/claude.ts";
 import * as Client from "../src/client.ts";
 import {
@@ -57,18 +56,15 @@ import { spawnSupervised } from "./supervised.ts";
 const tempDir = () => mkdtempSync(join(tmpdir(), "agent-bus-test-"));
 const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
 
-const busOn = (ledger: Layer.Layer<Ledger.Ledger | QueryGateway, unknown, never>, dir: string) =>
-  Bus.layer("test-installation").pipe(
-    Layer.provideMerge(ledger),
-    Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors")))
-  );
+const busOn = (ledger: Layer.Layer<Ledger.Ledger | QueryGateway, unknown, never>) =>
+  Bus.layer("test-installation").pipe(Layer.provideMerge(ledger));
 
 const jsonl = () => {
   const dir = tempDir();
   const file = join(dir, "ledger.jsonl");
   return {
     file,
-    layer: busOn(layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(Layer.provide(platform)),
+    layer: busOn(layerJsonl(file).pipe(Layer.provide(platform))).pipe(Layer.provide(platform)),
   };
 };
 
@@ -107,7 +103,7 @@ const fluree = async () => {
   const config = await freshLedger();
   return {
     config,
-    layer: busOn(Fluree.layerFluree(config).pipe(Layer.provide(platform)), tempDir()).pipe(
+    layer: busOn(Fluree.layerFluree(config).pipe(Layer.provide(platform))).pipe(
       Layer.provide(platform)
     ),
   };
@@ -124,9 +120,8 @@ const sid = (address: string) => `session:${address}`;
 const bodies = (messages: ReadonlyArray<{ readonly body: string }>) => messages.map((m) => m.body);
 
 for (const backend of backends) {
-  const run = async <A, E>(
-    effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>
-  ) => Effect.runPromise(Effect.provide(effect, (await backend.make()).layer));
+  const run = async <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger>) =>
+    Effect.runPromise(Effect.provide(effect, (await backend.make()).layer));
 
   describe(`delivery (${backend.name})`, () => {
     test("routes direct, topic and broadcast messages, never back to the sender", () =>
@@ -694,10 +689,9 @@ for (const backend of backends) {
 describe("fluree ledger", () => {
   test("a second process sees appends and is woken by the event stream", async () => {
     const first = await fluree();
-    const second = busOn(
-      Fluree.layerFluree(first.config).pipe(Layer.provide(platform)),
-      tempDir()
-    ).pipe(Layer.provide(platform));
+    const second = busOn(Fluree.layerFluree(first.config).pipe(Layer.provide(platform))).pipe(
+      Layer.provide(platform)
+    );
     await Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
@@ -2731,7 +2725,7 @@ describe("one address at a time", () => {
 
 describe("one session per address", () => {
   const cwd = process.cwd();
-  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors>) =>
+  const run = <A, E>(effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger>) =>
     Effect.runPromise(Effect.provide(effect, jsonl().layer));
 
   /**
@@ -3221,11 +3215,6 @@ describe("one session per address", () => {
           })
         );
 
-        // A pre-owner join left a cursor, and mail waits behind it.
-        const cursors = yield* Cursors.Cursors;
-        const ledger = yield* Ledger.Ledger;
-        yield* cursors.set("codex/b", yield* ledger.end);
-        yield* cursors.set("claude/d", yield* ledger.end);
         yield* send("codex/b", "waiting for b");
 
         // Owner-less only, joined (even naming a Codex thread) or left: not joined.
@@ -3236,7 +3225,7 @@ describe("one session per address", () => {
         expect(listed).not.toContain("codex/b");
         expect(listed).not.toContain("claude/c");
         expect((yield* Effect.flip(bus.take("codex/b", "t-b")))._tag).toBe("NotJoined");
-        // Its first owner starts at the present, not at the pre-owner cursor.
+        // Its first owner starts at the present, not at the owner-less join.
         yield* bus.join({
           address: "codex/b",
           runtime: "codex",
@@ -3268,7 +3257,7 @@ describe("one session per address", () => {
     const dir = tempDir();
     const file = join(dir, "ledger.jsonl");
     const layer = () =>
-      busOn(layerJsonl(file).pipe(Layer.provide(platform)), dir).pipe(Layer.provide(platform));
+      busOn(layerJsonl(file).pipe(Layer.provide(platform))).pipe(Layer.provide(platform));
     await Effect.runPromise(
       Effect.provide(
         Effect.gen(function* () {
@@ -3317,7 +3306,7 @@ describe("one session per address", () => {
 
 describe("claude wake", () => {
   const run = <A, E>(
-    effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | Cursors.Cursors | QueryGateway>
+    effect: Effect.Effect<A, E, Bus.Bus | Ledger.Ledger | QueryGateway>
   ): Promise<A> => Effect.runPromise(Effect.provide(effect, jsonl().layer));
   const a = sid("claude/a");
   const joinBoth = (bus: Bus.Bus["Service"]) =>
@@ -3775,7 +3764,7 @@ describe("claude wake", () => {
       Layer.merge(QueryGateway.layerUnavailable)
     );
     return {
-      layer: busOn(ledger, dir).pipe(Layer.provide(platform)),
+      layer: busOn(ledger).pipe(Layer.provide(platform)),
       plan: (...reads: typeof planned) => {
         planned.push(...reads);
       },

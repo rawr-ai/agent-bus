@@ -47,7 +47,7 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
   const base = await store.runPromise(Ledger);
   const gateway = await store.runPromise(QueryGateway);
   const state: {
-    /** Mailbox starts, acknowledgements and imports. */
+    /** Mailbox starts and acknowledgements. */
     mailboxWrites: number;
     /** Mailbox position reads. */
     mailboxReads: number;
@@ -92,7 +92,6 @@ const open = async (kind = "jsonl", silent = false, ownerRuntime: "claude" | "ot
       }),
     admitWithStart: (message, start, cut) => mailboxWrite(base.admitWithStart(message, start, cut)),
     appendMailboxAck: (ack, cut) => mailboxWrite(base.appendMailboxAck(ack, cut)),
-    importMailbox: (start, cut) => mailboxWrite(base.importMailbox(start, cut)),
     mailboxAt: (name, cut) =>
       Effect.suspend(() => {
         state.mailboxReads++;
@@ -245,7 +244,6 @@ const bindingOnly = async (fixture: Awaited<ReturnType<typeof open>>) => {
     mailboxReceiptAt: forbidden,
     admitWithStart: forbidden,
     appendMailboxAck: forbidden,
-    importMailbox: forbidden,
     log: forbidden,
     direct: forbidden,
     end: forbidden(),

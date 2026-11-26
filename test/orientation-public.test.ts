@@ -10,7 +10,6 @@ import { Context, Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { orientationAssociations } from "../src/catalogue.ts";
 import { InvalidQuery, LedgerError } from "../src/domain.ts";
 import * as Fluree from "../src/Fluree.ts";
@@ -95,7 +94,6 @@ const fixture = async () => {
   probe.stop(true);
   const bus = Bus.layer("test-installation").pipe(
     Layer.provideMerge(Fluree.layerFluree(config)),
-    Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
     Layer.provide(platform)
   );
   const runtime = ManagedRuntime.make(

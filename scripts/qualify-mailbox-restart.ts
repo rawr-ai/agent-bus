@@ -1,14 +1,21 @@
 /**
  * Restarts the selected CLI on a new disposable Fluree ledger. No installed bus,
  * launchd job, operator credential or live mailbox is used. Invoke with the pinned Bun:
- *   bun --no-env-file scripts/qualify-mailbox-restart.ts [--cli path/to/app/cli.js]
- *   bun --no-env-file scripts/qualify-mailbox-restart.ts --file-baseline --cli old/app/cli.js
- * The baseline reuses its files. The ledger candidate gets only the installation id,
- * test credential and ledger configuration in a fresh directory on restart.
+ *   bun --no-env-file scripts/qualify-mailbox-restart.ts [--release /abs/release --expect sha256]
+ * On restart, only the verified binding, identity, test credential and configuration
+ * are retained in a fresh directory.
  */
 import assert from "node:assert/strict";
-import { createHash, randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import {
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { parseArgs } from "node:util";
@@ -19,19 +26,46 @@ import { CallToolResultSchema } from "@modelcontextprotocol/sdk/types.js";
 import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import { FetchHttpClient } from "effect/http";
 import { Message, Presence } from "../src/domain.ts";
-import { createFlureeLedgerOnce, layerFluree } from "../src/Fluree.ts";
+import { layerFluree } from "../src/Fluree.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { QueryGateway } from "../src/Query.ts";
 import { boundary, type Forwarded } from "../test/fluree-boundary.ts";
 import { freshLedger, insertRaw, stopFlureeServer } from "../test/fluree-server.ts";
+import { createFixtureLedger, fixtureAttach } from "../test/serve-binding-fixture.ts";
 import { type Supervised, spawnSupervised } from "../test/supervised.ts";
+import { verify } from "./release.ts";
 
 const { values } = parseArgs({
   args: Bun.argv.slice(2),
-  options: { cli: { type: "string" }, "file-baseline": { type: "boolean" } },
+  options: { release: { type: "string" }, expect: { type: "string" } },
 });
-const cli = resolve(values.cli ?? join(import.meta.dir, "../src/bin.ts"));
-const files = values["file-baseline"] === true;
+assert.equal(
+  values.release === undefined,
+  values.expect === undefined,
+  "--release requires --expect"
+);
+const sealed =
+  values.release !== undefined && values.expect !== undefined
+    ? verify(values.release, { expect: values.expect })
+    : null;
+assert(
+  sealed === null || (sealed.ok && sealed.root),
+  "The selected sealed package did not verify."
+);
+const release = sealed?.root;
+const cli = release
+  ? [
+      join(release, "runtime/bun"),
+      "--no-env-file",
+      `--config=${join(release, "app/bunfig.toml")}`,
+      join(release, "app/cli.js"),
+    ]
+  : [
+      process.execPath,
+      "--no-env-file",
+      "--config=/dev/null",
+      resolve(import.meta.dir, "../src/bin.ts"),
+    ];
 const reader = "fixture/mailbox-restart-reader";
 const author = "fixture/mailbox-restart-sender";
 const sid = (address: string) => `synthetic:${address}`;
@@ -46,6 +80,7 @@ const run = async () => {
   const config = await freshLedger("qualify-mailbox-restart");
   const proxy = boundary(config.url);
   const root = mkdtempSync(join(tmpdir(), "agent-bus-qualify-restart-"));
+  const home = join(root, "home");
   const roots = [join(root, "before"), join(root, "fresh")] as const;
   const platform = Layer.mergeAll(BunFileSystem.layer, BunPath.layer, FetchHttpClient.layer);
   const witness = ManagedRuntime.make(
@@ -109,19 +144,16 @@ const run = async () => {
     const portProbe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
     const port = portProbe.port;
     portProbe.stop(true);
-    processHandle = spawnSupervised(
-      [process.execPath, "--no-env-file", cli, "serve", "--codex", "/usr/bin/false"],
-      {
-        env: {
-          HOME: dir,
-          PATH: process.env.PATH ?? dirname(process.execPath),
-          AGENT_BUS_PORT: String(port),
-          AGENT_BUS_DIR: dir,
-        },
-        stdout: "ignore",
-        stderr: "ignore",
-      }
-    );
+    processHandle = spawnSupervised([...cli, "serve", "--codex", "/usr/bin/false"], {
+      env: {
+        HOME: home,
+        PATH: process.env.PATH ?? dirname(process.execPath),
+        AGENT_BUS_PORT: String(port),
+        AGENT_BUS_DIR: dir,
+      },
+      stdout: "ignore",
+      stderr: "ignore",
+    });
     const endpoint = new URL(`http://127.0.0.1:${port}/mcp`);
     for (let attempt = 0; attempt < 80 && processHandle.exitCode === null; attempt++) {
       const next = new Client({ name: "mailbox-restart-qualification", version: "1" });
@@ -255,31 +287,36 @@ const run = async () => {
     assert.equal((await pin()).head, through + 1);
   };
   try {
-    const installation = randomUUID();
+    mkdirSync(home, { mode: 0o700 });
+    for (const dir of roots) mkdirSync(dir, { mode: 0o700 });
+    const administer = (args: string[]) =>
+      Bun.spawn([...cli, ...args], {
+        env: { HOME: home, AGENT_BUS_DIR: roots[0], PATH: "/usr/bin:/bin" },
+        stdout: "ignore",
+        stderr: "ignore",
+        timeout: 20_000,
+      }).exited;
+    assert.equal(await administer(["initialize-installation"]), 0);
+    const identity = join(roots[0], "installation-id");
+    const installation = readFileSync(identity, "utf8").trim();
+    copyFileSync(identity, join(roots[1], "installation-id"));
     for (const dir of roots) {
-      mkdirSync(dir, { mode: 0o700 });
       writeFileSync(
         join(dir, "config.json"),
         JSON.stringify({ fluree: { url: proxy.url, ledger: config.ledger } }),
         { mode: 0o600 }
       );
       writeFileSync(join(dir, "fluree-token"), config.token, { mode: 0o600 });
-      writeFileSync(join(dir, "installation-id"), installation, { mode: 0o600 });
     }
-    // The file baseline creates its own ledger. The ledger writer must attach to an
-    // existing era-1 store on both starts; provisioning belongs to the disposable fixture.
-    if (!files) {
-      const provisioned = await Effect.runPromise(
-        createFlureeLedgerOnce(config).pipe(Effect.provide(platform))
-      );
-      assert(provisioned.status === "CREATED", "disposable era-1 ledger was not created");
-      assert.deepEqual(await pin(), provisioned.cut);
-    }
+    const provisioned = await createFixtureLedger(config);
+    assert.deepEqual(await pin(), { head: provisioned.head, incarnation: provisioned.incarnation });
+    const attach = await administer(fixtureAttach(installation, provisioned));
+    assert.equal(attach, 0, "The selected CLI could not attach to the disposable ledger.");
+    copyFileSync(join(roots[0], ".serve-binding-v1"), join(roots[1], ".serve-binding-v1"));
     await start(roots[0]);
     await joinPeer(author, []);
     const beforeJoin = (await pin()).head;
-    if (files) await joinPeer(reader, []);
-    else {
+    {
       await joinAfterLostAnswer(["alpha", "beta"]);
       const t = (await pin()).head;
       assert.equal(t, beforeJoin + 1);
@@ -308,8 +345,8 @@ const run = async () => {
     const beforeRead = (await pin()).head;
     assert.deepEqual(await read(), [first]);
     const acknowledged = (await pin()).head;
-    assert.equal(acknowledged, beforeRead + (files ? 0 : 1));
-    if (!files) {
+    assert.equal(acknowledged, beforeRead + 1);
+    {
       const startRef = await pointer(beforeRead);
       const ackRef = await pointer(acknowledged);
       assert.notEqual(startRef, ackRef);
@@ -321,24 +358,21 @@ const run = async () => {
       assert.equal(ackRef, receiptPrefix + ack.operation);
     }
     await stop();
-    await start(files ? roots[0] : roots[1]);
+    await start(roots[1]);
     assert.deepEqual(await read(), []);
     assert.equal((await pin()).head, acknowledged);
     const next = await send("after restart");
     assert.notEqual(next, first);
     assert.deepEqual(await read(), [next]);
     assert.deepEqual(await read(), []);
-    assert.equal(readdirSync(roots[0]).includes("fluree-cursors"), files);
-    assert.equal(readdirSync(roots[1]).includes("fluree-cursors"), false);
-    if (!files) {
-      await unknownJoin();
-      await idleGap(installation);
-      console.log(
-        "PASS: unconfirmed registration recovered without rejoining; cold read served exact IDs across the 500-commit boundary."
-      );
-    }
+    for (const dir of roots) assert.equal(readdirSync(dir).includes("fluree-cursors"), false);
+    await unknownJoin();
+    await idleGap(installation);
     console.log(
-      `PASS: ${files ? "retained-file baseline" : "ledger pointer, lost join and renewal responses, no cursor files"}; process restart, exact mail IDs and zero-write empty read.`
+      "PASS: unconfirmed registration recovered without rejoining; cold read served exact IDs across the 500-commit boundary."
+    );
+    console.log(
+      "PASS: binding-only restart, exact mail IDs, lost join and renewal responses, and zero-write empty read."
     );
   } finally {
     try {

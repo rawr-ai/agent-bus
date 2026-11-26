@@ -44,6 +44,7 @@ tail -n 20 ~/.agent-bus/agent-bus.log
 | `last exit code = 1` and `Failed to start server. Is port 8096 in use?` | [The port is held](#the-port-is-held) |
 | `last exit code = 1` and `has no Fluree ledger`, or `SchemaError` | [The config file is bad](#the-config-file-is-bad) |
 | `last exit code = 1` and `Missing installation-id` or `Cannot read a valid installation-id` | [The installation identity is missing or invalid](#the-installation-identity-is-missing-or-invalid) |
+| `serve` or the installer refuses the serving binding or cannot prove its history | [The serving binding is refused](#the-serving-binding-is-refused) |
 | `last exit code = 1` and `Transport error (GET …/exists/…)` | [Fluree is down or unreachable](#fluree-is-down-or-unreachable) |
 | `last exit code = 1` and `Fluree 401` | [Fluree won't start, or the token isn't enforced](#fluree-wont-start-or-the-token-isnt-enforced) (a missing token) |
 | `last exit code = 78: EX_CONFIG`, a `program` that doesn't exist, and nothing in the log | [bun is missing from the plist](#bun-is-missing-from-the-plist) |
@@ -65,9 +66,9 @@ initializer refuses a nonempty pre-identity root; a direct upgrade from that
 state is not supported by this procedure. Preserve the root and use a reviewed
 upgrade path rather than treating it as a fresh installation.
 
-For a paired ledger-mailbox transition, a replacement identity does not have
-the original installation's admission. Keep the job held and use reviewed
-recovery rather than generating or copying an identity to bypass that evidence.
+A replacement identity does not have the original installation's binding or
+admission. Keep the job held and use [binding recovery](#the-serving-binding-is-refused)
+rather than generating or copying an identity to bypass that evidence.
 
 ### The port is held
 
@@ -541,34 +542,72 @@ to make the installer start over. Preserve the token separately.
 
 ## Mailbox import cannot be established
 
-Keep both old writers held. Preserve the original cursor directories, both
-sentinels, all paired admission evidence, both independent receipts and copies,
-and the reported operation or classification. A truncated or unreadable copy
-is not evidence a cursor was absent. For an uncertain era or import write,
-follow the [paired procedure](deploy.md#import-file-positions-into-the-ledger)
-with the same operation and captures; an absent read does not prove a
-dispatched request cannot still commit. Do not ask `bus_join` to settle a
-classified unresolved position. If the pre-sentinel comparison loses a
-formerly usable read or same-owner return, preserve both copies and reconcile
-the original holding and exact position offline; do not write a sentinel,
-disguise the loss with a fresh join, or infer a route from a hostname. An
-explicitly verified vacancy with no source files is not damaged mail.
-Fix the evidence and reconcile through the
-owner-approved procedure before selecting a release. After the first sentinel,
-the selected transition is fix-forward: do not remove the marker to resume an
-old file writer. There is no qualified file rollback after later ledger reads
-or joins. *Unverified on the paired installed hosts.*
+This only applies to an unfinished R1 transition on an installation that has
+not retired the R1 evidence. Keep both writers held and preserve the original
+directories, sentinels, complete admission sets, exact binaries and independent
+receipts. Follow the
+[pinned R1 recovery procedure](https://github.com/rawr-ai/agent-bus/blob/a32ae0aecb3413e1e04363f464242ae1a9136418/docs/runbooks/recover.md#mailbox-import-cannot-be-established).
+Do not take an absent read to mean a dispatched write cannot commit. Do not
+erase a sentinel, replay a completed import, or roll forward via a new join.
+The current release cannot run any R1 import command. *Unverified as an
+installed recovery procedure.*
 
-If only one sentinel was installed, keep both jobs held. Resume with the same
-operation and receipts only after the other original generation satisfies its
-fence checks; restore that generation only from independently verified captured
-bytes. An irreparable mismatch needs reviewed repair, not marker removal. If a
-reported failure establishes that the provider is unreachable, restore its
-availability under the authorized provider procedure; if it establishes that
-evidence is invalid, reconcile or restore the exact retained evidence instead.
-Do not discard either kind of evidence or substitute one diagnosis for the
-other. The retained originals, sentinels and completed paired records remain
-startup dependencies until explicit retirement. *Unverified on the paired installed hosts.*
+## The serving binding is refused
+
+1. **Hold and attribute.** Keep the affected writer and any hosted peer that
+   depends on it held. During paired retirement keep both writers held. Keep
+   the identity, config, original private binding, and all retained admission
+   and blocker bytes. Determine whether the refusal is from unavailable or
+   inconclusive proof, a changed target, or a missing/foreign binding. Do not
+   initialize, rebind, infer a new anchor, or start against a second store at
+   the same alias. If only one retirement publication completed, resume the
+   same proved operation with both original evidence sets under their holds, or
+   reconcile before making any further changes. *Unverified as an installed
+   procedure.*
+
+2. **Establish the recovery floor before choosing a store.** A normal binding
+   proves lineage at R, not freshness after R. Use the independently known
+   current or protected last-known cut S, its native CID and incarnation, plus
+   independently witnessed pending mail and acknowledgements. An old H/K
+   transition capture or R alone is not a substitute. If the last authoritative
+   cut or what may have committed since it is unknown, surface that uncertainty
+   and keep the service held. A known lossy disaster recovery requires informed,
+   separate human approval; ordinary activation does not authorize it.
+   *Unverified as an installed procedure.*
+
+3. **Prove the candidate before touching the installed binding.** Restore a
+   working copy from the protected whole-store capture via the
+   [provider recovery procedure](recover-provider-copy.md), never a logical
+   export or an online copy. The alternate provider needs its own isolated
+   endpoint and credentials. Do not edit the original binding to match a
+   disposable alias. For the eventual final attachment, with the original
+   identity, config and binding at the attributed configured endpoint and the
+   exact served artifact verified, run:
+
+   ```sh
+   AGENT_BUS_DIR="$state_dir" "$verified_release/runtime/bun" --no-env-file \
+     --config="$verified_release/app/bunfig.toml" "$verified_release/app/cli.js" \
+     verify-serve-binding --expected-recovery-head "$recovery_head" \
+     --expected-recovery-commit "$recovery_cid"
+   ```
+
+   Expect exactly `serve-binding-v1`. It proves both the binding's lineage and
+   S (or that the current head descends from S). A known stale or incomparable
+   store refuses even if it shares R. Compare the independently expected
+   pending mail and ACK IDs on isolated data before releasing the writer. A
+   successful command is not independent proof of mailbox freshness after S.
+   *Unverified as an installed procedure.*
+
+4. **Restore exact files; roll back only with compatible retained evidence.**
+   Recover the original identity and binding with the verified same-history
+   store, and restore the original predecessor's `layout` and
+   `.export-pending` to their known old exact path.
+   A rollback to the last R1 runtime additionally requires its exact full
+   admission evidence, a separately qualified compatible ledger and a
+   complete guarded cohort rollback. Do not bypass the normal installer's
+   refusal of an old target. There is no rollback to a file writer or
+   pre-fence storage, and no rewind to make an old proof fit. *Unverified as an
+   installed procedure.*
 
 ## A legacy holding cannot read
 

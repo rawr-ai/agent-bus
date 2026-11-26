@@ -40,6 +40,7 @@ import { join, resolve } from "node:path";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { flureeServer, ledgerOn, stopFlureeServer } from "../test/fluree-server.ts";
+import { createFixtureLedger, fixtureAttach } from "../test/serve-binding-fixture.ts";
 import { build, fileSha256, releaseCommands, removeOwned, sha256 } from "./release.ts";
 
 const repo = resolve(import.meta.dir, "..");
@@ -62,22 +63,8 @@ const git = (...args: string[]) =>
   spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" }).stdout.trim();
 const commitA = git("rev-parse", "--verify", `${arg("--a") ?? "HEAD~1"}^{commit}`);
 const commitB = git("rev-parse", "--verify", `${arg("--b") ?? "HEAD"}^{commit}`);
-// Identify the known legacy-to-v2 source boundary, not arbitrary future formats.
-const exactCursorSource = (commit: string) => {
-  const result = spawnSync(
-    "git",
-    ["-C", repo, "ls-tree", "--name-only", commit, "--", "src/cursor-layout.ts"],
-    { encoding: "utf8" }
-  );
-  if (result.status !== 0) throw new Error("Could not inspect the selected cursor format.");
-  return result.stdout.trim() === "src/cursor-layout.ts";
-};
 if (commitA === "" || commitB === "" || commitA === commitB)
   throw new Error("Supply two distinct source commits for the ordinary release rehearsal.");
-if (exactCursorSource(commitA) !== exactCursorSource(commitB))
-  throw new Error(
-    "The ordinary release rehearsal cannot cross cursor formats. Rehearse the stopped migrate/export transition in docs/runbooks/deploy.md with the verified packages."
-  );
 
 const freePort = () => {
   const probe = Bun.listen({ hostname: "127.0.0.1", port: 0, socket: { data() {} } });
@@ -444,7 +431,7 @@ const same = (a: string[], b: string[]) =>
  */
 const stateDigest = () =>
   sha256(
-    ["config.json", "fluree-token", "installation-id"]
+    ["config.json", "fluree-token", "installation-id", ".serve-binding-v1"]
       .map((name) => {
         const path = join(busDir, name);
         const entry = lstatSync(path, { bigint: true });
@@ -654,20 +641,45 @@ try {
 
   // The bus store: an authenticated throwaway ledger.
   const ledger = ledgerOn(await flureeServer(), "rehearsal");
+  const pin = await createFixtureLedger(ledger);
   mkdirSync(busDir, { recursive: true, mode: 0o700 });
-  writeFileSync(
-    join(busDir, "config.json"),
-    JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
-  );
-  writeFileSync(join(busDir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
-  // The delivery identity, initialized once as the first upgrade to stable delivery does it,
-  // with the source's own command; no activation or rollback below may create or change it.
+  // Initialize the new identity in an empty root before preparing its attachment.
   if (
     run([bun, "--no-env-file", join(source, "src/bin.ts"), "initialize-installation"], {}, source)
       .status !== 0 ||
     !existsSync(join(busDir, "installation-id"))
   )
     throw new Error("could not initialize the installation identity");
+  writeFileSync(
+    join(busDir, "config.json"),
+    JSON.stringify({ fluree: { url: ledger.url, ledger: ledger.ledger } })
+  );
+  writeFileSync(join(busDir, "fluree-token"), `${ledger.token}\n`, { mode: 0o600 });
+  const attachment = run(
+    [
+      bun,
+      "--no-env-file",
+      join(source, "src/bin.ts"),
+      ...fixtureAttach(readFileSync(join(busDir, "installation-id"), "utf8"), pin),
+    ],
+    {},
+    source
+  );
+  if (attachment.status !== 0 || !existsSync(join(busDir, ".serve-binding-v1")))
+    throw new Error("The source must support the explicit serving-binding contract.");
+  for (const target of [A, B]) {
+    const probe = run([
+      join(target.dir, "runtime/bun"),
+      "--no-env-file",
+      `--config=${join(target.dir, "app/bunfig.toml")}`,
+      join(target.dir, "app/cli.js"),
+      "verify-serve-binding",
+    ]);
+    if (probe.status !== 0 || probe.stdout !== "serve-binding-v1\n")
+      throw new Error(
+        "Ordinary release rehearsal requires two packages that prove the same serving binding; rehearse R1 retirement separately."
+      );
+  }
   facts.stateDigest = stateDigest();
 
   // 0. Source, as deployed today: launcher v1 and serve, and the viewer from the checkout.

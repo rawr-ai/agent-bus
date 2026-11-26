@@ -21,7 +21,6 @@ import { BunFileSystem, BunPath } from "@effect/platform-bun";
 import { Effect, Layer, ManagedRuntime } from "effect";
 import { FetchHttpClient } from "effect/http";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { layerFluree } from "../src/Fluree.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, stopFlureeServer } from "../test/fluree-server.ts";
@@ -130,11 +129,7 @@ try {
   const bus = ManagedRuntime.make(
     Serve.layerHttp({ port, version: "relocated-peer-fixture" }).pipe(
       Layer.provideMerge(
-        Bus.layer("fixture").pipe(
-          Layer.provideMerge(store),
-          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
-          Layer.provide(platform)
-        )
+        Bus.layer("fixture").pipe(Layer.provideMerge(store), Layer.provide(platform))
       )
     )
   );

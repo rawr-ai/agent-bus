@@ -1,12 +1,6 @@
 import { Context, type Effect, type Stream } from "effect";
 import type { DirectScan, InvalidQuery, LedgerError, Logged, Message } from "./domain.ts";
-import type {
-  MailboxAck,
-  MailboxFact,
-  MailboxStart,
-  MailboxState,
-  MailboxUnresolved,
-} from "./mailbox-model.ts";
+import type { MailboxAck, MailboxFact, MailboxStart, MailboxState } from "./mailbox-model.ts";
 import type { Pin } from "./Query.ts";
 
 /** Server-selected namespaces: callers cannot name an arbitrary ledger subject. */
@@ -77,25 +71,6 @@ export type DesignationResult =
     }
   | { readonly status: "IDENTITY_MISMATCH"; readonly cut: Pin }
   | { readonly status: "CONFLICT"; readonly current: string | null; readonly cut: Pin }
-  | { readonly status: "UNKNOWN" };
-
-export interface OwnershipActivation {
-  readonly source: Pin;
-  /** Full native commit CID at the held source head. */
-  readonly commit: string;
-  /** Stable lowercase UUIDv7 persisted by the operator before dispatch. */
-  readonly operation: string;
-}
-export type OwnershipActivationLookup = Pick<OwnershipActivation, "source" | "operation">;
-export interface OwnershipActivationProof {
-  /** The original activation commit (E), not the observed head. */
-  readonly cut: Pin;
-  readonly commit: string;
-  readonly sourceCommit: string;
-}
-export type OwnershipActivationResult =
-  | { readonly status: "APPLIED" | "ALREADY_APPLIED"; readonly cut: Pin; readonly commit: string }
-  | { readonly status: "CONFLICT"; readonly cut: Pin }
   | { readonly status: "UNKNOWN" };
 
 /**
@@ -220,17 +195,8 @@ export class Ledger extends Context.Service<
     readonly presenceAt: (at?: number) => Effect.Effect<PresenceRead, LedgerError>;
     /** Original commit of the still-active ownership era at this exact pin. Never initializes it. */
     readonly ownershipEraAt: (cut: Pin) => Effect.Effect<number, LedgerError>;
-    /** Native CID of this exact source commit. Compare with the retained external CID before cutover. */
+    /** Native CID of this exact pinned commit, for comparison with the independent serving anchor. */
     readonly sourceCommitAt: (source: Pin) => Effect.Effect<string, LedgerError>;
-    /** Recover the original cutover only. Compare sourceCommit with the retained external CID;
-     * neither a born-new era nor an empty import plan is evidence that a migration occurred. */
-    readonly ownershipActivationAt: (
-      lookup: OwnershipActivationLookup
-    ) => Effect.Effect<OwnershipActivationProof, LedgerError>;
-    /** Existing-store cutover only. All other writers must already be drained and held. */
-    readonly activateOwnershipEra: (
-      intent: OwnershipActivation
-    ) => Effect.Effect<OwnershipActivationResult, LedgerError>;
     /**
      * Appends an entry only if no presence for its sender was written after `basis`, the cut
      * its ownership decision read. One attempt with a fresh id, never resent: a resent id
@@ -263,16 +229,6 @@ export class Ledger extends Context.Service<
       start: MailboxStart,
       basis: Pin
     ) => Effect.Effect<Admission, LedgerError | InvalidQuery>;
-    /** Record an import that could not establish a position, only while truly absent. */
-    readonly classifyMailboxImport: (
-      unresolved: MailboxUnresolved,
-      basis: Pin
-    ) => Effect.Effect<MailboxWrite, LedgerError>;
-    /** Import into an absent mailbox, or explicitly reconcile an unresolved one. */
-    readonly importMailbox: (
-      start: MailboxStart,
-      basis: Pin
-    ) => Effect.Effect<MailboxWrite, LedgerError>;
     /**
      * Fenced storage only. The caller must prove the holder, run, membership, prefix and carrier
      * at the same basis before writing, and must authorize receipt access separately.

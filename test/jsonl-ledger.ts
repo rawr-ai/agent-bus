@@ -615,7 +615,7 @@ export const layerJsonl = (file: string) =>
             cut: at,
           } satisfies MailboxReceiptRead;
         }).pipe(Effect.orElseSucceed((): MailboxReceiptRead => ({ status: "UNAVAILABLE" })));
-      const writeMailbox = (record: MailboxRecord, basis: Pin) =>
+      const appendMailboxAck = (record: MailboxAck, basis: Pin) =>
         Effect.gen(function* () {
           yield* validateMailbox(record).pipe(Effect.mapError(ledgerError));
           yield* snapshotLines(basis);
@@ -643,34 +643,17 @@ export const layerJsonl = (file: string) =>
           if (currentRows.some((row) => row.t > basis.head && row.record.mailbox === mailbox)) {
             return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
           }
-          if (record.kind === "unresolved") {
-            if (prior.status !== "ABSENT")
-              return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
-          } else if (record.kind === "start") {
-            if (
-              (record.origin !== "import" && record.origin !== "reconcile") ||
-              record.position > basis.head ||
-              (record.origin === "import" && prior.status !== "ABSENT") ||
-              (record.origin === "reconcile" && prior.status !== "UNRESOLVED")
-            ) {
-              return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
-            }
-            yield* mailboxLines({ head: record.position, incarnation: basis.incarnation });
-          } else if (
+          if (
             prior.status !== "FOUND" ||
             record.from !== prior.position ||
             record.dataCut.head > basis.head ||
             record.dataCut.incarnation !== basis.incarnation
           ) {
             return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
-          } else {
-            yield* mailboxLines(record.dataCut);
-            yield* mailboxLines({ head: record.through, incarnation: basis.incarnation });
           }
-          const fact = mailboxFactOf(
-            record,
-            prior.status === "ABSENT" ? null : prior.current.record.operation
-          );
+          yield* mailboxLines(record.dataCut);
+          yield* mailboxLines({ head: record.through, incarnation: basis.incarnation });
+          const fact = mailboxFactOf(record, prior.current.record.operation);
           const json = encodeMailboxFact(fact);
           yield* resolveMailbox(
             [...priorRows, { record: fact, t: basis.head + 1 }],
@@ -699,10 +682,7 @@ export const layerJsonl = (file: string) =>
           ) {
             return { status: "CONFLICT", cut: current } satisfies MailboxWrite;
           }
-          const line =
-            record.kind === "ack"
-              ? { "@mailboxAck": json }
-              : { "@mailboxStart": json, message: null };
+          const line = { "@mailboxAck": json };
           yield* fs
             .writeFileString(file, `${JSON.stringify(line)}\n`, { flag: "a" })
             .pipe(Effect.mapError(ledgerError));
@@ -710,16 +690,7 @@ export const layerJsonl = (file: string) =>
             status: "APPLIED",
             cut: { head: yield* end, incarnation: instance },
           } satisfies MailboxWrite;
-        });
-      const importMailbox = (start: MailboxStart, basis: Pin) =>
-        writeMailbox(start, basis).pipe(locked, Effect.withSpan("Ledger.importMailbox"));
-      const classifyMailboxImport = (unresolved: MailboxUnresolved, basis: Pin) =>
-        writeMailbox(unresolved, basis).pipe(
-          locked,
-          Effect.withSpan("Ledger.classifyMailboxImport")
-        );
-      const appendMailboxAck = (ack: MailboxAck, basis: Pin) =>
-        writeMailbox(ack, basis).pipe(locked, Effect.withSpan("Ledger.appendMailboxAck"));
+        }).pipe(locked, Effect.withSpan("Ledger.appendMailboxAck"));
       const commandLines = (upTo: number) =>
         Effect.map(lines(upTo), (found) =>
           found.flatMap(({ text, end }) => {
@@ -882,14 +853,10 @@ export const layerJsonl = (file: string) =>
         presenceAt,
         ownershipEraAt: () => ledgerError("A JSONL fixture has no Fluree ownership era."),
         sourceCommitAt: () => ledgerError("A JSONL fixture has no native commit CID."),
-        ownershipActivationAt: () => ledgerError("A JSONL fixture has no Fluree ownership era."),
-        activateOwnershipEra: () => ledgerError("A JSONL fixture has no Fluree ownership era."),
         admit,
         mailboxAt,
         mailboxReceiptAt,
         admitWithStart,
-        classifyMailboxImport,
-        importMailbox,
         appendMailboxAck,
         appendCommand,
         readCommand,

@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readFileSync } from "node:fs";
-import { cp, mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
@@ -19,14 +19,6 @@ import {
   MAILBOX_BOOTSTRAP_SPENT_FILE,
   reserveMailboxBootstrap,
 } from "../src/mailbox-bootstrap.ts";
-import { captureMailboxSource, verifyMailboxImport } from "../src/mailbox-import.ts";
-import {
-  acceptMailboxTransitionPeer,
-  MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE,
-  permitMailboxTransitionServe,
-  recordMailboxTransitionReady,
-} from "../src/mailbox-transition-admission.ts";
-import { installMailboxTransitionGuard } from "../src/mailbox-transition-guard.ts";
 import { freshLedger } from "./fluree-server.ts";
 import { ownership } from "./processes.ts";
 import { spawnSupervised } from "./supervised.ts";
@@ -147,7 +139,7 @@ const createProxy = async (
     method: string,
     path: string,
     body: string
-  ) => "drop" | "missing" | "redirect" | undefined,
+  ) => "drop" | "missing" | "redirect" | "conflict" | undefined,
   redirectTo?: string
 ) => {
   const calls: string[] = [];
@@ -162,6 +154,11 @@ const createProxy = async (
       for await (const chunk of request) chunks.push(Buffer.from(chunk));
       const requestBody = Buffer.concat(chunks);
       const fault = intercept(method, path, requestBody.toString("utf8"));
+      if (fault === "conflict") {
+        response.writeHead(409, { "content-type": "application/json" });
+        response.end(JSON.stringify({ error: "conflict" }));
+        return;
+      }
       if (fault === "redirect") {
         if (redirectTo === undefined) throw new Error("missing test redirect");
         response.writeHead(302, { location: redirectTo });
@@ -285,6 +282,42 @@ const writeCounts = (calls: ReadonlyArray<string>) => ({
   updates: calls.filter((call) => call === "POST /v1/fluree/update").length,
 });
 
+const bindingFile = ".serve-binding-v1";
+
+const commitAt = async (config: Fluree.FlureeConfig & { readonly token: string }, head: number) => {
+  const response = await fetch(
+    `${config.url}/v1/fluree/show/${encodeURIComponent(config.ledger)}?commit=t%3A${head}`,
+    { headers: { authorization: `Bearer ${config.token}` } }
+  );
+  if (!response.ok) throw new Error("fixture commit is unavailable");
+  return Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(await response.json()).id;
+};
+
+const oldNativeCompletion = async (
+  bus: string,
+  target: { readonly url: string; readonly ledger: string },
+  incarnation: string
+) => {
+  const installation = (await readFile(join(bus, "installation-id"), "utf8")).trim();
+  await writeFile(
+    join(bus, MAILBOX_BOOTSTRAP_IDENTITY_COMPLETE_FILE),
+    JSON.stringify({ version: 1, installation, kind: "identity-only-complete" }),
+    { mode: 0o600 }
+  );
+  await writeFile(
+    join(bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE),
+    JSON.stringify({
+      version: 1,
+      installation,
+      ...target,
+      kind: "complete",
+      origin: "existing",
+      incarnation,
+    }),
+    { mode: 0o600 }
+  );
+};
+
 test("partial packaged-candidate selection fails before executing a candidate", async () => {
   const root = await newRoot();
   try {
@@ -361,6 +394,13 @@ test("a new grant creates once, binds the real incarnation and restarts existing
   probe.stop(true);
   try {
     await setup(root.bus, { url: proxy.url, ledger: actual.ledger }, actual.token, true);
+    expect(
+      await refusal(root.bus, root.home, ["verify-serve-binding", "--allow-first-create"])
+    ).toEqual({
+      code: 0,
+      output: "first-create-reservation-v1\n",
+    });
+    expect(proxy.calls).toEqual([]);
     for (let restart = 0; restart < 2; restart++) {
       const owned = ownership();
       const child = owned.supervisor(start(root.bus, root.home, port));
@@ -379,11 +419,18 @@ test("a new grant creates once, binds the real incarnation and restarts existing
       } finally {
         await owned.stop();
       }
+      if (restart === 0) {
+        expect(await refusal(root.bus, root.home, ["verify-serve-binding"])).toEqual({
+          code: 0,
+          output: "serve-binding-v1\n",
+        });
+        await rm(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE));
+        await rm(join(root.bus, MAILBOX_BOOTSTRAP_GRANT_FILE));
+        await rm(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE));
+      }
     }
     expect(await actualHead(actual)).toBe(1);
-    const binding = JSON.parse(
-      await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE)).text()
-    );
+    const binding = JSON.parse(await Bun.file(join(root.bus, bindingFile)).text());
     const response = await fetch(
       `${actual.url}/v1/fluree/show/${encodeURIComponent(actual.ledger)}?commit=t%3A1`,
       {
@@ -401,7 +448,7 @@ test("a new grant creates once, binds the real incarnation and restarts existing
   }
 }, 40_000);
 
-test("an identity-only remote attachment never creates an absent ledger and can later attach to an existing one", async () => {
+test("identity-only serve refuses; explicitly attached identity cannot select a new cut after binding loss", async () => {
   const actual = await freshLedger("bootstrap-remote-attach");
   const root = await newRoot();
   let proxy: Awaited<ReturnType<typeof createProxy>> | undefined;
@@ -432,7 +479,7 @@ test("an identity-only remote attachment never creates an absent ledger and can 
     for (let attempt = 0; attempt < 2; attempt++) {
       const result = await refusal(root.bus, root.home);
       expect(result.code).toBe(1);
-      expect(result.output).toContain("no unspent creation grant");
+      expect(result.output).toContain("No serving binding");
       expect(await exists()).toBe(false);
       expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
       expect(await readFile(join(root.bus, "installation-id"))).toEqual(identity);
@@ -440,11 +487,40 @@ test("an identity-only remote attachment never creates an absent ledger and can 
       expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE)).exists()).toBe(false);
       expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE)).exists()).toBe(false);
     }
-    expect(proxy.calls.some((call) => call.startsWith("GET /v1/fluree/exists/"))).toBe(true);
+    expect(proxy.calls).toEqual([]);
 
     // Provision the remote ledger independently; attaching still must not create or update it.
     const incarnation = await prepareLedger(actual);
+    const update = await fetch(
+      `${actual.url}/v1/fluree/update?ledger=${encodeURIComponent(actual.ledger)}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${actual.token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          insert: { "@id": "urn:fixture:existing", "urn:fixture:note": "after genesis" },
+        }),
+      }
+    );
+    expect(update.status).toBe(200);
     const head = await actualHead(actual);
+    const commit = await commitAt(actual, head);
+    expect(head).toBeGreaterThan(1);
+    expect((await refusal(root.bus, root.home)).code).toBe(1);
+    const attach = [
+      "bind-existing-ledger",
+      "--expected-installation",
+      identity.toString("utf8").trim(),
+      "--expected-incarnation",
+      incarnation,
+      "--expected-head",
+      String(head),
+      "--expected-commit",
+      commit,
+    ];
+    const wrong = [...attach.slice(0, -1), incarnation];
+    expect((await refusal(root.bus, root.home, wrong)).code).toBe(1);
+    expect((await refusal(root.bus, root.home, attach)).code).toBe(0);
+    expect((await refusal(root.bus, root.home, attach)).code).toBe(0);
     const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
     const port = Number(probe.url.port);
     probe.stop(true);
@@ -464,14 +540,51 @@ test("an identity-only remote attachment never creates an absent ledger and can 
     expect(await readFile(join(root.bus, "installation-id"))).toEqual(identity);
     expect(await readFile(join(root.bus, "config.json"), "utf8")).toBe(config);
     expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_GRANT_FILE)).exists()).toBe(false);
-    const completed: unknown = JSON.parse(
-      await readFile(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE), "utf8")
-    );
+    const bytes = await readFile(join(root.bus, bindingFile), "utf8");
     expect(
       Schema.decodeUnknownSync(
-        Schema.Struct({ origin: Schema.String, incarnation: Schema.String })
-      )(completed)
-    ).toEqual({ origin: "existing", incarnation });
+        Schema.Struct({
+          anchor: Schema.Struct({ head: Schema.Int, commit: Schema.String }),
+          incarnation: Schema.String,
+        })
+      )(JSON.parse(bytes))
+    ).toEqual({ anchor: { head, commit }, incarnation });
+    await owned.stop();
+    const advance = await fetch(
+      `${actual.url}/v1/fluree/update?ledger=${encodeURIComponent(actual.ledger)}`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${actual.token}`, "content-type": "application/json" },
+        body: JSON.stringify({
+          insert: { "@id": "urn:fixture:recovery", "urn:fixture:note": "later" },
+        }),
+      }
+    );
+    expect(advance.ok).toBe(true);
+    const recoveryHead = await actualHead(actual);
+    expect(recoveryHead).toBe(head + 1);
+    const recoveryCommit = await commitAt(actual, recoveryHead);
+    const verifyAt = (at: number, cid: string) =>
+      refusal(root.bus, root.home, [
+        "verify-serve-binding",
+        "--expected-recovery-head",
+        String(at),
+        "--expected-recovery-commit",
+        cid,
+      ]);
+    expect(await verifyAt(recoveryHead, recoveryCommit)).toEqual({
+      code: 0,
+      output: "serve-binding-v1\n",
+    });
+    expect((await verifyAt(recoveryHead + 1, recoveryCommit)).code).toBe(1);
+    expect((await verifyAt(recoveryHead, commit)).code).toBe(1);
+    expect((await verifyAt(1, incarnation)).code).toBe(1);
+    expect(await readFile(join(root.bus, bindingFile), "utf8")).toBe(bytes);
+    await rm(join(root.bus, bindingFile));
+    expect((await refusal(root.bus, root.home)).code).toBe(1);
+    expect((await refusal(root.bus, root.home, attach)).code).toBe(1);
+    expect(existsSync(join(root.bus, bindingFile))).toBe(false);
+    expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
   } finally {
     try {
       await owned.stop();
@@ -603,7 +716,14 @@ test("a born era opens without a full presence-history query", async () => {
   const owned = ownership();
   let child: ReturnType<typeof start> | undefined;
   try {
-    await setup(root.bus, { url: proxy.url, ledger: actual.ledger }, actual.token, false);
+    const target = { url: proxy.url, ledger: actual.ledger };
+    await setup(root.bus, target, actual.token, false);
+    await oldNativeCompletion(root.bus, target, incarnation);
+    expect(await refusal(root.bus, root.home, ["verify-serve-binding"])).toEqual({
+      code: 0,
+      output: "serve-binding-v1\n",
+    });
+    expect(existsSync(join(root.bus, bindingFile))).toBe(false);
     child = owned.supervisor(start(root.bus, root.home, port));
     let healthy = false;
     for (let attempt = 0; attempt < 100 && child.exitCode === null; attempt++) {
@@ -615,9 +735,7 @@ test("a born era opens without a full presence-history query", async () => {
       await Bun.sleep(100);
     }
     expect(healthy).toBe(true);
-    const binding = JSON.parse(
-      await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE)).text()
-    );
+    const binding = JSON.parse(await Bun.file(join(root.bus, bindingFile)).text());
     expect(binding.incarnation).toBe(incarnation);
     expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
   } finally {
@@ -659,8 +777,28 @@ test("a migrated era at a later commit cannot replace missing legacy state", asy
     await setup(root.bus, { url: proxy.url, ledger: actual.ledger }, actual.token, false);
     const result = await refusal(root.bus, root.home);
     expect(result.code).toBe(1);
-    expect(result.output).toContain("paired admission is required");
+    expect(result.output).toContain("No serving binding");
     expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE)).exists()).toBe(false);
+    const installation = (await readFile(join(root.bus, "installation-id"), "utf8")).trim();
+    const genesis = await commitAt(actual, 1);
+    const attachAt = (head: number, commit: string) =>
+      refusal(root.bus, root.home, [
+        "bind-existing-ledger",
+        "--expected-installation",
+        installation,
+        "--expected-incarnation",
+        genesis,
+        "--expected-head",
+        String(head),
+        "--expected-commit",
+        commit,
+      ]);
+    // The exact genesis is on this history but predates the active era. Validation must
+    // refuse it before spending this fresh identity's only attachment attempt.
+    expect((await attachAt(1, genesis)).code).toBe(1);
+    expect(existsSync(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE))).toBe(false);
+    expect(existsSync(join(root.bus, bindingFile))).toBe(false);
+    expect((await attachAt(2, await commitAt(actual, 2))).code).toBe(0);
     expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
   } finally {
     await proxy.close();
@@ -670,17 +808,19 @@ test("a migrated era at a later commit cannot replace missing legacy state", asy
 
 test("a ledger disappearing between precheck and serving open never creates or listens", async () => {
   const actual = await freshLedger("bootstrap-disappeared");
-  await prepareLedger(actual);
+  const incarnation = await prepareLedger(actual);
   const root = await newRoot();
   const proxy = await createProxy(actual.url, (method, path) =>
     method === "GET" &&
     path.startsWith("/v1/fluree/show/") &&
-    existsSync(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE))
+    existsSync(join(root.bus, bindingFile))
       ? "missing"
       : undefined
   );
   try {
-    await setup(root.bus, { url: proxy.url, ledger: actual.ledger }, actual.token, false);
+    const target = { url: proxy.url, ledger: actual.ledger };
+    await setup(root.bus, target, actual.token, false);
+    await oldNativeCompletion(root.bus, target, incarnation);
     const result = await refusal(root.bus, root.home);
     expect(result.code).toBe(1);
     expect(proxy.wasMissing()).toBe(true);
@@ -692,28 +832,36 @@ test("a ledger disappearing between precheck and serving open never creates or l
   }
 }, 40_000);
 
-test("an existing ledger lost after grant spend is never recreated on retry", async () => {
+test("a positively observed first-create conflict spends the grant without adopting or recreating", async () => {
   const actual = await freshLedger("bootstrap-spent-disappeared");
   await prepareLedger(actual);
   const root = await newRoot();
-  const proxy = await createProxy(actual.url, (method, path) =>
-    method === "GET" &&
-    path.startsWith("/v1/fluree/show/") &&
-    existsSync(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE))
-      ? "missing"
-      : undefined
-  );
+  const proxy = await createProxy(actual.url, () => undefined);
   try {
     await setup(root.bus, { url: proxy.url, ledger: actual.ledger }, actual.token, true);
     const first = await refusal(root.bus, root.home);
     expect(first.code).toBe(1);
-    expect(proxy.wasMissing()).toBe(true);
+    expect(first.output).toContain("already exists");
+    expect(existsSync(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE))).toBe(true);
     expect(await Bun.file(join(root.bus, MAILBOX_BOOTSTRAP_COMPLETE_FILE)).exists()).toBe(false);
     const before = writeCounts(proxy.calls);
     expect(before).toEqual({ creates: 0, updates: 0 });
+    const drop = await fetch(`${actual.url}/v1/fluree/drop`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${actual.token}`, "content-type": "application/json" },
+      body: JSON.stringify({ ledger: actual.ledger.replace(/:main$/, ""), hard: true }),
+    });
+    expect(drop.ok).toBe(true);
+    const after = await fetch(
+      `${actual.url}/v1/fluree/exists/${encodeURIComponent(actual.ledger)}`,
+      { headers: { authorization: `Bearer ${actual.token}` } }
+    );
+    expect(await after.json()).toMatchObject({ exists: false });
+    const requests = [...proxy.calls];
     const second = await refusal(root.bus, root.home);
     expect(second.code).toBe(1);
     expect(second.output).toContain("operator recovery");
+    expect(proxy.calls).toEqual(requests);
     expect(writeCounts(proxy.calls)).toEqual(before);
   } finally {
     await proxy.close();
@@ -721,487 +869,53 @@ test("an existing ledger lost after grant spend is never recreated on retry", as
   }
 }, 40_000);
 
-test("check-source verifies only the isolated copy and never forwards the live token", async () => {
-  const actual = await freshLedger("bootstrap-recovered-copy");
-  const incarnation = await prepareLedger(actual);
+test("provider conflict after absent observation is one dispatch and never an upsert", async () => {
+  const actual = await freshLedger("bootstrap-create-conflict");
   const root = await newRoot();
-  let originalRequests = 0;
-  const original = Bun.serve({
-    hostname: "127.0.0.1",
-    port: 0,
-    fetch: () => {
-      originalRequests++;
-      return new Response(null, { status: 500 });
-    },
-  });
-  const recovered = await createProxy(actual.url, () => undefined);
-  const redirect = await createProxy(
-    actual.url,
-    () => "redirect",
-    `${original.url.origin}/must-not-receive-token`
+  const proxy = await createProxy(actual.url, (method, path) =>
+    method === "POST" && path === "/v1/fluree/create" ? "conflict" : undefined
   );
-  const recoveredConfig = join(root.root, "recovered-config.json");
-  const recoveredToken = join(root.root, "recovered-token");
-  const liveToken = "original-token-secret";
   try {
-    await writeFile(
-      join(root.bus, "config.json"),
-      JSON.stringify({ fluree: { url: `${original.url.origin}/`, ledger: actual.ledger } })
-    );
-    await writeFile(join(root.bus, "fluree-token"), liveToken, { mode: 0o600 });
-    await writeFile(
-      recoveredConfig,
-      JSON.stringify({ fluree: { url: recovered.url, ledger: actual.ledger } })
-    );
-    await writeFile(recoveredToken, actual.token, { mode: 0o600 });
-    const args = [
-      "mailbox-transition",
-      "--action",
-      "check-source",
-      "--recovered-config",
-      recoveredConfig,
-      "--recovered-token",
-      recoveredToken,
-      "--expected-incarnation",
-      incarnation,
-      "--expected-head",
-      "1",
-      "--source-commit",
-      incarnation,
-    ];
-    const before = (await readdir(root.bus)).sort();
-    const ok = await refusal(root.bus, root.home, args);
-    if (ok.code !== 0)
-      throw new Error(
-        ok.output.replaceAll(actual.token, "[redacted]").replaceAll(liveToken, "[redacted]")
-      );
-    expect(ok.code).toBe(0);
-    expect(ok.output).toContain("verified");
-    expect((await readdir(root.bus)).sort()).toEqual(before);
-    expect(originalRequests).toBe(0);
-    expect(writeCounts(recovered.calls)).toEqual({ creates: 0, updates: 0 });
-    expect(await actualHead(actual)).toBe(1);
-
-    const badCid = [...args];
-    badCid[badCid.indexOf("--source-commit") + 1] = "wrong-source-cid";
-    expect((await refusal(root.bus, root.home, badCid)).code).toBe(1);
-    const badHead = [...args];
-    badHead[badHead.indexOf("--expected-head") + 1] = "2";
-    expect((await refusal(root.bus, root.home, badHead)).code).toBe(1);
-    expect(await actualHead(actual)).toBe(1);
-    const callsBeforeCredentialRefusals = [...recovered.calls];
-    const reusedToken = [...args];
-    reusedToken[reusedToken.indexOf("--recovered-token") + 1] = join(root.bus, "fluree-token");
-    const reused = await refusal(root.bus, root.home, reusedToken);
-    expect(reused.code).toBe(1);
-    expect(reused.output).not.toContain(liveToken);
-    const missingToken = [...args];
-    missingToken[missingToken.indexOf("--recovered-token") + 1] = join(root.root, "missing");
-    expect((await refusal(root.bus, root.home, missingToken)).code).toBe(1);
-    expect(recovered.calls).toEqual(callsBeforeCredentialRefusals);
-
-    await writeFile(
-      recoveredConfig,
-      JSON.stringify({ fluree: { url: recovered.url, ledger: "foreign-ledger:main" } })
-    );
-    expect((await refusal(root.bus, root.home, args)).code).toBe(1);
-    expect(recovered.calls).toEqual(callsBeforeCredentialRefusals);
-    await writeFile(
-      recoveredConfig,
-      JSON.stringify({ fluree: { url: original.url.origin, ledger: actual.ledger } })
-    );
-    expect((await refusal(root.bus, root.home, args)).code).toBe(1);
-    await writeFile(
-      recoveredConfig,
-      JSON.stringify({
-        fluree: { url: "http://user:credential-secret@127.0.0.1:9", ledger: actual.ledger },
-      })
-    );
-    const credentialUrl = await refusal(root.bus, root.home, args);
-    expect(credentialUrl.code).toBe(1);
-    expect(credentialUrl.output).not.toContain("credential-secret");
-    await writeFile(
-      recoveredConfig,
-      JSON.stringify({ fluree: { url: recovered.url, ledger: actual.ledger } })
-    );
-    await writeFile(recoveredToken, "wrong-token");
-    const wrongCredential = await refusal(root.bus, root.home, args);
-    expect(wrongCredential.code).toBe(1);
-    expect(wrongCredential.output).not.toContain("wrong-token");
-    await writeFile(recoveredToken, actual.token);
-    await writeFile(
-      recoveredConfig,
-      JSON.stringify({ fluree: { url: redirect.url, ledger: actual.ledger } })
-    );
-    expect((await refusal(root.bus, root.home, args)).code).toBe(1);
-    expect(originalRequests).toBe(0);
-    expect(writeCounts(recovered.calls)).toEqual({ creates: 0, updates: 0 });
-    expect(await actualHead(actual)).toBe(1);
-    expect((await readdir(root.bus)).sort()).toEqual(before);
+    await setup(root.bus, { url: proxy.url, ledger: actual.ledger }, actual.token, true);
+    const first = await refusal(root.bus, root.home);
+    expect(first.code).toBe(1);
+    expect(first.output).toContain("uncertain or conflicted");
+    expect(writeCounts(proxy.calls)).toEqual({ creates: 1, updates: 0 });
+    const calls = [...proxy.calls];
+    const retry = await refusal(root.bus, root.home);
+    expect(retry.code).toBe(1);
+    expect(proxy.calls).toEqual(calls);
   } finally {
-    await redirect.close();
-    await recovered.close();
-    original.stop(true);
-    await root.close();
-  }
-}, 60_000);
-
-const emptyLegacyFixture = async () => {
-  const actual = await freshLedger("bootstrap-empty-hostile");
-  const headers = { authorization: `Bearer ${actual.token}`, "content-type": "application/json" };
-  const post = (path: string, body: unknown) =>
-    fetch(`${actual.url}/v1/fluree${path}`, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(body),
-    });
-  expect((await post("/create", { ledger: actual.ledger })).status).toBe(201);
-  expect(
-    (
-      await post(`/update?ledger=${encodeURIComponent(actual.ledger)}`, {
-        "@context": { bus: "https://rawr.ai/ns/agent-bus#" },
-        insert: { "@id": "urn:fixture:before-era", "bus:value": "old" },
-      })
-    ).status
-  ).toBe(200);
-  const first = await fetch(
-    `${actual.url}/v1/fluree/show/${encodeURIComponent(actual.ledger)}?commit=t%3A1`,
-    { headers }
-  );
-  expect(first.ok).toBe(true);
-  const sourceCommit = Schema.decodeUnknownSync(Schema.Struct({ id: Schema.String }))(
-    await first.json()
-  ).id;
-  const cut = { incarnation: sourceCommit, head: 1 };
-  const root = await newRoot();
-  const peer = join(root.root, "peer");
-  const firstCopy = join(root.root, "first-copy");
-  const secondCopy = join(root.root, "second-copy");
-  const badLocal = join(root.root, "bad-local");
-  const badPeer = join(root.root, "bad-peer");
-  const goodLocal = join(root.root, "good-local");
-  const goodPeer = join(root.root, "good-peer");
-  const proxy = await createProxy(actual.url, () => undefined);
-  try {
-    const ledgerLayer = Fluree.layerFluree(actual, { existingOnly: true });
-    await Effect.runPromise(initializeInstallation(root.bus).pipe(Effect.provide(platform)));
-    await Effect.runPromise(initializeInstallation(peer).pipe(Effect.provide(platform)));
-    const legacy = (dir: string) =>
-      join(dir, "fluree-cursors", encodeURIComponent(actual.ledger), cut.incarnation);
-    const emptyHash = Bun.CryptoHasher.hash("sha256", "[]", "hex");
-    for (const dir of [root.bus, peer]) {
-      await mkdir(`${legacy(dir)}.v2`, { recursive: true });
-      await writeFile(
-        join(`${legacy(dir)}.v2`, "layout"),
-        JSON.stringify({ generation: Bun.randomUUIDv7(), legacy: emptyHash })
-      );
-    }
-    const capture = (dir: string) =>
-      Effect.runPromise(
-        captureMailboxSource(dir, actual.ledger, cut, Effect.void).pipe(
-          Effect.provide(ledgerLayer),
-          Effect.provide(platform)
-        )
-      );
-    const firstSource = await capture(root.bus);
-    const secondSource = await capture(peer);
-    const sources =
-      firstSource.installation < secondSource.installation
-        ? ([firstSource, secondSource] as const)
-        : ([secondSource, firstSource] as const);
-    await cp(root.bus, firstCopy, { recursive: true });
-    await cp(peer, secondCopy, { recursive: true });
-    const copies = [
-      { root: firstCopy, receipt: firstSource },
-      { root: secondCopy, receipt: secondSource },
-    ] as const;
-    const operation = Bun.randomUUIDv7();
-    const receipt1 = join(root.root, "first-receipt.json");
-    const receipt2 = join(root.root, "second-receipt.json");
-    await writeFile(receipt1, JSON.stringify(firstSource));
-    await writeFile(receipt2, JSON.stringify(secondSource));
-    await writeFile(
-      join(root.bus, "config.json"),
-      JSON.stringify({ fluree: { url: proxy.url, ledger: actual.ledger } }),
-      { mode: 0o600 }
-    );
-    await writeFile(join(root.bus, "fluree-token"), actual.token, { mode: 0o600 });
-    const fence = [
-      "mailbox-transition",
-      "--action",
-      "fence",
-      "--first-receipt",
-      receipt1,
-      "--second-receipt",
-      receipt2,
-      "--operation",
-      operation,
-      "--expected-local-installation",
-      firstSource.installation,
-      "--expected-peer-installation",
-      secondSource.installation,
-      "--expected-incarnation",
-      cut.incarnation,
-      "--paired-holds-confirmed",
-      "--provider-settled",
-      "--source-commit",
-    ];
-    const wrongFence = await refusal(root.bus, root.home, [...fence, "foreign-source-cid"]);
-    expect(wrongFence.code).toBe(1);
-    expect(wrongFence.output).toContain("captured source commit");
-    expect(await Bun.file(join(`${legacy(root.bus)}.v2`, ".export-pending")).exists()).toBe(false);
-    expect(await actualHead(actual)).toBe(1);
-    expect(writeCounts(proxy.calls)).toEqual({ creates: 0, updates: 0 });
-    const noHold = await refusal(root.bus, root.home, [...fence, sourceCommit]);
-    expect(noHold.code).toBe(1);
-    expect(noHold.output).toContain("Cursor transition refused");
-    expect(await Bun.file(join(`${legacy(root.bus)}.v2`, ".export-pending")).exists()).toBe(false);
-    for (const [dir, item] of [
-      [root.bus, firstSource],
-      [peer, secondSource],
-    ] as const) {
-      await Effect.runPromise(
-        installMailboxTransitionGuard(
-          dir,
-          actual.ledger,
-          sources,
-          item.installation,
-          operation,
-          Effect.void
-        ).pipe(Effect.provide(platform))
-      );
-    }
-    await cp(root.bus, badLocal, { recursive: true });
-    await cp(peer, badPeer, { recursive: true });
-    await cp(root.bus, goodLocal, { recursive: true });
-    await cp(peer, goodPeer, { recursive: true });
-    const proof = await Effect.runPromise(
-      verifyMailboxImport(actual.ledger, copies, firstSource.installation).pipe(
-        Effect.provide(ledgerLayer),
-        Effect.provide(platform)
-      )
-    );
-    const peerSentinel = join(`${legacy(peer)}.v2`, ".export-pending");
-    const common = [
-      "--first-receipt",
-      receipt1,
-      "--second-receipt",
-      receipt2,
-      "--operation",
-      operation,
-      "--source-commit",
-      sourceCommit,
-      "--expected-local-installation",
-      firstSource.installation,
-      "--expected-peer-installation",
-      secondSource.installation,
-      "--expected-incarnation",
-      cut.incarnation,
-      "--paired-holds-confirmed",
-      "--provider-settled",
-      "--peer-sentinel",
-      peerSentinel,
-      "--first-state",
-      firstCopy,
-      "--second-state",
-      secondCopy,
-    ];
-    return {
-      actual,
-      root,
-      proxy,
-      peer,
-      badLocal,
-      badPeer,
-      goodLocal,
-      goodPeer,
-      firstSource,
-      secondSource,
-      sources,
-      copies,
-      proof,
-      cut,
-      operation,
-      sourceCommit,
-      common,
-      ledgerLayer,
-    };
-  } catch (error) {
     await proxy.close();
     await root.close();
-    throw error;
   }
-};
+}, 40_000);
 
-const forgeEmptyAdmissions = async (
-  fixture: Awaited<ReturnType<typeof emptyLegacyFixture>>,
-  left: string,
-  right: string,
-  sourceCommit: string,
-  verifiedCommit: string,
-  proof = { ...fixture.proof, verifiedAt: { ...fixture.cut, head: 2 } }
-) => {
-  // The production ready CLI cannot issue this K=H+1 proof before era activation.
-  const checks = { confirmLocalHeld: () => Effect.void, verifyLocalFence: () => Effect.void };
-  const one = {
-    busDir: left,
-    operation: fixture.operation,
-    sourceCommit,
-    verifiedCommit,
-    sources: fixture.sources,
-    localInstallation: fixture.firstSource.installation,
-    proof,
-  };
-  const two = {
-    busDir: right,
-    operation: fixture.operation,
-    sourceCommit,
-    verifiedCommit,
-    sources: fixture.sources,
-    localInstallation: fixture.secondSource.installation,
-    proof,
-  };
-  const oneReady = await Effect.runPromise(
-    recordMailboxTransitionReady(one, checks).pipe(Effect.provide(platform))
-  );
-  const twoReady = await Effect.runPromise(
-    recordMailboxTransitionReady(two, checks).pipe(Effect.provide(platform))
-  );
-  await Effect.runPromise(
-    acceptMailboxTransitionPeer(one, twoReady, checks).pipe(Effect.provide(platform))
-  );
-  await Effect.runPromise(
-    acceptMailboxTransitionPeer(two, oneReady, checks).pipe(Effect.provide(platform))
-  );
-  const oneAdmission = await readFile(
-    join(left, MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE),
-    "utf8"
-  );
-  const twoAdmission = await readFile(
-    join(right, MAILBOX_TRANSITION_ADMITTED_COMPLETE_FILE),
-    "utf8"
-  );
-  await Effect.runPromise(
-    permitMailboxTransitionServe(
-      {
-        busDir: left,
-        ledgerName: fixture.actual.ledger,
-        incarnation: fixture.cut.incarnation,
-        localInstallation: fixture.firstSource.installation,
-      },
-      twoAdmission,
-      checks
-    ).pipe(Effect.provide(platform))
-  );
-  await Effect.runPromise(
-    permitMailboxTransitionServe(
-      {
-        busDir: right,
-        ledgerName: fixture.actual.ledger,
-        incarnation: fixture.cut.incarnation,
-        localInstallation: fixture.secondSource.installation,
-      },
-      oneAdmission,
-      checks
-    ).pipe(Effect.provide(platform))
-  );
-};
-
-test("an empty legacy plan cannot import, ready or serve without the exact activated era", async () => {
-  const f = await emptyLegacyFixture();
+test("an old unspent R1 grant cannot authorize a new store after upgrade", async () => {
+  const actual = await freshLedger("bootstrap-old-unspent");
+  const root = await newRoot();
+  const proxy = await createProxy(actual.url, () => undefined);
   try {
-    expect(f.proof.rows).toEqual([]);
-    expect(f.proof.verifiedAt.head).toBe(1);
+    const target = { url: proxy.url, ledger: actual.ledger };
+    await setup(root.bus, target, actual.token, true);
+    const installation = (await readFile(join(root.bus, "installation-id"), "utf8")).trim();
+    const grantPath = join(root.bus, MAILBOX_BOOTSTRAP_GRANT_FILE);
+    const oldGrant = JSON.stringify({ version: 1, installation, ...target, kind: "grant" });
+    await writeFile(grantPath, oldGrant, { mode: 0o600 });
     for (const args of [
-      ["mailbox-import", ...f.common],
-      ["mailbox-transition", "--action", "ready", ...f.common],
+      ["serve"],
+      ["verify-serve-binding", "--allow-first-create"],
+      ["initialize-installation", "--fluree-url", target.url, "--fluree-ledger", target.ledger],
     ]) {
-      const result = await refusal(f.root.bus, f.root.home, args);
+      const result = await refusal(root.bus, root.home, args);
       expect(result.code).toBe(1);
-      expect(result.output).not.toContain("Cursor transition refused");
-      expect(await actualHead(f.actual)).toBe(1);
-      expect(writeCounts(f.proxy.calls)).toEqual({ creates: 0, updates: 0 });
+      expect(result.output).toContain("operator recovery");
     }
-    await forgeEmptyAdmissions(f, f.root.bus, f.peer, f.sourceCommit, "unverified-k-commit");
-    const beforeEra = await refusal(f.root.bus, f.root.home);
-    expect(beforeEra.code).toBe(1);
-    expect(await actualHead(f.actual)).toBe(1);
-    expect(writeCounts(f.proxy.calls)).toEqual({ creates: 0, updates: 0 });
-
-    const activation = await Effect.runPromise(
-      Effect.gen(function* () {
-        return yield* (yield* Ledger.Ledger).activateOwnershipEra({
-          source: f.cut,
-          commit: f.sourceCommit,
-          operation: f.operation,
-        });
-      }).pipe(Effect.provide(f.ledgerLayer), Effect.provide(platform))
-    );
-    expect(activation.status).toBe("APPLIED");
-    if (activation.status !== "APPLIED") throw new Error("The fixture era was not applied.");
-    expect(await actualHead(f.actual)).toBe(2);
-    const actualProof = await Effect.runPromise(
-      verifyMailboxImport(f.actual.ledger, f.copies, f.firstSource.installation).pipe(
-        Effect.provide(f.ledgerLayer),
-        Effect.provide(platform)
-      )
-    );
-    expect(actualProof.verifiedAt.head).toBe(2);
-    await forgeEmptyAdmissions(
-      f,
-      f.badLocal,
-      f.badPeer,
-      "foreign-source-cid",
-      activation.commit,
-      actualProof
-    );
-    await forgeEmptyAdmissions(
-      f,
-      f.goodLocal,
-      f.goodPeer,
-      f.sourceCommit,
-      activation.commit,
-      actualProof
-    );
-    expect((await refusal(f.root.bus, f.root.home)).code).toBe(1);
-    const wrongCommit = [...f.common];
-    wrongCommit[wrongCommit.indexOf("--source-commit") + 1] = "foreign-source-cid";
-    for (const args of [
-      ["mailbox-import", ...wrongCommit],
-      ["mailbox-transition", "--action", "ready", ...wrongCommit],
-    ]) {
-      const result = await refusal(f.root.bus, f.root.home, args);
-      expect(result.code).toBe(1);
-      expect(result.output).toContain("retained source commit");
-      expect(await actualHead(f.actual)).toBe(2);
-      expect(writeCounts(f.proxy.calls)).toEqual({ creates: 0, updates: 0 });
-    }
-    const wrongAdmitted = await refusal(f.badLocal, f.root.home);
-    expect(wrongAdmitted.code).toBe(1);
-    expect(await actualHead(f.actual)).toBe(2);
-    expect(writeCounts(f.proxy.calls)).toEqual({ creates: 0, updates: 0 });
-
-    const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
-    const port = Number(probe.url.port);
-    probe.stop(true);
-    const owned = ownership();
-    const candidate = owned.supervisor(start(f.goodLocal, f.root.home, port));
-    try {
-      let healthy = false;
-      for (let attempt = 0; attempt < 100 && candidate.exitCode === null; attempt++) {
-        healthy = await fetch(`http://127.0.0.1:${port}/health`).then(
-          (r) => r.ok,
-          () => false
-        );
-        if (healthy) break;
-        await Bun.sleep(100);
-      }
-      expect(healthy).toBe(true);
-    } finally {
-      await owned.stop();
-    }
+    expect(proxy.calls).toEqual([]);
+    expect(await readFile(grantPath, "utf8")).toBe(oldGrant);
+    expect(existsSync(join(root.bus, MAILBOX_BOOTSTRAP_SPENT_FILE))).toBe(false);
   } finally {
-    await f.proxy.close();
-    await f.root.close();
+    await proxy.close();
+    await root.close();
   }
-}, 60_000);
+}, 40_000);

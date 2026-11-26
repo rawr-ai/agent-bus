@@ -8,15 +8,16 @@
 # On first install it creates the signing key and token and points the bus at the Fluree ledger
 # (config.json).
 #
-# On another machine, `--remote SSH_HOST` (an ssh host alias for the bus host):
+# On a new machine, `--remote SSH_HOST --prepare-attachment`:
 #   ai.rawr.agent-bus.tunnel  an SSH tunnel to the bus host's server, on the same local port
-#   ai.rawr.agent-bus         `agent-bus serve` for this machine's sessions
-# and copies the token from the bus host.
+# and copies the token from the bus host. Preparing does not select an existing ledger
+# or start serve. Bind to an independently anchored cut before running --runtime-only.
 #
 # Rerunning is safe: existing config, credentials and messages are kept.
 #
 # --runtime-only --bun /absolute/path/to/bun updates just the managed command and serve
-# LaunchAgent, without inspecting Fluree, SSH or credentials. It also supports rollback:
+# LaunchAgent, verifying the existing binding without reprovisioning Fluree, SSH or credentials.
+# It also supports same-binding rollback:
 # run this retained installer with AGENT_BUS_REPO=/absolute/canonical/source and the old
 # explicit Bun after restoring that source. The selected Bun must match its package pin.
 # Full installs may omit --bun to select the Bun currently on PATH.
@@ -44,6 +45,8 @@
 set -eu
 
 remote=""
+prepare_attachment=false
+allow_first_create=false
 release=""
 expect=""
 runtime_only=false
@@ -52,6 +55,7 @@ show_help=false
 bun_bin=""
 usage() {
   echo "usage: $0 [--remote SSH_HOST] [--bun /absolute/path/to/bun]"
+  echo "       $0 --remote SSH_HOST --prepare-attachment [--bun /absolute/path/to/bun]"
   echo "       $0 --runtime-only --bun /absolute/path/to/bun"
   echo "       $0 --release /absolute/releases/<id> --expect <manifest sha256>"
   echo "       $0 --release /absolute/releases/<id> --expect <manifest sha256> --bind-only"
@@ -89,6 +93,11 @@ while [ "$#" -gt 0 ]; do
       runtime_only=true
       shift
       ;;
+    --prepare-attachment)
+      [ "$prepare_attachment" = false ] || fail "--prepare-attachment was supplied more than once"
+      prepare_attachment=true
+      shift
+      ;;
     --bind-only)
       [ "$bind_only" = false ] || fail "--bind-only was supplied more than once"
       bind_only=true
@@ -99,6 +108,8 @@ while [ "$#" -gt 0 ]; do
   esac
 done
 [ "$show_help" = false ] || { usage; exit 0; }
+[ "$prepare_attachment" = false ] || [ -n "$remote" ] ||
+  fail "--prepare-attachment requires --remote"
 if [ "$runtime_only" = true ]; then
   [ -z "$remote" ] || fail "--runtime-only cannot be combined with --remote"
   [ -n "$bun_bin" ] || fail "--runtime-only requires an explicit --bun path"
@@ -370,196 +381,34 @@ if [ "$runtime_only" = false ] && [ -z "$release" ] &&
   fi
 fi
 
-# A migration sentinel occupies the old export marker, but is not an export plan.
-# Recognise both formats before allowing any install or rebind to change a surface.
-transition_evidence_js=$(cat <<'JS'
-import { constants, closeSync, fstatSync, lstatSync, openSync, readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
-
-const [root, mode, runtime, entry, release] = process.argv.slice(1);
-const fail = (message) => { console.error(`Mailbox transition binding refused: ${message}`); process.exit(1); };
-const info = (path) => {
-  try { return lstatSync(path); }
-  catch (error) { if (error.code === "ENOENT") return undefined; throw error; }
-};
-const read = (path) => {
-  const before = info(path);
-  if (!before?.isFile() || before.isSymbolicLink() || before.size === 0 || before.size > 1024 * 1024)
-    fail("evidence is missing, unsafe or unreadable; preserve it for recovery.");
-  const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
-  try {
-    const opened = fstatSync(fd);
-    if (!opened.isFile() || opened.dev !== before.dev || opened.ino !== before.ino || opened.size > 1024 * 1024)
-      fail("evidence changed while inspecting it; preserve it for recovery.");
-    const bytes = readFileSync(fd);
-    const text = bytes.toString("utf8");
-    const after = info(path);
-    if (!after?.isFile() || after.isSymbolicLink() || after.dev !== opened.dev || after.ino !== opened.ino ||
-        !bytes.equals(Buffer.from(text, "utf8")))
-      fail("evidence changed or is not UTF-8; preserve it for recovery.");
-    return text;
-  } finally { closeSync(fd); }
-};
-const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
-const json = (path) => {
-  const text = read(path);
-  let value;
-  try { value = JSON.parse(text); } catch { fail("evidence is not valid JSON; preserve it for recovery."); }
-  if (!object(value)) fail("evidence is not a recognised record; preserve it for recovery.");
-  return { text, value };
-};
-const keys = (value, names) => object(value) && JSON.stringify(Object.keys(value)) === JSON.stringify(names);
-const uuid4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const uuid7 = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const digest = /^[0-9a-f]{64}$/;
-const cut = (value) => keys(value, ["incarnation", "head"]) && typeof value.incarnation === "string" &&
-  /^(?!\.{1,2}$)[^/\\\0]+$/.test(value.incarnation) && Number.isSafeInteger(value.head) && value.head > 0;
-const source = (value) => keys(value, ["installation", "digest", "capturedAt"]) &&
-  uuid4.test(value.installation) && digest.test(value.digest) && Number.isSafeInteger(value.capturedAt) &&
-  value.capturedAt >= 1 && value.capturedAt <= 0xffffffffffff;
-const oldExport = ({ text, value }) =>
-  keys(value, ["generation", "operation", "exact", "original", "exported"]) &&
-  uuid7.test(value.generation) && uuid7.test(value.operation) && digest.test(value.exact) &&
-  digest.test(value.original) && digest.test(value.exported) && JSON.stringify(value) === text;
-const sentinel = ({ text, value }) =>
-  keys(value, ["version", "kind", "operation", "ledger", "cut", "sources", "installation"]) &&
-  value.version === 1 && value.kind === "mailbox-transition-guard" && uuid7.test(value.operation) &&
-  typeof value.ledger === "string" && value.ledger.length > 0 && cut(value.cut) &&
-  Array.isArray(value.sources) && value.sources.length === 2 && value.sources.every(source) &&
-  value.sources[0].installation < value.sources[1].installation && uuid4.test(value.installation) &&
-  value.sources.some((item) => item.installation === value.installation) && JSON.stringify(value) === text;
-
-try {
-  const rootInfo = info(root);
-  if (rootInfo === undefined) process.exit(0);
-  const names = {
-    ".mailbox-transition-ready-r1": "ready",
-    ".mailbox-transition-ready-complete-r1": "ready-complete",
-    ".mailbox-transition-admitted-r1": "admitted",
-    ".mailbox-transition-admitted-complete-r1": "admitted-complete",
-    ".mailbox-transition-start-permit-r1": "start-permit",
-  };
-  const records = [];
-  for (const name of readdirSync(root)) {
-    if (!name.startsWith(".mailbox-transition-") || !name.endsWith("-r1")) continue;
-    if (!(name in names)) fail("foreign transition evidence was found; preserve it for recovery.");
-    records.push([names[name], json(join(root, name)).value]);
-  }
-  const markers = [];
-  const cursors = join(root, "fluree-cursors");
-  if (info(cursors) !== undefined) {
-    for (const ledgerName of readdirSync(cursors)) {
-      const ledger = join(cursors, ledgerName);
-      if (!statSync(ledger).isDirectory()) continue;
-      for (const generationName of readdirSync(ledger)) {
-        if (!generationName.endsWith(".v2")) continue;
-        const generation = join(ledger, generationName);
-        if (!statSync(generation).isDirectory()) continue;
-        const path = join(generation, ".export-pending");
-        if (info(path) === undefined) continue;
-        const marker = json(path);
-        if (oldExport(marker)) continue;
-        if (!sentinel(marker) || encodeURIComponent(marker.value.ledger) !== ledgerName ||
-            `${marker.value.cut.incarnation}.v2` !== generationName ||
-            [root, cursors, ledger, generation].some((dir) => !info(dir)?.isDirectory()))
-          fail("the migration sentinel is malformed, foreign or at the wrong path; preserve it for recovery.");
-        markers.push(marker.value);
-      }
-    }
-  }
-  if (records.length > 0 && markers.length === 0)
-    fail("transition evidence has no matching migration sentinel; preserve it for recovery.");
-  if (markers.length === 0) process.exit(0);
-
-  const identity = read(join(root, "installation-id"));
-  const match = /^[ \t\r\n\v\f]*([0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})[ \t\r\n\v\f]*$/.exec(identity);
-  if (match === null || markers.some((item) => item.installation !== match[1]))
-    fail("the migration sentinel does not match this installation; preserve it for recovery.");
-  const ready = (value) => object(value) && value.version === 2 && uuid7.test(value.operation) &&
-    uuid4.test(value.installation) && Array.isArray(value.sources) && value.sources.length === 2 &&
-    typeof value.sourceCommit === "string" && value.sourceCommit.length > 0 && value.sourceCommit.length <= 4096 &&
-    typeof value.verifiedCommit === "string" && value.verifiedCommit.length > 0 && value.verifiedCommit.length <= 4096 &&
-    cut(value.cut) && cut(value.verifiedAt) && value.verifiedAt.incarnation === value.cut.incarnation &&
-    value.verifiedAt.head > value.cut.head && digest.test(value.proofDigest);
-  const admitted = (value) => {
-    if (!object(value) || value.version !== 1 || !Array.isArray(value.attestations) ||
-        value.attestations.length !== 2 || !value.attestations.every(ready)) return false;
-    const [one, two] = value.attestations;
-    return one.installation === one.sources[0]?.installation && two.installation === one.sources[1]?.installation &&
-      one.operation === two.operation && one.sourceCommit === two.sourceCommit &&
-      one.verifiedCommit === two.verifiedCommit && one.proofDigest === two.proofDigest &&
-      JSON.stringify(one.sources) === JSON.stringify(two.sources) &&
-      JSON.stringify(one.cut) === JSON.stringify(two.cut) && JSON.stringify(one.verifiedAt) === JSON.stringify(two.verifiedAt);
-  };
-  for (const [kind, value] of records) {
-    let attestations;
-    if (kind === "ready" && ready(value)) attestations = [value];
-    if (kind === "ready-complete" && value.version === 1 && value.kind === kind && ready(value.ready))
-      attestations = [value.ready];
-    if (kind === "admitted" && admitted(value)) attestations = value.attestations;
-    if (kind === "admitted-complete" && value.version === 1 && value.kind === kind &&
-        value.installation === match[1] && admitted(value.admitted)) attestations = value.admitted.attestations;
-    if (kind === "start-permit" && value.version === 1 && value.kind === kind &&
-        value.installation === match[1] && object(value.peer) && value.peer.version === 1 &&
-        value.peer.kind === "admitted-complete" && value.peer.installation !== match[1] &&
-        admitted(value.peer.admitted) && value.peer.admitted.attestations.some((a) => a.installation === value.peer.installation))
-      attestations = value.peer.admitted.attestations;
-    if (attestations === undefined || attestations.some((item) => !markers.some((marker) =>
-      marker.operation === item.operation && item.cut.incarnation === marker.cut.incarnation &&
-      item.cut.head === marker.cut.head && marker.sources.some((s) => s.installation === item.installation) &&
-      item.sources.every((s, i) =>
-        object(s) && s.version === 1 && s.installation === marker.sources[i].installation &&
-        s.digest === marker.sources[i].digest && s.capturedAt === marker.sources[i].capturedAt &&
-        s.ledger === marker.ledger && object(s.cut) &&
-        s.cut.incarnation === marker.cut.incarnation && s.cut.head === marker.cut.head
-      )))) fail("transition evidence is malformed or foreign; preserve it for recovery.");
-    if ((kind === "ready" || kind === "ready-complete") && attestations[0].installation !== match[1])
-      fail("transition evidence belongs to another installation; preserve it for recovery.");
-  }
-
-  const command = mode === "release"
-    ? [runtime, "--no-env-file", `--config=${release}/app/bunfig.toml`, `${release}/app/cli.js`]
-    : [runtime, "--no-env-file", "--config=/dev/null", entry];
-  const probe = Bun.spawnSync([...command, "serve-admission-capability"], {
-    cwd: "/", env: { HOME: process.env.HOME, PATH: "/usr/bin:/bin:/usr/sbin:/sbin", BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0" },
-    stdout: "pipe", stderr: "pipe", timeout: 10_000,
-  });
-  if (probe.exitCode !== 0 || !probe.stdout.equals(Buffer.from("r1-h-k-peer-legacy-read-v2\n")))
-    fail("the selected target does not declare the required R1 serve-admission capability.");
-} catch {
-  fail("cannot inspect transition evidence safely; preserve it for recovery.");
+# The exact target must prove the binding itself. A help/capability probe alone is not
+# authority to open an existing store. Older targets do not emit either exact result.
+check_serve_binding() {
+  case "$mode" in
+    release) set -- "$bun_bin" --no-env-file --config="$release/app/bunfig.toml" "$release/app/cli.js" "$@" ;;
+    source) set -- "$bun_bin" --no-env-file --config=/dev/null "$entry" "$@" ;;
+  esac
+  result=$(cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" LC_ALL=C CLICOLOR=0 \
+    AGENT_BUS_DIR="$bus_dir" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 "$@" 2>/dev/null && printf '.') ||
+    fail "The selected target could not verify this installation's serving binding. Preserve the state and restore or establish the binding before activating."
+  case "$result" in
+    'serve-binding-v1
+.' ) ;;
+    'first-create-reservation-v1
+.' )
+      [ "$allow_first_create" = true ] ||
+        fail "An unspent creation reservation cannot authorize an existing-store activation."
+      ;;
+    *) fail "The selected target did not prove a supported serving binding." ;;
+  esac
 }
-JS
-)
-check_transition_compatibility() {
-  BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 "$bun_bin" --no-env-file --config=/dev/null -e "$transition_evidence_js" \
-    "$bus_dir" "$mode" "$bun_bin" "$entry" "$release" ||
-    fail "Cannot bind this target while transition evidence requires recovery or a compatible target."
-}
-check_transition_compatibility
-
-# An active exact directory can retain older legacy cursor positions. A target that
-# cannot read exact state must not be selected until a stopped export has retired it.
-if [ -e "$bus_dir/fluree-cursors" ] || [ -L "$bus_dir/fluree-cursors" ]; then
-  [ -d "$bus_dir/fluree-cursors" ] || fail "Cannot inspect the installation's cursor layouts"
-  exact=$(/usr/bin/find -L "$bus_dir/fluree-cursors" -mindepth 2 -maxdepth 2 -name '*.v2' -print -quit) \
-    || fail "Cannot inspect the installation's cursor layouts"
-  if [ -n "$exact" ]; then
-    target_cursor_help() {
-      if [ -n "$release" ]; then
-        set -- "$bun_bin" --no-env-file --config="$release/app/bunfig.toml" "$release/app/cli.js"
-      else
-        set -- "$bun_bin" --no-env-file --config=/dev/null "$entry"
-      fi
-      (cd / && env -i HOME="$HOME" PATH="/usr/bin:/bin:/usr/sbin:/sbin" LC_ALL=C CLICOLOR=0 \
-        BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 "$@" cursors --help)
-    }
-    # Legacy CLIs can print main help and exit zero for unknown subcommands.
-    help=$(target_cursor_help 2>/dev/null) || help=""
-    printf '%s\n' "$help" | grep -Fq 'Exact-address cursor layout v2:' ||
-      fail "The selected target does not support the active exact cursor layout. Use the stopped cursor export procedure before selecting a legacy package (docs/runbooks/deploy.md)."
+check_target_admission() {
+  if [ "$allow_first_create" = true ]; then
+    check_serve_binding verify-serve-binding --allow-first-create
+  else
+    check_serve_binding verify-serve-binding
   fi
-fi
+}
 
 launcher_tmp=""
 agent_tmp=""
@@ -636,7 +485,7 @@ write_agent() {
 
 # Stage both files before replacing either; mv replaces an old symlink, never its target.
 install_runtime() {
-  check_transition_compatibility
+  check_target_admission
   mkdir -p "$bus_dir" "$agents" "$(dirname "$launcher")"
   launcher_tmp=$(mktemp "$launcher.tmp.XXXXXX")
   if [ -n "$release" ]; then
@@ -696,7 +545,7 @@ install_runtime() {
       cp -P "$launcher" "$bindings/launcher.$(date -u +%Y%m%dT%H%M%SZ).$$.before-$(basename "$release")"
     fi
   fi
-  check_transition_compatibility
+  check_target_admission
   mv -f "$launcher_tmp" "$launcher"
   launcher_tmp=""
   if [ "$keep_plist" = false ]; then
@@ -752,9 +601,10 @@ wait_for() {
 # A release's serve routes native delivery by this installation's identity and never creates
 # one. Activation does not create it either: a first upgrade initializes it deliberately, and
 # an established identity that is missing is restored, never replaced (docs/runbooks/deploy.md).
-if [ -n "$release" ]; then
+if [ "$runtime_only" = true ] || [ -n "$release" ]; then
   valid_identity "$bus_dir/installation-id" ||
     fail "No valid installation-id in $bus_dir. Initialize it before a first activation, or restore this installation's own; activation creates none."
+  check_target_admission
 fi
 
 # A held bind is an operator-controlled transition, not proof that a prior process exited.
@@ -816,49 +666,37 @@ if [ "$runtime_only" = true ] || [ -n "$release" ]; then
   exit 0
 fi
 
-# Missing config is not a fresh install when this directory already held a cursor.
-if [ ! -f "$bus_dir/config.json" ] && [ ! -e "$bus_dir/installation-id" ] &&
-  [ -e "$bus_dir/fluree-cursors" ]; then
-  fail "Retained cursors but no config.json or installation-id. Restore this installation's state before reinstalling."
-fi
-
-# A former remote attempt may have left a targeted creation grant. Validate any
-# retained bootstrap evidence without changing it before touching credentials or jobs.
-if [ -n "$remote" ]; then
-  bootstrap_evidence=false
-  for name in .mailbox-bootstrap-init-v1 .mailbox-bootstrap-identity-complete-v1 \
-    .mailbox-bootstrap-grant-v1 .mailbox-bootstrap-spent-v1 .mailbox-bootstrap-complete-v1; do
-    if [ -e "$bus_dir/$name" ] || [ -L "$bus_dir/$name" ]; then
-      bootstrap_evidence=true
-      break
-    fi
-  done
-  if [ "$bootstrap_evidence" = true ]; then
-    AGENT_BUS_DIR="$bus_dir" BUN_RUNTIME_TRANSPILER_CACHE_PATH=0 "$bun_bin" --no-env-file \
-      "$repo_dir/src/bin.ts" initialize-installation >/dev/null 2>&1 ||
-      fail "Remote attachment refused: bootstrap evidence is incomplete or invalid; preserve it for recovery."
-    if [ -e "$bus_dir/.mailbox-bootstrap-grant-v1" ] || [ -L "$bus_dir/.mailbox-bootstrap-grant-v1" ]; then
-      [ -f "$bus_dir/.mailbox-bootstrap-complete-v1" ] && [ ! -L "$bus_dir/.mailbox-bootstrap-complete-v1" ] ||
-        fail "Remote attachment refused: an uncompleted creation grant must be recovered; preserve all bootstrap evidence."
-    fi
-  fi
-fi
-
-mkdir -p "$bus_dir" "$agents"
-
+# Only full local installation may start the explicitly reserved first create.
+[ -n "$remote" ] || allow_first_create=true
 if [ -e "$bus_dir/config.json" ] || [ -L "$bus_dir/config.json" ]; then
+  [ "$prepare_attachment" = false ] ||
+    fail "Attachment preparation already has a configuration. Do not reprovision it; verify its target before binding."
   [ -f "$bus_dir/config.json" ] && [ ! -L "$bus_dir/config.json" ] ||
     fail "The existing config is not a real file; restore this installation before reinstalling."
   valid_identity "$bus_dir/installation-id" ||
     fail "Existing config but no valid installation-id. Restore the original identity before reinstalling."
+  check_target_admission
 else
+  for retained in "$serve_plist" "$bus_dir/.serve-binding-v1"; do
+    [ ! -e "$retained" ] && [ ! -L "$retained" ] ||
+      fail "An established installation is missing its configuration. Restore it before reinstalling."
+  done
   if [ -n "$remote" ]; then
-    AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation
+    [ "$prepare_attachment" = true ] ||
+      fail "A new remote installation requires --prepare-attachment and a separately authorized existing-store binding."
+    for retained in "$bus_dir/.mailbox-bootstrap-grant-v1" "$bus_dir/.mailbox-bootstrap-spent-v1" \
+        "$bus_dir/.mailbox-bootstrap-complete-v1"; do
+      [ ! -e "$retained" ] && [ ! -L "$retained" ] ||
+        fail "Attachment preparation refuses a retained creation or completed bootstrap record."
+    done
+    AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$entry" initialize-installation
   else
-    AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$repo_dir/src/bin.ts" initialize-installation \
+    AGENT_BUS_DIR="$bus_dir" "$bun_bin" --no-env-file "$entry" initialize-installation \
       --fluree-url "$url" --fluree-ledger "$ledger"
   fi
 fi
+
+mkdir -p "$bus_dir" "$agents"
 
 if [ -z "$remote" ]; then
   fluree_bin=$(command -v fluree) || {
@@ -918,9 +756,14 @@ wait_for "$url" "$log"
 require_auth
 
 if [ ! -f "$bus_dir/config.json" ]; then
-  printf '{ "fluree": { "url": "%s", "ledger": "%s" } }\n' "$url" "$ledger" > "$bus_dir/config.json"
+  (umask 077; set -C; printf '{ "fluree": { "url": "%s", "ledger": "%s" } }\n' "$url" "$ledger" > "$bus_dir/config.json")
   echo "bus store: $ledger at $url"
 fi
+
+[ "$prepare_attachment" = false ] || {
+  echo "Attachment prepared; serve was not bound or started. Verify the independently authorized ledger pin and bind it explicitly."
+  exit 0
+}
 
 install_runtime
 wait_for "http://127.0.0.1:$bus_port" "$bus_dir/agent-bus.log"

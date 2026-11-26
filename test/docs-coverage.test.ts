@@ -22,7 +22,6 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { Duration, Effect, Layer, ManagedRuntime } from "effect";
 import * as Bus from "../src/Bus.ts";
-import * as Cursors from "../src/Cursors.ts";
 import { prepareWatchTool } from "../src/private-web/events.ts";
 import * as Serve from "../src/serve.ts";
 import * as Timing from "../src/timing.ts";
@@ -44,7 +43,6 @@ const served = async () => {
       Layer.provide(
         Bus.layer("test-installation").pipe(
           Layer.provideMerge(layerJsonl(join(dir, "ledger.jsonl"))),
-          Layer.provideMerge(Cursors.layerFiles(join(dir, "cursors"))),
           Layer.provide(Layer.mergeAll(BunFileSystem.layer, BunPath.layer))
         )
       )
@@ -109,7 +107,6 @@ const SOURCES = (() => {
     "mcp-tools",
     "Ledger",
     "Fluree",
-    "Cursors",
     "client",
     "bin",
     "Query",

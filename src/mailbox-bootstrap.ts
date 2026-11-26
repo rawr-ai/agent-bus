@@ -23,7 +23,7 @@ const Base = {
   url: Schema.String,
   ledger: Schema.String,
 };
-const Grant = Schema.Struct({ ...Base, kind: Schema.Literal("grant") });
+const Grant = Schema.Struct({ ...Base, kind: Schema.Literals(["grant", "first-create-grant"]) });
 const TargetedInitializing = Schema.Struct({ ...Base, kind: Schema.Literal("initializing") });
 const IdentityOnlyInitializing = Schema.Struct({
   version: Schema.Literal(1),
@@ -34,12 +34,12 @@ const Initializing = Schema.Union([TargetedInitializing, IdentityOnlyInitializin
 const IdentityComplete = Schema.Struct({
   version: Schema.Literal(1),
   installation: Schema.String.check(Schema.isPattern(uuidV4)),
-  kind: Schema.Literal("identity-only-complete"),
+  kind: Schema.Literals(["identity-only-complete", "attachment-identity-complete"]),
 });
 const Spent = Schema.Struct({
   ...Base,
   kind: Schema.Literal("spent"),
-  observed: Schema.Literals(["present", "absent"]),
+  observed: Schema.Literals(["present", "absent", "attachment"]),
 });
 const Complete = Schema.Struct({
   ...Base,
@@ -55,6 +55,8 @@ type Complete = typeof Complete.Type;
 
 export type MailboxBootstrapState =
   | { readonly kind: "ungranted" }
+  | { readonly kind: "identity-only" }
+  | { readonly kind: "attachment-spent" }
   | { readonly kind: "unspent" }
   | { readonly kind: "complete"; readonly incarnation: string };
 
@@ -92,7 +94,7 @@ const prepareMailboxIdentity = (path: string, identity: string) =>
     catch: refused,
   });
 
-const syncMailboxIdentityDirectory = (root: string) =>
+export const syncInstallationDirectory = (root: string) =>
   Effect.tryPromise({
     try: async () => {
       const directory = await open(
@@ -109,7 +111,7 @@ const syncMailboxIdentityDirectory = (root: string) =>
     catch: refused,
   });
 
-const validTarget = (target: MailboxBootstrapTarget) => {
+export const validBootstrapTarget = (target: MailboxBootstrapTarget) => {
   if (target.url.length > 2048 || target.ledger.length === 0 || target.ledger.length > 1024)
     return false;
   try {
@@ -148,7 +150,7 @@ const info = async (path: string) => {
 };
 
 /** Reads only a stable, bounded, private regular file; no following the final component. */
-const read = async (path: string) => {
+export const readPrivateInstallationRecord = async (path: string) => {
   const original = await info(path);
   if (original === undefined) return undefined;
   if (!original.isFile() || (original.mode & 0o777) !== 0o600 || original.size > limit)
@@ -184,6 +186,9 @@ const read = async (path: string) => {
     await file.close();
   }
 };
+
+const read = readPrivateInstallationRecord;
+const validTarget = validBootstrapTarget;
 
 const publish = async (root: string, name: string, bytes: string) => {
   if (Buffer.byteLength(bytes) > limit || !(await lstat(root)).isDirectory()) throw new Error();
@@ -357,7 +362,7 @@ const publishMailboxBootstrapGrant = (
             installation,
             url: target.url,
             ledger: target.ledger,
-            kind: "grant",
+            kind: "first-create-grant",
           })
         );
       },
@@ -378,7 +383,7 @@ export const initializeTargetedMailboxIdentity = (root: string, target: MailboxB
       .pipe(Effect.mapError(refused));
     yield* prepareMailboxIdentity(temporary, identity);
     yield* fs.link(temporary, join(root, "installation-id")).pipe(Effect.mapError(refused));
-    yield* syncMailboxIdentityDirectory(root);
+    yield* syncInstallationDirectory(root);
     yield* publishMailboxBootstrapGrant(root, identity, target, temporary);
   }).pipe(Effect.scoped);
 
@@ -408,7 +413,7 @@ export const initializeIdentityOnly = (root: string) =>
       .pipe(Effect.mapError(refused));
     yield* prepareMailboxIdentity(temporary, identity);
     yield* fs.link(temporary, join(root, "installation-id")).pipe(Effect.mapError(refused));
-    yield* syncMailboxIdentityDirectory(root);
+    yield* syncInstallationDirectory(root);
     yield* Effect.tryPromise({
       try: async () => {
         if ((await read(join(root, "installation-id"))) !== `${identity}\n`) throw new Error();
@@ -418,7 +423,7 @@ export const initializeIdentityOnly = (root: string) =>
           JSON.stringify({
             version: 1,
             installation: identity,
-            kind: "identity-only-complete",
+            kind: "attachment-identity-complete",
           })
         );
       },
@@ -428,7 +433,7 @@ export const initializeIdentityOnly = (root: string) =>
       url: "http://127.0.0.1",
       ledger: "identity-only",
     });
-    if (state.kind !== "ungranted") return yield* refused();
+    if (state.kind !== "identity-only") return yield* refused();
   }).pipe(Effect.scoped);
 
 /** A spent grant without its completion is never retried automatically. */
@@ -444,23 +449,39 @@ export const inspectMailboxBootstrap = (
       target
     );
     if (initializing?.kind === "identity-only-initializing") {
-      if (identityComplete === undefined || grant !== undefined || spent !== undefined)
-        return yield* refused();
+      if (identityComplete === undefined || grant !== undefined) return yield* refused();
+      if (spent !== undefined) {
+        if (
+          identityComplete.kind !== "attachment-identity-complete" ||
+          spent.observed !== "attachment" ||
+          complete !== undefined
+        )
+          return yield* refused();
+        return { kind: "attachment-spent" } as const;
+      }
     } else if (initializing?.kind === "initializing") {
-      if (identityComplete !== undefined || grant === undefined) return yield* refused();
+      if (identityComplete !== undefined || grant === undefined || spent?.observed === "attachment")
+        return yield* refused();
     } else if (identityComplete !== undefined || grant !== undefined || spent !== undefined) {
       return yield* refused();
     }
     if (complete === undefined) {
       if (spent !== undefined) return yield* refused();
-      return initializing?.kind !== "initializing"
-        ? ({ kind: "ungranted" } as const)
-        : ({ kind: "unspent" } as const);
+      if (initializing?.kind === "initializing") {
+        // R1 could accept paired admission without spending an older reservation.
+        if (grant?.kind !== "first-create-grant") return yield* refused();
+        return { kind: "unspent" } as const;
+      }
+      return identityComplete?.kind === "attachment-identity-complete"
+        ? ({ kind: "identity-only" } as const)
+        : ({ kind: "ungranted" } as const);
     }
     if (
       complete.origin === "grant"
         ? initializing?.kind !== "initializing" || grant === undefined || spent === undefined
-        : grant !== undefined || spent !== undefined
+        : grant !== undefined ||
+          spent !== undefined ||
+          identityComplete?.kind === "attachment-identity-complete"
     ) {
       return yield* refused();
     }
@@ -553,13 +574,41 @@ export const spendMailboxBootstrap = (
       return yield* refused();
   });
 
-/** Record the exact incarnation only after an existing-only or single authorized open verifies era 1. */
+/** A lost binding is restored, never an opportunity to attach this identity to another history. */
+export const spendExistingAttachment = (
+  root: string,
+  installation: string,
+  target: MailboxBootstrapTarget
+) =>
+  Effect.gen(function* () {
+    if ((yield* inspectMailboxBootstrap(root, installation, target)).kind !== "identity-only")
+      return yield* refused();
+    yield* Effect.tryPromise({
+      try: () =>
+        publish(
+          root,
+          MAILBOX_BOOTSTRAP_SPENT_FILE,
+          JSON.stringify({
+            version: 1,
+            installation,
+            url: target.url,
+            ledger: target.ledger,
+            kind: "spent",
+            observed: "attachment",
+          })
+        ),
+      catch: refused,
+    });
+    if ((yield* inspectMailboxBootstrap(root, installation, target)).kind !== "attachment-spent")
+      return yield* refused();
+  });
+
+/** Record the exact incarnation only after a single authorized create verifies era 1. */
 export const completeMailboxBootstrap = (
   root: string,
   installation: string,
   target: MailboxBootstrapTarget,
-  incarnation: string,
-  origin: "grant" | "existing"
+  incarnation: string
 ) =>
   Effect.gen(function* () {
     if (incarnation.length === 0 || incarnation.length > 2048) return yield* refused();
@@ -570,16 +619,10 @@ export const completeMailboxBootstrap = (
     );
     if (
       complete !== undefined ||
-      (origin === "grant"
-        ? initializing?.kind !== "initializing" ||
-          identityComplete !== undefined ||
-          grant === undefined ||
-          spent === undefined
-        : initializing?.kind === "initializing" ||
-          grant !== undefined ||
-          spent !== undefined ||
-          (initializing?.kind === "identity-only-initializing" && identityComplete === undefined) ||
-          (initializing === undefined && identityComplete !== undefined))
+      initializing?.kind !== "initializing" ||
+      identityComplete !== undefined ||
+      grant?.kind !== "first-create-grant" ||
+      spent?.observed !== "absent"
     ) {
       return yield* refused();
     }
@@ -594,7 +637,7 @@ export const completeMailboxBootstrap = (
             url: target.url,
             ledger: target.ledger,
             kind: "complete",
-            origin,
+            origin: "grant",
             incarnation,
           })
         ),
