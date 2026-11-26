@@ -27,6 +27,9 @@ An ownership or validation refusal changes nothing. Match its wording:
 | "This entry's body or subject is over the 32768-byte limit for searchable text" | Nothing was sent or written; shorten the text as above |
 | "The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced." | The unread commit was not consumed. Use a reader that can admit the whole commit; do not skip it or rejoin |
 | "The batch recorded under this readId needs … result bytes and a limit of at least …" | Nothing was changed. Repeat the read with the same `readId` and limits at least that large |
+| "The original mailbox import receipt could not be read." | This is not a reason to abandon a wake or rejoin. Retry the identical call once when the store is available, from the same installation and session with the same `readId` or peek receipt. If it still fails, tell the operator |
+| "The original mailbox import does not establish this holding's read source." | Stop and tell the operator. Keep the holding and the original read ID or receipt; do not rejoin, take over or replay |
+| "This mailbox position is unresolved" | Preserve the position and ask the operator to reconcile the import; do not rejoin, take over or replay |
 | "This readId was recorded in an earlier run of this holding" | That batch went to an earlier run (before a leave and rejoin, a replay or a takeover). Read with your latest `nextReadId`, or none; if you lost the batch, find it in `bus_history` |
 | "This readId is recorded for another address" | Nothing was changed. Read with a new `readId`, such as your latest `nextReadId` |
 | "This readId names a mailbox position that served no batch" | Nothing was changed. Read with a new `readId` |

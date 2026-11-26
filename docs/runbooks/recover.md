@@ -27,6 +27,7 @@ Use this when the bus misbehaves: each symptom, how to check it, the fix and how
 | The offline `cursors` tool refuses a cursor format transition | The current installation, exact/legacy generation, and the refusal | [Cursor format transition refused](#cursor-format-transition-refused) | A reviewed conversion or export completes, or the installation stays held |
 | `bus_read` or `bus_wait` says the oldest unread commit cannot fit | The reader limits and original holding | [The oldest unread mail does not fit](#the-oldest-unread-mail-does-not-fit) | The same owner reads the complete group, or it stays unread |
 | A read or ownership operation fails with "A ledger entry at t=… could not be decoded." | The stored entry at the named commit | [An entry cannot be decoded](#an-entry-cannot-be-decoded) | The affected operation succeeds after the underlying damage is resolved |
+| A legacy read cannot check its original import receipt, or its source or position is unresolved | Distinguish an unavailable lookup from missing or conflicting evidence | [A legacy holding cannot read](#a-legacy-holding-cannot-read) | The same owner reads at the proved position, or the holding remains unresolved |
 | A command run over SSH on the other machine can't find `bun` | `command -v bun` over SSH | [`bun` not found over SSH](#bun-not-found-over-ssh-on-the-other-machine) | The command runs |
 
 ## serve won't start
@@ -568,6 +569,12 @@ evidence is invalid, reconcile or restore the exact retained evidence instead.
 Do not discard either kind of evidence or substitute one diagnosis for the
 other. The retained originals, sentinels and completed paired records remain
 startup dependencies until explicit retirement. *Unverified on the paired installed hosts.*
+
+## A legacy holding cannot read
+
+1. **Owner:** If the original import receipt **could not be read**, the call did not acknowledge or serve mail. Once the store is available, retry the identical `bus_read` or `bus_wait` from the same installation and session, preserving any `readId`; for `bus_ack`, resend the same peek receipt. Do not rejoin. If the lookup still fails, stop and tell the operator. *Unverified as an installed recovery procedure.*
+2. **Owner and operator:** If the import **does not establish** the read source, or the position is explicitly **unresolved**, keep the holding unchanged. Record the address, read ID or receipt and error privately. On an isolated copy compare the paired capture receipts and their original cursor files with the import operation at its original commit, the latest acknowledged position, and the current presence and run. Account for later acknowledgements: an original import position alone is not the current position. Establish both the source installation and the exact position independently before proposing a repair. Without that evidence, keep the holding unresolved. *Unverified as an installed recovery procedure.*
+3. **Operator:** Rehearse any fix on the copy and seek owner approval before applying a separately reviewed repair. Verify that the same owner on the proved source can read from the established position without a new join or wake right. There is no public repair or restart-at-present command. Do not edit live receipts, remove fences, overwrite the position with the ledger head, or use leave, takeover or replay as a repair. *Unverified as an installed recovery procedure.*
 
 ## `bun` not found over SSH on the other machine
 
