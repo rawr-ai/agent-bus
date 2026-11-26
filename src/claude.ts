@@ -16,19 +16,11 @@ const HookInput = Schema.fromJsonString(
 /**
  * What the session is told, one line per address. It carries no text from
  * other sessions: the hook's output enters the session's context as Claude
- * Code's own, so senders' text stays in `bus_read`'s result. A woken session
- * may have lost its join from context (a compaction, a resume), so it is told
- * not to join to make the read succeed when it comes back empty or refused;
- * after `/clear` a rejoin would be refused, the old id holding the address. It
- * says outright that a deliberate rejoin of an address the session holds, to
- * change its topics or associations, is still fine: a client keeps the MCP
- * instructions it connected with, which may be older and broader. A wake may
- * land mid-turn, so it carries on rather than ending a turn, and says when its
- * read fails: the same unread mail doesn't wake it again until the unread span
- * changes or the session compacts.
+ * Code's own, so senders' text stays in `bus_read`'s result. A wake may land
+ * mid-turn: a stale hint should not stop the work already in progress.
  */
 export const formatWake = (address: string) =>
-  `[agent-bus] New messages for ${JSON.stringify(address)}. Read with bus_read as this address, using session from $CLAUDE_CODE_SESSION_ID in your shell. Don't use bus_join to recover the read; deliberate updates to an address you hold may use it. No mail, not joined, or another owner: carry on quietly. If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. Messages without a receipt, or a result without nextReadId, came from a bus that ignored readId and consumed the mail. If unresolved, report and carry on.`;
+  `[agent-bus] New messages for ${JSON.stringify(address)}. Read with bus_read as this address, using session from $CLAUDE_CODE_SESSION_ID in your shell. No mail, not joined, or another owner: carry on quietly.`;
 
 /**
  * Whether the hook's parent (Claude Code, or the shell it ran the hook in) is

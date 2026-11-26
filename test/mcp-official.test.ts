@@ -110,7 +110,7 @@ const publicMessage = {
   from: "other/sender",
   to: ["other/reader"],
   kind: "message" as const,
-  body: "ordinary public body",
+  body: 'Complete fixture body: "quoted", backslash \\, newline\n, euro \u20ac and \u{1f642}.',
   subject: "public subject",
   replyTo: "earlier-message",
   origin: { host: "fixture-host", cwd: "/workspace", repo: "/workspace", branch: "fixture" },
@@ -502,10 +502,12 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
     });
   });
 
-  test("peers and ordinary messages omit stored claims in both output encodings", async () => {
+  test("compact inbox and exact message detail preserve content without exposing stored claims", async () => {
     const { succeed, tools } = await connect();
     const reader = `${version}/projection-reader`;
+    const respondent = `${version}/projection-respondent`;
     const claim = `${privateMarker}-${version}`;
+    await succeed("bus_join", joining(respondent));
     await succeed("bus_join", {
       ...joining(reader),
       runtime: "codex",
@@ -533,10 +535,17 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
         for (const field of ["presence", "session", "installation", "codexThreadId", "rejoinOf"]) {
           expect(schema).not.toContain(`"${field}":`);
         }
+        if (name === "bus_read" || name === "bus_wait") expect(schema).not.toContain('"origin":');
       }
     }
+    const head = () => server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end));
     for (const name of ["bus_read", "bus_wait"]) {
-      const expected = { ...publicMessage, id: Bun.randomUUIDv7(), to: [reader] };
+      const expected = {
+        ...publicMessage,
+        id: Bun.randomUUIDv7(),
+        from: respondent,
+        to: [reader],
+      };
       // This is legal in the legacy internal representation despite kind: message.
       const stored = new Message({
         ...expected,
@@ -544,12 +553,37 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
         presence: privatePresence,
       });
       await server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.append(stored)));
-      const result = await succeed(name, { address: reader, session: claim, timeoutSeconds: 0 });
-      expect(result).toMatchObject({ messages: [expected] });
+      const result = await succeed(name, {
+        address: reader,
+        session: claim,
+        ...(name === "bus_wait" ? { timeoutSeconds: 0 } : {}),
+      });
+      const { origin, ...compact } = expected;
+      expect(result.messages).toEqual([compact]);
       expect(Object.keys(result).sort()).toEqual(["messages", "nextReadId", "receipt"]);
       expect(JSON.stringify(result)).not.toContain(privateMarker);
+      const beforeDetail = await head();
       const history = await succeed("bus_history", { participant: reader, limit: 1 });
       expect(history).toEqual({ messages: [expected] });
+      const detail = await succeed("bus_run_query", {
+        name: "messages",
+        args: { ids: [expected.id] },
+      });
+      expect(detail.rows).toEqual([expect.objectContaining({ ...compact, origin })]);
+      expect(JSON.stringify(detail)).not.toContain(privateMarker);
+      expect(await head()).toBe(beforeDetail);
+
+      const reply = await succeed("bus_publish", {
+        from: reader,
+        session: claim,
+        to: [result.messages[0].from],
+        body: "linked reply from compact result",
+        replyTo: result.messages[0].id,
+      });
+      const linked = await succeed("bus_read", { address: respondent, session: sid(respondent) });
+      expect(linked.messages).toEqual([
+        expect.objectContaining({ id: reply.id, to: [respondent], replyTo: expected.id }),
+      ]);
     }
     // Projection must not rewrite the stored internal representation.
     const internal = await server.runPromise(
@@ -565,6 +599,7 @@ describe.each(["2025-11-25", "2025-06-18", "2025-03-26"])("official client over 
       nextReadId: expect.any(String),
     });
     await succeed("bus_leave", { address: reader, session: claim });
+    await succeed("bus_leave", { address: respondent, session: sid(respondent) });
   });
 
   test("topic joins echo their effective subscriptions and malformed replacements are tool refusals", async () => {

@@ -10,7 +10,7 @@ import type * as Bus from "../src/Bus.ts";
 import { Message, Presence, runOf } from "../src/domain.ts";
 import { Ledger } from "../src/Ledger.ts";
 import { type MailboxAck, mailboxServedDigest, mailboxTopicsDigest } from "../src/mailbox-model.ts";
-import { carrierBytes, EMPTY_READ_RESULT_BYTES, readResult } from "../src/message-carrier.ts";
+import { EMPTY_READ_RESULT_BYTES } from "../src/message-carrier.ts";
 import type { WakeCoverage } from "../src/wake-observation.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import {
@@ -44,6 +44,7 @@ import {
   successor,
   wait,
 } from "./read-contract-support.ts";
+import { incumbentWidth } from "./read-wire-fixture.ts";
 
 const TIMEOUT = 60_000;
 
@@ -78,7 +79,7 @@ const fixture = async (
 
 /** The exact public result size of an outcome, as the MCP carrier counts it. */
 const bytesOf = (outcome: Bus.ReadOutcome) =>
-  carrierBytes(readResult(outcome.messages, outcome.receipt, outcome.nextReadId));
+  incumbentWidth(outcome.messages, outcome.receipt, outcome.nextReadId);
 
 const peekReceipt = (outcome: Bus.ReadOutcome): Bus.AckInput["receipt"] => {
   const receipt = outcome.receipt;
@@ -322,7 +323,10 @@ test(
       expect(needed).toBe(exact - 2);
       const before = await head(a);
       for (const [limits, expected] of [
-        [{ maxResultBytes: needed - 1 }, `needs ${needed} result bytes and a limit of at least 2`],
+        [
+          { maxResultBytes: needed - 1 },
+          `needs ${needed} result bytes of allowance (including origin) and a limit of at least 2`,
+        ],
         [{ limit: 1 }, "a limit of at least 2"],
       ] as const) {
         expect(await failure(read(a, { readId, ...limits }))).toContain(expected);

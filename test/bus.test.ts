@@ -1535,12 +1535,20 @@ describe("codex delivery", () => {
       })
     ));
 
-  test("a nudge in the earlier wording, waiting across a deploy, is ours to skip but never to remove", () =>
+  // Freeze actual deployed text, not formatNudge(): old queued items survive a deploy.
+  test.each([
+    [
+      "pre-scoping",
+      `[agent-bus] New messages for "codex/a". You are already joined; don't call bus_join. Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`,
+    ],
+    [
+      "prior release",
+      `[agent-bus] New messages for "codex/a". Read with bus_read as this address, using session from $CODEX_THREAD_ID in your shell. Don't use bus_join to recover the read; deliberate updates to an address you hold may use it. No mail, not joined, or another owner: end this turn quietly. If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. Messages without a receipt, or a result without nextReadId, came from a bus that ignored readId and consumed the mail. If unresolved, report and end this turn.`,
+    ],
+  ])("a waiting %s nudge is skipped across a deploy and never removed", (_version, earlier) =>
     run(
       Effect.gen(function* () {
         const { bus, waiting, put, queueState, restarted, send } = yield* setup;
-        // The deployed text before the wake scoping, frozen: a queue can still hold it.
-        const earlier = `[agent-bus] New messages for "codex/a". You are already joined; don't call bus_join. Read them with the agent-bus bus_read tool, as that address with your $CODEX_THREAD_ID as session, and handle them. If bus_read returns no messages, or says the address isn't joined or belongs to another session, end this turn without replying and without rejoining. If it fails, try once more; if it fails again, say so and end the turn.`;
         put("t-1", earlier);
         yield* send("two");
         yield* restarted;
@@ -1550,7 +1558,8 @@ describe("codex delivery", () => {
         expect(queueState.removed).toEqual([]);
         expect(waiting("t-1")).toEqual([earlier]);
       })
-    ));
+    )
+  );
 
   test("a nudge belongs to its address's owner: leaving stops it, a takeover nudges the new one", () =>
     run(
@@ -3961,25 +3970,18 @@ describe("claude wake hook", () => {
     );
   });
 
-  test("wake texts route the read, keep its quiet and bounded-retry branches, and allow deliberate maintenance", () => {
+  test("wake text names only the owned inbox, how to read it, and what to do if the hint is stale", () => {
+    const address = 'quoted "address"\nnext line';
     for (const { text, session, end } of [
-      { text: formatWake("claude/a"), session: "$CLAUDE_CODE_SESSION_ID", end: "carry on" },
-      { text: formatNudge("codex/a"), session: "$CODEX_THREAD_ID", end: "end this turn" },
+      { text: formatWake(address), session: "$CLAUDE_CODE_SESSION_ID", end: "carry on" },
+      { text: formatNudge(address), session: "$CODEX_THREAD_ID", end: "end this turn" },
     ]) {
-      expect(text).toContain(
-        `Read with bus_read as this address, using session from ${session} in your shell.`
-      );
-      expect(text).toContain(
-        "Don't use bus_join to recover the read; deliberate updates to an address you hold may use it."
-      );
+      expect(text).toStartWith(`[agent-bus] New messages for ${JSON.stringify(address)}.`);
+      expect(text).not.toContain("\n");
+      expect(text.match(/\bbus_\w+/g)).toEqual(["bus_read"]);
+      expect(text).toContain(session);
       expect(text).toContain(`No mail, not joined, or another owner: ${end} quietly.`);
-      const failure = text.slice(text.indexOf("If the read was definitely not sent"));
-      expect(failure).toBe(
-        `If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. Messages without a receipt, or a result without nextReadId, came from a bus that ignored readId and consumed the mail. If unresolved, report and ${end}.`
-      );
-      expect(text).not.toContain("Retry other failures once");
-      // The earlier unconditional ban kept sessions from rejoining to change their topics or associations.
-      expect(text).not.toMatch(/already joined|don't (call )?bus_join[.;]/i);
+      expect(text).not.toMatch(/retry|rejoin|receipt|readId|peek/i);
     }
   });
 
@@ -4134,7 +4136,7 @@ describe("mcp over http", () => {
             arguments: { address: "claude/a", session: sid("claude/a") },
           });
           expect(bodies(messages)).toEqual(["over http"]);
-          expect(messages[0]?.origin?.cwd).toBe(process.cwd());
+          expect(messages[0]).not.toHaveProperty("origin");
 
           const relative = yield* client.callTool({
             tool: tool("bus_join"),

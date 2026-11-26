@@ -632,7 +632,8 @@ test("lost public reply and a newly built retry return the original notification
     expect(Array.isArray(messages)).toBe(true);
     if (!Array.isArray(messages) || messages.length !== 1) throw new Error("one notice expected");
     const original = messages[0];
-    expect(original).toMatchObject({ from: "publisher", origin: { cwd: "/synthetic/first" } });
+    expect(original).toMatchObject({ from: "publisher" });
+    expect(original).not.toHaveProperty("origin");
     await call(reader, "bus_join", {
       address: "publisher",
       runtime: "other",
@@ -650,7 +651,7 @@ test("lost public reply and a newly built retry return the original notification
     expect(retried.structuredContent).toMatchObject({
       status: "APPLIED",
       operation,
-      notification: original,
+      notification: { ...original, origin: { cwd: "/synthetic/first" } },
     });
     const readAgain = await call(reader, "bus_read", { address: "reader", session: "reader" });
     expect(readAgain.structuredContent).toEqual({ messages: [], nextReadId: expect.any(String) });

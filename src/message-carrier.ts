@@ -2,7 +2,7 @@ import { Effect, Schema } from "effect";
 import { InvalidQuery, type Message, MessageJson } from "./domain.ts";
 
 /**
- * The most bytes one new message's public read carrier may take: every creator of a message
+ * The most bytes one new message's full v1 public carrier may take: every creator of a message
  * entry (publish, directory and bulletin notices) checks it before its single write, so any one
  * commit fits a reader whose result budget is at least this plus {@link READ_METADATA_BYTES} (a
  * peek's receipt also names its ledger and served digest). Stored entries are never re-checked.
@@ -99,17 +99,22 @@ export const readableEntry = (message: Message, limit = MAX_STORED_ENTRY_BYTES) 
       );
 };
 
-/** The explicit public projection reads return: never presence, pierce or other internals. */
+/** Every field an inbox reader needs to understand and reply to the complete message. */
+const inboxMessage = (message: Message) => ({
+  id: message.id,
+  ts: message.ts,
+  from: message.from,
+  to: message.to,
+  kind: message.kind,
+  body: message.body,
+  ...(message.subject === undefined ? {} : { subject: message.subject }),
+  ...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
+});
+
+/** Historical public projection used by write admission and persisted v1 acknowledgement evidence. */
 export const publicMessages = (messages: ReadonlyArray<Message>) => ({
   messages: messages.map((message) => ({
-    id: message.id,
-    ts: message.ts,
-    from: message.from,
-    to: message.to,
-    kind: message.kind,
-    body: message.body,
-    ...(message.subject === undefined ? {} : { subject: message.subject }),
-    ...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
+    ...inboxMessage(message),
     ...(message.origin === undefined
       ? {}
       : {
@@ -159,13 +164,7 @@ export interface ReadReceipt {
   readonly served?: { readonly count: number; readonly digest: string };
 }
 
-/** The one public shape of a `bus_read`, `bus_wait` or peek result; sized and returned as is. */
-export const readResult = (
-  messages: ReadonlyArray<Message>,
-  receipt: ReadReceipt | undefined,
-  nextReadId: string
-) => ({
-  ...publicMessages(messages),
+const readMetadata = (receipt: ReadReceipt | undefined, nextReadId: string) => ({
   ...(receipt === undefined
     ? {}
     : {
@@ -185,12 +184,26 @@ export const readResult = (
   nextReadId,
 });
 
+/** Use the full v1 shape for durable evidence and for conservative, cross-version byte admission. */
+export const readResult = (
+  messages: ReadonlyArray<Message>,
+  receipt: ReadReceipt | undefined,
+  nextReadId: string
+) => ({ ...publicMessages(messages), ...readMetadata(receipt, nextReadId) });
+
+/** Origin belongs in history and exact-message lookup, not repeated on each ordinary inbox row. */
+export const inboxResult = (
+  messages: ReadonlyArray<Message>,
+  receipt: ReadReceipt | undefined,
+  nextReadId: string
+) => ({ messages: messages.map(inboxMessage), ...readMetadata(receipt, nextReadId) });
+
 /**
  * The bytes an acknowledgement records as its carrier: the read-shaped public result of exactly
  * that batch, with a receipt saying `replayed: false` and a 36-character `nextReadId`. A read
- * returns that size and a replay two bytes less (`true`, in each copy), so a batch that fitted
- * fits again. A peek's receipt is larger, but `bus_ack` records this same canonical size. It is
- * compared on replay and never used to compute a position.
+ * budgets that size and a replay two bytes less (`true`, in each copy), so a batch that fitted
+ * fits again even with the old projection. A peek's receipt is larger, but `bus_ack` records
+ * this same canonical size. It is compared on replay and never used to compute a position.
  */
 export const servedCarrierBytes = (
   messages: ReadonlyArray<Message>,
@@ -241,7 +254,7 @@ export const admitEntry = (message: Message) => {
     ? Effect.void
     : Effect.fail(
         new InvalidQuery({
-          message: `This message is too large: as a reader receives it, with both its text and structured copies and their JSON escaping, it takes ${bytes} bytes, over the ${MAX_ENTRY_CARRIER_BYTES}-byte limit. Nothing was sent or written. Keep the message short and link to large content (a file path, URL or commit) instead.`,
+          message: `This message is too large: including origin, text and structured copies and their JSON escaping, it takes ${bytes} bytes, over the ${MAX_ENTRY_CARRIER_BYTES}-byte limit. Nothing was sent or written. Keep the message short and link to large content (a file path, URL or commit) instead.`,
         })
       );
 };

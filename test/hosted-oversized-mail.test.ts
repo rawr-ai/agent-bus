@@ -35,6 +35,7 @@ import * as Serve from "../src/serve.ts";
 import { flureeFetch, freshLedger } from "./fluree-server.ts";
 import { layerJsonl } from "./jsonl-ledger.ts";
 import { mailboxPosition } from "./mailbox-position.ts";
+import { carrierWidth, compactRow, incumbentWidth, readFixtureId } from "./read-wire-fixture.ts";
 
 /** The complete hosted result ceiling the peer promises, measured as HTTP response-body bytes. */
 const HOSTED_RESULT_BYTES = 4 * 1024 * 1024;
@@ -284,11 +285,16 @@ test("publish admits a message at exactly the carrier cap and refuses one byte o
     const committed = (await entriesAfter(before)).map((entry) => entry.message);
     expect(committed.map((message) => message.id)).toEqual([id]);
     expect(committed[0]?.body).toBe(exact.body);
-    // The bound is on the exact public carrier of the stored entry, escaping included: the
-    // reader's actual result for it alone is CAP bytes plus its receipt and nextReadId, at
-    // most READ_METADATA_BYTES more, refused one byte short of that.
+    // Admission retains the incumbent carrier, escaping and origin included. The compact
+    // wire remains below that allowance and never changes which commit fits.
     expect(messageCarrierBytes(committed)).toBe(CAP);
-    const full = servedCarrierBytes(committed, await cursor(recipient), await head());
+    const receipt = {
+      readId: readFixtureId,
+      from: await cursor(recipient),
+      through: await head(),
+      replayed: false,
+    };
+    const full = incumbentWidth(committed, receipt);
     expect(full - CAP).toBeGreaterThan(0);
     expect(full - CAP).toBeLessThanOrEqual(READ_METADATA_BYTES);
     const short = await native("bus_read", {
@@ -298,15 +304,18 @@ test("publish admits a message at exactly the carrier cap and refuses one byte o
     });
     expect(short.isError).toBe(true);
     expect(textOf(short)).toContain(READ_REFUSAL);
-    expect(textOf(short)).toContain(`Their first commit needs ${full} result bytes`);
+    expect(textOf(short)).toContain(`Their first commit needs ${full} result bytes of allowance`);
     const read = await nativeOk("bus_read", {
       address: recipient,
       session: recipient,
       maxResultBytes: full,
     });
-    expect(pageOf(read).map((message) => message.id)).toEqual([id]);
+    const compact = committed.map(compactRow);
+    expect(pageOf(read)).toEqual(compact);
     const carried = { content: read.content, structuredContent: read.structuredContent };
-    expect(Buffer.byteLength(JSON.stringify({ ...carried, isError: false }), "utf8")).toBe(full);
+    const bytes = Buffer.byteLength(JSON.stringify({ ...carried, isError: false }), "utf8");
+    expect(bytes).toBe(carrierWidth({ messages: compact, receipt, nextReadId: readFixtureId }));
+    expect(bytes).toBeLessThan(full);
 
     const over = fit(recipient, unit, CAP + 1);
     expect(messageCarrierBytes([shaped(over)])).toBe(CAP + 1);
@@ -554,9 +563,20 @@ test("the largest admitted hosted read fits 4 MiB as received over HTTP; one car
     exact.map((message) => Bun.hash(message.body))
   );
   expect(largest.bytes).toBeLessThanOrEqual(HOSTED_RESULT_BYTES);
+  expect(pageOf(largest.result).every((message) => message.origin === undefined)).toBe(true);
+  const compactBytes = Buffer.byteLength(
+    JSON.stringify({
+      content: largest.result.content,
+      structuredContent: largest.result.structuredContent,
+      isError: false,
+    }),
+    "utf8"
+  );
+  expect(compactBytes).toBeLessThan(budget);
   observations.budget = budget;
+  observations.compactCarrierBytes = compactBytes;
   observations.largestCompleteResultBytes = largest.bytes;
-  observations.overheadBytes = largest.bytes - budget;
+  observations.overheadBytes = largest.bytes - compactBytes;
   observations.resultKeys = Object.keys(largest.result).sort();
 
   // One byte over: the whole-prefix admission takes four and leaves the fifth unread.

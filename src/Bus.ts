@@ -1706,7 +1706,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
           (input.maxResultBytes !== undefined && bytes > input.maxResultBytes)
         ) {
           return yield* new InvalidQuery({
-            message: `The batch recorded under this readId needs ${bytes} result bytes and a limit of at least ${messages.length}; repeat the read with the same readId and limits that fit. Nothing was changed.`,
+            message: `The batch recorded under this readId needs ${bytes} result bytes of allowance (including origin) and a limit of at least ${messages.length}; repeat the read with the same readId and limits that fit. Nothing was changed.`,
           });
         }
         return { messages, receipt, nextReadId } satisfies ReadOutcome;
@@ -2050,7 +2050,7 @@ const make = (installation: string, hostOf: () => string, storedEntryBytes: numb
         // A Fluree cursor names a commit, not a row. Never consume only part of one commit.
         if (chosen === undefined)
           return yield* new InvalidQuery({
-            message: `The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Their first commit needs ${bytesOf(first)} result bytes and a limit of at least ${first.count}. Use a reader with larger limits.`,
+            message: `The oldest unread messages cannot fit this read's limits without splitting a commit; the cursor was not advanced. Their first commit needs ${bytesOf(first)} result bytes of allowance (including origin) and a limit of at least ${first.count}. Use a reader with larger limits.`,
           });
         if (chosen.exhausted && damage !== undefined) return yield* incompleteMailbox(damage);
         const messages = messagesOf(chosen);

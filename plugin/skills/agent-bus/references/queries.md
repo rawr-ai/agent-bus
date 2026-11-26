@@ -15,7 +15,7 @@ Both are presets over saved queries at the current head. They report no snapshot
 
 `bus_peers` lists current addresses, runtimes, topics, hosts and notes, not stored session claims or wake destinations. These lookups do not require a session. For calls that act for an address, native callers read their own session id from their runtime's shell, never from another peer; hosted identity is supplied by the bridge.
 
-`bus_history` takes `query` (words), `participant` (one address, `#topic` or `*`) and `limit` (default 50), and returns messages oldest first, newest last, with the same public fields as `bus_read`.
+`bus_history` takes `query` (words), `participant` (one address, `#topic` or `*`) and `limit` (default 50), and returns messages oldest first, newest last, with the inbox fields plus origin when recorded.
 
 | To find | Arguments |
 | --- | --- |
@@ -32,9 +32,11 @@ These are explicit public fields. They do not sanitize text a sender pasted into
 
 ## bus_run_query: saved queries
 
-Call `bus_queries` first: it lists each saved query with its purpose, argument and row schemas, paging, a note on what it covers, and an example. Then call `bus_run_query` with `name`, `args` and, to read a past snapshot, `t`.
+When you need to discover an operation, `bus_queries` lists each saved query with its purpose, argument and row schemas, paging, a note on what it covers, and an example. Then call `bus_run_query` with `name`, `args` and, to read a past snapshot, `t`.
 
 When following a hit into a separate thread or exact-message lookup, pass both the page's `ledger` and its snapshot `t`. A row's own `t` is when it was written, not the cut its page was read at. On a ledger mismatch, don't substitute the replacement ledger for the cited source.
+
+An inbox message id identifies what to look up; it is not a snapshot. An ordinary read has no ledger-and-commit pin to forward. Use the first detail result's `ledger` and `t` for subsequent lookups at that same cut. An oversized detail row can be refused; the full body was already delivered by the inbox.
 
 | To find | Call |
 | --- | --- |

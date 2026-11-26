@@ -70,7 +70,7 @@ const PublicOrigin = Schema.Struct({
   repo: Origin.fields.repo,
   branch: Origin.fields.branch,
 });
-const PublicMessage = Schema.Struct({
+const InboxMessage = Schema.Struct({
   id: Message.fields.id,
   ts: Message.fields.ts,
   from: Message.fields.from,
@@ -79,6 +79,9 @@ const PublicMessage = Schema.Struct({
   subject: Message.fields.subject,
   body: Message.fields.body,
   replyTo: Message.fields.replyTo,
+});
+const PublicMessage = Schema.Struct({
+  ...InboxMessage.fields,
   origin: Schema.optionalKey(PublicOrigin),
 });
 export const Messages = Schema.Struct({ messages: Schema.Array(PublicMessage) });
@@ -124,7 +127,7 @@ const ReadReceipt = Schema.Struct({
     "Present whenever messages are: the batch's recorded or proposed acknowledgement. Absent from an older server, which ignores readId and peek and consumes the mail.",
 });
 export const ReadResult = Schema.Struct({
-  messages: Messages.fields.messages,
+  messages: Schema.Array(InboxMessage),
   receipt: Schema.optionalKey(ReadReceipt),
   nextReadId: NextReadId,
 });
@@ -438,7 +441,7 @@ export const Takeover = Tool.make("bus_takeover", {
   .annotate(Tool.Destructive, true);
 
 export const Publish = Tool.make("bus_publish", {
-  description: `Send from an address you own. The bus refuses the send if the sender's presence changes after its ownership check but before commit. Give an operation (a UUIDv7) to make it safe to retry: the message takes it as its id, and retrying the identical call with the same operation returns the stored message's id and ts, with replayed when the retry certainly wrote nothing, while a different send under it is refused with nothing written. If the outcome is unconfirmed, retry with the same operation. \`to\` names the audience: peer addresses, #topic for its subscribers, or * for everyone. The complete public read carrier must fit ${MAX_ENTRY_CARRIER_BYTES / (1024 * 1024)} MiB, including recipients and escaping. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.`,
+  description: `Send from an address you own. The bus refuses the send if the sender's presence changes after its ownership check but before commit. Give an operation (a UUIDv7) to make it safe to retry: the message takes it as its id, and retrying the identical call with the same operation returns the stored message's id and ts, with replayed when the retry certainly wrote nothing, while a different send under it is refused with nothing written. If the outcome is unconfirmed, retry with the same operation. \`to\` names the audience: peer addresses, #topic for its subscribers, or * for everyone. The full public carrier, counting recorded origin in both its text and structured copies, must fit ${MAX_ENTRY_CARRIER_BYTES / (1024 * 1024)} MiB, including recipients and escaping. Set replyTo to the id being answered; it links messages, not recipients. Name in the body who, if anyone, is asked to respond. A result with wake names addressed recipients whose observed registration was not joined or lacked a native wake's prerequisites; the message is still stored. No wake never means a recipient was woken.`,
   parameters: Schema.Struct({
     from: Address,
     session: Session,
@@ -544,6 +547,9 @@ export const Orient = Tool.make("bus_orient", {
 /** The smallest complete read result, an empty one with its nextReadId; computed, not chosen. */
 export const MIN_READ_RESULT_BYTES = EMPTY_READ_RESULT_BYTES;
 const ReadResultBytes = Schema.Int.check(Schema.isGreaterThanOrEqualTo(MIN_READ_RESULT_BYTES));
+const ReadAllowance = ReadResultBytes.annotate({
+  description: `UTF-8 JSON byte allowance for both text and structured copies, receipt and nextReadId. Admission conservatively counts origin even though the inbox omits it. Whole oldest messages only; if the first commit cannot fit, the call names the required allowance without advancing. Minimum ${MIN_READ_RESULT_BYTES}.`,
+});
 
 const READ_RECOVERY =
   "Pass readId (your last result's nextReadId): after a lost result, repeat the call with the same readId to get the same batch back, writing nothing. Without readId, a lost result may already have consumed mail; inspect bus_history before reading again. A result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail: it is neither a replay nor a peek. An empty result has no receipt.";
@@ -560,7 +566,7 @@ const readFields = {
 };
 
 export const Read = Tool.make("bus_read", {
-  description: `Return your unread messages and mark them read. Returns immediately. ${READ_RECOVERY} peek: true returns the mail and a receipt without marking it read; acknowledge it with bus_ack. Before using peek, confirm from a current tools/list that bus_read declares peek and that bus_ack exists; if not, this server has no read that leaves mail unread, so read normally. Messages include public content and origin metadata, never stored presence or session claims.`,
+  description: `Read unread mail now, oldest first; a normal read marks the returned messages read. Reply with bus_publish, setting replyTo to the message id and choosing the audience. For origin or linked replies use bus_run_query: messages with args {ids:[id]} or thread with args {id}. ${READ_RECOVERY} Use peek: true only when the current tool list declares peek and bus_ack; it leaves mail unread until you pass its receipt to bus_ack.`,
   parameters: Schema.Struct({
     ...readFields,
     peek: Schema.optionalKey(
@@ -575,18 +581,14 @@ export const Read = Tool.make("bus_read", {
           "The most messages to return, oldest first; the rest stay unread. A commit group is never split, so a group larger than the limit is refused without advancing the cursor. Defaults to all of them.",
       })
     ),
-    maxResultBytes: Schema.optionalKey(
-      ReadResultBytes.annotate({
-        description: `Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content, the receipt and nextReadId. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte and count limits, the call is refused, naming what it needs, without advancing the cursor. Minimum ${MIN_READ_RESULT_BYTES}.`,
-      })
-    ),
+    maxResultBytes: Schema.optionalKey(ReadAllowance),
   }),
   success: ReadResult,
   failure: Failure,
 }).annotateMerge(Local);
 
 export const Wait = Tool.make("bus_wait", {
-  description: `Wait for your next unread messages (marking them read), up to timeoutSeconds (default and maximum ${MAX_WAIT_SECONDS}). Use while you expect a reply; returns an empty list on timeout. ${READ_RECOVERY} Returns the same public message fields as bus_read, without stored presence or session claims.`,
+  description: `Wait for unread mail while expecting a reply, up to timeoutSeconds (default and maximum ${MAX_WAIT_SECONDS}). Returns the same full messages as bus_read, marks them read, and returns an empty list on timeout. ${READ_RECOVERY}`,
   parameters: Schema.Struct({
     ...readFields,
     peek: Schema.optionalKey(
@@ -600,11 +602,7 @@ export const Wait = Tool.make("bus_wait", {
         description: `Seconds to wait, 0 to ${MAX_WAIT_SECONDS}; defaults to ${MAX_WAIT_SECONDS}.`,
       })
     ),
-    maxResultBytes: Schema.optionalKey(
-      ReadResultBytes.annotate({
-        description: `Maximum UTF-8 JSON bytes for the complete public MCP result carrier, including both text and structured content, the receipt and nextReadId. Whole oldest messages only; remaining messages stay unread. If the first unread commit group cannot fit the byte limit, the call is refused, naming what it needs, without advancing the cursor. Minimum ${MIN_READ_RESULT_BYTES}.`,
-      })
-    ),
+    maxResultBytes: Schema.optionalKey(ReadAllowance),
   }),
   success: ReadResult,
   failure: Failure,
@@ -675,7 +673,7 @@ export const ListPeers = Tool.make("bus_peers", {
 
 export const History = Tool.make("bus_history", {
   description:
-    "Past messages, newest last: without query, the newest limit messages; with query, the best full-text matches. Filter by a participant address. Does not change what is unread. Returns the same public message fields as bus_read, without stored presence or session claims. A preset over bus_run_query's history and search at one commit; use bus_run_query for snapshots, paging and completeness.",
+    "Past messages, newest last: without query, the newest limit messages; with query, the best full-text matches. Filter by a participant address. Does not change what is unread. History includes recorded origin as well as the ordinary inbox fields. A preset over bus_run_query's history and search at one commit; use bus_run_query for snapshots, paging and completeness.",
   parameters: Schema.Struct({
     query: Schema.optionalKey(
       Schema.String.annotate({

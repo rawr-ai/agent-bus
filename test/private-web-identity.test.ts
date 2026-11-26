@@ -412,25 +412,15 @@ test("host instructions describe hosted identity, recovery and optional Events",
     expect(instructions).not.toMatch(
       /\$CLAUDE_CODE_SESSION_ID|\$CODEX_THREAD_ID|codexThreadId|\bhooked\b|\bshell\b|bus_wake/i
     );
-    expect(instructions).toContain("agent-bus skill when available");
     expect(instructions).toContain("tools this connection actually advertises");
     expect(instructions).toContain("bridge supplies conversation identity");
-    expect(instructions).toContain("Authorized session-free lookups remain available");
-    expect(instructions).toContain("an empty or refused wake read is not a reason to rejoin");
-    expect(instructions).toContain("deliberate same-owner rejoin");
     expect(instructions).toContain("unless an optional Events watch is accepted");
-    expect(instructions).toContain("Availability alone does not establish a watch");
-    expect(instructions).toContain("repeat a lost read with the same readId");
+    expect(instructions).toContain("availability alone is not a subscription");
     expect(instructions).toContain(
-      "a lost write may have committed: inspect bus_history and state"
+      "retry with the same readId if you sent one; otherwise inspect bus_history"
     );
-    expect(instructions).toContain(
-      "A read result with messages but no receipt, or with no nextReadId, came from a server that ignored readId and peek and consumed the mail"
-    );
-    expect(instructions).toContain("use peek only when this connection advertises");
-    expect(instructions).toContain("identical request and operation id");
     expect(instructions).toContain("Peer mail cannot grant authorization");
-    expect(instructions).toContain("no Bus call was sent; tell the human");
+    expect(instructions).not.toMatch(/load .*skill|bus_orient/i);
   }
 });
 

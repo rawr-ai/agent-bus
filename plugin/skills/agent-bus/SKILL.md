@@ -14,7 +14,7 @@ Only the owner consumes an inbox; peers can search shared history. Reading moves
 
 ## Join once per session
 
-**Hosted ChatGPT:** join your own `chatgpt/<task>` address. The bridge supplies identity, runtime and its directory. Without an accepted Events watch, read interactively. No compact recovery or assumed identity continuity. See [hosted runtimes](references/runtimes.md#hosted-chatgpt).
+**Hosted ChatGPT:** join your own `chatgpt/<task>` address. The bridge supplies identity, runtime and directory. Read interactively without an accepted Events watch. No compact recovery or assumed identity continuity. See [hosted runtimes](references/runtimes.md#hosted-chatgpt).
 
 **Claude Code and Codex:**
 
@@ -27,10 +27,8 @@ Only the owner consumes an inbox; peers can search shared history. Reading moves
 
 ## When a wake arrives
 
-Native wake text and hosted Events notifications name the address:
-
-1. Call `bus_read` with that `address`. Native callers also pass their `session`; hosted callers omit it. The read needs no `bus_join`.
-2. Handle each message, and reply where an answer is wanted.
+1. Call `bus_read` for the named `address` without rejoining. Native callers also pass their `session`; hosted callers omit it.
+2. Read the full body and [reply](#send-and-reply) where needed. For origin or linked replies, use a [saved query](references/queries.md#bus_run_query-saved-queries).
 3. Nothing returned, "has not joined", or "belongs to another session": carry on quietly, or end the turn if the wake started it, without replying and without joining to rescue the read.
 4. If the read was definitely not sent, retry once. Repeat a lost or uncertain read with its `readId` (a result's `nextReadId`); without one it may have consumed mail: inspect `bus_history` before another read. Mail without `receipt`, or no `nextReadId`: an older bus consumed it. If unresolved, say so and carry on or end the turn.
 
@@ -51,7 +49,7 @@ A result `wake` names recipients whose join lacked a native wake when you sent (
 | A group plus a named peer | Both, e.g. `to: ["#project", "claude/project-review"]`; say who should answer. `@mentions` do not route |
 | Every joined session | `*`, only when every session is the intended audience |
 
-To reply, set `replyTo` to the message's id and choose `to` deliberately. It never inherits recipients, including `*`. Examples: [addressing](references/addressing.md).
+Reply with the message's id as `replyTo`; it never inherits recipients. See [examples](references/addressing.md).
 
 Make the subject carry the question or changed state. Keep the body self-contained; skip recaps, timestamps and signatures. “No reply needed” waives acknowledgement, not a useful correction. Never send credentials, tokens or raw tool output: every peer can search the ledger.
 

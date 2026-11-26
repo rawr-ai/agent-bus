@@ -14,6 +14,7 @@ import { Ledger } from "../src/Ledger.ts";
 import { Messages, MIN_READ_RESULT_BYTES } from "../src/mcp-tools.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
+import { carrierWidth, incumbentRow, incumbentWidth, readFixtureId } from "./read-wire-fixture.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "agent-bus-byte-admission-"));
 const probe = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
@@ -60,47 +61,11 @@ const cursor = async (address: string) => {
   if (result.status !== "FOUND") throw new Error("Missing mailbox position.");
   return result.position;
 };
-const publicMessage = (message: Message) => ({
-  id: message.id,
-  ts: message.ts,
-  from: message.from,
-  to: message.to,
-  kind: message.kind,
-  body: message.body,
-  ...(message.subject === undefined ? {} : { subject: message.subject }),
-  ...(message.replyTo === undefined ? {} : { replyTo: message.replyTo }),
-  ...(message.origin === undefined
-    ? {}
-    : {
-        origin: {
-          host: message.origin.host,
-          ...(message.origin.cwd === undefined ? {} : { cwd: message.origin.cwd }),
-          ...(message.origin.repo === undefined ? {} : { repo: message.origin.repo }),
-          ...(message.origin.branch === undefined ? {} : { branch: message.origin.branch }),
-        },
-      }),
-});
 /**
- * The documented size of a complete read result, computed independently of the server: the
- * messages, a receipt (36-character id, the batch's positions, replayed false) and a
- * 36-character nextReadId, as structured content and as its escaped text copy.
+ * The incumbent-sized admission allowance is separate from the compact result's actual bytes.
  */
-const ID = "01a20000-0000-7000-8000-000000000000";
-const carrierBytes = (rows: ReadonlyArray<Message>, from: number, through: number) => {
-  const structuredContent = {
-    messages: rows.map(publicMessage),
-    receipt: { readId: ID, from, through, replayed: false },
-    nextReadId: ID,
-  };
-  return Buffer.byteLength(
-    JSON.stringify({
-      content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-      structuredContent,
-      isError: false,
-    }),
-    "utf8"
-  );
-};
+const carrierBytes = (rows: ReadonlyArray<Message>, from: number, through: number) =>
+  incumbentWidth(rows, { readId: readFixtureId, from, through, replayed: false });
 const head = () => server.runPromise(Effect.flatMap(Ledger, (ledger) => ledger.end));
 const endOf = async (id: string) => {
   const entry = (
@@ -135,7 +100,16 @@ test("byte admission takes only a whole prefix and never moves past an oversized
   const [a, b, c] = entries;
   if (!a || !b || !c) throw new Error("Missing fixture messages.");
   const before = await cursor(address);
-  const firstSize = carrierBytes([a], before, await endOf(a.id));
+  const firstThrough = await endOf(a.id);
+  const firstSize = carrierBytes([a], before, firstThrough);
+  const { origin, ...compact } = incumbentRow(a);
+  expect(origin).toBeDefined();
+  const compactSize = carrierWidth({
+    messages: [compact],
+    receipt: { readId: readFixtureId, from: before, through: firstThrough, replayed: false },
+    nextReadId: readFixtureId,
+  });
+  expect(compactSize).toBeLessThan(firstSize);
   expect(firstSize).toBeGreaterThan(MIN_READ_RESULT_BYTES);
   expect(firstSize).toBeGreaterThan(Buffer.byteLength(a.body, "utf8"));
   for (const name of ["bus_read", "bus_wait", "bus_read"]) {
@@ -161,9 +135,18 @@ test("byte admission takes only a whole prefix and never moves past an oversized
     limit: 1,
     maxResultBytes: firstSize,
   });
-  expect(messages(first.structuredContent).map((message) => message.body)).toEqual([a.body]);
+  expect(messages(first.structuredContent)).toEqual([compact]);
   expect(first.content).toEqual([{ type: "text", text: JSON.stringify(first.structuredContent) }]);
-  expect(Buffer.byteLength(JSON.stringify(first), "utf8")).toBeLessThanOrEqual(firstSize);
+  expect(
+    Buffer.byteLength(
+      JSON.stringify({
+        content: first.content,
+        structuredContent: first.structuredContent,
+        isError: false,
+      }),
+      "utf8"
+    )
+  ).toBe(compactSize);
   const afterFirst = await cursor(address);
   const refused = await call("bus_read", {
     address,
