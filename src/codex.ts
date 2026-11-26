@@ -358,19 +358,17 @@ export const daemonBorrower = (options: {
   };
 };
 
-/** The first line of a bus nudge, by which the deliverer recognises its own waiting one. */
+/** Keep this first sentence stable: an older nudge may still be waiting across a deploy. */
 const nudgeHead = (address: string) => `[agent-bus] New messages for ${JSON.stringify(address)}.`;
 
 /**
  * The turn input that tells a Codex thread it has mail. It carries no text
  * from other sessions (bodies, subjects or sender addresses): a queued item
  * runs as the owner's own input, so their text stays in `bus_read`'s result.
- * Like the Claude wake, it rules out joining only to make an empty or refused
- * read succeed, and says a deliberate rejoin to change topics or associations
- * is still fine.
+ * The read tool, not each queued turn, describes retry and recovery.
  */
 export const formatNudge = (address: string) =>
-  `${nudgeHead(address)} Read with bus_read as this address, using session from $CODEX_THREAD_ID in your shell. Don't use bus_join to recover the read; deliberate updates to an address you hold may use it. No mail, not joined, or another owner: end this turn quietly. If the read was definitely not sent, retry once. Pass your last result's nextReadId as readId when you have it: after a lost or uncertain result, repeat the read with that same readId. Without one, a lost or uncertain result may have consumed mail: inspect bus_history before another read. Messages without a receipt, or a result without nextReadId, came from a bus that ignored readId and consumed the mail. If unresolved, report and end this turn.`;
+  `${nudgeHead(address)} Read with bus_read as this address, using session from $CODEX_THREAD_ID in your shell. No mail, not joined, or another owner: end this turn quietly.`;
 
 /** An item waiting in a thread's queue: Codex's ids for it, which an edit keeps, and its text. */
 export interface Queued {

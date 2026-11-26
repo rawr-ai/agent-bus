@@ -260,7 +260,7 @@ export const peerTools = (exchange: Exchange, cwd: string) =>
             : (tool.description ?? "");
     const readLimit =
       name === "bus_read" || name === "bus_wait"
-        ? ` The oldest whole messages fitting a complete ${HOSTED_RESULT_BYTES / (1024 * 1024)} MiB result are returned and, unless peeked, consumed; the rest stay unread. If the first commit cannot fit, the call is refused without moving the cursor.`
+        ? ` The ${HOSTED_RESULT_BYTES / (1024 * 1024)} MiB result budget reserves framing and counts origin even though the inbox omits it. Whole oldest messages only; the rest stay unread. If the first commit cannot fit, the cursor does not move.`
         : "";
     return {
       name,

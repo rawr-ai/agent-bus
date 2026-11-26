@@ -4,6 +4,7 @@
 // own presence fence, and the MCP wire: a response lost after its commit, a second serve, and
 // the exact carrier bytes a client receives.
 import { afterAll, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ import { Effect, Layer, ManagedRuntime, Schema } from "effect";
 import type * as Bus from "../src/Bus.ts";
 import { Message, Origin } from "../src/domain.ts";
 import { layerFluree, toNode } from "../src/Fluree.ts";
+import { Ledger } from "../src/Ledger.ts";
 import { MIN_READ_RESULT_BYTES, ReadResult } from "../src/mcp-tools.ts";
 import * as Serve from "../src/serve.ts";
 import { freshLedger, insertRaw } from "./fluree-server.ts";
@@ -20,9 +22,11 @@ import {
   ack,
   acks,
   busLayer,
+  cut,
   failure,
   head,
   hold,
+  holdingOf,
   ids,
   inbox,
   joinInbox,
@@ -42,6 +46,7 @@ import {
   send,
   sender,
 } from "./read-contract-support.ts";
+import { carrierWidth, compactRow, incumbentWidth, readFixtureId } from "./read-wire-fixture.ts";
 
 const TIMEOUT = 120_000;
 const roots: Array<string> = [];
@@ -298,7 +303,126 @@ const textOf = (result: Received) =>
     : "";
 const decoded = (result: Received) =>
   Schema.decodeUnknownSync(ReadResult)(result.structuredContent);
-const ID = "01a20000-0000-7000-8000-000000000000";
+const checkWire = (result: Received, expected: object) => {
+  expect(result.structuredContent).toEqual(expected);
+  expect(result.content).toEqual([
+    { type: "text", text: JSON.stringify(result.structuredContent) },
+  ]);
+  expect(receivedBytes(result)).toBe(carrierWidth(expected));
+};
+
+const digest = (values: ReadonlyArray<string>) =>
+  createHash("sha256").update(JSON.stringify(values), "utf8").digest("hex");
+
+test(
+  "replays a predecessor-shaped v1 record and acknowledges an old peek unchanged",
+  () =>
+    fixture("read-incumbent-shape", async ({ store, root, bus }) => {
+      const a = bus();
+      const { nextReadId: readId } = await joinInbox(a);
+      const holder = await holdingOf(a);
+      await joinSender(a);
+
+      // Write an independent predecessor-shaped receipt through real fenced storage,
+      // bypassing the candidate's acknowledgement builder and wire serializer.
+      const record = async (id: string, message: Message, render: "incumbent" | "compact") => {
+        const dataCut = await cut(a);
+        const range = { from: await position(a), through: dataCut.head };
+        const receipt = { readId: id, ...range, replayed: false };
+        const compact = carrierWidth({
+          messages: [compactRow(message)],
+          receipt,
+          nextReadId: readFixtureId,
+        });
+        const incumbent = incumbentWidth([message], receipt);
+        expect(compact).toBeLessThan(incumbent);
+        const write = await a.runPromise(
+          Effect.flatMap(Ledger, (ledger) =>
+            ledger.appendMailboxAck(
+              {
+                version: 1,
+                kind: "ack",
+                operation: id,
+                address: inbox,
+                mode: "read",
+                run: holder.joinId,
+                ...range,
+                dataCut,
+                subscription: { presenceId: holder.joinId, topicsDigest: digest([]) },
+                servedCount: 1,
+                servedDigest: digest([message.id]),
+                carrierBytes: render === "incumbent" ? incumbent : compact,
+              },
+              dataCut
+            )
+          )
+        );
+        expect(write.status).toBe("APPLIED");
+        return { ...receipt, replayed: true };
+      };
+
+      const first = await send(a, inbox, "old keyed batch");
+      const predecessor = await record(readId, first, "incumbent");
+      const second = await send(a, inbox, 'old peek with newline\n and quoted "body"');
+      const peekCut = await cut(a);
+      const peek = {
+        readId: Bun.randomUUIDv7(),
+        from: predecessor.through,
+        through: peekCut.head,
+        replayed: false,
+        basis: { ledger: peekCut.incarnation, t: peekCut.head },
+        served: { count: 1, digest: digest([second.id]) },
+      };
+
+      const successor = await serving(store, root);
+      try {
+        const call = (name: string, args: Record<string, unknown>) =>
+          successor.client.callTool({
+            name,
+            arguments: { address: inbox, session: owner, ...args },
+          });
+        const before = { head: await head(a), position: await position(a) };
+        const replay = await call("bus_wait", { readId, timeoutSeconds: 0 });
+        expect(replay.isError).not.toBe(true);
+        checkWire(replay, {
+          messages: [compactRow(first)],
+          receipt: predecessor,
+          nextReadId: decoded(replay).nextReadId,
+        });
+        expect({ head: await head(a), position: await position(a) }).toEqual(before);
+
+        const applied = await call("bus_ack", { receipt: peek });
+        expect(applied.isError).not.toBe(true);
+        expect(applied.structuredContent).toMatchObject({
+          receipt: { readId: peek.readId, from: peek.from, through: peek.through, replayed: false },
+        });
+        expect(await head(a)).toBe(before.head + 1);
+        expect(await position(a)).toBe(peek.through);
+        const duplicate = await call("bus_ack", { receipt: peek });
+        expect(duplicate.isError).not.toBe(true);
+        expect(duplicate.structuredContent).toMatchObject({ receipt: { replayed: true } });
+        expect(await head(a)).toBe(before.head + 1);
+        const restored = await call("bus_read", { readId: peek.readId });
+        expect(restored.isError).not.toBe(true);
+        expect(decoded(restored).messages).toEqual([compactRow(second)]);
+        expect(await head(a)).toBe(before.head + 1);
+
+        // A v1 record with the new wire width is not a valid alternative interpretation.
+        const wrongId = Bun.randomUUIDv7();
+        const third = await send(a, inbox, "negative v1 width control");
+        await record(wrongId, third, "compact");
+        const saved = { head: await head(a), position: await position(a) };
+        const refused = await call("bus_read", { readId: wrongId });
+        expect(refused.isError).toBe(true);
+        expect(refused.structuredContent).toBeUndefined();
+        expect(textOf(refused)).toContain("could not be established");
+        expect({ head: await head(a), position: await position(a) }).toEqual(saved);
+      } finally {
+        await successor.dispose();
+      }
+    }),
+  TIMEOUT
+);
 
 test(
   "over MCP: a response lost after its commit is recovered by its readId through a second serve, at exact byte bounds",
@@ -342,14 +466,16 @@ test(
           Schema.Struct({ nextReadId: Schema.String, cursor: Schema.Number })
         )(joined.structuredContent);
         await joinSender(a);
-        await send(
+        const aMessage = await send(
           a,
           inbox,
           'multi-byte € 🙂, quotes " \\ , a newline\n, U+2028 \u2028 and \u0001'
         );
-        await send(a, inbox, "a second commit");
+        const bMessage = await send(a, inbox, "a second commit");
+        const mail = [aMessage, bMessage];
 
-        // A peek writes nothing and shows the batch; it fits at its exact size and not one under.
+        // The compact peek is admitted using the larger predecessor allowance.
+        const beforePeek = await head(a);
         const peek = await ok(first.client, "bus_read", {
           address: inbox,
           session: owner,
@@ -357,13 +483,17 @@ test(
         });
         const peekBytes = receivedBytes(peek);
         const peeked = decoded(peek);
+        expect(peeked.receipt).toBeDefined();
+        const peekAllowance = incumbentWidth(mail, peeked.receipt);
+        expect(peekBytes).toBeLessThan(peekAllowance);
+        checkWire(peek, { ...peeked, messages: mail.map(compactRow) });
         expect(
           receivedBytes(
             await ok(first.client, "bus_read", {
               address: inbox,
               session: owner,
               peek: true,
-              maxResultBytes: peekBytes,
+              maxResultBytes: peekAllowance,
             })
           )
         ).toBe(peekBytes);
@@ -373,37 +503,23 @@ test(
             address: inbox,
             session: owner,
             peek: true,
-            maxResultBytes: peekBytes - 1,
+            maxResultBytes: peekAllowance - 1,
           })
         );
         expect(shrunk.messages).toEqual(peeked.messages.slice(0, 1));
+        expect(await head(a)).toBe(beforePeek);
 
-        // The documented size of a read, computed independently of the server.
-        const sizeOf = (
-          messages: ReadonlyArray<unknown>,
-          range: { readonly from: number; readonly through: number }
-        ) => {
-          const structuredContent = {
-            messages,
-            receipt: { readId: ID, ...range, replayed: false },
-            nextReadId: ID,
-          };
-          return Buffer.byteLength(
-            JSON.stringify({
-              content: [{ type: "text", text: JSON.stringify(structuredContent) }],
-              structuredContent,
-              isError: false,
-            }),
-            "utf8"
-          );
-        };
         const from = peeked.receipt?.from ?? -1;
         const through = peeked.receipt?.through ?? -1;
-        const exact = sizeOf(peeked.messages, { from, through });
+        const freshReceipt = { readId, from, through, replayed: false };
+        const exact = incumbentWidth(mail, freshReceipt);
         // A lone first commit too large for the limit is refused, naming what it needs.
-        const lone = sizeOf(shrunk.messages, { from, through: shrunk.receipt?.through ?? -1 });
+        const lone = incumbentWidth([aMessage], {
+          ...freshReceipt,
+          through: shrunk.receipt?.through ?? -1,
+        });
         expect(await refused(first.client, { readId, maxResultBytes: lone - 1 })).toContain(
-          `needs ${lone} result bytes and a limit of at least 1`
+          `needs ${lone} result bytes of allowance (including origin) and a limit of at least 1`
         );
 
         // The response is lost after the acknowledgement commits.
@@ -428,19 +544,24 @@ test(
         second = await serving(store, root);
         const after = { head: await head(a), position: await position(a) };
         expect(after.position).toBe(through);
-        const replayBytes = exact - 2;
-        expect(await refused(second.client, { readId, maxResultBytes: replayBytes - 1 })).toContain(
-          `needs ${replayBytes} result bytes`
-        );
+        const replayReceipt = { ...freshReceipt, replayed: true };
+        const replayAllowance = incumbentWidth(mail, replayReceipt);
+        expect(replayAllowance).toBe(exact - 2);
+        expect(
+          await refused(second.client, { readId, maxResultBytes: replayAllowance - 1 })
+        ).toContain(`needs ${replayAllowance} result bytes of allowance (including origin)`);
         const replay = await ok(second.client, "bus_read", {
           address: inbox,
           session: owner,
           readId,
-          maxResultBytes: replayBytes,
+          maxResultBytes: replayAllowance,
         });
-        expect(receivedBytes(replay)).toBe(replayBytes);
-        expect(decoded(replay).messages).toEqual(peeked.messages);
-        expect(decoded(replay).receipt).toEqual({ readId, from, through, replayed: true });
+        expect(receivedBytes(replay)).toBeLessThan(replayAllowance);
+        checkWire(replay, {
+          messages: mail.map(compactRow),
+          receipt: replayReceipt,
+          nextReadId: decoded(replay).nextReadId,
+        });
         expect({ head: await head(a), position: await position(a) }).toEqual(after);
 
         // The minimum holds an empty result exactly; one byte less is refused by validation.

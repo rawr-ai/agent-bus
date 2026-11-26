@@ -467,19 +467,25 @@ test("real Bus peer ownership, complete mail and reconnect", async () => {
     expect(typeof replyText).toBe("string");
     if (typeof replyText !== "string") throw new Error("Missing native text carrier.");
     expect(JSON.parse(replyText)).toEqual(replyContent);
-    expect(replyContent).toMatchObject({
-      messages: [
-        {
-          id: reply?.id,
-          body: "reply body",
-          subject: "reply subject",
-          replyTo: sent?.id,
-          origin: { cwd: process.cwd() },
-        },
+    expect(replyContent?.messages).toEqual([
+      {
+        id: reply?.id,
+        ts: reply?.ts,
+        kind: "message",
+        from: "chatgpt/a",
+        to: ["chatgpt/b"],
+        body: "reply body",
+        subject: "reply subject",
+        replyTo: sent?.id,
+      },
+    ]);
+    const page = await ok("bus_run_query", { name: "messages", args: { ids: [reply?.id] } });
+    expect(page).toMatchObject({
+      rows: [
+        { id: reply?.id, body: "reply body", replyTo: sent?.id, origin: { cwd: process.cwd() } },
       ],
+      complete: true,
     });
-    const page = await ok("bus_run_query", { name: "messages", args: { ids: [sent?.id] } });
-    expect(page).toMatchObject({ rows: [{ id: sent?.id, body: "full body" }], complete: true });
 
     await ok("bus_publish", { from: "chatgpt/b", to: ["chatgpt/a"], body: "carry over" }, b);
     // A bounded wake notice passes the hosted wire's closed output schema, omissions counted.
