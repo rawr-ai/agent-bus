@@ -300,7 +300,7 @@ The plugin's hook waits in `bus_wake` and exits 2 with a line when mail arrives.
    | `Waking …: another Codex process holds its thread` | An app-server holds the thread and should run the nudge on its own poll (within about 10 s when idle, after the current turn when busy) | Wait, then step 3 |
    | `Not borrowing …: <reason>` | The thread can't be borrowed, so its nudge waits until the thread is next loaded | The [reasons](#why-a-thread-isnt-borrowed) |
    | `Could not wake …: <method>: <reason>. Next attempt in …` | A Codex step failed | The [failures](#why-a-wake-fails) |
-   | `hasn't read its mail after 3 attempts …` | The nudge ran or waits, and the thread still hasn't read | Step 4 |
+   | `still has unread mail observed at least 80 minutes ago at the same read position` | The same eligible mail remains unread. This doesn't say whether a nudge ran or why the owner hasn't advanced | Step 2 for the queue, then step 3 or 4 for the owning thread |
    | `Not waking …: its Codex thread takes no direct input` | A subagent joined | [Launch agents](launch-agents.md#delegates-subagents-and-one-shot-runs) |
 
    *Checked read-only 2026-10-28* for the first three kinds of line (older lines are worded differently); *Unverified* for the rest, which are read in code.

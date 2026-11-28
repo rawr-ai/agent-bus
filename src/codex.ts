@@ -16,9 +16,9 @@ import {
   QUEUE_PAGE_SIZE,
   QUEUE_TIMEOUT,
   RECONCILE,
-  RECONCILES_BEFORE_WARNING,
   RELEASE_SECONDS,
   START_TIMEOUT,
+  UNREAD_WARNING_AGE,
   UNSUBSCRIBE_TIMEOUT,
 } from "./timing.ts";
 import { VERSION } from "./version.ts";
@@ -542,6 +542,15 @@ interface Hold {
    * only on the reconcile schedule, until the owner reads or newer mail arrives.
    */
   readonly covered?: Covered | undefined;
+  /** One eligible message witnessed at this read position; new tail mail only resets the wake schedule. */
+  readonly backlog?:
+    | {
+        readonly cursor: number;
+        readonly id: string;
+        readonly since: bigint;
+        readonly warned: boolean;
+      }
+    | undefined;
   /** Why the log last said this thread can't be borrowed; a different reason is said again. */
   readonly warned?: string | undefined;
   /**
@@ -639,18 +648,37 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
         failures: joined()?.failures ?? 0,
         until: joined()?.until ?? 0,
         covered: known?.covered,
+        backlog: known?.backlog,
         warned: known?.warned,
         posted: known?.posted,
         ...change,
       });
     };
     const hold = (change: Partial<Hold>) => update({ failures: 0, until: 0, ...change });
+    const observeBacklog = ({ messages, cursor }: Pending) =>
+      Effect.gen(function* () {
+        const first = messages[0];
+        const previous = current()?.backlog;
+        const watch = previous?.cursor === cursor ? previous : undefined;
+        if (first === undefined || watch?.warned) return;
+        const at = yield* Clock.monotonicTimeNanos;
+        // Keep our witness even when an earlier, previously suppressed message becomes eligible.
+        if (watch === undefined || !messages.some(({ id }) => id === watch.id)) {
+          update({ backlog: { cursor, id: first.id, since: at, warned: false } });
+        } else if (at - watch.since >= Duration.toNanosUnsafe(UNREAD_WARNING_AGE)) {
+          update({ backlog: { ...watch, warned: true } });
+          yield* Effect.logWarning(
+            `${peer.address} still has unread mail observed at least ${Duration.toMinutes(UNREAD_WARNING_AGE)} minutes ago at the same read position.`
+          );
+        }
+      });
     const post = (found: Pending) =>
       Effect.gen(function* () {
         const { subscriber } = found;
         attempted = subscriber;
         const threadId = subscriber.presence.codexThreadId;
         if (threadId === undefined) return undefined;
+        yield* observeBacklog(found);
         if ((joined()?.until ?? 0) > now) return undefined;
         const covered = current()?.covered;
         const { news, coverage } = cover(covered?.coverage, found);
@@ -679,6 +707,7 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
     const retract = (subscriber: Subscriber) =>
       Effect.gen(function* () {
         attempted = subscriber;
+        if (current()?.backlog !== undefined) update({ backlog: undefined });
         const posted = current()?.posted;
         const threadId = subscriber.presence.codexThreadId;
         if (posted === undefined || threadId === undefined) return;
@@ -756,13 +785,6 @@ export const deliverOnce = Effect.fn("Codex.deliverOnce")(function* (
       } else {
         yield* Effect.logInfo(
           `${doing} ${peer.address}: ${posted}; another Codex process holds its thread`
-        );
-      }
-      if (woken.reconciles === RECONCILES_BEFORE_WARNING) {
-        yield* Effect.logWarning(
-          ineligible === undefined
-            ? `${peer.address} hasn't read its mail after ${woken.reconciles} attempts to wake it since the first; trying hourly until it does.`
-            : `${peer.address} hasn't read its mail after ${woken.reconciles} checks that its nudge still waits; its thread can't be borrowed (${ineligible.replaceAll(woken.threadId, "<thread>")}), so its nudge stays queued. Checking hourly.`
         );
       }
       continue;
