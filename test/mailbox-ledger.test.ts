@@ -2148,6 +2148,66 @@ describe("mailbox Fluree boundaries", () => {
     });
   });
 
+  test("a dense scan keeps late route edits and type-only retractions at their respective damage positions", async () => {
+    const config = await freshLedger("mailbox-long-history");
+    const store = await handle(layerFluree(config).pipe(Layer.provide(platform)) as LedgerLayer);
+    const earlier = message();
+    await store.append(earlier);
+    const from = (await store.cut()).head;
+    const prefix = message();
+    await store.append(prefix);
+    const prefixT = (await store.cut()).head;
+    const direct = message();
+    const typedOnly = message("other");
+    const group = [
+      direct,
+      typedOnly,
+      new Message({ ...message(), to: [] }),
+      ...Array.from({ length: 100 }, () => message("other")),
+    ];
+    await insertRaw(
+      config,
+      group.map((m) => toNode(m, JSON.stringify(m)))
+    );
+    const groupT = (await store.cut()).head;
+    // No type candidates in these transactions; their unrelated routes are not mailbox groups.
+    for (let i = 0; i < 499; i++) {
+      await insertRaw(config, {
+        "@id": `urn:filler:${i}`,
+        "https://rawr.ai/ns/agent-bus#from": "unrelated",
+      });
+    }
+    const ctx = { bus: "https://rawr.ai/ns/agent-bus#" };
+    await insertRaw(config, {
+      "@context": ctx,
+      "@id": messageIri(earlier.id),
+      "bus:to": "outside",
+    });
+    const good = await store.cut();
+    const retract = async (node: Record<string, string>) => {
+      const response = await flureeFetch(
+        `/v1/fluree/update?ledger=${encodeURIComponent(config.ledger)}`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ "@context": ctx, where: node, delete: node }),
+        }
+      );
+      expect(response.ok).toBe(true);
+    };
+    await retract({ "@id": messageIri(typedOnly.id), "@type": "bus:Message" });
+    const typeCut = await store.cut();
+    const route = { "@id": messageIri(direct.id), "bus:to": address };
+    await retract(route);
+    await insertRaw(config, { "@context": ctx, ...route });
+    const restored = await store.cut();
+    const first = { message: prefix, end: prefixT };
+    const both = [first, { message: direct, end: groupT }];
+    expect(await store.checked(from, good)).toEqual({ entries: both, damage: undefined });
+    expect(await store.checked(from, typeCut)).toEqual({ entries: both, damage: typeCut.head });
+    expect(await store.checked(from, restored)).toEqual({ entries: [first], damage: groupT });
+  }, 30_000);
+
   test.each(["bus:id", "bus:from", "bus:to"])(
     "an encoded message alone cannot hide its missing %s projection",
     async (field) => {
