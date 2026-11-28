@@ -86,5 +86,5 @@ export const LAST_RETRY = Duration.minutes(5);
  * while that mail stays unread: 5 minutes, then 15, then every hour.
  */
 export const RECONCILE = [Duration.minutes(5), Duration.minutes(15), Duration.minutes(60)] as const;
-/** After this many reconciles of the same unread mail, the log says the thread isn't reading it. */
-export const RECONCILES_BEFORE_WARNING = 3;
+/** How far apart two observations of the same eligible unread mail must be before warning. */
+export const UNREAD_WARNING_AGE = Duration.minutes(80);

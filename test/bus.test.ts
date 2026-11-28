@@ -1039,6 +1039,7 @@ describe("codex delivery", () => {
 
   /** What the deliverer logged in the latest `run`, as "Level: message". */
   let logs: Array<string> = [];
+  const backlogWarnings = () => logs.filter((line) => line.includes("still has unread mail"));
   const capture = Logger.make(({ logLevel, message }) => {
     logs.push(`${logLevel}: ${Array.isArray(message) ? message.join(" ") : String(message)}`);
   });
@@ -1655,6 +1656,11 @@ describe("codex delivery", () => {
         expect(daemonState.borrows).toEqual([]);
         expect(holds.get("codex/a")?.warned).toContain("on-request");
         expect(warnings()).toEqual([expect.stringContaining('approval policy is "on-request"')]);
+        yield* TestClock.adjust("80 minutes");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(1);
+        expect(warnings()).toHaveLength(1);
+        expect(daemonState.borrows).toEqual([]);
 
         // Nor is one whose rollout can't be found, a new reason, which is said.
         queueState.rollout = () => ({
@@ -1786,7 +1792,7 @@ describe("codex delivery", () => {
         expect(yield* borrowsAfter("1 minute")).toBe(4);
         expect(yield* borrowsAfter("60 minutes")).toBe(5);
         expect(holds.get("codex/a")?.covered?.reconciles).toBe(4);
-        expect(logs.filter((line) => line.includes("hasn't read its mail")).length).toBe(1);
+        expect(backlogWarnings()).toHaveLength(1);
 
         // Once read, nothing more.
         yield* bus.take("codex/a", "t-1");
@@ -1803,6 +1809,129 @@ describe("codex delivery", () => {
         yield* deliver;
         expect(daemonState.borrows.length).toBe(2);
         expect(holds.get("codex/a")?.covered?.reconciles).toBe(0);
+      })
+    ));
+
+  test("fresh arrivals keep waking but cannot postpone or repeat an unread warning", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, deliver, send, runNext, queueState, daemonState, join: renew } = yield* setup;
+        const peek = bus.read({ address: "codex/a", session: "t-1", peek: true });
+        const ids = (yield* peek).messages.map(({ id }) => id);
+        yield* deliver;
+        for (let i = 1; i <= 8; i++) {
+          runNext("t-1");
+          yield* TestClock.adjust("5 minutes");
+          yield* deliver;
+          runNext("t-1");
+          yield* TestClock.adjust(i === 8 ? "299 seconds" : "5 minutes");
+          ids.push((yield* send(`private tail ${i}`)).message.id);
+          yield* deliver;
+        }
+        // At 79:59: a fresh nudge, but neither the owner's peek nor its ordinary renewal pays the debt.
+        expect((yield* peek).messages.map(({ id }) => id)).toEqual(ids);
+        yield* renew;
+        yield* deliver;
+        expect(logs.filter((line) => line.startsWith("Warn:"))).toEqual([]);
+        expect([queueState.opened, daemonState.borrows.length]).toEqual([17, 17]);
+        yield* TestClock.adjust("1 second");
+        yield* deliver;
+        expect(backlogWarnings()).toEqual([
+          "Warn: codex/a still has unread mail observed at least 80 minutes ago at the same read position.",
+        ]);
+        // Warning without a post, a queue scan, a borrow, or an acknowledgement.
+        expect([queueState.opened, daemonState.borrows.length]).toEqual([17, 17]);
+        for (let i = 9; i <= 18; i++) {
+          runNext("t-1");
+          yield* TestClock.adjust("10 minutes");
+          ids.push((yield* send(`private tail ${i}`)).message.id);
+          yield* deliver;
+        }
+        expect(daemonState.borrows.length).toBe(27);
+        expect(backlogWarnings()).toHaveLength(1);
+        expect((yield* bus.take("codex/a", "t-1")).map(({ id }) => id)).toEqual(ids);
+      })
+    ));
+
+  test("a partial read starts a full new warning interval for the remaining mail", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, deliver, send } = yield* setup;
+        yield* send("second");
+        yield* send("third");
+        yield* deliver;
+        yield* TestClock.adjust("79 minutes");
+        expect(bodies(yield* bus.take("codex/a", "t-1", 1))).toEqual(["hi"]);
+        yield* deliver;
+        yield* TestClock.adjust("79 minutes");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(0);
+        yield* TestClock.adjust("1 minute");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(1);
+        expect(bodies(yield* bus.take("codex/a", "t-1", 1))).toEqual(["second"]);
+        yield* deliver;
+        yield* TestClock.adjust("79 minutes");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(1);
+        yield* TestClock.adjust("1 minute");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(2);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["third"]);
+      })
+    ));
+
+  test("held-back mail neither ages a fresh warning nor displaces a still-eligible witness", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, deliver, send } = yield* setup;
+        yield* bus.take("codex/a", "t-1");
+        const mute = (on: boolean) =>
+          bus.activity({
+            address: "codex/a",
+            session: "t-1",
+            operation: Bun.randomUUIDv7(),
+            mutes: on ? [{ scope: "programme" }] : [],
+          });
+        yield* bus.publish({
+          from: "claude/b",
+          session: sid("claude/b"),
+          to: ["*"],
+          body: "ambient",
+        });
+        yield* deliver;
+        yield* mute(true);
+        yield* TestClock.adjust("79 minutes");
+        yield* send("direct");
+        yield* deliver;
+        yield* TestClock.adjust("79 minutes");
+        // The older message becomes eligible again. The direct witness didn't disappear.
+        yield* mute(false);
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(0);
+        yield* TestClock.adjust("1 minute");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(1);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["ambient", "direct"]);
+      })
+    ));
+
+  test("a new run never inherits warning age, even for the same unread message", () =>
+    run(
+      Effect.gen(function* () {
+        const { bus, deliver, join: rejoin } = yield* setup;
+        yield* deliver;
+        yield* TestClock.adjust("79 minutes");
+        yield* bus.leave("codex/a", "t-1");
+        yield* rejoin;
+        yield* deliver;
+        yield* TestClock.adjust("79 minutes");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(0);
+        yield* TestClock.adjust("1 minute");
+        yield* deliver;
+        expect(backlogWarnings()).toHaveLength(1);
+        expect(bodies(yield* bus.take("codex/a", "t-1"))).toEqual(["hi"]);
       })
     ));
 
