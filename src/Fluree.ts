@@ -27,7 +27,6 @@ import {
   type EntryRead,
   Ledger,
   type LocatedSlice,
-  type MailboxCandidate,
   messageIri,
   type PresenceRead,
   revisionIri,
@@ -36,6 +35,7 @@ import {
   type WitnessRead,
   witnessIri,
 } from "./Ledger.ts";
+import { scanMailboxCandidates } from "./mailbox-candidate-scan.ts";
 import { mailboxWindow } from "./mailbox-window.ts";
 import { ENTRY_READ_BYTES, storable } from "./message-carrier.ts";
 import { type Pin, QueryGateway } from "./Query.ts";
@@ -908,86 +908,54 @@ export const layerFluree = (
           })
         ).pipe(Effect.withSpan("Ledger.readAt"));
 
+      const routeOverflow = capacity(JSONLD_RESPONSE_BYTES);
       const mailboxCandidatesAt = (from: number, cut: Pin) =>
         bounded(
           Effect.gen(function* () {
             yield* checkEntryCut(from, cut);
-            const candidates: Array<MailboxCandidate> = [];
-            for (let start = from + 1; start <= cut.head; start += READ_WINDOW) {
-              const stop = Math.min(cut.head, start + READ_WINDOW - 1);
-              // Filtering a matched type preserves @t and @op; prebinding ?type with VALUES does not.
-              const typed = yield* entryHistory(start, stop, {
-                select: ["?m", "?t", "?op"],
-                where: [
-                  {
-                    "@id": "?m",
-                    "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": {
-                      "@type": "@id",
-                      "@value": "?type",
-                      "@t": "?t",
-                      "@op": "?op",
-                    },
-                  },
-                  ["filter", `(= ?type <${BUS}Message>)`],
-                ],
-              }).pipe(Effect.flatMap(decode(CandidateRows)));
-              for (let offset = 0; offset < typed.length; offset += 100) {
-                const batch = typed.slice(offset, offset + 100);
-                const iri = (value: string) => ({ "@type": "@id", "@value": value });
-                const subjects = [...new Set(batch.map(([subject]) => subject))];
-                // A generic snapshot predicate can report t=0 for freshly guarded writes. History exposes
-                // the actual routing assertions and any later retraction up to the same cut.
-                const rows = yield* entryHistory(start, cut.head, {
-                  select: ["?m", "?p", "?value", "?t", "?op", "?datatype"],
-                  values: [["?m"], subjects.map((subject) => [iri(subject)])],
+            const iri = (value: string) => ({ "@type": "@id", "@value": value });
+            const candidates = yield* scanMailboxCandidates(
+              from,
+              cut.head,
+              READ_WINDOW,
+              (start, stop) =>
+                entryHistory(start, stop, {
+                  select: ["?m", "?t", "?op"],
+                  // Filtering the matched type preserves @t and @op; prebinding ?type does not.
                   where: [
-                    ["values", ["?p", ["id", "from", "to"].map((p) => iri(`bus:${p}`))]],
-                    { "@id": "?m", "?p": { "@value": "?value", "@t": "?t", "@op": "?op" } },
-                    ["bind", "?datatype", "(datatype ?value)"],
+                    {
+                      "@id": "?m",
+                      "http://www.w3.org/1999/02/22-rdf-syntax-ns#type": {
+                        "@type": "@id",
+                        "@value": "?type",
+                        "@t": "?t",
+                        "@op": "?op",
+                      },
+                    },
+                    ["filter", `(= ?type <${BUS}Message>)`],
                   ],
-                }).pipe(Effect.flatMap(decode(RoutingRows)));
-                for (const [subject, end, asserted] of batch) {
-                  if (end < start || end > stop) return yield* invalidResponse();
-                  const projection = rows.filter(([node]) => node === subject);
-                  const fields = new Map<string, Array<string>>();
-                  let intact = asserted;
-                  for (const [, p, value, t, assertion, datatype] of projection) {
-                    if (
-                      !assertion ||
-                      t !== end ||
-                      typeof value !== "string" ||
-                      (datatype !== "xsd:string" &&
-                        datatype !== "http://www.w3.org/2001/XMLSchema#string")
-                    ) {
-                      intact = false;
-                      break;
-                    }
-                    const key = p.startsWith(BUS)
-                      ? p.slice(BUS.length)
-                      : p.startsWith("bus:")
-                        ? p.slice("bus:".length)
-                        : undefined;
-                    if (key !== "id" && key !== "from" && key !== "to") {
-                      intact = false;
-                      break;
-                    }
-                    const values = fields.get(key) ?? [];
-                    values.push(value);
-                    fields.set(key, values);
-                  }
-                  const ids = fields.get("id") ?? [];
-                  const senders = fields.get("from") ?? [];
-                  const to = fields.get("to") ?? [];
-                  const id = ids.length === 1 ? ids[0] : undefined;
-                  const sender = senders.length === 1 ? senders[0] : undefined;
-                  const routing =
-                    intact && id !== undefined && sender !== undefined
-                      ? { id, from: sender, to }
-                      : undefined;
-                  candidates.push({ subject, end, ...optional("routing", routing) });
-                }
-              }
-            }
+                }).pipe(Effect.flatMap(decode(CandidateRows))),
+              (start, stop, subjects) =>
+                entryHistory(
+                  start,
+                  stop,
+                  {
+                    select: ["?m", "?p", "?value", "?t", "?op", "?datatype"],
+                    ...(subjects === undefined
+                      ? {}
+                      : { values: [["?m"], subjects.map((subject) => [iri(subject)])] }),
+                    where: [
+                      ["values", ["?p", ["id", "from", "to"].map((p) => iri(`bus:${p}`))]],
+                      { "@id": "?m", "?p": { "@value": "?value", "@t": "?t", "@op": "?op" } },
+                      ["bind", "?datatype", "(datatype ?value)"],
+                    ],
+                  },
+                  JSONLD_RESPONSE_BYTES,
+                  routeOverflow
+                ).pipe(Effect.flatMap(decode(RoutingRows))),
+              routeOverflow,
+              invalidResponse
+            );
             yield* checkEntryCut(from, cut);
             return candidates;
           })
